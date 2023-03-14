@@ -17,6 +17,7 @@ import (
 	"google.golang.org/api/option"
 )
 
+// Retrievs all file names and their ID's from your Google Drive.
 func GetFileNames(c echo.Context) error {
 	client, err := client(c)
 	if err != nil {
@@ -43,6 +44,7 @@ func GetFileNames(c echo.Context) error {
 	return c.String(200, resp)
 }
 
+// Returns file by ID
 func GetFileByID(c echo.Context) error {
 	id := c.Param("ID")
 
@@ -55,6 +57,7 @@ func GetFileByID(c echo.Context) error {
 
 }
 
+// Client authentication function, reads cookie, compares to database and returns authenticated client.
 func client(c echo.Context) (*http.Client, error) {
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
 
@@ -67,7 +70,12 @@ func client(c echo.Context) (*http.Client, error) {
 		log.Fatalf("Unable to parse client secret file to config: %v", err)
 	}
 
-	tok, err := database.ReadGoogleAuthToken("cookie1234")
+	cookie, err := c.Cookie("google-auth")
+	if err != nil {
+		return nil, err
+	}
+
+	tok, err := database.ReadGoogleAuthToken(cookie.Value)
 	if err != nil {
 		return nil, c.String(http.StatusUnauthorized, "user is not authorized")
 	}
@@ -76,6 +84,7 @@ func client(c echo.Context) (*http.Client, error) {
 	return client, nil
 }
 
+// Downloads file from Google Drive by ID.
 func GetFile(c echo.Context, id string) (string, []byte, error) {
 	client, err := client(c)
 	if err != nil {
@@ -97,6 +106,7 @@ func GetFile(c echo.Context, id string) (string, []byte, error) {
 	return file.Name, data, nil
 }
 
+// Uploads file to Google Drive.
 func UploadFile(c echo.Context, name string, data []byte) error {
 	client, err := client(c)
 	if err != nil {

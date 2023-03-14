@@ -23,6 +23,7 @@ func main() {
 	server.StartServer(storage)
 }
 
+// Loads all data from .env file into Environmental variables.
 func processENV() {
 	err := godotenv.Load()
 	if err != nil {

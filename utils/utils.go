@@ -11,6 +11,7 @@ func init() {
 
 var letterRunes = []rune("1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
+// Creates random string for cookie purposes.
 func RandStringRunes(n int) string {
 	b := make([]rune, n)
 	for i := range b {

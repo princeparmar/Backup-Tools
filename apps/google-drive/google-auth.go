@@ -14,8 +14,10 @@ import (
 	"google.golang.org/api/drive/v3"
 )
 
+// for middleware database purposes
 const dbContextKey = "__db"
 
+// Google authentication module, checks if you have auth token in database, if not - redirects to Google auth page.
 func Autentificate(c echo.Context) error {
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
 	code := c.FormValue("code")
@@ -42,7 +44,7 @@ func Autentificate(c echo.Context) error {
 			cookieNew := new(http.Cookie)
 			cookieNew.Name = "google-auth"
 			cookieNew.Value = utils.RandStringRunes(50)
-			database.WriteGoogleAuthToken(cookieNew.Name, tok)
+			database.WriteGoogleAuthToken(cookieNew.Value, tok)
 
 			c.SetCookie(cookieNew)
 		}
