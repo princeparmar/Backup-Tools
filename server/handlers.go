@@ -1466,3 +1466,109 @@ func handleQuickbooksInvoicesToStorj(c echo.Context) error {
 
 	return c.String(http.StatusOK, "invoices are successfully uploaded from quickbooks to storj")
 }
+
+// Shows list of user's Google Photos albums.
+func handleListGPhotosAlbums(c echo.Context) error {
+	client, err := google.NewGPhotosClient(c)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	albs, err := client.ListAlbums(c)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	strList := ""
+	for _, v := range albs {
+		strList = strList + "Name: " + v.Title + " ID: " + v.ID + "\n"
+	}
+	return c.String(http.StatusOK, strList)
+
+}
+
+// Shows list of user's Google Photos items in given album.
+func handleListPhotosInAlbum(c echo.Context) error {
+	id := c.Param("ID")
+
+	client, err := google.NewGPhotosClient(c)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	files, err := client.ListFilesFromAlbum(c, id)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	strList := ""
+	for _, v := range files {
+		strList = strList + "Name: " + v.Filename + " ID: " + v.ID + "\n"
+	}
+	return c.String(http.StatusOK, strList)
+}
+
+// Sends photo item from Storj to Google Photos.
+func handleSendFileFromStorjToGooglePhotos(c echo.Context) error {
+	name := c.Param("name")
+	accesGrant, err := c.Cookie("storj_access_token")
+	if err != nil {
+		return c.String(http.StatusForbidden, "storj is unauthenticated")
+	}
+
+	data, err := storj.DownloadObject(context.Background(), accesGrant.Value, "google-photos", name)
+	if err != nil {
+		return c.String(http.StatusForbidden, "error downloading object from Storj"+err.Error())
+	}
+
+	path := filepath.Join("./cache", name)
+	file, err := os.Create(path)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	file.Write(data)
+	file.Close()
+	defer os.Remove(path)
+
+	client, err := google.NewGPhotosClient(c)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	err = client.UploadFileToGPhotos(c, name, "Storj Album")
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	return c.String(http.StatusOK, "file "+name+" was successfully uploaded from Storj to Google Photos")
+}
+
+// Sends photo item from Google Photos to Storj.
+func handleSendFileFromGooglePhotosToStorj(c echo.Context) error {
+	id := c.Param("ID")
+	accesGrant, err := c.Cookie("storj_access_token")
+	if err != nil {
+		return c.String(http.StatusForbidden, "storj is unauthenticated")
+	}
+
+	client, err := google.NewGPhotosClient(c)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	item, err := client.GetPhoto(c, id)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	resp, err := http.Get(item.BaseURL)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	err = storj.UploadObject(context.Background(), accesGrant.Value, "google-photos", item.Filename, body)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	return c.String(http.StatusOK, "file "+item.Filename+" was successfully uploaded from Google Photos to Storj")
+}

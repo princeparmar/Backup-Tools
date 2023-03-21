@@ -37,6 +37,12 @@ redirects to google authentication module and in case of successful authenticati
 
 &nbsp;
 
+---
+
+## Google Drive
+
+&nbsp;
+
 `/drive-get-file-names` (GET)
 
 returns all the file names and their ID's on your Google Drive.
@@ -70,3 +76,48 @@ takes file name as a parameter, downloads this file from Storj and uploads it to
 | Parameter | Required |  Description |
 | ----------- | ----------- |----------- |
 | name | Yes | file name |
+
+&nbsp;
+
+
+---
+
+## Google Photos
+
+&nbsp;
+
+`/photos-list-albums` (GET)
+
+returns all the user's album names and their ID's on Google Photos.
+
+&nbsp;
+
+`/photos-list-photos-in-album/:ID` (GET)
+
+| Parameter | Required |  Description |
+| ----------- | ----------- |----------- |
+| name | Yes | album ID |
+
+takes Google Photos album's ID and retreives data about photos in this album.
+
+&nbsp;
+
+`/storj-to-photos/:name` (GET)
+
+| Parameter | Required |  Description |
+| ----------- | ----------- |----------- |
+| name | Yes | photo name in Storj |
+
+takes photo name as a parameter, downloads this file from Storj and uploads it to your Google Photos.
+
+&nbsp;
+
+`/photos-to-storj/:ID` (GET)
+
+| Parameter | Required |  Description |
+| ----------- | ----------- |----------- |
+| name | Yes | photo ID in Google Photos |
+
+takes photo ID as a parameter, downloads this file from Google Photos and uploads it to your Storj bucket.
+
+&nbsp;
