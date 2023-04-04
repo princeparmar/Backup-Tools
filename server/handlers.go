@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -1571,4 +1572,156 @@ func handleSendFileFromGooglePhotosToStorj(c echo.Context) error {
 	}
 
 	return c.String(http.StatusOK, "file "+item.Filename+" was successfully uploaded from Google Photos to Storj")
+}
+
+func handleGmailGetThreads(c echo.Context) error {
+	GmailClient, err := google.NewGmailClient(c)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	threads, err := GmailClient.GetUserThreads("")
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// TODO: implement next page token (now only first page is avialable)
+	respStr := ""
+	for _, v := range threads.Threads {
+		respStr = fmt.Sprintf("%sID: %s Snippet: %s\n", respStr, v.ID, v.Snippet)
+	}
+
+	return c.String(http.StatusOK, respStr)
+}
+
+func handleGmailGetMessages(c echo.Context) error {
+	GmailClient, err := google.NewGmailClient(c)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	msgs, err := GmailClient.GetUserMessages("")
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// TODO: implement next page token (now only first page is avialable)
+	respStr := ""
+	for _, v := range msgs.Messages {
+		respStr = fmt.Sprintf("%sID: %s ThreadID: %s\n", respStr, v.ID, v.ThreadID)
+	}
+
+	return c.String(http.StatusOK, respStr)
+}
+
+func handleGmailGetMessage(c echo.Context) error {
+	id := c.Param("ID")
+
+	GmailClient, err := google.NewGmailClient(c)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	msg, err := GmailClient.GetMessage(id)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	res, _ := json.Marshal(msg)
+
+	return c.String(http.StatusOK, string(res))
+}
+
+func handleGmailMessageToStorj(c echo.Context) error {
+	id := c.Param("ID")
+	accesGrant, err := c.Cookie("storj_access_token")
+
+	// FETCH THE EMAIL TO GOLANG STRUCT
+
+	GmailClient, err := google.NewGmailClient(c)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	msg, err := GmailClient.GetMessage(id)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	msgToSave := storage.GmailMessageSQL{
+		ID:      msg.ID,
+		Date:    msg.Date,
+		From:    msg.From,
+		To:      msg.To,
+		Subject: msg.Subject,
+		Body:    msg.Body,
+	}
+
+	// SAVE ATTACHMENTS TO THE STORJ BUCKET AND WRITE THEIR NAMES TO STRUCT
+
+	if len(msg.Attachments) > 0 {
+		for _, att := range msg.Attachments {
+			err = storj.UploadObject(context.Background(), accesGrant.Value, "gmail", att.FileName, att.Data)
+			if err != nil {
+				return c.String(http.StatusForbidden, err.Error())
+			}
+			msgToSave.Attachments = msgToSave.Attachments + "|" + att.FileName
+		}
+	}
+
+	// CHECK IF EMAIL DATABASE ALREADY EXISTS AND DOWNLOAD IT, IF NOT - CREATE NEW ONE
+
+	dbPath := "./cache/gmails.db"
+
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant.Value, "gmail", "gmails.db")
+	// Copy file from storj to local cache if everything's fine.
+	// Skip error check, if there's error - we will check that and create new file
+	if err == nil {
+		dbFile, err := os.Create(dbPath)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+		_, err = dbFile.Write(byteDB)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+	}
+
+	db, err := storage.ConnectToEmailDB()
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// WRITE ALL EMAILS TO THE DATABASE LOCALLY
+
+	err = db.WriteEmailToDB(&msgToSave)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// DELETE OLD DB COPY FROM STORJ UPLOAD UP TO DATE DB FILE BACK TO STORJ AND DELETE IT FROM LOCAL CACHE
+
+	// get db file data
+	dbByte, err := os.ReadFile(dbPath)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// delete old db copy from storj
+	err = storj.DeleteObject(context.Background(), accesGrant.Value, "gmail", "gmails.db")
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// upload file to storj
+	err = storj.UploadObject(context.Background(), accesGrant.Value, "gmail", "gmails.db", dbByte)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// delete from local cache copy of database
+	err = os.Remove(dbPath)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	return c.String(http.StatusOK, "Email was successfully uploaded")
 }

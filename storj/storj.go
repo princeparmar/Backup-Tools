@@ -84,3 +84,32 @@ func DownloadObject(ctx context.Context, accessGrant, bucketName, objectKey stri
 	}
 	return receivedContents, nil
 }
+
+func DeleteObject(ctx context.Context, accessGrant, bucketName, objectKey string) error {
+	// Parse the Access Grant.
+	access, err := uplink.ParseAccess(accessGrant)
+	if err != nil {
+		return fmt.Errorf("could not parse access grant: %v", err)
+	}
+
+	// Open up the Project we will be working with.
+	project, err := uplink.OpenProject(ctx, access)
+	if err != nil {
+		return fmt.Errorf("could not open project: %v", err)
+	}
+	defer project.Close()
+
+	// Ensure the desired Bucket within the Project is created.
+	_, err = project.EnsureBucket(ctx, bucketName)
+	if err != nil {
+		return err
+	}
+
+	// Delete object
+	_, err = project.DeleteObject(ctx, bucketName, objectKey)
+	if err != nil {
+		return err
+	}
+	return nil
+
+}
