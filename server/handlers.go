@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"storj-integrations/storage"
 	"storj-integrations/storj"
 	"storj-integrations/utils"
+	"time"
 
 	"github.com/labstack/echo/v4"
 )
@@ -1519,7 +1521,7 @@ func handleSendFileFromStorjToGooglePhotos(c echo.Context) error {
 		return c.String(http.StatusForbidden, "error downloading object from Storj"+err.Error())
 	}
 
-	path := filepath.Join("./cache", name)
+	path := filepath.Join("./cache", createUserTempCacheFolder(), name)
 	file, err := os.Create(path)
 	if err != nil {
 		return c.String(http.StatusForbidden, err.Error())
@@ -1669,13 +1671,13 @@ func handleGmailMessageToStorj(c echo.Context) error {
 
 	// CHECK IF EMAIL DATABASE ALREADY EXISTS AND DOWNLOAD IT, IF NOT - CREATE NEW ONE
 
-	dbPath := "./cache/gmails.db"
+	userCacheDBPath := "./cache/" + createUserTempCacheFolder() + "/gmails.db"
 
 	byteDB, err := storj.DownloadObject(context.Background(), accesGrant.Value, "gmail", "gmails.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
-		dbFile, err := os.Create(dbPath)
+		dbFile, err := os.Create(userCacheDBPath)
 		if err != nil {
 			return c.String(http.StatusForbidden, err.Error())
 		}
@@ -1700,7 +1702,7 @@ func handleGmailMessageToStorj(c echo.Context) error {
 	// DELETE OLD DB COPY FROM STORJ UPLOAD UP TO DATE DB FILE BACK TO STORJ AND DELETE IT FROM LOCAL CACHE
 
 	// get db file data
-	dbByte, err := os.ReadFile(dbPath)
+	dbByte, err := os.ReadFile(userCacheDBPath)
 	if err != nil {
 		return c.String(http.StatusForbidden, err.Error())
 	}
@@ -1718,10 +1720,50 @@ func handleGmailMessageToStorj(c echo.Context) error {
 	}
 
 	// delete from local cache copy of database
-	err = os.Remove(dbPath)
+	err = os.Remove(userCacheDBPath)
 	if err != nil {
 		return c.String(http.StatusForbidden, err.Error())
 	}
 
 	return c.String(http.StatusOK, "Email was successfully uploaded")
+}
+
+func handleGetGmailDBFromStorj(c echo.Context) error {
+	accesGrant, err := c.Cookie("storj_access_token")
+
+	// Copy file from storj to local cache if everything's fine.
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant.Value, "gmail", "gmails.db")
+	if err != nil {
+		return c.String(http.StatusForbidden, "no emails saved in Storj database")
+	}
+
+	userCacheDBPath := "./cache/" + createUserTempCacheFolder() + "/gmails.db"
+
+	dbFile, err := os.Create(userCacheDBPath)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	_, err = dbFile.Write(byteDB)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// delete db from cache after user get's it.
+	defer os.Remove(userCacheDBPath)
+
+	return c.Attachment(userCacheDBPath, "gmails.db")
+}
+
+// creates temporary folder for user's cache to avoid situation of conflicts in case different users have the same file name.
+func createUserTempCacheFolder() string {
+	const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+	rand.Seed(time.Now().UnixNano())
+
+	b := make([]byte, 20)
+	for i := range b {
+		b[i] = letterBytes[rand.Intn(len(letterBytes))]
+	}
+
+	return string(b)
 }
