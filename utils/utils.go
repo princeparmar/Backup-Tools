@@ -60,3 +60,17 @@ func GetStringInBetweenTwoString(str string, startS string, endS string) (result
 	result = newS[:e]
 	return result, true
 }
+
+// creates temporary folder for user's cache to avoid situation of conflicts in case different users have the same file name.
+func CreateUserTempCacheFolder() string {
+	const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+	rand.Seed(time.Now().UnixNano())
+
+	b := make([]byte, 20)
+	for i := range b {
+		b[i] = letterBytes[rand.Intn(len(letterBytes))]
+	}
+
+	return string(b)
+}

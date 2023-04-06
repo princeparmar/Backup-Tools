@@ -5,9 +5,21 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 
+	"github.com/labstack/echo/v4"
 	"storj.io/uplink"
 )
+
+// Authenticates app with your Storj accout.
+func HandleStorjAuthentication(c echo.Context) error {
+	storjAccessToken := c.FormValue("storj")
+	c.SetCookie(&http.Cookie{
+		Name:  "storj_access_token",
+		Value: storjAccessToken,
+	})
+	return c.String(http.StatusOK, "storj authentication was successful")
+}
 
 func UploadObject(ctx context.Context, accessGrant, bucketName, objectKey string, data []byte) error {
 	// Parse the Access Grant.

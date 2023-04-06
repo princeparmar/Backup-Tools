@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -1481,12 +1480,22 @@ func handleListGPhotosAlbums(c echo.Context) error {
 		return c.String(http.StatusForbidden, err.Error())
 	}
 
-	strList := ""
+	var photosListJSON []*AlbumsJSON
 	for _, v := range albs {
-		strList = strList + "Name: " + v.Title + " ID: " + v.ID + "\n"
+		photosListJSON = append(photosListJSON, &AlbumsJSON{
+			Title: v.Title,
+			ID:    v.ID,
+			Items: v.MediaItemsCount,
+		})
 	}
-	return c.String(http.StatusOK, strList)
 
+	return c.JSON(http.StatusOK, photosListJSON)
+
+}
+
+type PhotosJSON struct {
+	Name string `json:"file_name"`
+	ID   string `json:"file_id"`
 }
 
 // Shows list of user's Google Photos items in given album.
@@ -1501,11 +1510,16 @@ func handleListPhotosInAlbum(c echo.Context) error {
 	if err != nil {
 		return c.String(http.StatusForbidden, err.Error())
 	}
-	strList := ""
+
+	var photosRespJSON []*PhotosJSON
 	for _, v := range files {
-		strList = strList + "Name: " + v.Filename + " ID: " + v.ID + "\n"
+		photosRespJSON = append(photosRespJSON, &PhotosJSON{
+			Name: v.Filename,
+			ID:   v.ID,
+		})
 	}
-	return c.String(http.StatusOK, strList)
+
+	return c.JSON(http.StatusOK, photosRespJSON)
 }
 
 // Sends photo item from Storj to Google Photos.
@@ -1521,7 +1535,7 @@ func handleSendFileFromStorjToGooglePhotos(c echo.Context) error {
 		return c.String(http.StatusForbidden, "error downloading object from Storj"+err.Error())
 	}
 
-	path := filepath.Join("./cache", createUserTempCacheFolder(), name)
+	path := filepath.Join("./cache", utils.CreateUserTempCacheFolder(), name)
 	file, err := os.Create(path)
 	if err != nil {
 		return c.String(http.StatusForbidden, err.Error())
@@ -1589,12 +1603,20 @@ func handleGmailGetThreads(c echo.Context) error {
 	}
 
 	// TODO: implement next page token (now only first page is avialable)
-	respStr := ""
-	for _, v := range threads.Threads {
-		respStr = fmt.Sprintf("%sID: %s Snippet: %s\n", respStr, v.ID, v.Snippet)
-	}
 
-	return c.String(http.StatusOK, respStr)
+	var jsonResp []*ThreadJSON
+	for _, v := range threads.Threads {
+		jsonResp = append(jsonResp, &ThreadJSON{
+			ID:      v.ID,
+			Snippet: v.Snippet,
+		})
+	}
+	return c.JSON(http.StatusOK, jsonResp)
+}
+
+type MessageListJSON struct {
+	ID       string `json:"message_id"`
+	ThreadID string `json:"thread_id"`
 }
 
 // Fetches user messages, returns their ID's and threat's IDs.
@@ -1610,12 +1632,15 @@ func handleGmailGetMessages(c echo.Context) error {
 	}
 
 	// TODO: implement next page token (now only first page is avialable)
-	respStr := ""
-	for _, v := range msgs.Messages {
-		respStr = fmt.Sprintf("%sID: %s ThreadID: %s\n", respStr, v.ID, v.ThreadID)
-	}
 
-	return c.String(http.StatusOK, respStr)
+	var jsonMessages []*MessageListJSON
+	for _, v := range msgs.Messages {
+		jsonMessages = append(jsonMessages, &MessageListJSON{
+			ID:       v.ID,
+			ThreadID: v.ThreadID,
+		})
+	}
+	return c.JSON(http.StatusOK, jsonMessages)
 }
 
 // Returns Gmail message in JSON format.
@@ -1631,9 +1656,7 @@ func handleGmailGetMessage(c echo.Context) error {
 		return c.String(http.StatusForbidden, err.Error())
 	}
 
-	res, _ := json.Marshal(msg)
-
-	return c.String(http.StatusOK, string(res))
+	return c.JSON(http.StatusOK, msg)
 }
 
 // Fetches message from Gmail by given ID as a parameter and writes it into SQLite Database in Storj.
@@ -1676,7 +1699,7 @@ func handleGmailMessageToStorj(c echo.Context) error {
 
 	// CHECK IF EMAIL DATABASE ALREADY EXISTS AND DOWNLOAD IT, IF NOT - CREATE NEW ONE
 
-	userCacheDBPath := "./cache/" + createUserTempCacheFolder() + "/gmails.db"
+	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
 
 	byteDB, err := storj.DownloadObject(context.Background(), accesGrant.Value, "gmail", "gmails.db")
 	// Copy file from storj to local cache if everything's fine.
@@ -1742,7 +1765,7 @@ func handleGetGmailDBFromStorj(c echo.Context) error {
 		return c.String(http.StatusForbidden, "no emails saved in Storj database")
 	}
 
-	userCacheDBPath := "./cache/" + createUserTempCacheFolder() + "/gmails.db"
+	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
 
 	dbFile, err := os.Create(userCacheDBPath)
 	if err != nil {
