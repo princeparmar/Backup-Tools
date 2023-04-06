@@ -1,0 +1,247 @@
+{
+  "body": {},
+  "headers": [
+    { "name": "Delivered-To", "value": "mikitenko2001@gmail.com" },
+    {
+      "name": "Received",
+      "value": "by 2002:a05:7022:4396:b0:61:1bd0:30f0 with SMTP id bo22csp1181287dlb;        Tue, 28 Mar 2023 10:47:06 -0700 (PDT)"
+    },
+    {
+      "name": "X-Received",
+      "value": "by 2002:aa7:c914:0:b0:4af:69b8:52af with SMTP id b20-20020aa7c914000000b004af69b852afmr15576587edt.24.1680025385162;        Tue, 28 Mar 2023 10:43:05 -0700 (PDT)"
+    },
+    {
+      "name": "X-Google-Smtp-Source",
+      "value": "AKy350YT4kCcSE2zM/3Msy8zmEpA8NQqApmUgyIM2lIRVdf6gzSxdob0PAUAyoxc1+Q8A3CoQeg7"
+    },
+    {
+      "name": "X-Received",
+      "value": "by 2002:aa7:c914:0:b0:4af:69b8:52af with SMTP id b20-20020aa7c914000000b004af69b852afmr15576411edt.24.1680025379827;        Tue, 28 Mar 2023 10:42:59 -0700 (PDT)"
+    },
+    {
+      "name": "ARC-Seal",
+      "value": "i=2; a=rsa-sha256; t=1680025379; cv=pass;        d=google.com; s=arc-20160816;        b=brf9F0sIgP/j9Fwphvw01KGd4vzQGk6r6w1tNMu7W0tOlpGF4GAA3bD3N8Ml7xAK1Y         qZ4+WmwQ9Jemu9JOYMIIm+lbRiLVWEdtj8cU2Ghs4XmdpvJN40Bdtswaz7oX24iwu8tn         LP6H3lhq1i/zrqnprUHZ2nAx1hheE44w9FjPQMTjB6lLScxn1sISk7RBgT8J6LpAUSCE         xEt4nIS4IFZjU8wZstQiPkQepspQ6shNsSZvLbZZUrvO9E09kXxlk6ip1S1KrVQYAJ7R         G2QsncAnE/rTxILk56oaWjxRIoja5Mxp0PofmwT9PN/Qu/ekczKioGbGKsMVnFLwTpVT         oVPw=="
+    },
+    {
+      "name": "ARC-Message-Signature",
+      "value": "i=2; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20160816;        h=mime-version:content-language:accept-language:message-id:date         :thread-index:thread-topic:subject:to:from:dkim-signature;        bh=sl6YcrWugmx7ntgVewfKnxUmgp/ER0FxeHyRoUKuRMw=;        b=tn5+rl/Lbc6ywzGc94wELx0DsuhRiJlyqkLsBoILYASFY7QhlrT/NagD6T8bjsdC1g         DRa77Vu9OvzrBgXWi3Bu4SS4GQuR+B2px8IToX+jMgQIWqo9GT8mN26921/L6A3LyJNq         2HMringkFRFi037Uo/Yaszy8W9nzMpH/bOM4u0o1kZVmT4aa1sxWWG2vBZZdVsrsm8HY         aEj3woYy54pMIMEbvUtcA46M6iliAIWlfsbZb0NmGHAliYttSE7zTmm+lkSnAzVmQgyD         tsmLNa51vdjhWotyc2XZG81ceXcdPsPs1GRLskKOi1x+4eha+pUdCn0bF0EeUSniDHyD         EkVA=="
+    },
+    {
+      "name": "ARC-Authentication-Results",
+      "value": "i=2; mx.google.com;       dkim=pass header.i=@ukmaedu.onmicrosoft.com header.s=selector2-ukmaedu-onmicrosoft-com header.b=SoB0mFdM;       arc=pass (i=1 spf=pass spfdomain=ukma.edu.ua dkim=pass dkdomain=ukma.edu.ua dmarc=pass fromdomain=ukma.edu.ua);       spf=pass (google.com: domain of bohdan.mykytenko@ukma.edu.ua designates 2a01:111:f400:7d00::722 as permitted sender) smtp.mailfrom=bohdan.mykytenko@ukma.edu.ua"
+    },
+    {
+      "name": "Return-Path",
+      "value": "\u003cbohdan.mykytenko@ukma.edu.ua\u003e"
+    },
+    {
+      "name": "Received",
+      "value": "from EUR05-VI1-obe.outbound.protection.outlook.com (mail-vi1eur05on20722.outbound.protection.outlook.com. [2a01:111:f400:7d00::722])        by mx.google.com with ESMTPS id g6-20020aa7c586000000b004ac746e3f9asi31279512edq.441.2023.03.28.10.42.58        for \u003cmikitenko2001@gmail.com\u003e        (version=TLS1_2 cipher=ECDHE-ECDSA-AES128-GCM-SHA256 bits=128/128);        Tue, 28 Mar 2023 10:42:59 -0700 (PDT)"
+    },
+    {
+      "name": "Received-SPF",
+      "value": "pass (google.com: domain of bohdan.mykytenko@ukma.edu.ua designates 2a01:111:f400:7d00::722 as permitted sender) client-ip=2a01:111:f400:7d00::722;"
+    },
+    {
+      "name": "Authentication-Results",
+      "value": "mx.google.com;       dkim=pass header.i=@ukmaedu.onmicrosoft.com header.s=selector2-ukmaedu-onmicrosoft-com header.b=SoB0mFdM;       arc=pass (i=1 spf=pass spfdomain=ukma.edu.ua dkim=pass dkdomain=ukma.edu.ua dmarc=pass fromdomain=ukma.edu.ua);       spf=pass (google.com: domain of bohdan.mykytenko@ukma.edu.ua designates 2a01:111:f400:7d00::722 as permitted sender) smtp.mailfrom=bohdan.mykytenko@ukma.edu.ua"
+    },
+    {
+      "name": "ARC-Seal",
+      "value": "i=1; a=rsa-sha256; s=arcselector9901; d=microsoft.com; cv=none; b=ftJyv2aQXbv2X2cAQqAFr9ksNxRokN/RAhBsoJ6dlAKf6Y7EEJ00IQYRpqK8iJfrwMxdvnLn//l02YGnHsiRL3c6F0UeixsMvpSzOaOAgxkYS3VEYQ/ZW5ICK8Eu2PkrGkO/T4aJYKzXbZ8CSktuqB/q6kT93D5id4mRfFwg0KK5dnfT/1uWaYqEM6/6FSUxlQdH3YUVxFturqnyooNu+32dLjYw5giYbwwFr+4NXJIIlhO2RsfjCQqSI5c5Z9j3q1Hwvq3/kxd8HAynxiVLxyDxhOOZV0mNqex2UZLSKp6+Nffz5W2NB7LZBm4hQjeJFLvddAbzf0iAPbXpzkVwEg=="
+    },
+    {
+      "name": "ARC-Message-Signature",
+      "value": "i=1; a=rsa-sha256; c=relaxed/relaxed; d=microsoft.com; s=arcselector9901; h=From:Date:Subject:Message-ID:Content-Type:MIME-Version:X-MS-Exchange-AntiSpam-MessageData-ChunkCount:X-MS-Exchange-AntiSpam-MessageData-0:X-MS-Exchange-AntiSpam-MessageData-1; bh=sl6YcrWugmx7ntgVewfKnxUmgp/ER0FxeHyRoUKuRMw=; b=ZuQX2cmThcDJSHKksuacroHP+sgvR+lQklK0iXClZK+QJgu/591H3A6kf4Sh7q/WSc9kqap2y94F1zRdBoWCEBfOfcvAWQFZzSed7D/WoylVyhk/gTC7uhOM/1dtGt6EGKBVUOu5LKmwJiiSLDvRZTTjimeCyck69k7Tf5w2/6ejq6W+/d4SkctqW3YEzKvky/TOCGbw+v88iaqwG7wmLqvHqRfMD4NKenE+NuMlHbv1ffgPKEsCpHUn9DhIauaY7iz9GL79Ffv8F60/QR40d2ce2Ecb3KWmMksgVgZApOa8iDQ1mdZ0arLf7avr57M1DVkqGfSaNLMWj57u5cHy4Q=="
+    },
+    {
+      "name": "ARC-Authentication-Results",
+      "value": "i=1; mx.microsoft.com 1; spf=pass smtp.mailfrom=ukma.edu.ua; dmarc=pass action=none header.from=ukma.edu.ua; dkim=pass header.d=ukma.edu.ua; arc=none"
+    },
+    {
+      "name": "DKIM-Signature",
+      "value": "v=1; a=rsa-sha256; c=relaxed/relaxed; d=ukmaedu.onmicrosoft.com; s=selector2-ukmaedu-onmicrosoft-com; h=From:Date:Subject:Message-ID:Content-Type:MIME-Version:X-MS-Exchange-SenderADCheck; bh=sl6YcrWugmx7ntgVewfKnxUmgp/ER0FxeHyRoUKuRMw=; b=SoB0mFdM1CH5UqbPS1dcvLE1kiEnq+B2C6ZcXVy5dLhFyLXIMTg7v+lFedvRly0+PJnLmcE0fKwSYPsRs7iOTkOjyA2xjOHyvYG81qFxcckgSI7hLhMqToyMLUMvoFrErI1echx6lJuE5zKu3mH2UqrtKyhysckrTud1LT3D9dQ="
+    },
+    {
+      "name": "Received",
+      "value": "from AS1PR01MB9371.eurprd01.prod.exchangelabs.com (2603:10a6:20b:4d3::16) by PA4PR01MB9209.eurprd01.prod.exchangelabs.com (2603:10a6:102:2ac::15) with Microsoft SMTP Server (version=TLS1_2, cipher=TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384) id 15.20.6222.33; Tue, 28 Mar 2023 17:42:56 +0000"
+    },
+    {
+      "name": "Received",
+      "value": "from AS1PR01MB9371.eurprd01.prod.exchangelabs.com ([fe80::37ba:2c71:70bf:8888]) by AS1PR01MB9371.eurprd01.prod.exchangelabs.com ([fe80::37ba:2c71:70bf:8888%6]) with mapi id 15.20.6222.028; Tue, 28 Mar 2023 17:42:56 +0000"
+    },
+    {
+      "name": "From",
+      "value": "\"Микитенко Богдан Юрійович\" \u003cbohdan.mykytenko@ukma.edu.ua\u003e"
+    },
+    {
+      "name": "To",
+      "value": "\"mikitenko2001@gmail.com\" \u003cmikitenko2001@gmail.com\u003e"
+    },
+    { "name": "Subject", "value": "Test message" },
+    { "name": "Thread-Topic", "value": "Test message" },
+    { "name": "Thread-Index", "value": "AQHZYZxmYn4piMYxTEqO2zJDMeZoNg==" },
+    { "name": "Date", "value": "Tue, 28 Mar 2023 17:42:55 +0000" },
+    {
+      "name": "Message-ID",
+      "value": "\u003cAS1PR01MB93715136C305B0E84AAF5A61D5889@AS1PR01MB9371.eurprd01.prod.exchangelabs.com\u003e"
+    },
+    { "name": "Accept-Language", "value": "uk-UA, en-US" },
+    { "name": "Content-Language", "value": "en-GB" },
+    { "name": "X-MS-Has-Attach", "value": "yes" },
+    { "name": "X-MS-TNEF-Correlator" },
+    {
+      "name": "authentication-results",
+      "value": "dkim=none (message not signed) header.d=none;dmarc=none action=none header.from=ukma.edu.ua;"
+    },
+    { "name": "x-ms-publictraffictype", "value": "Email" },
+    {
+      "name": "x-ms-traffictypediagnostic",
+      "value": "AS1PR01MB9371:EE_|PA4PR01MB9209:EE_"
+    },
+    {
+      "name": "x-ms-office365-filtering-correlation-id",
+      "value": "c4168aa6-5221-4d98-54ff-08db2fb3dd33"
+    },
+    { "name": "x-ms-exchange-senderadcheck", "value": "1" },
+    { "name": "x-ms-exchange-antispam-relay", "value": "0" },
+    { "name": "x-microsoft-antispam", "value": "BCL:0;" },
+    {
+      "name": "x-microsoft-antispam-message-info",
+      "value": "58VzbMuDNPHr0Ek40DcSVR64tA9XF7sxib/whX545wunhtJokNxQNQBWqpq5g8ZaXa9YK/DAjY5ZAWj/CkYHDxra31/keZHC7UbJ3tmDIVrvpwttdo/Nsyj/3FFyaN3OWNch4c1uP0JU0zh43iwqiLs5YdpH6r5Pq+9L1BykDZTYdZmTbyYvz62YcNMIjwNJfDbCjJWEe4skt5ieQm54I9DnBQ+UfRi+gipvFaOcmzJzeg8ir9fozM4J5sxwlhZ0Cz9kcae/So4nVP4hsbKkVyqUU70o/eIbkqiFZgt8glcjGTn1bqi2i3jHpMOy2JFJzwDjUwVx+Ru4MVvGy1X90dAFGgOQwhcO8/YdxdK3YWbCtnXCnQGuI1ZcmYwHmHuZeIhsApbzep5K7qKnfB394JxtvRsA0zMgdqRW5dvWuDpwRw037G/ZZHXoO4pyAhM+yvJdKJKPCvIfXhwAHUk74O2REXqWksPCSGeHpcZ2Wm4VUS3aIhXTVqBi0Bn4DS/w5Olp6bVrbFqYVySoMx8TMtGQD68n8FF3ypfNp3BmRVamga+RKNH7tHrszN3zzKWb"
+    },
+    {
+      "name": "x-forefront-antispam-report",
+      "value": "CIP:255.255.255.255;CTRY:;LANG:en;SCL:1;SRV:;IPV:NLI;SFV:NSPM;H:AS1PR01MB9371.eurprd01.prod.exchangelabs.com;PTR:;CAT:NONE;SFS:(13230028)(376002)(39850400004)(346002)(396003)(136003)(366004)(451199021)(52536014)(122000001)(5660300002)(8936002)(316002)(7116003)(45080400002)(38100700002)(3480700007)(786003)(66946007)(6916009)(41300700001)(86362001)(66446008)(66556008)(66476007)(64756008)(8676002)(91956017)(76116006)(99936003)(71200400001)(478600001)(166002)(2906002)(83380400001)(15650500001)(38070700005)(7696005)(9686003)(55016003)(558084003)(26005)(186003)(6506007)(33656002)(41320700001)(85182001)(4270600006);DIR:OUT;SFP:1102;"
+    },
+    { "name": "x-ms-exchange-antispam-messagedata-chunkcount", "value": "1" },
+    {
+      "name": "x-ms-exchange-antispam-messagedata-0",
+      "value": "fCdi7uHnWKJFFHs45R9MKNKWM2F+nV4Hak2BnBCdRxXesOWsIftLr/Ne6KE9GQqvkDR/T+fnCRBm0xvRbw1uNZ4CzkvG+KPiuqsUpB76Cas6Vmw7OobKcJuo/JHvFCpCm1beyI6K0QXjtRGSnKEDKz15NQC5C5EahCR5+Gx2o3vOwyfIF4vlsL7dszXv3UAOd3+fiQuFyGzXztTTLaWwqLTEOgAL7sOsqWHLQjK2YOUg0SJX1SErGk6dDPnpOsUU4KkNYtYUZSYWuMzRN4IzTUJuXlvEcAFS5AScBw5VZLhOL6u9oYSJbZyPzpTNcBSafNjxOUr4UThNeWbQ6WvITb2UwJ5gGYwaPRFyGjYQW7Jhw8mZKKxrjTKuDJNI6XTlGE7Gz07Dyb6GuuV0zhQsyxSf+uPvoQW8aG4S0MgcbdobFhi2l8sv86w4QjzDCYr7KEDXUtFqdjK/XRaV845Eyo48ify9bgRK0SXBqdrKJ+f96bm/EobXRASOLJc+MbGdEWrnowMNUDs+7wamVQiLrTAd4rilOCzf3tKsyuawmbuJJDYlTYcmMUPaU136OH1VSFzzYVsjEuHWjiBr7F9PXEk1DmHw2g5yLmGfs9KwBdUwZH30HZPDC4k1N6o2zErmZPliKzfknQIPRc008oGbhJ2J5pklA25m4PW/yU4eosppd0sSURHBFbh3poNmrikuOOf3ulpmg8QllK7ITeDCP47p+oJkqQDZ8wjccPvi553dPRWjEV/WK5gfdGTSyshqJg4SwMYvPk6QhNlz9obGTCynAmyCVIi/VzZtVXtbqRhqoGOOjmqxrDlUOHFYtN+9BApzZHm8xHRZjkwtRltZxsy9EXMt1g2UK6dPo2B4VBaPL8wcSC7kP24Mvjs28Q6YmODyP0xhtvUlVJikotafh7ujpTR9WkuHx0cYnH6qiAXRT5MRBtIJ+OT2xAON8fgNMbZGAKSusvNSP/MfF6+V8/s52tdB0WYthsAPUPoSO5T38K2eFpKZQWHpjv1PP68N9M4bFG5vN1SE8HnjyvL5dKVXy17JfMqvE5mq/UFy6ZGtiWePLxaNLMXi/6/fh2+xFG63y7cuc7g27CnCVenGjnCobeXdq5X1/O9mqqaEor+k6Gmoub0jyYHTlVYV/L4PCV832xnsaVoP37sx+w/iOAD5u+ZeBk3VS296xPWc02DXaJuuKZh2H6+rVzvWQ7g2NruhE4RFXas0ks24ORvzQcynysjf97uXv/mdG47g2IFntR0JCJJRXdyMZQ5GBpThEDWh+fAfzUe4G8tUlxnbJ2xECBvipT63mW+WCQ6o65OfbvfLdgbS1eJTUgM8XEC0Ov5KcRbCkRSRgiB3KrmKdQ4TZLnDNVC6cZ5yMfsXvhS2YbtJ41DEPNDDXOBvNV64TZgiRmVyXkuRBBwidtFLL7w0BRyskms5SQNBHzOMnNCjMhp+eRmF8a0NmcKBpvTliuCjQH6xl1mWtRLJRfH09YqVvfSi9WXxFenYgLZCC6NKXRRGUGmNiGtjeeeGIr2Nth8p85roH+oRsmP0dtN+i74L+Lg95exKmZHlI7VZf7IbxUdqinoDPcUTytCgYvXSmqg6xfmZG/HYWr+oZDI2peOZLEGRd8Vai0tequMQTa8="
+    },
+    {
+      "name": "Content-Type",
+      "value": "multipart/mixed; boundary=\"_005_AS1PR01MB93715136C305B0E84AAF5A61D5889AS1PR01MB9371eurp_\""
+    },
+    { "name": "MIME-Version", "value": "1.0" },
+    { "name": "X-OriginatorOrg", "value": "ukma.edu.ua" },
+    { "name": "X-MS-Exchange-CrossTenant-AuthAs", "value": "Internal" },
+    {
+      "name": "X-MS-Exchange-CrossTenant-AuthSource",
+      "value": "AS1PR01MB9371.eurprd01.prod.exchangelabs.com"
+    },
+    {
+      "name": "X-MS-Exchange-CrossTenant-Network-Message-Id",
+      "value": "c4168aa6-5221-4d98-54ff-08db2fb3dd33"
+    },
+    {
+      "name": "X-MS-Exchange-CrossTenant-originalarrivaltime",
+      "value": "28 Mar 2023 17:42:55.9835 (UTC)"
+    },
+    { "name": "X-MS-Exchange-CrossTenant-fromentityheader", "value": "Hosted" },
+    {
+      "name": "X-MS-Exchange-CrossTenant-id",
+      "value": "b8cbfe43-c90c-4bea-84ae-be5d6d8a5f52"
+    },
+    { "name": "X-MS-Exchange-CrossTenant-mailboxtype", "value": "HOSTED" },
+    {
+      "name": "X-MS-Exchange-CrossTenant-userprincipalname",
+      "value": "p762B9iY88snBiI4Y7JY+FdP4navBBgrTbpri2mhbpNysPAo2BiBV0LZaRBTnAy4R57gYx9B4khGKYWWe7WxFUvUzZBXi0I0zwyRmKublVU="
+    },
+    {
+      "name": "X-MS-Exchange-Transport-CrossTenantHeadersStamped",
+      "value": "PA4PR01MB9209"
+    }
+  ],
+  "mimeType": "multipart/mixed",
+  "parts": [
+    {
+      "body": {},
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "multipart/alternative; boundary=\"_000_AS1PR01MB93715136C305B0E84AAF5A61D5889AS1PR01MB9371eurp_\""
+        }
+      ],
+      "mimeType": "multipart/alternative",
+      "partId": "0",
+      "parts": [
+        {
+          "body": {
+            "data": "SGV5LA0KVGhpcyBpcyBhIHRlc3QgbWVzc2FnZS4NCkhlcmUncyB0aGUgYXR0YWNobWVudHMNCg0KDQpHZXQgT3V0bG9vayBmb3IgaU9TPGh0dHBzOi8vYWthLm1zL28wdWtlZj4NCg==",
+            "size": 103
+          },
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "text/plain; charset=\"koi8-u\""
+            },
+            { "name": "Content-Transfer-Encoding", "value": "quoted-printable" }
+          ],
+          "mimeType": "text/plain",
+          "partId": "0.0"
+        },
+        {
+          "body": {
+            "data": "PGh0bWw-DQo8aGVhZD4NCjxtZXRhIGh0dHAtZXF1aXY9IkNvbnRlbnQtVHlwZSIgY29udGVudD0idGV4dC9odG1sOyBjaGFyc2V0PWtvaTgtdSI-DQo8L2hlYWQ-DQo8Ym9keT4NCjxkaXYgZGlyPSJsdHIiPg0KPGRpdj48L2Rpdj4NCjxkaXYgc3R5bGU9IiI-DQo8ZGl2PkhleSw8L2Rpdj4NCjxkaXYgZGlyPSJsdHIiPlRoaXMgaXMgYSB0ZXN0IG1lc3NhZ2UuPC9kaXY-DQo8ZGl2IGRpcj0ibHRyIj5IZXJlJ3MgdGhlIGF0dGE8c3Bhbj5jaG1lbnRzPC9zcGFuPjwvZGl2Pg0KPGRpdiBkaXI9Imx0ciI-PHNwYW4-PGJyPg0KPC9zcGFuPjwvZGl2Pg0KPGRpdiBpZD0ibXMtb3V0bG9vay1tb2JpbGUtc2lnbmF0dXJlIj4NCjxkaXY-PGJyPg0KPC9kaXY-DQpHZXQgPGEgaHJlZj0iaHR0cHM6Ly9ha2EubXMvbzB1a2VmIj5PdXRsb29rIGZvciBpT1M8L2E-PC9kaXY-DQo8L2Rpdj4NCjwvZGl2Pg0KPC9ib2R5Pg0KPC9odG1sPg0K",
+            "size": 468
+          },
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "text/html; charset=\"koi8-u\""
+            },
+            { "name": "Content-Transfer-Encoding", "value": "quoted-printable" }
+          ],
+          "mimeType": "text/html",
+          "partId": "0.1"
+        }
+      ]
+    },
+    {
+      "body": {
+        "attachmentId": "ANGjdJ_qSKKZw5rX3AuDVnA5vRyA2HF3x0x_Jlhz48IO2MizyTBbdnZcTCrg6bdCFt2PdQb9TVKgG3pUTHOfBWoU4FBjW6M9PEoQydHhm2YlMmh_FhPAifUWICSonA1UqwSOdQhx1s6thmEKSdiiMgVSb9aDxo-ivu0zC4WzhvvQ5_kBgXOKXSdZlJqm-0HDhPi3ClipFf2YEhnPDfH6Vhf_PED9BnQTYjkqRVuXQYS03pxWDUfm6acOS3mcurnWPWSfQ20-NiEeVR8fOTeDPoWsqjMTCN7Cwi7ZJHB1PbnmtRTBouNO7U9_4T0X-5WN0_9qCh5iv6aV2owoK5RQZUnMYBExn6tfhEEWubvP8v2kMwKk3a7ouqtTCDzxxrWNrFZI18yTWkrSvnUjFQZp",
+        "size": 158556
+      },
+      "filename": "Immergut_the theoretical core of New Institutionalism.pdf",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/pdf; name=\"Immergut_the theoretical core of New Institutionalism.pdf\""
+        },
+        {
+          "name": "Content-Description",
+          "value": "Immergut_the theoretical core of New Institutionalism.pdf"
+        },
+        {
+          "name": "Content-Disposition",
+          "value": "attachment; filename=\"Immergut_the theoretical core of New Institutionalism.pdf\"; size=158556; creation-date=\"Tue, 28 Mar 2023 17:42:17 GMT\"; modification-date=\"Tue, 28 Mar 2023 17:42:17 GMT\""
+        },
+        { "name": "Content-Transfer-Encoding", "value": "base64" }
+      ],
+      "mimeType": "application/pdf",
+      "partId": "1"
+    },
+    {
+      "body": {
+        "attachmentId": "ANGjdJ9vf0JfUjG_iO-3qr7DDxnTCSEWpklII-v4KBCfq8FlK78Jw0TNj7k4BrZqSDHsNlEvkogfA81dhoYJaQWPdAHa7FGldY5fRq_yTXiZ7uk1ucy--2PQDU3zCseltgtoG11jtGz13ROKrCvAe7M_2bmkC_bcQ2h9Wz58GL99NWnnEEyoc7l_0Q3xbxTpDFWTwPcc8FJA1iyOI1Df8_E6hERPpo7o3anLkN7zbiQErE809w42lc4N7jydtgQYjfn3ekNgr7xMLiSmDBK_K76ZRNVfewfdMKQ94scsgEhFYtaZId9OEHRSOIVmKFHdkBPPFevyC2613_84w1u3fgB-eDxwCEUEaxHc8gkRNLoNL7eLJbAWPtCGq-3wACphNwKhIJxZC84s4mi6tfWroOLt417u0HPXt4ZkBOn52A",
+        "size": 2821273
+      },
+      "filename": "Курсова.docx",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/vnd.openxmlformats-officedocument.wordprocessingml.document; name=\"Курсова.docx\""
+        },
+        { "name": "Content-Description", "value": "Курсова.docx" },
+        {
+          "name": "Content-Disposition",
+          "value": "attachment; filename=\"Курсова.docx\"; size=2821273; creation-date=\"Tue, 28 Mar 2023 17:42:53 GMT\"; modification-date=\"Tue, 28 Mar 2023 17:42:54 GMT\""
+        },
+        { "name": "Content-Transfer-Encoding", "value": "base64" }
+      ],
+      "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "partId": "2"
+    }
+  ]
+}
