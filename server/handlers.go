@@ -1576,6 +1576,7 @@ func handleSendFileFromGooglePhotosToStorj(c echo.Context) error {
 	return c.String(http.StatusOK, "file "+item.Filename+" was successfully uploaded from Google Photos to Storj")
 }
 
+// Fetches user threads, returns their IDs and snippets.
 func handleGmailGetThreads(c echo.Context) error {
 	GmailClient, err := google.NewGmailClient(c)
 	if err != nil {
@@ -1596,6 +1597,7 @@ func handleGmailGetThreads(c echo.Context) error {
 	return c.String(http.StatusOK, respStr)
 }
 
+// Fetches user messages, returns their ID's and threat's IDs.
 func handleGmailGetMessages(c echo.Context) error {
 	GmailClient, err := google.NewGmailClient(c)
 	if err != nil {
@@ -1616,6 +1618,7 @@ func handleGmailGetMessages(c echo.Context) error {
 	return c.String(http.StatusOK, respStr)
 }
 
+// Returns Gmail message in JSON format.
 func handleGmailGetMessage(c echo.Context) error {
 	id := c.Param("ID")
 
@@ -1633,6 +1636,8 @@ func handleGmailGetMessage(c echo.Context) error {
 	return c.String(http.StatusOK, string(res))
 }
 
+// Fetches message from Gmail by given ID as a parameter and writes it into SQLite Database in Storj.
+// If there's no database yet - creates one.
 func handleGmailMessageToStorj(c echo.Context) error {
 	id := c.Param("ID")
 	accesGrant, err := c.Cookie("storj_access_token")

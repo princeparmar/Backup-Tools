@@ -116,8 +116,50 @@ takes photo name as a parameter, downloads this file from Storj and uploads it t
 
 | Parameter | Required |  Description |
 | ----------- | ----------- |----------- |
-| name | Yes | photo ID in Google Photos |
+| ID | Yes | photo ID in Google Photos |
 
 takes photo ID as a parameter, downloads this file from Google Photos and uploads it to your Storj bucket.
+
+&nbsp;
+
+## Gmail
+
+&nbsp;
+
+`/gmail-list-threads` (GET)
+
+returns list of user's threads.
+
+&nbsp;
+
+`/gmail-get-message/:ID` (GET)
+
+| Parameter | Required |  Description |
+| ----------- | ----------- |----------- |
+| ID | Yes | message (email) ID in Gmail |
+
+takes message ID as a parameter and returns message.
+
+&nbsp;
+
+`/gmail-list-messages` (GET)
+
+returns list of user's messages.
+
+&nbsp;
+
+`/gmail-message-to-storj/:ID` (GET)
+
+| Parameter | Required |  Description |
+| ----------- | ----------- |----------- |
+| ID | Yes | message (email) ID in Gmail |
+
+takes message ID as a parameter and saves it to the backup database in Storj bucket.
+
+&nbsp;
+
+`/get-gmail-db-from-storj` (GET)
+
+returns database file (gmails.db) with backuped data.
 
 &nbsp;
