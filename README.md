@@ -14,7 +14,8 @@ This service is currently under developing.
 1. Setup PostgreSQL database (no manual schema setup needed, app migrates all the tables and data automatically).
 2. Create and write PostgreSQL connection data into `.env` file (see the `.env.example` file)
 3. Create credentials for Application in Google auth service and put this file to general folder.
-4. Make requests!
+4. Run the app using main.go file.
+5. Make requests!
 
 ---
 
@@ -161,5 +162,51 @@ takes message ID as a parameter and saves it to the backup database in Storj buc
 `/get-gmail-db-from-storj` (GET)
 
 returns database file (gmails.db) with backuped data.
+
+&nbsp;
+
+## Google Cloud Storage
+
+&nbsp;
+
+`/storage-list-buckets/:projectName` (GET)
+
+| Parameter | Required |  Description |
+| ----------- | ----------- |----------- |
+| projectName | Yes | Google Cloud project name |
+
+takes Google Cloud project name as a parameter, returns JSON responce with all the buckets in this project.
+
+&nbsp;
+
+`/storage-list-items/:bucketName` (GET)
+
+| Parameter | Required |  Description |
+| ----------- | ----------- |----------- |
+| bucketName | Yes | Google Cloud bucket name |
+
+takes Google Cloud bucket name as a parameter, returns JSON responce with all the items in this bucket.
+
+&nbsp;
+
+`/storage-item-to-storj/:bucketName/:itemName` (GET)
+
+| Parameter | Required |  Description |
+| ----------- | ----------- |----------- |
+| bucketName | Yes | Google Cloud bucket name |
+| itemName | Yes | Google Cloud item name |
+
+takes bucket name and item name as a parameters, downloads the object from Google Cloud Storage and uploads it into Storj "google-cloud" bucket.
+
+&nbsp;
+
+`/storage-item-from-storj-to-google-cloud/:bucketName/:itemName` (GET)
+
+| Parameter | Required |  Description |
+| ----------- | ----------- |----------- |
+| bucketName | Yes | Storj bucket name |
+| itemName | Yes | Google Cloud item name |
+
+takes bucket name and item name as a parameters, downloads the object from Storj bucket and uploads it into Google Cloud Storage bucket.
 
 &nbsp;
