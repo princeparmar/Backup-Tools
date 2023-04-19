@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -383,4 +384,91 @@ func handleGetGmailDBFromStorj(c echo.Context) error {
 	defer os.Remove(userCacheDBPath)
 
 	return c.Attachment(userCacheDBPath, "gmails.db")
+}
+
+// <<<<<------------ GOOGLE CLOUD STORAGE ------------>>>>>
+
+// Takes Google Cloud project name as a parameter, returns JSON responce with all the buckets in this project.
+func handleStorageListBuckets(c echo.Context) error {
+	projectName := c.Param("projectName")
+
+	client, err := google.NewGoogleStorageClient(c)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	bucketsJSON, err := client.ListBucketsJSON(c, projectName)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	return c.JSON(http.StatusOK, bucketsJSON)
+}
+
+// Takes Google Cloud bucket name as a parameter, returns JSON responce with all the items in this bucket.
+func handleStorageListObjects(c echo.Context) error {
+	bucketName := c.Param("bucketName")
+
+	client, err := google.NewGoogleStorageClient(c)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	objects, err := client.ListObjectsInBucketJSON(c, bucketName)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	return c.JSON(http.StatusOK, objects)
+
+}
+
+// Takes bucket name and item name as a parameters, downloads the object from Google Cloud Storage and uploads it into Storj "google-cloud" bucket.
+func handleGoogleCloudItemToStorj(c echo.Context) error {
+	bucketName := c.Param("bucketName")
+	itemName := c.Param("itemName")
+	accesGrant, err := c.Cookie("storj_access_token")
+
+	client, err := google.NewGoogleStorageClient(c)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	obj, err := client.GetObject(c, bucketName, itemName)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	err = storj.UploadObject(context.Background(), accesGrant.Value, "google-cloud", obj.Name, obj.Data)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	return c.String(http.StatusOK, fmt.Sprintf("object %s was successfully uploaded from Google Cloud Storage to Storj", obj.Name))
+
+}
+
+// Takes bucket name and item name as a parameters, downloads the object from Storj bucket and uploads it into Google Cloud Storage bucket.
+func handleStorjToGoogleCloud(c echo.Context) error {
+	bucketName := c.Param("bucketName")
+	itemName := c.Param("itemName")
+	accesGrant, err := c.Cookie("storj_access_token")
+
+	client, err := google.NewGoogleStorageClient(c)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	data, err := storj.DownloadObject(context.Background(), accesGrant.Value, "google-cloud", itemName)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	err = client.UploadObject(c, bucketName, &google.StorageObject{
+		Name: itemName,
+		Data: data,
+	})
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	return c.String(http.StatusOK, fmt.Sprintf("object %s was successfully uploaded from Storj to Google Cloud Storage", itemName))
+
 }

@@ -41,5 +41,11 @@ func StartServer(db *storage.PosgresStore) {
 	google.GET("/gmail-message-to-storj/:ID", handleGmailMessageToStorj)
 	google.GET("/get-gmail-db-from-storj", handleGetGmailDBFromStorj)
 
+	// Google Cloud Storage
+	google.GET("/storage-list-buckets/:projectName", handleStorageListBuckets)
+	google.GET("/storage-list-items/:bucketName", handleStorageListObjects)
+	google.GET("/storage-item-to-storj/:bucketName/:itemName", handleGoogleCloudItemToStorj)
+	google.GET("/storage-item-from-storj-to-google-cloud/:bucketName/:itemName", handleStorjToGoogleCloud)
+
 	e.Start(":8000")
 }
