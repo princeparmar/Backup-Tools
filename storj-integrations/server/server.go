@@ -47,5 +47,11 @@ func StartServer(db *storage.PosgresStore) {
 	google.GET("/storage-item-to-storj/:bucketName/:itemName", handleGoogleCloudItemToStorj)
 	google.GET("/storage-item-from-storj-to-google-cloud/:bucketName/:itemName", handleStorjToGoogleCloud)
 
+	// Dropbox
+	dropbox := e.Group("/dropbox")
+
+	dropbox.GET("/file-to-storj/:filePaht", handleDropboxToStorj)
+	dropbox.GET("/file-from-storj/:filePath", handleStorjToDropbox)
+
 	e.Start(":8000")
 }

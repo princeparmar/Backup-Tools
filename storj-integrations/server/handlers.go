@@ -1,12 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"storj-integrations/apps/dropbox"
 	google "storj-integrations/apps/google"
 	"storj-integrations/storage"
 	"storj-integrations/storj"
@@ -471,4 +473,52 @@ func handleStorjToGoogleCloud(c echo.Context) error {
 
 	return c.String(http.StatusOK, fmt.Sprintf("object %s was successfully uploaded from Storj to Google Cloud Storage", itemName))
 
+}
+
+// <<<<<------------ DROPBOX ------------>>>>>
+
+func handleDropboxToStorj(c echo.Context) error {
+	filePath := c.Param("filePath")
+	accesGrant, err := c.Cookie("storj_access_token")
+
+	client, err := dropbox.NewDropboxClient()
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	file, err := client.DownloadFile("/" + filePath)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	data, err := io.ReadAll(file.Data)
+
+	err = storj.UploadObject(context.Background(), accesGrant.Value, "dropbox", file.Name, data)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	return c.String(http.StatusOK, fmt.Sprintf("object %s was successfully uploaded from Dropbox to Storj", file.Name))
+}
+
+func handleStorjToDropbox(c echo.Context) error {
+	filePath := c.Param("filePath")
+	accesGrant, err := c.Cookie("storj_access_token")
+
+	objData, err := storj.DownloadObject(context.Background(), accesGrant.Value, "dropbox", filePath)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	client, err := dropbox.NewDropboxClient()
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	data := bytes.NewReader(objData)
+	err = client.UploadFile(data, "/"+filePath)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	return c.String(http.StatusOK, fmt.Sprintf("object %s was successfully uploaded from Storj to Dropbox", filePath))
 }

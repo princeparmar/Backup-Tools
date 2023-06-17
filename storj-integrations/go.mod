@@ -16,6 +16,7 @@ require (
 	cloud.google.com/go v0.110.0 // indirect
 	cloud.google.com/go/compute v1.18.0 // indirect
 	cloud.google.com/go/compute/metadata v0.2.3 // indirect
+	github.com/dropbox/dropbox-sdk-go-unofficial/v6 v6.0.5 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/gadelkareem/cachita v0.2.1 // indirect
 	github.com/glebarez/go-sqlite v1.20.3 // indirect
