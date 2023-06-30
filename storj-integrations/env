@@ -1,0 +1,2 @@
+POSTGRES_DSN = "host=localhost user=bodya-pc password=bodya2912 dbname=gorm port=5432 sslmode=disable TimeZone=Asia/Shanghai"
+DROPBOX_TOKEN = "sl.BgSXT8eN5n7mek3NcsyCzpI6p2TQUzzMWQE_x8mvDhV_EuIf85PkZqDq78tdbsA_vB86Yp_p4z4-O5sw3wD9ez1JuXIh5WhDK8mcSAMHW1em8A1DWHqNxFgdaadrR3QnNRCTq9lTvmqR"
