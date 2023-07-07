@@ -50,8 +50,14 @@ func StartServer(db *storage.PosgresStore) {
 	// Dropbox
 	dropbox := e.Group("/dropbox")
 
-	dropbox.GET("/file-to-storj/:filePaht", handleDropboxToStorj)
+	dropbox.GET("/file-to-storj/:filePath", handleDropboxToStorj)
 	dropbox.GET("/file-from-storj/:filePath", handleStorjToDropbox)
+
+	// AWS S3
+	aws := e.Group("/aws")
+	aws.GET("/list-files-in-bucket/:bucketName", handleListAWSs3BucketFiles)
+	aws.GET("/file-from-aws-to-storj/:bucketName/:itemName", handleS3toStorj)
+	aws.GET("/file-from-storj-to-aws/:bucketName/:itemName", handleStorjToS3)
 
 	e.Start(":8000")
 }

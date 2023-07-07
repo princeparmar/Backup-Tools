@@ -205,7 +205,7 @@ takes bucket name and item name as a parameters, downloads the object from Googl
 | Parameter | Required |  Description |
 | ----------- | ----------- |----------- |
 | bucketName | Yes | Storj bucket name |
-| itemName | Yes | Google Cloud item name |
+| itemName | Yes | Storj item name |
 
 takes bucket name and item name as a parameters, downloads the object from Storj bucket and uploads it into Google Cloud Storage bucket.
 

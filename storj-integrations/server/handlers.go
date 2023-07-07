@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"storj-integrations/apps/aws"
 	"storj-integrations/apps/dropbox"
 	google "storj-integrations/apps/google"
 	"storj-integrations/storage"
@@ -521,4 +522,93 @@ func handleStorjToDropbox(c echo.Context) error {
 	}
 
 	return c.String(http.StatusOK, fmt.Sprintf("object %s was successfully uploaded from Storj to Dropbox", filePath))
+}
+
+// <<<<<------------ AWS S3 ------------>>>>>
+
+func handleListAWSs3BucketFiles(c echo.Context) error {
+	bucketName := c.Param("bucketName")
+
+	s3sess := aws.ConnectAws()
+	data, err := s3sess.ListFiles(bucketName)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	return c.String(http.StatusOK, fmt.Sprintf("%+v", data))
+}
+
+func handleS3toStorj(c echo.Context) error {
+	bucketName := c.Param("bucketName")
+	itemName := c.Param("itemName")
+	accesGrant, err := c.Cookie("storj_access_token")
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	dirPath := filepath.Join("./cache", utils.CreateUserTempCacheFolder())
+	path := filepath.Join(dirPath, itemName)
+	os.Mkdir(dirPath, 0777)
+
+	file, err := os.Create(path)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	defer os.Remove(path)
+
+	s3sess := aws.ConnectAws()
+	err = s3sess.DownloadFile(bucketName, itemName, file)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	err = storj.UploadObject(context.Background(), accesGrant.Value, "aws-s3", itemName, data)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	return c.String(http.StatusOK, fmt.Sprintf("object %s was successfully uploaded from AWS S3 bucket to Storj", itemName))
+}
+
+func handleStorjToS3(c echo.Context) error {
+	bucketName := c.Param("bucketName")
+	itemName := c.Param("itemName")
+	accesGrant, err := c.Cookie("storj_access_token")
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	data, err := storj.DownloadObject(context.Background(), accesGrant.Value, "aws-s3", itemName)
+	if err != nil {
+		return c.String(http.StatusForbidden, "error downloading object from Storj"+err.Error())
+	}
+	dirPath := filepath.Join("./cache", utils.CreateUserTempCacheFolder())
+	path := filepath.Join(dirPath, itemName)
+	os.Mkdir(dirPath, 0777)
+
+	file, err := os.Create(path)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	file.Write(data)
+	file.Close()
+	defer os.Remove(path)
+
+	cachedFile, err := os.Open(path)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	s3sess := aws.ConnectAws()
+	err = s3sess.UploadFile(bucketName, itemName, cachedFile)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	return c.String(http.StatusOK, fmt.Sprintf("object %s was successfully uploaded from Storj to AWS S3 %s bucket", itemName, bucketName))
+
 }

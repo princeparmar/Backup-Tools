@@ -74,3 +74,8 @@ func CreateUserTempCacheFolder() string {
 
 	return string(b)
 }
+
+// GetEnvWithKey : get env value
+func GetEnvWithKey(key string) string {
+	return os.Getenv(key)
+}
