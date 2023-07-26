@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"storj-integrations/apps/aws"
 	"storj-integrations/apps/dropbox"
+	gthb "storj-integrations/apps/github"
 	google "storj-integrations/apps/google"
 	"storj-integrations/storage"
 	"storj-integrations/storj"
@@ -611,4 +612,162 @@ func handleStorjToS3(c echo.Context) error {
 	}
 	return c.String(http.StatusOK, fmt.Sprintf("object %s was successfully uploaded from Storj to AWS S3 %s bucket", itemName, bucketName))
 
+}
+
+// <<<<<------------ GITHUB ------------>>>>>
+
+func handleGithubLogin(c echo.Context) error {
+	return gthb.AuthenticateGithub(c)
+}
+
+func handleGithubCallback(c echo.Context) error {
+	code := c.QueryParam("code")
+
+	githubAccessToken := gthb.GetGithubAccessToken(code)
+	cookie := new(http.Cookie)
+	cookie.Name = "github-auth"
+	cookie.Value = githubAccessToken
+	c.SetCookie(cookie)
+
+	return c.String(http.StatusOK, "you have been successfuly authenticated to github")
+}
+
+func handleListRepos(c echo.Context) error {
+	accessToken, err := c.Cookie("github-auth")
+	if err != nil {
+		return c.String(http.StatusUnauthorized, "UNAUTHENTICATED!")
+	}
+
+	gh, err := gthb.NewGithubClient(c)
+	if err != nil {
+		return c.String(http.StatusUnauthorized, "UNAUTHENTICATED!")
+	}
+	reps, err := gh.ListReps(accessToken.Value)
+	if err != nil {
+		return c.String(http.StatusBadRequest, err.Error())
+	}
+	var repositories []string
+	for _, r := range reps {
+		repositories = append(repositories, *r.FullName)
+	}
+	return c.JSON(http.StatusOK, repositories)
+}
+
+func handleGetRepository(c echo.Context) error {
+	accessToken, err := c.Cookie("github-auth")
+	if err != nil {
+		return c.String(http.StatusUnauthorized, "UNAUTHENTICATED!")
+	}
+	owner := c.QueryParam("owner")
+	if owner == "" {
+		return c.String(http.StatusBadRequest, "owner is now specified")
+	}
+	repo := c.QueryParam("repo")
+	if repo == "" {
+		return c.String(http.StatusBadRequest, "repo name is now specified")
+	}
+
+	gh, err := gthb.NewGithubClient(c)
+	if err != nil {
+		return c.String(http.StatusUnauthorized, "UNAUTHENTICATED!")
+	}
+
+	repoPath, err := gh.DownloadRepositoryToCache(owner, repo, accessToken.Value)
+	dir, _ := filepath.Split(repoPath)
+	defer os.RemoveAll(dir)
+
+	return c.File(repoPath)
+}
+
+func handleGithubRepositoryToStorj(c echo.Context) error {
+	accessToken, err := c.Cookie("github-auth")
+	if err != nil {
+		return c.String(http.StatusUnauthorized, "UNAUTHENTICATED!")
+	}
+
+	accesGrant, err := c.Cookie("storj_access_token")
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	owner := c.QueryParam("owner")
+	if owner == "" {
+		return c.String(http.StatusBadRequest, "owner is now specified")
+	}
+	repo := c.QueryParam("repo")
+	if repo == "" {
+		return c.String(http.StatusBadRequest, "repo name is now specified")
+	}
+
+	gh, err := gthb.NewGithubClient(c)
+	if err != nil {
+		return c.String(http.StatusUnauthorized, "UNAUTHENTICATED!")
+	}
+
+	repoPath, err := gh.DownloadRepositoryToCache(owner, repo, accessToken.Value)
+	dir, repoName := filepath.Split(repoPath)
+	defer os.RemoveAll(dir)
+	file, err := os.Open(repoPath)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	err = storj.UploadObject(context.Background(), accesGrant.Value, "github", repoName, data)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	file.Close()
+
+	return c.String(http.StatusOK, fmt.Sprintf("repo %s was successfully uploaded from Github to Storj", repoName))
+}
+
+func handleRepositoryFromStorjToGithub(c echo.Context) error {
+	accessToken, err := c.Cookie("github-auth")
+	if err != nil {
+		return c.String(http.StatusUnauthorized, "UNAUTHENTICATED!")
+	}
+
+	accesGrant, err := c.Cookie("storj_access_token")
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	repo := c.QueryParam("repo")
+	if repo == "" {
+		return c.String(http.StatusBadRequest, "repo name is now specified")
+	}
+
+	repoData, err := storj.DownloadObject(context.Background(), accesGrant.Value, "github", repo)
+	if err != nil {
+		return c.String(http.StatusForbidden, "error downloading object from Storj"+err.Error())
+	}
+	dirPath := filepath.Join("./cache", utils.CreateUserTempCacheFolder())
+	path := filepath.Join(dirPath, repo+".zip")
+	os.Mkdir(dirPath, 0777)
+
+	file, err := os.Create(path)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	file.Write(repoData)
+	file.Close()
+	dir, _ := filepath.Split(path)
+	defer os.RemoveAll(dir)
+
+	url := "https://api.github.com/user/repos"
+
+	jsonBody := []byte(`{"name": "` + repo + `","private": true,}`)
+	bodyReader := bytes.NewReader(jsonBody)
+
+	req, _ := http.NewRequest(http.MethodPost, url, bodyReader)
+	req.Header.Add("Authorization", "bearer "+accessToken.Value)
+
+	// TODO Unzip archived repo
+	// TODO upload all files to github repo
+
+	return c.String(http.StatusOK, "work in progress")
 }
