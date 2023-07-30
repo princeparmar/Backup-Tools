@@ -88,6 +88,26 @@ func (gh Github) DownloadRepositoryToCache(owner, repo, accessToken string) (str
 	return path, nil
 }
 
+func (gh Github) UploadFileToGithub(owner, repo, filePath string, data []byte) error {
+	msg := fmt.Sprintf("file %s recovered from backup", filePath)
+	_, _, err := gh.Client.Repositories.CreateFile(context.Background(), owner, repo, filePath, &github.RepositoryContentFileOptions{
+		Message: &msg,
+		Content: data,
+	})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (gh Github) GetAuthenticatedUserName() (string, error) {
+	user, _, err := gh.Client.Users.Get(context.Background(), "")
+	if err != nil {
+		return "", err
+	}
+	return *user.Name, nil
+}
+
 func GetGithubAccessToken(code string) string {
 
 	clientID := getGithubClientID()

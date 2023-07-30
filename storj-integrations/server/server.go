@@ -66,6 +66,7 @@ func StartServer(db *storage.PosgresStore) {
 	github.GET("/list-repos", handleListRepos)
 	github.GET("/get-repo", handleGetRepository)
 	github.GET("/repo-to-storj", handleGithubRepositoryToStorj)
+	github.GET("/recover-repo-to-github", handleRepositoryFromStorjToGithub)
 
 	e.Start(":8000")
 }

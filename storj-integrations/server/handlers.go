@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -746,17 +747,34 @@ func handleRepositoryFromStorjToGithub(c echo.Context) error {
 		return c.String(http.StatusForbidden, "error downloading object from Storj"+err.Error())
 	}
 	dirPath := filepath.Join("./cache", utils.CreateUserTempCacheFolder())
-	path := filepath.Join(dirPath, repo+".zip")
+	basePath := filepath.Join(dirPath, repo+".zip")
 	os.Mkdir(dirPath, 0777)
 
-	file, err := os.Create(path)
+	file, err := os.Create(basePath)
 	if err != nil {
 		return c.String(http.StatusForbidden, err.Error())
 	}
 	file.Write(repoData)
 	file.Close()
-	dir, _ := filepath.Split(path)
-	defer os.RemoveAll(dir)
+
+	defer os.RemoveAll(dirPath)
+
+	unzipPath := filepath.Join(dirPath, "unarchived")
+	os.Mkdir(unzipPath, 0777)
+
+	err = utils.Unzip(basePath, unzipPath)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	gh, err := gthb.NewGithubClient(c)
+	if err != nil {
+		return c.String(http.StatusUnauthorized, "UNAUTHENTICATED!")
+	}
+	username, err := gh.GetAuthenticatedUserName()
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
 
 	url := "https://api.github.com/user/repos"
 
@@ -766,8 +784,21 @@ func handleRepositoryFromStorjToGithub(c echo.Context) error {
 	req, _ := http.NewRequest(http.MethodPost, url, bodyReader)
 	req.Header.Add("Authorization", "bearer "+accessToken.Value)
 
-	// TODO Unzip archived repo
-	// TODO upload all files to github repo
+	err = filepath.WalkDir(unzipPath, func(path string, di fs.DirEntry, err error) error {
+		if !di.IsDir() {
+			gitFile, err := os.Open(path)
+			if err != nil {
+				return c.String(http.StatusForbidden, err.Error())
+			}
+			gitFileData, err := io.ReadAll(gitFile)
+			if err != nil {
+				return c.String(http.StatusForbidden, err.Error())
+			}
+			gh.UploadFileToGithub(username, repo, path, gitFileData)
+			gitFile.Close()
+		}
+		return nil
+	})
 
-	return c.String(http.StatusOK, "work in progress")
+	return c.String(http.StatusOK, "repository "+repo+" restored to Github from Storj")
 }
