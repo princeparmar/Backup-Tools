@@ -9,8 +9,6 @@ import (
 )
 
 func main() {
-	processENV()
-
 	storage, err := storage.NewPostgresStore()
 	if err != nil {
 		log.Fatal(err)
@@ -24,7 +22,7 @@ func main() {
 }
 
 // Loads all data from .env file into Environmental variables.
-func processENV() {
+func init() {
 	err := godotenv.Load()
 	if err != nil {
 		log.Fatal(err)

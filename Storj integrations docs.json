@@ -1,0 +1,681 @@
+{
+	"info": {
+		"_postman_id": "557e935a-9a47-407c-bb3d-bea4e52532d1",
+		"name": "Storj integrations",
+		"description": "This is custom module for integration the most popular services with Storj decentralized cloud data storaging service. This service allowes to backup data to Storj and upload it back.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "23796940"
+	},
+	"item": [
+		{
+			"name": "Storj Auth",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/storj-auth?storj=12345",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"storj-auth"
+					],
+					"query": [
+						{
+							"key": "storj",
+							"value": "12345",
+							"description": "Storj grant access token"
+						}
+					]
+				},
+				"description": "takes your authentication Storj key and returns it as a cookie for future requests."
+			},
+			"response": []
+		},
+		{
+			"name": "Google Auth",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/google/google-auth",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"google",
+						"google-auth"
+					]
+				},
+				"description": "redirects to google authentication module and in case of successful authentication saves data in database and returns cookie with authentication token."
+			},
+			"response": []
+		},
+		{
+			"name": "Google Drive get file names",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/google/drive-get-file-names",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"google",
+						"drive-get-file-names"
+					]
+				},
+				"description": "returns all the file names and their ID's on your Google Drive."
+			},
+			"response": []
+		},
+		{
+			"name": "Google Drive get file",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/google/drive-get-file/:id",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"google",
+						"drive-get-file",
+						":id"
+					],
+					"variable": [
+						{
+							"key": "id",
+							"value": "12345",
+							"description": "file ID, can be get using `/drive-get-file-names` request"
+						}
+					]
+				},
+				"description": "takes file ID as a parameter, downloads this file and returs this file to you."
+			},
+			"response": []
+		},
+		{
+			"name": "Google Drive to Storj",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/google/drive-to-storj/:id",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"google",
+						"drive-to-storj",
+						":id"
+					],
+					"variable": [
+						{
+							"key": "id",
+							"value": "12345",
+							"description": "file ID, can be get using `/drive-get-file-names` request"
+						}
+					]
+				},
+				"description": "takes file ID as a parameter, downloads this file from Google Drive and uploads it to your Storj bucket."
+			},
+			"response": []
+		},
+		{
+			"name": "Storj to Google Drive",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/google/drive-to-storj/:name",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"google",
+						"drive-to-storj",
+						":name"
+					],
+					"variable": [
+						{
+							"key": "name",
+							"value": "abcd",
+							"description": "file name"
+						}
+					]
+				},
+				"description": "takes file name as a parameter, downloads this file from Storj and uploads it to your Google Drive."
+			},
+			"response": []
+		},
+		{
+			"name": "Google Photos list albums",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/google/photos-list-albums",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"google",
+						"photos-list-albums"
+					]
+				},
+				"description": "returns all the user's album names and their ID's on Google Photos."
+			},
+			"response": []
+		},
+		{
+			"name": "Google Photos list photos in album",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/google/photos-list-photos-in-album/:name",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"google",
+						"photos-list-photos-in-album",
+						":name"
+					],
+					"variable": [
+						{
+							"key": "name",
+							"value": "a1b2c3",
+							"description": "album ID"
+						}
+					]
+				},
+				"description": "takes Google Photos album's ID and retreives data about photos in this album."
+			},
+			"response": []
+		},
+		{
+			"name": "Storj to Google Photos",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/google/storj-to-photos/:name",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"google",
+						"storj-to-photos",
+						":name"
+					],
+					"variable": [
+						{
+							"key": "name",
+							"value": "abcd",
+							"description": "photo name in Storj"
+						}
+					]
+				},
+				"description": "takes photo name as a parameter, downloads this file from Storj and uploads it to your Google Photos."
+			},
+			"response": []
+		},
+		{
+			"name": "Google Photos to Storj",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/google/photos-to-storj/:ID",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"google",
+						"photos-to-storj",
+						":ID"
+					],
+					"variable": [
+						{
+							"key": "ID",
+							"value": "a1b2c3",
+							"description": "photo ID in Google Photos"
+						}
+					]
+				},
+				"description": "takes photo ID as a parameter, downloads this file from Google Photos and uploads it to your Storj bucket."
+			},
+			"response": []
+		},
+		{
+			"name": "Gmail list threads",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/google/gmail-list-threads",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"google",
+						"gmail-list-threads"
+					]
+				},
+				"description": "returns list of user's threads."
+			},
+			"response": []
+		},
+		{
+			"name": "Gmail get message",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/google/gmail-get-message/:ID",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"google",
+						"gmail-get-message",
+						":ID"
+					],
+					"variable": [
+						{
+							"key": "ID",
+							"value": "a1b2c3",
+							"description": "message (email) ID in Gmail"
+						}
+					]
+				},
+				"description": "takes message ID as a parameter and returns message."
+			},
+			"response": []
+		},
+		{
+			"name": "Gmail list messages",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/google/gmail-list-messages",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"google",
+						"gmail-list-messages"
+					]
+				},
+				"description": "returns list of user's messages."
+			},
+			"response": []
+		},
+		{
+			"name": "Gmail message to Storj",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/google/gmail-message-to-storj/:ID",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"google",
+						"gmail-message-to-storj",
+						":ID"
+					],
+					"variable": [
+						{
+							"key": "ID",
+							"value": "a1b2c3",
+							"description": "message (email) ID in Gmail"
+						}
+					]
+				},
+				"description": "takes message ID as a parameter and saves it to the backup database in Storj bucket."
+			},
+			"response": []
+		},
+		{
+			"name": "Gmail get emails-DB from storj",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/google/get-gmail-db-from-storj",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"google",
+						"get-gmail-db-from-storj"
+					]
+				},
+				"description": "returns database file (gmails.db) with backuped data."
+			},
+			"response": []
+		},
+		{
+			"name": "Google Storage list buckets",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/google/storage-list-buckets/:projectName",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"google",
+						"storage-list-buckets",
+						":projectName"
+					],
+					"variable": [
+						{
+							"key": "projectName",
+							"value": "abcd",
+							"description": "Google Cloud project name"
+						}
+					]
+				},
+				"description": "takes Google Cloud project name as a parameter, returns JSON responce with all the buckets in this project."
+			},
+			"response": []
+		},
+		{
+			"name": "Google Storage list items in bucket",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/google/storage-list-items/:bucketName",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"google",
+						"storage-list-items",
+						":bucketName"
+					],
+					"variable": [
+						{
+							"key": "bucketName",
+							"value": "abcd",
+							"description": "Google Cloud bucket name"
+						}
+					]
+				},
+				"description": "takes Google Cloud bucket name as a parameter, returns JSON responce with all the items in this bucket."
+			},
+			"response": []
+		},
+		{
+			"name": "Google Storage item to Storj",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/google/storage-item-to-storj/:bucketName/:itemName",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"google",
+						"storage-item-to-storj",
+						":bucketName",
+						":itemName"
+					],
+					"variable": [
+						{
+							"key": "bucketName",
+							"value": "abcd",
+							"description": "Google Cloud bucket name "
+						},
+						{
+							"key": "itemName",
+							"value": "abcd",
+							"description": "Google Cloud item name"
+						}
+					]
+				},
+				"description": "takes bucket name and item name as a parameters, downloads the object from Google Cloud Storage and uploads it into Storj \"google-cloud\" bucket."
+			},
+			"response": []
+		},
+		{
+			"name": "Storj item to Google Cloud",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/google/storage-item-from-storj-to-google-cloud/:bucketName/:itemName",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"google",
+						"storage-item-from-storj-to-google-cloud",
+						":bucketName",
+						":itemName"
+					],
+					"variable": [
+						{
+							"key": "bucketName",
+							"value": "abcd",
+							"description": "Storj bucket name"
+						},
+						{
+							"key": "itemName",
+							"value": "abdcd",
+							"description": "Storj item name"
+						}
+					]
+				},
+				"description": "takes bucket name and item name as a parameters, downloads the object from Storj bucket and uploads it into Google Cloud Storage bucket."
+			},
+			"response": []
+		},
+		{
+			"name": "Dropbox file to Storj",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/dropbox/file-to-storj/:filePath",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"dropbox",
+						"file-to-storj",
+						":filePath"
+					],
+					"variable": [
+						{
+							"key": "filePath",
+							"value": "abcd",
+							"description": "path to file in Dropbox"
+						}
+					]
+				},
+				"description": "request takes the path to file in Dropbox and sends this file to Storj bucket."
+			},
+			"response": []
+		},
+		{
+			"name": "File from Storj to Dropbox",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/dropbox/file-from-storj/:filePath",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"dropbox",
+						"file-from-storj",
+						":filePath"
+					],
+					"variable": [
+						{
+							"key": "filePath",
+							"value": "abcd",
+							"description": "path to file in Storj"
+						}
+					]
+				},
+				"description": "request takes the path to file in Srotj and sends this file to Dropbox."
+			},
+			"response": []
+		},
+		{
+			"name": "Get list of files in AWS S3 bucket",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/aws/list-files-in-bucket/:bucketName",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"aws",
+						"list-files-in-bucket",
+						":bucketName"
+					],
+					"variable": [
+						{
+							"key": "bucketName",
+							"value": "storj-test-3424",
+							"description": "S3 bucket name"
+						}
+					]
+				},
+				"description": "request checks all the files in the S3 bucket."
+			},
+			"response": []
+		},
+		{
+			"name": "File from S3 to Storj",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/aws/file-from-aws-to-storj/:bucketName/:itemName",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"aws",
+						"file-from-aws-to-storj",
+						":bucketName",
+						":itemName"
+					],
+					"variable": [
+						{
+							"key": "bucketName",
+							"value": "storj-test-3424",
+							"description": "S3 bucket name"
+						},
+						{
+							"key": "itemName",
+							"value": "cat.jpg",
+							"description": "file name"
+						}
+					]
+				},
+				"description": "request downloads specified file from aws s3 bucket and uploads to Storj"
+			},
+			"response": []
+		},
+		{
+			"name": "File from Storj to S3",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://localhost:8000/aws/file-from-storj-to-aws/:bucketName/:itemName",
+					"protocol": "http",
+					"host": [
+						"localhost"
+					],
+					"port": "8000",
+					"path": [
+						"aws",
+						"file-from-storj-to-aws",
+						":bucketName",
+						":itemName"
+					],
+					"variable": [
+						{
+							"key": "bucketName",
+							"value": "storj-test-3424",
+							"description": "S3 bucket name"
+						},
+						{
+							"key": "itemName",
+							"value": "cat.jpg",
+							"description": "file name"
+						}
+					]
+				},
+				"description": "request downloads specified file from Storj and uploads to aws s3 bucket"
+			},
+			"response": []
+		}
+	]
+}

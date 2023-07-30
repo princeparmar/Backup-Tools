@@ -48,5 +48,25 @@ func StartServer(db *storage.PosgresStore) {
 	google.GET("/storj-to-photos/:name", handleSendFileFromStorjToGooglePhotos)
 	google.GET("/photos-to-storj/:ID", handleSendFileFromGooglePhotosToStorj)
 
+	// Dropbox
+	dropbox := e.Group("/dropbox")
+
+	dropbox.GET("/file-to-storj/:filePath", handleDropboxToStorj)
+	dropbox.GET("/file-from-storj/:filePath", handleStorjToDropbox)
+
+	// AWS S3
+	aws := e.Group("/aws")
+	aws.GET("/list-files-in-bucket/:bucketName", handleListAWSs3BucketFiles)
+	aws.GET("/file-from-aws-to-storj/:bucketName/:itemName", handleS3toStorj)
+	aws.GET("/file-from-storj-to-aws/:bucketName/:itemName", handleStorjToS3)
+
+	// Github
+	github := e.Group("/github")
+	github.GET("/login", handleGithubLogin)
+	github.GET("/callback", handleGithubCallback)
+	github.GET("/list-repos", handleListRepos)
+	github.GET("/get-repo", handleGetRepository)
+	github.GET("/repo-to-storj", handleGithubRepositoryToStorj)
+
 	e.Start(":8000")
 }
