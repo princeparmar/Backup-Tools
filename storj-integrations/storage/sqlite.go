@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	goshopify "github.com/bold-commerce/go-shopify"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
@@ -49,6 +50,71 @@ func ConnectToEmailDB() (*SQLiteEmailDatabase, error) {
 
 func (db *SQLiteEmailDatabase) WriteEmailToDB(msg *GmailMessageSQL) error {
 	resp := db.Create(&msg)
+	if resp.Error != nil {
+		return resp.Error
+	}
+	return nil
+}
+
+// SHOPIFY
+
+type SQLiteShopifyDatabase struct {
+	*gorm.DB
+}
+
+func ConnectToShopifyDB() (*SQLiteShopifyDatabase, error) {
+	dbPath := "./cache/shopify.db"
+
+	// TODO check if db exists locally
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		// Database file does not exist, create new file
+		fmt.Println("Creating new database file...")
+		if _, err := os.Create(dbPath); err != nil {
+			return nil, err
+		}
+	}
+
+	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	if err != nil {
+		return nil, err
+	}
+
+	err = db.AutoMigrate(&goshopify.Product{})
+	if err != nil {
+		return nil, err
+	}
+
+	err = db.AutoMigrate(&goshopify.Order{})
+	if err != nil {
+		return nil, err
+	}
+
+	err = db.AutoMigrate(&goshopify.Customer{})
+	if err != nil {
+		return nil, err
+	}
+
+	return &SQLiteShopifyDatabase{db}, nil
+}
+
+func (db *SQLiteShopifyDatabase) WriteProductsToDB(product *goshopify.Product) error {
+	resp := db.Create(&product)
+	if resp.Error != nil {
+		return resp.Error
+	}
+	return nil
+}
+
+func (db *SQLiteShopifyDatabase) WriteOrdersToDB(order *goshopify.Order) error {
+	resp := db.Create(&order)
+	if resp.Error != nil {
+		return resp.Error
+	}
+	return nil
+}
+
+func (db *SQLiteShopifyDatabase) WriteCustomersToDB(customer *goshopify.Customer) error {
+	resp := db.Create(&customer)
 	if resp.Error != nil {
 		return resp.Error
 	}

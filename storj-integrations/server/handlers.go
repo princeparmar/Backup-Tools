@@ -13,6 +13,7 @@ import (
 	"storj-integrations/apps/dropbox"
 	gthb "storj-integrations/apps/github"
 	google "storj-integrations/apps/google"
+	"storj-integrations/apps/shopify"
 	"storj-integrations/storage"
 	"storj-integrations/storj"
 	"storj-integrations/utils"
@@ -802,3 +803,270 @@ func handleRepositoryFromStorjToGithub(c echo.Context) error {
 
 	return c.String(http.StatusOK, "repository "+repo+" restored to Github from Storj")
 }
+
+// <<<<<<<--------- SHOPIFY --------->>>>>>>
+
+func createShopifyCleint(c echo.Context, shopname string) *shopify.ShopifyClient {
+	cookieToken, err := c.Cookie("shopify-auth")
+	if err != nil {
+		c.String(http.StatusUnauthorized, "Unauthorized")
+		return nil
+	}
+	database := c.Get(dbContextKey).(*storage.PosgresStore)
+	token, err := database.ReadShopifyAuthToken(cookieToken.Value)
+	if err != nil {
+		c.String(http.StatusBadRequest, err.Error())
+		return nil
+	}
+	cleint := shopify.CreateClient(token, shopname)
+	return cleint
+}
+
+func handleShopifyProductsToStorj(c echo.Context) error {
+	accesGrant, err := c.Cookie("storj_access_token")
+	shopname := c.Param("shopname")
+
+	client := createShopifyCleint(c, shopname)
+
+	if client == nil {
+		return http.ErrNoCookie
+	}
+	products, err := client.GetProducts()
+	if err != nil {
+		return c.String(http.StatusNotFound, "Error getting products")
+	}
+
+	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/shopify.db"
+
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant.Value, "shopify", "shopify.db")
+	// Copy file from storj to local cache if everything's fine.
+	// Skip error check, if there's error - we will check that and create new file
+	if err == nil {
+		dbFile, err := os.Create(userCacheDBPath)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+		_, err = dbFile.Write(byteDB)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+	}
+
+	db, err := storage.ConnectToShopifyDB()
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	for _, product := range products {
+		err = db.WriteProductsToDB(&product)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+	}
+
+	// DELETE OLD DB COPY FROM STORJ UPLOAD UP TO DATE DB FILE BACK TO STORJ AND DELETE IT FROM LOCAL CACHE
+
+	// get db file data
+	dbByte, err := os.ReadFile(userCacheDBPath)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// delete old db copy from storj
+	err = storj.DeleteObject(context.Background(), accesGrant.Value, "shopify", "shopify.db")
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// upload file to storj
+	err = storj.UploadObject(context.Background(), accesGrant.Value, "shopify", "shopify.db", dbByte)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// delete from local cache copy of database
+	err = os.Remove(userCacheDBPath)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	return c.String(http.StatusOK, "DB with products data was successfully uploaded")
+}
+
+func handleShopifyCustomersToStorj(c echo.Context) error {
+	accesGrant, err := c.Cookie("storj_access_token")
+	shopname := c.Param("shopname")
+
+	client := createShopifyCleint(c, shopname)
+
+	if client == nil {
+		return http.ErrNoCookie
+	}
+	customers, err := client.GetCustomers()
+	if err != nil {
+		return c.String(http.StatusNotFound, "Error getting customers")
+	}
+
+	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/shopify.db"
+
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant.Value, "shopify", "shopify.db")
+	// Copy file from storj to local cache if everything's fine.
+	// Skip error check, if there's error - we will check that and create new file
+	if err == nil {
+		dbFile, err := os.Create(userCacheDBPath)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+		_, err = dbFile.Write(byteDB)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+	}
+
+	db, err := storage.ConnectToShopifyDB()
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	for _, customer := range customers {
+		err = db.WriteCustomersToDB(&customer)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+	}
+
+	// DELETE OLD DB COPY FROM STORJ UPLOAD UP TO DATE DB FILE BACK TO STORJ AND DELETE IT FROM LOCAL CACHE
+
+	// get db file data
+	dbByte, err := os.ReadFile(userCacheDBPath)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// delete old db copy from storj
+	err = storj.DeleteObject(context.Background(), accesGrant.Value, "shopify", "shopify.db")
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// upload file to storj
+	err = storj.UploadObject(context.Background(), accesGrant.Value, "shopify", "shopify.db", dbByte)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// delete from local cache copy of database
+	err = os.Remove(userCacheDBPath)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	return c.String(http.StatusOK, "DB with customers data was successfully uploaded")
+
+}
+
+func handleShopifyOrdersToStorj(c echo.Context) error {
+	accesGrant, err := c.Cookie("storj_access_token")
+	shopname := c.Param("shopname")
+
+	client := createShopifyCleint(c, shopname)
+
+	if client == nil {
+		return http.ErrNoCookie
+	}
+	orders, err := client.GetOrders()
+	if err != nil {
+		return c.String(http.StatusNotFound, "Error getting orders")
+	}
+
+	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/shopify.db"
+
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant.Value, "shopify", "shopify.db")
+	// Copy file from storj to local cache if everything's fine.
+	// Skip error check, if there's error - we will check that and create new file
+	if err == nil {
+		dbFile, err := os.Create(userCacheDBPath)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+		_, err = dbFile.Write(byteDB)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+	}
+
+	db, err := storage.ConnectToShopifyDB()
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	for _, order := range orders {
+		err = db.WriteOrdersToDB(&order)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+	}
+
+	// DELETE OLD DB COPY FROM STORJ UPLOAD UP TO DATE DB FILE BACK TO STORJ AND DELETE IT FROM LOCAL CACHE
+
+	// get db file data
+	dbByte, err := os.ReadFile(userCacheDBPath)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// delete old db copy from storj
+	err = storj.DeleteObject(context.Background(), accesGrant.Value, "shopify", "shopify.db")
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// upload file to storj
+	err = storj.UploadObject(context.Background(), accesGrant.Value, "shopify", "shopify.db", dbByte)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// delete from local cache copy of database
+	err = os.Remove(userCacheDBPath)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	return c.String(http.StatusOK, "DB with orders data was successfully uploaded")
+}
+
+// Create an oauth-authorize url for the app and redirect to it.
+func handleShopifyAuth(c echo.Context) error {
+	shopName := c.QueryParam("shop")
+	state := c.QueryParam("state")
+
+	authUrl := shopify.ShopifyInitApp.App.AuthorizeUrl(shopName, state)
+
+	return c.Redirect(http.StatusFound, authUrl)
+}
+
+func handleShopifyAuthRedirect(c echo.Context) error {
+	// Check that the callback signature is valid
+	if ok, err := shopify.ShopifyInitApp.App.VerifyAuthorizationURL(c.Request().URL); !ok {
+		return c.String(http.StatusUnauthorized, "Invalid Signature\n"+err.Error())
+	}
+	query := c.Request().URL.Query()
+	shopName := query.Get("shop")
+	code := query.Get("code")
+	token, err := shopify.ShopifyInitApp.App.GetAccessToken(shopName, code)
+	if err != nil {
+		return c.String(http.StatusUnauthorized, "Invalid Signature\n"+err.Error())
+
+	}
+
+	database := c.Get(dbContextKey).(*storage.PosgresStore)
+
+	cookieNew := new(http.Cookie)
+	cookieNew.Name = "shopify-auth"
+	cookieNew.Value = utils.RandStringRunes(50)
+	database.WriteShopifyAuthToken(cookieNew.Value, token)
+
+	c.SetCookie(cookieNew)
+
+	return c.String(http.StatusOK, "Authorized!")
+}
+
+// func handle

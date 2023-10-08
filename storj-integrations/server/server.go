@@ -68,5 +68,13 @@ func StartServer(db *storage.PosgresStore) {
 	github.GET("/repo-to-storj", handleGithubRepositoryToStorj)
 	github.GET("/recover-repo-to-github", handleRepositoryFromStorjToGithub)
 
+	// Shopify
+	shopify := e.Group("/shopify")
+	shopify.GET("/login", handleShopifyAuth)
+	shopify.GET("/callback", handleShopifyAuthRedirect)
+	shopify.GET("/products-to-storj/:shopname", handleShopifyProductsToStorj)
+	shopify.GET("/customers-to-storj/:shopname", handleShopifyCustomersToStorj)
+	shopify.GET("/orders-to-storj/:shopname", handleShopifyOrdersToStorj)
+
 	e.Start(":8000")
 }

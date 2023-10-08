@@ -17,6 +17,7 @@ require (
 	cloud.google.com/go/compute v1.18.0 // indirect
 	cloud.google.com/go/compute/metadata v0.2.3 // indirect
 	github.com/ProtonMail/go-crypto v0.0.0-20230217124315-7d5c6f04bbb8 // indirect
+	github.com/bold-commerce/go-shopify v2.3.0+incompatible // indirect
 	github.com/cloudflare/circl v1.3.3 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/gadelkareem/cachita v0.2.1 // indirect
@@ -37,6 +38,7 @@ require (
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	github.com/mediocregopher/radix/v3 v3.2.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230126093431-47fa9a501578 // indirect
+	github.com/shopspring/decimal v1.2.0 // indirect
 	github.com/vmihailenco/msgpack v4.0.1+incompatible // indirect
 	go.opencensus.io v0.24.0 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
