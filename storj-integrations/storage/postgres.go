@@ -22,6 +22,11 @@ type ShopifyAuthStorage struct {
 	Token  string
 }
 
+type QuickbooksAuthStorage struct {
+	Cookie string
+	Token  string
+}
+
 func NewPostgresStore() (*PosgresStore, error) {
 	dsn := os.Getenv("POSTGRES_DSN")
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
@@ -37,6 +42,10 @@ func (storage *PosgresStore) Migrate() error {
 		return err
 	}
 	err = storage.DB.AutoMigrate(&ShopifyAuthStorage{})
+	if err != nil {
+		return err
+	}
+	err = storage.DB.AutoMigrate(&QuickbooksAuthStorage{})
 	if err != nil {
 		return err
 	}
@@ -79,6 +88,26 @@ func (storage *PosgresStore) WriteShopifyAuthToken(cookie string, token string) 
 
 func (storage *PosgresStore) ReadShopifyAuthToken(cookie string) (string, error) {
 	var res ShopifyAuthStorage
+	storage.DB.Where("cookie = ?", cookie).First(&res)
+	return res.Token, nil
+}
+
+func (storage *PosgresStore) WriteQuickbooksAuthToken(cookie string, token string) error {
+	data := QuickbooksAuthStorage{
+		Cookie: cookie,
+		Token:  token,
+	}
+
+	res := storage.DB.Create(data)
+	if res.Error != nil {
+		return res.Error
+	}
+
+	return nil
+}
+
+func (storage *PosgresStore) ReadQuickbooksAuthToken(cookie string) (string, error) {
+	var res QuickbooksAuthStorage
 	storage.DB.Where("cookie = ?", cookie).First(&res)
 	return res.Token, nil
 }

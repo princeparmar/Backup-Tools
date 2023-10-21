@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 
+	quickbooksLibrary "github.com/rwestlund/quickbooks-go"
+
 	goshopify "github.com/bold-commerce/go-shopify"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -115,6 +117,71 @@ func (db *SQLiteShopifyDatabase) WriteOrdersToDB(order *goshopify.Order) error {
 
 func (db *SQLiteShopifyDatabase) WriteCustomersToDB(customer *goshopify.Customer) error {
 	resp := db.Create(&customer)
+	if resp.Error != nil {
+		return resp.Error
+	}
+	return nil
+}
+
+// QUICKBOOKS
+
+type SQLiteQuickbooksDatabase struct {
+	*gorm.DB
+}
+
+func ConnectToQuickbooksDB() (*SQLiteQuickbooksDatabase, error) {
+	dbPath := "./cache/quickbooks.db"
+
+	// TODO check if db exists locally
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		// Database file does not exist, create new file
+		fmt.Println("Creating new database file...")
+		if _, err := os.Create(dbPath); err != nil {
+			return nil, err
+		}
+	}
+
+	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	if err != nil {
+		return nil, err
+	}
+
+	err = db.AutoMigrate(&quickbooksLibrary.Customer{})
+	if err != nil {
+		return nil, err
+	}
+
+	err = db.AutoMigrate(&quickbooksLibrary.Item{})
+	if err != nil {
+		return nil, err
+	}
+
+	err = db.AutoMigrate(&quickbooksLibrary.Invoice{})
+	if err != nil {
+		return nil, err
+	}
+
+	return &SQLiteQuickbooksDatabase{db}, nil
+}
+
+func (db *SQLiteQuickbooksDatabase) WriteCustomersToDB(customer *quickbooksLibrary.Customer) error {
+	resp := db.Create(&customer)
+	if resp.Error != nil {
+		return resp.Error
+	}
+	return nil
+}
+
+func (db *SQLiteQuickbooksDatabase) WriteItemsToDB(item *quickbooksLibrary.Item) error {
+	resp := db.Create(&item)
+	if resp.Error != nil {
+		return resp.Error
+	}
+	return nil
+}
+
+func (db *SQLiteQuickbooksDatabase) WriteInvoicesToDB(invoice *quickbooksLibrary.Invoice) error {
+	resp := db.Create(&invoice)
 	if resp.Error != nil {
 		return resp.Error
 	}

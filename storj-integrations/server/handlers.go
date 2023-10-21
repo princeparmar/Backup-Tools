@@ -13,6 +13,7 @@ import (
 	"storj-integrations/apps/dropbox"
 	gthb "storj-integrations/apps/github"
 	google "storj-integrations/apps/google"
+	"storj-integrations/apps/quickbooks"
 	"storj-integrations/apps/shopify"
 	"storj-integrations/storage"
 	"storj-integrations/storj"
@@ -1069,4 +1070,234 @@ func handleShopifyAuthRedirect(c echo.Context) error {
 	return c.String(http.StatusOK, "Authorized!")
 }
 
-// func handle
+// <<<<<<<--------- QUICKBOOKS --------->>>>>>>
+
+// func loginQuickbooksClient(c echo.Context) *quickbooks.QBClient {
+// 	cookieToken, err := c.Cookie("quickbooks-auth")
+// 	if err != nil {
+// 		c.String(http.StatusUnauthorized, "Unauthorized")
+// 		return nil
+// 	}
+// 	database := c.Get(dbContextKey).(*storage.PosgresStore)
+// 	token, err := database.ReadQuickbooksAuthToken(cookieToken.Value)
+// 	if err != nil {
+// 		c.String(http.StatusBadRequest, err.Error())
+// 		return nil
+// 	}
+// 	client, _ := quickbooks.CreateClient()
+
+// 	return client
+// }
+
+// func AuthenticateQuickbooks(c echo.Context) error {
+// 	// Get the environment variable
+// 	client, _ := quickbooks.CreateClient()
+
+// 	// Create the dynamic redirect URL for login
+// 	redirectURL := "https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl"
+
+// 	return c.Redirect(http.StatusMovedPermanently, redirectURL)
+// }
+
+// func GetCompanyInfo(c echo.Context) error {
+// 	client, _ := quickbooks.CreateClient()
+// 	companyInfo, err := client.Client.FetchCompanyInfo()
+// 	if err != nil {
+// 		c.String(http.StatusForbidden, err.Error())
+// 	}
+// }
+
+func handleQuickbooksCustomersToStorj(c echo.Context) error {
+	accesGrant, err := c.Cookie("storj_access_token")
+
+	client, _ := quickbooks.CreateClient()
+	customers, err := client.Client.FetchCustomers()
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/quickbooks.db"
+
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db")
+	// Copy file from storj to local cache if everything's fine.
+	// Skip error check, if there's error - we will check that and create new file
+	if err == nil {
+		dbFile, err := os.Create(userCacheDBPath)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+		_, err = dbFile.Write(byteDB)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+	}
+
+	db, err := storage.ConnectToQuickbooksDB()
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	for _, n := range customers {
+		err = db.WriteCustomersToDB(&n)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+	}
+
+	// DELETE OLD DB COPY FROM STORJ UPLOAD UP TO DATE DB FILE BACK TO STORJ AND DELETE IT FROM LOCAL CACHE
+
+	// get db file data
+	dbByte, err := os.ReadFile(userCacheDBPath)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// delete old db copy from storj
+	err = storj.DeleteObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db")
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// upload file to storj
+	err = storj.UploadObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db", dbByte)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// delete from local cache copy of database
+	err = os.Remove(userCacheDBPath)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	return c.String(http.StatusOK, "customers are successfully uploaded from quickbooks to storj")
+}
+
+func handleQuickbooksItemsToStorj(c echo.Context) error {
+	accesGrant, err := c.Cookie("storj_access_token")
+
+	client, _ := quickbooks.CreateClient()
+	items, err := client.Client.FetchItems()
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/quickbooks.db"
+
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db")
+	// Copy file from storj to local cache if everything's fine.
+	// Skip error check, if there's error - we will check that and create new file
+	if err == nil {
+		dbFile, err := os.Create(userCacheDBPath)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+		_, err = dbFile.Write(byteDB)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+	}
+
+	db, err := storage.ConnectToQuickbooksDB()
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	for _, n := range items {
+		err = db.WriteItemsToDB(&n)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+	}
+
+	// DELETE OLD DB COPY FROM STORJ UPLOAD UP TO DATE DB FILE BACK TO STORJ AND DELETE IT FROM LOCAL CACHE
+
+	// get db file data
+	dbByte, err := os.ReadFile(userCacheDBPath)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// delete old db copy from storj
+	err = storj.DeleteObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db")
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// upload file to storj
+	err = storj.UploadObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db", dbByte)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// delete from local cache copy of database
+	err = os.Remove(userCacheDBPath)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	return c.String(http.StatusOK, "items are successfully uploaded from quickbooks to storj")
+}
+
+func handleQuickbooksInvoicesToStorj(c echo.Context) error {
+	accesGrant, err := c.Cookie("storj_access_token")
+
+	client, _ := quickbooks.CreateClient()
+	invoices, err := client.Client.FetchInvoices()
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/quickbooks.db"
+
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db")
+	// Copy file from storj to local cache if everything's fine.
+	// Skip error check, if there's error - we will check that and create new file
+	if err == nil {
+		dbFile, err := os.Create(userCacheDBPath)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+		_, err = dbFile.Write(byteDB)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+	}
+
+	db, err := storage.ConnectToQuickbooksDB()
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	for _, n := range invoices {
+		err = db.WriteInvoicesToDB(&n)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+	}
+
+	// DELETE OLD DB COPY FROM STORJ UPLOAD UP TO DATE DB FILE BACK TO STORJ AND DELETE IT FROM LOCAL CACHE
+
+	// get db file data
+	dbByte, err := os.ReadFile(userCacheDBPath)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// delete old db copy from storj
+	err = storj.DeleteObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db")
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// upload file to storj
+	err = storj.UploadObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db", dbByte)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	// delete from local cache copy of database
+	err = os.Remove(userCacheDBPath)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	return c.String(http.StatusOK, "invoices are successfully uploaded from quickbooks to storj")
+}

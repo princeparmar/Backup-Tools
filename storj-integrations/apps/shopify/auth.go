@@ -10,13 +10,13 @@ type ShopifyApp struct {
 	App goshopify.App
 }
 
-var ShopifyInitApp ShopifyApp
+var ShopifyInitApp *ShopifyApp
 
-// Create an app somewhere.
+// Create an app.
 func Init() {
 	apiKey := os.Getenv("SHOPIFY_API_KEY")
 	apiSecret := os.Getenv("SHOPIFY_API_SECRET")
-	ShopifyInitApp = ShopifyApp{App: goshopify.App{
+	ShopifyInitApp = &ShopifyApp{App: goshopify.App{
 		ApiKey:      apiKey,
 		ApiSecret:   apiSecret,
 		RedirectUrl: "http://localhost:8000/shopify/callback",
@@ -59,6 +59,3 @@ func (client *ShopifyClient) GetOrders() ([]goshopify.Order, error) {
 	return orders, nil
 
 }
-
-// - write postman requests
-// - publish on GitHub
