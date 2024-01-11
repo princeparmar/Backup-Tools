@@ -77,5 +77,13 @@ func StartServer(db *storage.PosgresStore) {
 	shopify.GET("/customers-to-storj/:shopname", handleShopifyCustomersToStorj)
 	shopify.GET("/orders-to-storj/:shopname", handleShopifyOrdersToStorj)
 
+	// Shopify
+	quickbooks := e.Group("/quickbooks")
+	// shopify.GET("/login", handleShopifyAuth)
+	// shopify.GET("/callback", handleShopifyAuthRedirect)
+	quickbooks.GET("/customers-to-storj", handleQuickbooksCustomersToStorj)
+	quickbooks.GET("/items-to-storj", handleQuickbooksItemsToStorj)
+	quickbooks.GET("/invoices-to-storj", handleQuickbooksInvoicesToStorj)
+
 	e.Start(":8000")
 }
