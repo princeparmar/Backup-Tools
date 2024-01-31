@@ -40,12 +40,22 @@ func (client *StorageClient) ListBucketsJSON(c echo.Context, projectName string)
 	return string(listJSON), nil
 }
 
+func (client *StorageClient) ListObjectsInBucket(c echo.Context, bucketName string) (*storage.Objects, error) {
+	objects, err := client.Objects.List(bucketName).Do()
+	if err != nil {
+		return nil, err
+	}
+
+	return objects, nil
+}
+
 // Takes bucket name and returns JSON list of all objects in this bucket.
 func (client *StorageClient) ListObjectsInBucketJSON(c echo.Context, bucketName string) (string, error) {
 	objects, err := client.Objects.List(bucketName).Do()
 	if err != nil {
 		return "", err
 	}
+
 	objectsJSON, err := objects.MarshalJSON()
 	if err != nil {
 		return "", err

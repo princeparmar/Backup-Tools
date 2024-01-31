@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -23,6 +24,14 @@ import (
 )
 
 // <<<<<------------ GOOGLE DRIVE ------------>>>>>
+
+func handleGetGoogleDriveFileNames(c echo.Context) error {
+	err, fileNames := google.GetFileNames(c)
+	if err != nil {
+		log.Fatalf("Unable to retrieve files: %v", err)
+	}
+	return c.JSON(http.StatusOK, fileNames)
+}
 
 // Sends file from Google Drive to Storj
 func handleSendFileFromGoogleDriveToStorj(c echo.Context) error {
@@ -42,6 +51,28 @@ func handleSendFileFromGoogleDriveToStorj(c echo.Context) error {
 		return c.String(http.StatusForbidden, err.Error())
 	}
 	return c.String(http.StatusOK, "file "+name+" was successfully uploaded from Google Drive to Storj")
+}
+
+func handleSendAllFilesFromGoogleDriveToStorj(c echo.Context) error {
+	_, resp := google.GetFileNames(c)
+
+	for _, f := range resp {
+
+		name, data, err := google.GetFile(c, f.ID)
+		if err != nil {
+			return c.String(http.StatusForbidden, "error")
+		}
+		accesGrant, err := c.Cookie("storj_access_token")
+		if err != nil {
+			return c.String(http.StatusForbidden, "storj is unauthenticated")
+		}
+
+		err = storj.UploadObject(context.Background(), accesGrant.Value, "google-drive", name, data)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+	}
+	return c.String(http.StatusOK, "all files were successfully uploaded from Google Drive to Storj")
 }
 
 // Sends file from Storj to Google Drive
@@ -192,6 +223,55 @@ func handleSendFileFromGooglePhotosToStorj(c echo.Context) error {
 	}
 
 	return c.String(http.StatusOK, "file "+item.Filename+" was successfully uploaded from Google Photos to Storj")
+}
+
+func handleSendAllFilesFromGooglePhotosToStorj(c echo.Context) error {
+	id := c.Param("ID")
+
+	client, err := google.NewGPhotosClient(c)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+	files, err := client.ListFilesFromAlbum(c, id)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	var photosRespJSON []*PhotosJSON
+	for _, v := range files {
+		photosRespJSON = append(photosRespJSON, &PhotosJSON{
+			Name: v.Filename,
+			ID:   v.ID,
+		})
+	}
+	accesGrant, err := c.Cookie("storj_access_token")
+	if err != nil {
+		return c.String(http.StatusForbidden, "storj is unauthenticated")
+	}
+
+	for _, p := range photosRespJSON {
+
+		item, err := client.GetPhoto(c, p.ID)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+		resp, err := http.Get(item.BaseURL)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+
+		err = storj.UploadObject(context.Background(), accesGrant.Value, "google-photos", item.Filename, body)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+	}
+
+	return c.String(http.StatusOK, "all photos from album were successfully uploaded from Google Photos to Storj")
 }
 
 // <<<<<------------ GMAIL ------------>>>>>
@@ -477,6 +557,37 @@ func handleStorjToGoogleCloud(c echo.Context) error {
 	}
 
 	return c.String(http.StatusOK, fmt.Sprintf("object %s was successfully uploaded from Storj to Google Cloud Storage", itemName))
+
+}
+
+func handleAllFilesFromGoogleCloudBucketToStorj(c echo.Context) error {
+	bucketName := c.Param("bucketName")
+
+	accesGrant, err := c.Cookie("storj_access_token")
+
+	client, err := google.NewGoogleStorageClient(c)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	objects, err := client.ListObjectsInBucket(c, bucketName)
+	if err != nil {
+		return c.String(http.StatusForbidden, err.Error())
+	}
+
+	for _, o := range objects.Items {
+		obj, err := client.GetObject(c, bucketName, o.Name)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+
+		err = storj.UploadObject(context.Background(), accesGrant.Value, "google-cloud", obj.Name, obj.Data)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+	}
+
+	return c.String(http.StatusOK, fmt.Sprintf("all objects in bucket '"+bucketName+"' were successfully uploaded from Storj to Google Cloud Storage", bucketName))
 
 }
 

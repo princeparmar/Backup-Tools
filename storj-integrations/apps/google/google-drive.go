@@ -23,10 +23,10 @@ type FilesJSON struct {
 }
 
 // Retrievs all file names and their ID's from your Google Drive.
-func GetFileNames(c echo.Context) error {
+func GetFileNames(c echo.Context) (error, []*FilesJSON) {
 	client, err := client(c)
 	if err != nil {
-		return err
+		return err, nil
 	}
 
 	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
@@ -51,7 +51,7 @@ func GetFileNames(c echo.Context) error {
 		}
 	}
 
-	return c.JSON(http.StatusOK, fileResp)
+	return nil, fileResp
 }
 
 // Returns file by ID as attachment.
