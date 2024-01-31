@@ -117,6 +117,28 @@ func handleSendAllFilesFromGoogleDriveToStorj(c echo.Context) error {
 	})
 }
 
+func handleSendAllFilesFromGoogleDriveToStorj(c echo.Context) error {
+	_, resp := google.GetFileNames(c)
+
+	for _, f := range resp {
+
+		name, data, err := google.GetFile(c, f.ID)
+		if err != nil {
+			return c.String(http.StatusForbidden, "error")
+		}
+		accesGrant, err := c.Cookie("storj_access_token")
+		if err != nil {
+			return c.String(http.StatusForbidden, "storj is unauthenticated")
+		}
+
+		err = storj.UploadObject(context.Background(), accesGrant.Value, "google-drive", name, data)
+		if err != nil {
+			return c.String(http.StatusForbidden, err.Error())
+		}
+	}
+	return c.String(http.StatusOK, "all files were successfully uploaded from Google Drive to Storj")
+}
+
 // Sends file from Storj to Google Drive
 func handleSendFileFromStorjToGoogleDrive(c echo.Context) error {
 	name := c.Param("name")
