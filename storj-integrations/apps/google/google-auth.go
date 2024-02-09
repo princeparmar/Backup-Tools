@@ -49,10 +49,15 @@ func Autentificate(c echo.Context) error {
 			database.WriteGoogleAuthToken(cookieNew.Value, tok)
 
 			c.SetCookie(cookieNew)
+
+			// Redirect to frontend application
+			frontendURL := os.Getenv("FRONTEND_URL") // Add Frontend URL for redirect to file .env
+			return c.Redirect(http.StatusTemporaryRedirect, frontendURL)
 		}
 	} else {
-		return c.String(http.StatusOK, "you are already authenticated!")
+		return c.String(http.StatusAccepted, "you are already authenticated!") // if code 202 - means already authentificated
 	}
 
-	return c.String(http.StatusOK, "authentication is successful!")
+	frontendURL := os.Getenv("FRONTEND_URL") // Add Frontend URL for redirect to file .env
+	return c.Redirect(http.StatusTemporaryRedirect, frontendURL)
 }
