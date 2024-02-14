@@ -36,6 +36,10 @@ func Autentificate(c echo.Context) error {
 
 	var redirectAddr string
 
+	c.Response().Header().Set("Access-Control-Allow-Origin", "*")
+	c.Response().Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	c.Response().Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
 	_, err = c.Cookie("google-auth")
 	if err != nil {
 		if code == "" {
