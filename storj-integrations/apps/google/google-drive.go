@@ -116,7 +116,7 @@ func GetFile(c echo.Context, id string) (string, []byte, error) {
 
 	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
 	if err != nil {
-		return "", nil, fmt.Errorf("unable to retrieve Drive client: %v", err)
+		return "", nil, fmt.Errorf("token error")
 	}
 
 	file, err := srv.Files.Get(id).Do()
@@ -146,7 +146,7 @@ func UploadFile(c echo.Context, name string, data []byte) error {
 	}
 	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
 	if err != nil {
-		return err
+		return fmt.Errorf("token error")
 	}
 	_, err = srv.Files.Create(
 		&drive.File{

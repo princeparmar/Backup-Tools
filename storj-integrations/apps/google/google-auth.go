@@ -7,7 +7,6 @@ import (
 	"os"
 	"storj-integrations/storage"
 	"storj-integrations/utils"
-	"time"
 
 	"github.com/gphotosuploader/googlemirror/api/photoslibrary/v1"
 	"github.com/labstack/echo/v4"
@@ -40,7 +39,6 @@ func Autentificate(c echo.Context) error {
 	c.Response().Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 	c.Response().Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
-	_, err = c.Cookie("google-auth")
 	if err != nil {
 		if code == "" {
 			authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
@@ -51,22 +49,13 @@ func Autentificate(c echo.Context) error {
 			if err != nil {
 				log.Fatalf("Unable to retrieve token from web %v", err)
 			}
-			cookieNew := new(http.Cookie)
-			domain := os.Getenv("FRONTEND_DOMAIN")
-			cookieNew.Domain = domain
-			cookieNew.Path = "/"
-			cookieNew.Expires.Add(24 * time.Hour)
-			cookieNew.SameSite = http.SameSiteNoneMode
-			cookieNew.Secure = false
-			cookieNew.HttpOnly = false
-			cookieNew.Name = "google-auth"
-			cookieNew.Value = utils.RandStringRunes(50)
-			database.WriteGoogleAuthToken(cookieNew.Value, tok)
 
-			c.SetCookie(cookieNew)
+			cookieName := "google-auth"
+			cookieValue := utils.RandStringRunes(50)
+			database.WriteGoogleAuthToken(cookieValue, tok)
 
 			frontendURL := os.Getenv("FRONTEND_URL") // Add Frontend URL for redirect to file .env
-			redirectAddr = frontendURL + "?" + cookieNew.Name + "_" + cookieNew.Value
+			redirectAddr = frontendURL + "?" + cookieName + "=" + cookieValue
 		}
 	} else {
 		return c.String(http.StatusAccepted, "you are already authenticated!") // if code 202 - means already authentificated

@@ -25,11 +25,17 @@ import (
 // <<<<<------------ GOOGLE DRIVE ------------>>>>>
 
 func handleGetGoogleDriveFileNames(c echo.Context) error {
-	err, fileNames := google.GetFileNames(c)
+	fileNames, err := google.GetFileNames(c)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"error": "failed to retrieve file names",
-		})
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": "failed to retrieve file from Google Drive",
+			})
+		}
 	}
 	return c.JSON(http.StatusOK, fileNames)
 }
@@ -40,11 +46,16 @@ func handleSendFileFromGoogleDriveToStorj(c echo.Context) error {
 
 	name, data, err := google.GetFile(c, id)
 	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "failed to retrieve file from Google Drive",
-		})
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": "failed to retrieve file from Google Drive",
+			})
+		}
 	}
-
 	accesGrant, err := c.Cookie("storj_access_token")
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -67,9 +78,15 @@ func handleSendFileFromGoogleDriveToStorj(c echo.Context) error {
 func handleSendAllFilesFromGoogleDriveToStorj(c echo.Context) error {
 	resp, err := google.GetFileNames(c)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"error": err.Error(),
-		})
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": "failed to retrieve file from Google Drive",
+			})
+		}
 	}
 
 	for _, f := range resp {
@@ -117,9 +134,15 @@ func handleSendFileFromStorjToGoogleDrive(c echo.Context) error {
 
 	err = google.UploadFile(c, name, data)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"error": "failed to upload file to Google Drive",
-		})
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": "failed to retrieve file from Google Drive",
+			})
+		}
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
