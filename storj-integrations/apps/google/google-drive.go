@@ -3,11 +3,11 @@ package google
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"storj-integrations/storage"
 	"storj-integrations/utils"
 
-	"log"
 	"net/http"
 	"os"
 
@@ -23,20 +23,20 @@ type FilesJSON struct {
 }
 
 // Retrievs all file names and their ID's from your Google Drive.
-func GetFileNames(c echo.Context) (error, []*FilesJSON) {
+func GetFileNames(c echo.Context) ([]*FilesJSON, error) {
 	client, err := client(c)
 	if err != nil {
-		return err, nil
+		return nil, fmt.Errorf("failed to get Google Drive client: %v", err)
 	}
 
 	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
 	if err != nil {
-		log.Fatalf("Unable to retrieve Drive client: %v", err)
+		return nil, fmt.Errorf("failed to create Drive service: %v", err)
 	}
 
 	r, err := srv.Files.List().Fields("nextPageToken, files(id, name)").Do()
 	if err != nil {
-		log.Fatalf("Unable to retrieve files: %v", err)
+		return nil, fmt.Errorf("failed to retrieve files: %v", err)
 	}
 
 	var fileResp []*FilesJSON
@@ -51,7 +51,7 @@ func GetFileNames(c echo.Context) (error, []*FilesJSON) {
 		}
 	}
 
-	return nil, fileResp
+	return fileResp, nil
 }
 
 // Returns file by ID as attachment.
@@ -80,34 +80,34 @@ func GetFileByID(c echo.Context) error {
 	return c.Attachment(userCachePath, name)
 }
 
-// Client authentication function, reads cookie, compares to database and returns authenticated client.
+// client authenticates the client and returns an HTTP client
 func client(c echo.Context) (*http.Client, error) {
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
 
 	b, err := os.ReadFile("credentials.json")
 	if err != nil {
-		log.Fatalf("Unable to read client secret file: %v", err)
+		return nil, fmt.Errorf("unable to read client secret file: %v", err)
 	}
 	config, err := google.ConfigFromJSON(b, drive.DriveScope)
 	if err != nil {
-		log.Fatalf("Unable to parse client secret file to config: %v", err)
+		return nil, fmt.Errorf("unable to parse client secret file to config: %v", err)
 	}
 
 	cookie, err := c.Cookie("google-auth")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to retrieve google-auth cookie: %v", err)
 	}
 
 	tok, err := database.ReadGoogleAuthToken(cookie.Value)
 	if err != nil {
-		return nil, c.String(http.StatusUnauthorized, "user is not authorized")
+		return nil, echo.NewHTTPError(http.StatusUnauthorized, "user is not authorized")
 	}
 	client := config.Client(context.Background(), tok)
 
 	return client, nil
 }
 
-// Downloads file from Google Drive by ID.
+// GetFile downloads file from Google Drive by ID
 func GetFile(c echo.Context, id string) (string, []byte, error) {
 	client, err := client(c)
 	if err != nil {
@@ -116,15 +116,24 @@ func GetFile(c echo.Context, id string) (string, []byte, error) {
 
 	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
 	if err != nil {
-		log.Fatalf("Unable to retrieve Drive client: %v", err)
+		return "", nil, fmt.Errorf("unable to retrieve Drive client: %v", err)
 	}
 
-	file, _ := srv.Files.Get(id).Do()
+	file, err := srv.Files.Get(id).Do()
+	if err != nil {
+		return "", nil, fmt.Errorf("unable to retrieve file metadata: %v", err)
+	}
+
 	res, err := srv.Files.Get(id).Download()
 	if err != nil {
-		log.Fatalf("Error: %v", err)
+		return "", nil, fmt.Errorf("unable to download file: %v", err)
 	}
-	data, _ := io.ReadAll(res.Body)
+	defer res.Body.Close()
+
+	data, err := io.ReadAll(res.Body)
+	if err != nil {
+		return "", nil, fmt.Errorf("unable to read file content: %v", err)
+	}
 
 	return file.Name, data, nil
 }

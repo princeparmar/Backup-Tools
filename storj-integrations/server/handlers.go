@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,7 +27,9 @@ import (
 func handleGetGoogleDriveFileNames(c echo.Context) error {
 	err, fileNames := google.GetFileNames(c)
 	if err != nil {
-		log.Fatalf("Unable to retrieve files: %v", err)
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"error": "failed to retrieve file names",
+		})
 	}
 	return c.JSON(http.StatusOK, fileNames)
 }
@@ -39,40 +40,62 @@ func handleSendFileFromGoogleDriveToStorj(c echo.Context) error {
 
 	name, data, err := google.GetFile(c, id)
 	if err != nil {
-		return c.String(http.StatusForbidden, "error")
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "failed to retrieve file from Google Drive",
+		})
 	}
+
 	accesGrant, err := c.Cookie("storj_access_token")
 	if err != nil {
-		return c.String(http.StatusForbidden, "storj is unauthenticated")
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "Storj is unauthenticated",
+		})
 	}
 
 	err = storj.UploadObject(context.Background(), accesGrant.Value, "google-drive", name, data)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"error": fmt.Sprintf("failed to upload file to Storj: %v", err),
+		})
 	}
-	return c.String(http.StatusOK, "file "+name+" was successfully uploaded from Google Drive to Storj")
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": fmt.Sprintf("file %s was successfully uploaded from Google Drive to Storj", name),
+	})
 }
 
 func handleSendAllFilesFromGoogleDriveToStorj(c echo.Context) error {
-	_, resp := google.GetFileNames(c)
+	resp, err := google.GetFileNames(c)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
 
 	for _, f := range resp {
-
 		name, data, err := google.GetFile(c, f.ID)
 		if err != nil {
-			return c.String(http.StatusForbidden, "error")
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": "failed to retrieve file from Google Drive",
+			})
 		}
 		accesGrant, err := c.Cookie("storj_access_token")
 		if err != nil {
-			return c.String(http.StatusForbidden, "storj is unauthenticated")
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": "Storj is unauthenticated",
+			})
 		}
 
 		err = storj.UploadObject(context.Background(), accesGrant.Value, "google-drive", name, data)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+				"error": fmt.Sprintf("failed to upload file to Storj: %v", err),
+			})
 		}
 	}
-	return c.String(http.StatusOK, "all files were successfully uploaded from Google Drive to Storj")
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "all files were successfully uploaded from Google Drive to Storj",
+	})
 }
 
 // Sends file from Storj to Google Drive
@@ -80,20 +103,28 @@ func handleSendFileFromStorjToGoogleDrive(c echo.Context) error {
 	name := c.Param("name")
 	accesGrant, err := c.Cookie("storj_access_token")
 	if err != nil {
-		return c.String(http.StatusForbidden, "storj is unauthenticated")
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "Storj is unauthenticated",
+		})
 	}
 
 	data, err := storj.DownloadObject(context.Background(), accesGrant.Value, "google-drive", name)
 	if err != nil {
-		return c.String(http.StatusForbidden, "error downloading object from Storj"+err.Error())
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"error": fmt.Sprintf("failed to download object from Storj: %v", err),
+		})
 	}
 
 	err = google.UploadFile(c, name, data)
 	if err != nil {
-		return c.String(http.StatusForbidden, "error uploading file to Google Drive")
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"error": "failed to upload file to Google Drive",
+		})
 	}
 
-	return c.String(http.StatusOK, "file "+name+" was successfully uploaded from Storj to Google Drive")
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": fmt.Sprintf("file %s was successfully uploaded from Storj to Google Drive", name),
+	})
 }
 
 // <<<<<------------ GOOGLE PHOTOS ------------>>>>>
