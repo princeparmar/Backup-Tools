@@ -2,6 +2,7 @@ package google
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -33,12 +34,12 @@ func Autentificate(c echo.Context) error {
 		log.Fatalf("Unable to parse client secret file to config: %v", err)
 	}
 
+	cookieOld, err := c.Cookie("google-auth")
+
 	var redirectAddr string
+	frontendURL := os.Getenv("FRONTEND_URL") // Add Frontend URL for redirect to file .env
 
-	c.Response().Header().Set("Access-Control-Allow-Origin", "*")
-	c.Response().Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	c.Response().Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
+	fmt.Println(err.Error())
 	if err != nil {
 		if code == "" {
 			authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
@@ -50,14 +51,17 @@ func Autentificate(c echo.Context) error {
 				log.Fatalf("Unable to retrieve token from web %v", err)
 			}
 
-			cookieName := "google-auth"
-			cookieValue := utils.RandStringRunes(50)
-			database.WriteGoogleAuthToken(cookieValue, tok)
+			cookieNew := new(http.Cookie)
+			cookieNew.Name = "google-auth"
+			cookieNew.Value = utils.RandStringRunes(50)
+			database.WriteGoogleAuthToken(cookieNew.Value, tok)
 
-			frontendURL := os.Getenv("FRONTEND_URL") // Add Frontend URL for redirect to file .env
-			redirectAddr = frontendURL + "?" + cookieName + "=" + cookieValue
+			c.SetCookie(cookieNew)
+
+			redirectAddr = frontendURL + "?" + cookieNew.Name + "=" + cookieNew.Value
 		}
 	} else {
+		redirectAddr = frontendURL + "?" + cookieOld.Name + "=" + cookieOld.Value
 		return c.String(http.StatusAccepted, "you are already authenticated!") // if code 202 - means already authentificated
 	}
 
