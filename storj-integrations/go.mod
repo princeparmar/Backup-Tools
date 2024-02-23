@@ -70,6 +70,7 @@ require (
 require (
 	github.com/aws/aws-sdk-go v1.49.15
 	github.com/calebcase/tmpfile v1.0.3 // indirect
+	github.com/dgrijalva/jwt-go v3.2.0+incompatible
 	github.com/glebarez/sqlite v1.10.0
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/joho/godotenv v1.5.1

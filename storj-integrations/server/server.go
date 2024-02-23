@@ -24,12 +24,13 @@ func StartServer(db *storage.PosgresStore) {
 	})
 
 	e.POST("/storj-auth", storj.HandleStorjAuthentication)
+	e.GET("/google-auth", googlepack.Autentificate)
 
 	google := e.Group("/google")
 
-	// See the requests description in README file
+	google.Use(JWTMiddleware)
 
-	google.GET("/google-auth", googlepack.Autentificate)
+	// See the requests description in README file
 
 	// Google Drive
 	google.GET("/drive-to-storj/:ID", handleSendFileFromGoogleDriveToStorj)

@@ -92,13 +92,12 @@ func client(c echo.Context) (*http.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse client secret file to config: %v", err)
 	}
-
-	cookie, err := c.Cookie("google-auth")
+	googleToken, err := GetGoogleTokenFromJWT(c)
 	if err != nil {
-		return nil, fmt.Errorf("unable to retrieve google-auth cookie: %v", err)
+		return nil, fmt.Errorf("unable to retrieve google-auth token from JWT: %v", err)
 	}
 
-	tok, err := database.ReadGoogleAuthToken(cookie.Value)
+	tok, err := database.ReadGoogleAuthToken(googleToken)
 	if err != nil {
 		return nil, echo.NewHTTPError(http.StatusUnauthorized, "user is not authorized")
 	}
