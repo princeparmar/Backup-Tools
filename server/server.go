@@ -32,8 +32,6 @@ func StartServer(db *storage.PosgresStore) {
 
 	// See the requests description in README file
 
-	google.GET("/google-auth", googlepack.Autentificate)
-
 	// Google Drive
 	google.GET("/drive-to-storj/:ID", handleSendFileFromGoogleDriveToStorj)
 	google.GET("/storj-to-drive/:name", handleSendFileFromStorjToGoogleDrive)
