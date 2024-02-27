@@ -1,2 +1,0 @@
-POSTGRES_DSN = "host=localhost user=user password=user123 dbname=gorm port=5432 sslmode=disable TimeZone=Asia/Shanghai"
-DROPBOX_TOKEN = "sl.asdasdasd-O5sw3wD9ez1JuXIh5WhDK8mcSAMHW1em8A1DWHqNxFgdaadrR3QnNRCTq9lTvmqR"
