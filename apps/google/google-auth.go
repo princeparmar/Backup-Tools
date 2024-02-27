@@ -90,6 +90,23 @@ func GetGoogleTokenFromJWT(c echo.Context) (string, error) {
 	}
 }
 
+// func Autentificate(c echo.Context) error {
+// 	database := c.Get(dbContextKey).(*storage.PosgresStore)
+// 	googleKey := c.FormValue("google-key")
+// 	if googleKey == "" {
+// 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+// 			"error": "google-key is missing",
+// 		})
+// 	}
+// 	googleExternalToken := utils.RandStringRunes(50)
+// 	database.WriteGoogleAuthToken(googleExternalToken, googleKey)
+// 	jwtString := CreateJWToken(googleExternalToken)
+// 	c.Response().Header().Add("Authorization", "Bearer "+jwtString)
+// 	return c.JSON(http.StatusBadRequest, map[string]interface{}{
+// 		"google-auth": jwtString,
+// 	})
+// }
+
 // Google authentication module, checks if you have auth token in database, if not - redirects to Google auth page.
 func Autentificate(c echo.Context) error {
 	database := c.Get(dbContextKey).(*storage.PosgresStore)

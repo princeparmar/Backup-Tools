@@ -12,6 +12,11 @@ type PosgresStore struct {
 	DB *gorm.DB
 }
 
+// type GoogleAuthStorage struct {
+// 	JWTtoken string
+// 	GoogleToken string
+// }
+
 type GoogleAuthStorage struct {
 	Cookie string
 	oauth2.Token
@@ -51,6 +56,20 @@ func (storage *PosgresStore) Migrate() error {
 	}
 	return nil
 }
+
+// func (storage *PosgresStore) WriteGoogleAuthToken(JWTtoken, googleToken string) error {
+// 	data := GoogleAuthStorage{
+// 		JWTtoken: JWTtoken,
+// 		GoogleToken:  googleToken,
+// 	}
+
+// 	res := storage.DB.Create(data)
+// 	if res.Error != nil {
+// 		return res.Error
+// 	}
+
+// 	return nil
+// }
 
 func (storage *PosgresStore) WriteGoogleAuthToken(cookie string, token *oauth2.Token) error {
 	data := GoogleAuthStorage{
