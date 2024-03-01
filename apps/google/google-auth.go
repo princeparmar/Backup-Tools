@@ -1,7 +1,6 @@
 package google
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,7 +10,6 @@ import (
 
 	"github.com/dgrijalva/jwt-go"
 	"github.com/labstack/echo/v4"
-	"google.golang.org/api/idtoken"
 )
 
 // for middleware database purposes
@@ -94,18 +92,18 @@ func Autentificate(c echo.Context) error {
 		})
 	}
 
-	_, err := idtoken.Validate(context.Background(), googleKey, "")
-	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-			"error": "google-key can not be validated. check google authentication token",
-		})
-	}
+	// _, err := idtoken.Validate(context.Background(), googleKey, "")
+	// if err != nil {
+	// 	return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+	// 		"error": "google-key can not be validated. check google authentication token",
+	// 	})
+	// }
 
 	googleExternalToken := utils.RandStringRunes(50)
 	database.WriteGoogleAuthToken(googleExternalToken, googleKey)
 	jwtString := CreateJWToken(googleExternalToken)
 	c.Response().Header().Add("Authorization", "Bearer "+jwtString)
-	return c.JSON(http.StatusBadRequest, map[string]interface{}{
+	return c.JSON(http.StatusOK, map[string]interface{}{
 		"google-auth": jwtString,
 	})
 }
