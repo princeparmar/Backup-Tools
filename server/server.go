@@ -24,7 +24,7 @@ func StartServer(db *storage.PosgresStore) {
 	})
 
 	e.POST("/storj-auth", storj.HandleStorjAuthentication)
-	e.GET("/google-auth", googlepack.Autentificate)
+	e.POST("/google-auth", googlepack.Autentificate)
 
 	google := e.Group("/google")
 
