@@ -33,7 +33,7 @@ func handleGetGoogleDriveFileNames(c echo.Context) error {
 			})
 		} else {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "failed to retrieve file from Google Drive",
+				"error": err.Error(),
 			})
 		}
 	}
@@ -52,7 +52,7 @@ func handleSendFileFromGoogleDriveToStorj(c echo.Context) error {
 			})
 		} else {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "failed to retrieve file from Google Drive",
+				"error": err.Error(),
 			})
 		}
 	}
@@ -84,7 +84,7 @@ func handleSendAllFilesFromGoogleDriveToStorj(c echo.Context) error {
 			})
 		} else {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "failed to retrieve file from Google Drive",
+				"error": err.Error(),
 			})
 		}
 	}
@@ -140,7 +140,7 @@ func handleSendFileFromStorjToGoogleDrive(c echo.Context) error {
 			})
 		} else {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "failed to retrieve file from Google Drive",
+				"error": err.Error(),
 			})
 		}
 	}
@@ -162,11 +162,21 @@ type AlbumsJSON struct {
 func handleListGPhotosAlbums(c echo.Context) error {
 	client, err := google.NewGPhotosClient(c)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 	}
 	albs, err := client.ListAlbums(c)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	var photosListJSON []*AlbumsJSON
@@ -193,11 +203,21 @@ func handleListPhotosInAlbum(c echo.Context) error {
 
 	client, err := google.NewGPhotosClient(c)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 	}
 	files, err := client.ListFilesFromAlbum(c, id)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	var photosRespJSON []*PhotosJSON
@@ -235,7 +255,15 @@ func handleSendFileFromStorjToGooglePhotos(c echo.Context) error {
 
 	client, err := google.NewGPhotosClient(c)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 	}
 	err = client.UploadFileToGPhotos(c, name, "Storj Album")
 	if err != nil {
@@ -255,7 +283,15 @@ func handleSendFileFromGooglePhotosToStorj(c echo.Context) error {
 
 	client, err := google.NewGPhotosClient(c)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 	}
 	item, err := client.GetPhoto(c, id)
 	if err != nil {
@@ -284,7 +320,15 @@ func handleSendAllFilesFromGooglePhotosToStorj(c echo.Context) error {
 
 	client, err := google.NewGPhotosClient(c)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 	}
 	files, err := client.ListFilesFromAlbum(c, id)
 	if err != nil {
@@ -339,7 +383,15 @@ type ThreadJSON struct {
 func handleGmailGetThreads(c echo.Context) error {
 	GmailClient, err := google.NewGmailClient(c)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 	}
 
 	threads, err := GmailClient.GetUserThreads("")
@@ -368,7 +420,15 @@ type MessageListJSON struct {
 func handleGmailGetMessages(c echo.Context) error {
 	GmailClient, err := google.NewGmailClient(c)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 	}
 
 	msgs, err := GmailClient.GetUserMessages("")
@@ -394,7 +454,15 @@ func handleGmailGetMessage(c echo.Context) error {
 
 	GmailClient, err := google.NewGmailClient(c)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 	}
 	msg, err := GmailClient.GetMessage(id)
 	if err != nil {
@@ -414,7 +482,15 @@ func handleGmailMessageToStorj(c echo.Context) error {
 
 	GmailClient, err := google.NewGmailClient(c)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 	}
 	msg, err := GmailClient.GetMessage(id)
 	if err != nil {
@@ -535,7 +611,15 @@ func handleStorageListBuckets(c echo.Context) error {
 
 	client, err := google.NewGoogleStorageClient(c)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 	}
 	bucketsJSON, err := client.ListBucketsJSON(c, projectName)
 	if err != nil {
@@ -550,7 +634,15 @@ func handleStorageListObjects(c echo.Context) error {
 
 	client, err := google.NewGoogleStorageClient(c)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 	}
 
 	objects, err := client.ListObjectsInBucketJSON(c, bucketName)
@@ -570,7 +662,15 @@ func handleGoogleCloudItemToStorj(c echo.Context) error {
 
 	client, err := google.NewGoogleStorageClient(c)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 	}
 
 	obj, err := client.GetObject(c, bucketName, itemName)
@@ -594,7 +694,15 @@ func handleStorjToGoogleCloud(c echo.Context) error {
 
 	client, err := google.NewGoogleStorageClient(c)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 	}
 
 	data, err := storj.DownloadObject(context.Background(), accesGrant.Value, "google-cloud", itemName)
@@ -621,7 +729,15 @@ func handleAllFilesFromGoogleCloudBucketToStorj(c echo.Context) error {
 
 	client, err := google.NewGoogleStorageClient(c)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 	}
 
 	objects, err := client.ListObjectsInBucket(c, bucketName)

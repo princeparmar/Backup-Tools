@@ -1,6 +1,7 @@
 package google
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -83,12 +84,44 @@ func GetGoogleTokenFromJWT(c echo.Context) (string, error) {
 	}
 }
 
+type TokenInfo struct {
+	Issuer        string `json:"iss"`
+	Audience      string `json:"aud"`
+	Expiry        int64  `json:"exp"`
+	IssuedAt      int64  `json:"iat"`
+	Email         string `json:"email"`
+	EmailVerified bool   `json:"email_verified"`
+	UserID        string `json:"sub"`
+}
+
+func verifyToken(idToken string) (*TokenInfo, error) {
+	resp, err := http.Get(fmt.Sprintf("https://www.googleapis.com/oauth2/v3/tokeninfo?id_token=%s", idToken))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var tokenInfo TokenInfo
+	if err := json.NewDecoder(resp.Body).Decode(&tokenInfo); err != nil {
+		return nil, err
+	}
+
+	return &tokenInfo, nil
+}
+
 func Autentificate(c echo.Context) error {
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
 	googleKey := c.FormValue("google-key")
 	if googleKey == "" {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"error": "google-key is missing",
+		})
+	}
+
+	_, err := verifyToken(googleKey)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error validating google auth token": err.Error(),
 		})
 	}
 
