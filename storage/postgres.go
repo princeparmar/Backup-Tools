@@ -3,6 +3,7 @@ package storage
 import (
 	"os"
 
+	"golang.org/x/oauth2"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -11,15 +12,15 @@ type PosgresStore struct {
 	DB *gorm.DB
 }
 
-type GoogleAuthStorage struct {
-	JWTtoken    string
-	GoogleToken string
-}
-
 // type GoogleAuthStorage struct {
-// 	Cookie string
-// 	oauth2.Token
+// 	JWTtoken    string
+// 	GoogleToken string
 // }
+
+type GoogleAuthStorage struct {
+	JWTtoken string
+	oauth2.Token
+}
 
 type ShopifyAuthStorage struct {
 	Cookie string
@@ -56,11 +57,11 @@ func (storage *PosgresStore) Migrate() error {
 	return nil
 }
 
-func (storage *PosgresStore) WriteGoogleAuthToken(JWTtoken, googleToken string) error {
-	data := GoogleAuthStorage{
-		JWTtoken:    JWTtoken,
-		GoogleToken: googleToken,
-	}
+func (storage *PosgresStore) WriteGoogleAuthToken(JWToken, authToken string) error {
+	data := GoogleAuthStorage{}
+	data.JWTtoken = JWToken
+	data.AccessToken = authToken
+	// data.RefreshToken = refreshToken
 
 	res := storage.DB.Create(data)
 	if res.Error != nil {
@@ -90,10 +91,13 @@ func (storage *PosgresStore) WriteGoogleAuthToken(JWTtoken, googleToken string) 
 // 	return &res.Token, nil
 // }
 
-func (storage *PosgresStore) ReadGoogleAuthToken(cookie string) (string, error) {
+func (storage *PosgresStore) ReadGoogleAuthToken(JWTtoken string) (oauth2.Token, error) {
 	var res GoogleAuthStorage
-	storage.DB.Where("cookie = ?", cookie).First(&res)
-	return res.GoogleToken, nil
+	storage.DB.Where("jw_ttoken = ?", JWTtoken).First(&res)
+	return oauth2.Token{
+		AccessToken: res.AccessToken,
+		// RefreshToken: res.RefreshToken,
+	}, nil
 }
 
 func (storage *PosgresStore) WriteShopifyAuthToken(cookie string, token string) error {

@@ -12,7 +12,6 @@ import (
 	"os"
 
 	"github.com/labstack/echo/v4"
-	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
@@ -97,14 +96,12 @@ func client(c echo.Context) (*http.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to retrieve google-auth token from JWT: %v", err)
 	}
-
 	tok, err := database.ReadGoogleAuthToken(googleToken)
 	if err != nil {
 		return nil, echo.NewHTTPError(http.StatusUnauthorized, "user is not authorized")
 	}
-	client := config.Client(context.Background(), &oauth2.Token{
-		AccessToken: tok,
-	})
+	fmt.Println(tok.AccessToken)
+	client := config.Client(context.Background(), &tok)
 
 	return client, nil
 }

@@ -52,7 +52,7 @@ func CreateJWToken(googleToken string) string {
 
 func GetGoogleTokenFromJWT(c echo.Context) (string, error) {
 	tokenString := c.Request().Header.Get("Authorization")
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+	token, err := jwt.ParseWithClaims(tokenString, &CustomClaims{}, func(token *jwt.Token) (interface{}, error) {
 		// Check the signing method
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
@@ -67,7 +67,9 @@ func GetGoogleTokenFromJWT(c echo.Context) (string, error) {
 	// Check if the token is valid
 	if token.Valid {
 		// Extract claims
-		claims, ok := token.Claims.(CustomClaims)
+		claims, ok := token.Claims.(*CustomClaims)
+		log.Printf("Token claims: %+v", token.Claims)
+
 		if !ok {
 			log.Print("Invalid token claims")
 			return "", err
@@ -75,6 +77,7 @@ func GetGoogleTokenFromJWT(c echo.Context) (string, error) {
 
 		// Extract specific information from claims
 		googleAuth := claims.GoogleAuthToken
+		fmt.Println(googleAuth)
 
 		// Output extracted informationr
 		return googleAuth, nil
@@ -111,19 +114,27 @@ func verifyToken(idToken string) (*TokenInfo, error) {
 
 func Autentificate(c echo.Context) error {
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
-	googleKey := c.FormValue("google-key")
-	if googleKey == "" {
+	authToken := c.FormValue("google-key")
+	// refreshToken := c.FormValue("refresh-key")
+
+	if authToken == "" {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"error": "google-key is missing",
 		})
 	}
+	// if refreshToken == "" {
+	// 	return c.JSON(http.StatusBadRequest, map[string]interface{}{
+	// 		"error": "refresh token is missing",
+	// 	})
+	// }
 
-	_, err := verifyToken(googleKey)
+	_, err := verifyToken(authToken)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error validating google auth token": err.Error(),
 		})
 	}
+	fmt.Println("token validated")
 
 	// _, err := idtoken.Validate(context.Background(), googleKey, "")
 	// if err != nil {
@@ -133,7 +144,7 @@ func Autentificate(c echo.Context) error {
 	// }
 
 	googleExternalToken := utils.RandStringRunes(50)
-	database.WriteGoogleAuthToken(googleExternalToken, googleKey)
+	database.WriteGoogleAuthToken(googleExternalToken, authToken)
 	jwtString := CreateJWToken(googleExternalToken)
 	c.Response().Header().Add("Authorization", "Bearer "+jwtString)
 	return c.JSON(http.StatusOK, map[string]interface{}{
