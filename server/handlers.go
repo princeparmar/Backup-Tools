@@ -231,6 +231,55 @@ func handleListPhotosInAlbum(c echo.Context) error {
 	return c.JSON(http.StatusOK, photosRespJSON)
 }
 
+type AllPhotosJSON struct {
+	Name         string `json:"file_name"`
+	ID           string `json:"file_id"`
+	MimeType     string `json:"mime_type"`
+	AlbumName    string `json:"album_name"`
+	CreationTime string `json:"creation_time"`
+}
+
+func handleListAllPhotos(c echo.Context) error {
+	client, err := google.NewGPhotosClient(c)
+	if err != nil {
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+	}
+	albs, err := client.ListAlbums(c)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+	var photosRespJSON []*AllPhotosJSON
+	for _, alb := range albs {
+		files, err := client.ListFilesFromAlbum(c, alb.ID)
+		if err != nil {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+		for _, v := range files {
+			photosRespJSON = append(photosRespJSON, &AllPhotosJSON{
+				Name:         v.Filename,
+				ID:           v.ID,
+				MimeType:     v.MimeType,
+				AlbumName:    alb.Title,
+				CreationTime: v.MediaMetadata.CreationTime,
+			})
+		}
+	}
+	return c.JSON(http.StatusOK, photosRespJSON)
+
+}
+
 // Sends photo item from Storj to Google Photos.
 func handleSendFileFromStorjToGooglePhotos(c echo.Context) error {
 	name := c.Param("name")
