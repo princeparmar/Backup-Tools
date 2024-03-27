@@ -155,7 +155,7 @@ func handleSendFileFromStorjToGoogleDrive(c echo.Context) error {
 type AlbumsJSON struct {
 	Title string `json:"album_title"`
 	ID    string `json:"album_id"`
-	Items string `json:"items_count"`
+	Items int64  `json:"items_count"`
 }
 
 // Shows list of user's Google Photos albums.
@@ -184,7 +184,7 @@ func handleListGPhotosAlbums(c echo.Context) error {
 		photosListJSON = append(photosListJSON, &AlbumsJSON{
 			Title: v.Title,
 			ID:    v.ID,
-			Items: v.MediaItemsCount,
+			Items: v.TotalMediaItems,
 		})
 	}
 
@@ -234,9 +234,14 @@ func handleListPhotosInAlbum(c echo.Context) error {
 type AllPhotosJSON struct {
 	Name         string `json:"file_name"`
 	ID           string `json:"file_id"`
+	Description  string `json:"description"`
+	BaseURL      string `json:"base_url"`
+	ProductURL   string `json:"product_url"`
 	MimeType     string `json:"mime_type"`
 	AlbumName    string `json:"album_name"`
 	CreationTime string `json:"creation_time"`
+	Width        int64  `json:"width"`
+	Height       int64  `json:"height"`
 }
 
 func handleListAllPhotos(c echo.Context) error {
@@ -270,9 +275,14 @@ func handleListAllPhotos(c echo.Context) error {
 			photosRespJSON = append(photosRespJSON, &AllPhotosJSON{
 				Name:         v.Filename,
 				ID:           v.ID,
+				Description:  v.Description,
+				BaseURL:      v.BaseURL,
+				ProductURL:   v.ProductURL,
 				MimeType:     v.MimeType,
 				AlbumName:    alb.Title,
 				CreationTime: v.MediaMetadata.CreationTime,
+				Width:        v.MediaMetadata.Width,
+				Height:       v.MediaMetadata.Height,
 			})
 		}
 	}

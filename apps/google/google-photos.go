@@ -4,9 +4,9 @@ import (
 	"context"
 	"path"
 
-	gphotos "github.com/gphotosuploader/google-photos-api-client-go/v2"
-	"github.com/gphotosuploader/google-photos-api-client-go/v2/albums"
-	"github.com/gphotosuploader/google-photos-api-client-go/v2/media_items"
+	gphotos "github.com/gphotosuploader/google-photos-api-client-go/v3"
+	"github.com/gphotosuploader/google-photos-api-client-go/v3/albums"
+	"github.com/gphotosuploader/google-photos-api-client-go/v3/media_items"
 	"github.com/labstack/echo/v4"
 )
 
@@ -48,7 +48,7 @@ func (gpclient *GPotosClient) UploadFileToGPhotos(c echo.Context, filename, albu
 	}
 
 	filepath := path.Join("./cache", filename)
-	_, err = gpclient.UploadFileToAlbum(context.Background(), alb.ID, filepath)
+	_, err = gpclient.UploadToAlbum(context.Background(), alb.ID, filepath)
 	if err != nil {
 		return err
 	}
@@ -57,7 +57,7 @@ func (gpclient *GPotosClient) UploadFileToGPhotos(c echo.Context, filename, albu
 }
 
 // Func takes Google Photos album ID and returns files data in this album.
-func (gpclient *GPotosClient) ListFilesFromAlbum(c echo.Context, albumID string) ([]media_items.MediaItem, error) {
+func (gpclient *GPotosClient) ListFilesFromAlbum(c echo.Context, albumID string) ([]*media_items.MediaItem, error) {
 	files, err := gpclient.MediaItems.ListByAlbum(context.Background(), albumID)
 	if err != nil {
 		return nil, err
