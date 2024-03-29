@@ -6,6 +6,7 @@ import (
 	"storj-integrations/storj"
 
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 )
 
 func StartServer(db *storage.PosgresStore) {
@@ -14,14 +15,7 @@ func StartServer(db *storage.PosgresStore) {
 
 	e.Use(DBMiddleware(db))
 
-	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c echo.Context) error {
-			c.Response().Header().Set("Access-Control-Allow-Origin", "*")
-			c.Response().Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, HEAD")
-			c.Response().Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-			return next(c)
-		}
-	})
+	e.Use(middleware.CORS())
 
 	e.POST("/storj-auth", storj.HandleStorjAuthentication)
 	e.POST("/google-auth", googlepack.Autentificate)
