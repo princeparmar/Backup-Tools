@@ -170,11 +170,11 @@ func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
 
 			// If there is text in second layer payload.
 		} else if part.MimeType == "text/html" {
-			data, err := base64.URLEncoding.DecodeString(part.Body.Data)
-			if err != nil {
-				log.Fatalf("Unable to decode message body: %v", err)
-			}
-			GmailMSG.Body = string(data)
+			// data, err := base64.URLEncoding.DecodeString(part.Body.Data)
+			// if err != nil {
+			// 	log.Fatalf("Unable to decode message body: %v", err)
+			// }
+			GmailMSG.Body = string(part.Body.Data)
 
 		} else if part.MimeType == "multipart/alternative" {
 			// Body data is split across multiple parts.
