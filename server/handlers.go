@@ -59,7 +59,8 @@ func handleSendFileFromGoogleDriveToStorj(c echo.Context) error {
 	accesGrant, err := c.Cookie("storj_access_token")
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "Storj is unauthenticated",
+			"message": "Storj is unauthenticated",
+			"error":   err.Error(),
 		})
 	}
 
@@ -93,20 +94,23 @@ func handleSendAllFilesFromGoogleDriveToStorj(c echo.Context) error {
 		name, data, err := google.GetFile(c, f.ID)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "failed to retrieve file from Google Drive",
+				"message": "failed to retrieve file from Google Drive",
+				"error":   err.Error(),
 			})
 		}
 		accesGrant, err := c.Cookie("storj_access_token")
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "Storj is unauthenticated",
+				"message": "Storj is unauthenticated",
+				"error":   err.Error(),
 			})
 		}
 
 		err = storj.UploadObject(context.Background(), accesGrant.Value, "google-drive", name, data)
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-				"error": fmt.Sprintf("failed to upload file to Storj: %v", err),
+				"message": fmt.Sprintf("failed to upload file to Storj: %v", err),
+				"error":   err.Error(),
 			})
 		}
 	}
@@ -295,18 +299,24 @@ func handleSendFileFromStorjToGooglePhotos(c echo.Context) error {
 	name := c.Param("name")
 	accesGrant, err := c.Cookie("storj_access_token")
 	if err != nil {
-		return c.String(http.StatusForbidden, "storj is unauthenticated")
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	data, err := storj.DownloadObject(context.Background(), accesGrant.Value, "google-photos", name)
 	if err != nil {
-		return c.String(http.StatusForbidden, "error downloading object from Storj"+err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	path := filepath.Join("./cache", utils.CreateUserTempCacheFolder(), name)
 	file, err := os.Create(path)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 	file.Write(data)
 	file.Close()
@@ -326,10 +336,14 @@ func handleSendFileFromStorjToGooglePhotos(c echo.Context) error {
 	}
 	err = client.UploadFileToGPhotos(c, name, "Storj Album")
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
-	return c.String(http.StatusOK, "file "+name+" was successfully uploaded from Storj to Google Photos")
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "file " + name + " was successfully uploaded from Storj to Google Photos",
+	})
 }
 
 // Sends photo item from Google Photos to Storj.
@@ -337,7 +351,10 @@ func handleSendFileFromGooglePhotosToStorj(c echo.Context) error {
 	id := c.Param("ID")
 	accesGrant, err := c.Cookie("storj_access_token")
 	if err != nil {
-		return c.String(http.StatusForbidden, "storj is unauthenticated")
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error":   err.Error(),
+			"message": "storj is unauthenticated",
+		})
 	}
 
 	client, err := google.NewGPhotosClient(c)
@@ -354,24 +371,34 @@ func handleSendFileFromGooglePhotosToStorj(c echo.Context) error {
 	}
 	item, err := client.GetPhoto(c, id)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 	resp, err := http.Get(item.BaseURL)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	err = storj.UploadObject(context.Background(), accesGrant.Value, "google-photos", item.Filename, body)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
-	return c.String(http.StatusOK, "file "+item.Filename+" was successfully uploaded from Google Photos to Storj")
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "file " + item.Filename + " was successfully uploaded from Google Photos to Storj",
+	})
 }
 
 func handleSendAllFilesFromGooglePhotosToStorj(c echo.Context) error {
@@ -391,7 +418,9 @@ func handleSendAllFilesFromGooglePhotosToStorj(c echo.Context) error {
 	}
 	files, err := client.ListFilesFromAlbum(c, id)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	var photosRespJSON []*PhotosJSON
@@ -403,32 +432,43 @@ func handleSendAllFilesFromGooglePhotosToStorj(c echo.Context) error {
 	}
 	accesGrant, err := c.Cookie("storj_access_token")
 	if err != nil {
-		return c.String(http.StatusForbidden, "storj is unauthenticated")
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error":   err.Error(),
+			"message": "storj is unauthenticated",
+		})
 	}
 
 	for _, p := range photosRespJSON {
 
 		item, err := client.GetPhoto(c, p.ID)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 		resp, err := http.Get(item.BaseURL)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 		defer resp.Body.Close()
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 
 		err = storj.UploadObject(context.Background(), accesGrant.Value, "google-photos", item.Filename, body)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 	}
 
-	return c.String(http.StatusOK, "all photos from album were successfully uploaded from Google Photos to Storj")
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": "all photos from album were successfully uploaded from Google Photos to Storj"})
 }
 
 // <<<<<------------ GMAIL ------------>>>>>
@@ -455,7 +495,9 @@ func handleGmailGetThreads(c echo.Context) error {
 
 	threads, err := GmailClient.GetUserThreads("")
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// TODO: implement next page token (now only first page is avialable)
@@ -492,7 +534,9 @@ func handleGmailGetMessages(c echo.Context) error {
 
 	msgs, err := GmailClient.GetUserMessages("")
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// TODO: implement next page token (now only first page is avialable)
@@ -525,7 +569,9 @@ func handleGmailGetMessage(c echo.Context) error {
 	}
 	msg, err := GmailClient.GetMessage(id)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	return c.JSON(http.StatusOK, msg)
@@ -553,7 +599,9 @@ func handleGmailMessageToStorj(c echo.Context) error {
 	}
 	msg, err := GmailClient.GetMessage(id)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	msgToSave := storage.GmailMessageSQL{
@@ -571,7 +619,9 @@ func handleGmailMessageToStorj(c echo.Context) error {
 		for _, att := range msg.Attachments {
 			err = storj.UploadObject(context.Background(), accesGrant.Value, "gmail", att.FileName, att.Data)
 			if err != nil {
-				return c.String(http.StatusForbidden, err.Error())
+				return c.JSON(http.StatusForbidden, map[string]interface{}{
+					"error": err.Error(),
+				})
 			}
 			msgToSave.Attachments = msgToSave.Attachments + "|" + att.FileName
 		}
@@ -587,24 +637,32 @@ func handleGmailMessageToStorj(c echo.Context) error {
 	if err == nil {
 		dbFile, err := os.Create(userCacheDBPath)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 		_, err = dbFile.Write(byteDB)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 	}
 
 	db, err := storage.ConnectToEmailDB()
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// WRITE ALL EMAILS TO THE DATABASE LOCALLY
 
 	err = db.WriteEmailToDB(&msgToSave)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// DELETE OLD DB COPY FROM STORJ UPLOAD UP TO DATE DB FILE BACK TO STORJ AND DELETE IT FROM LOCAL CACHE
@@ -612,28 +670,36 @@ func handleGmailMessageToStorj(c echo.Context) error {
 	// get db file data
 	dbByte, err := os.ReadFile(userCacheDBPath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// delete old db copy from storj
 	err = storj.DeleteObject(context.Background(), accesGrant.Value, "gmail", "gmails.db")
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// upload file to storj
 	err = storj.UploadObject(context.Background(), accesGrant.Value, "gmail", "gmails.db", dbByte)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// delete from local cache copy of database
 	err = os.Remove(userCacheDBPath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
-	return c.String(http.StatusOK, "Email was successfully uploaded")
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": "Email was successfully uploaded"})
 }
 
 func handleGetGmailDBFromStorj(c echo.Context) error {
@@ -642,18 +708,22 @@ func handleGetGmailDBFromStorj(c echo.Context) error {
 	// Copy file from storj to local cache if everything's fine.
 	byteDB, err := storj.DownloadObject(context.Background(), accesGrant.Value, "gmail", "gmails.db")
 	if err != nil {
-		return c.String(http.StatusForbidden, "no emails saved in Storj database")
+		return c.JSON(http.StatusForbidden, map[string]interface{}{"message": "no emails saved in Storj database", "error": err.Error()})
 	}
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
 
 	dbFile, err := os.Create(userCacheDBPath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 	_, err = dbFile.Write(byteDB)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// delete db from cache after user get's it.
@@ -682,7 +752,9 @@ func handleStorageListBuckets(c echo.Context) error {
 	}
 	bucketsJSON, err := client.ListBucketsJSON(c, projectName)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 	return c.JSON(http.StatusOK, bucketsJSON)
 }
@@ -706,7 +778,9 @@ func handleStorageListObjects(c echo.Context) error {
 
 	objects, err := client.ListObjectsInBucketJSON(c, bucketName)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	return c.JSON(http.StatusOK, objects)
@@ -734,14 +808,18 @@ func handleGoogleCloudItemToStorj(c echo.Context) error {
 
 	obj, err := client.GetObject(c, bucketName, itemName)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	err = storj.UploadObject(context.Background(), accesGrant.Value, "google-cloud", obj.Name, obj.Data)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
-	return c.String(http.StatusOK, fmt.Sprintf("object %s was successfully uploaded from Google Cloud Storage to Storj", obj.Name))
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("object %s was successfully uploaded from Google Cloud Storage to Storj", obj.Name)})
 
 }
 
@@ -766,7 +844,9 @@ func handleStorjToGoogleCloud(c echo.Context) error {
 
 	data, err := storj.DownloadObject(context.Background(), accesGrant.Value, "google-cloud", itemName)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	err = client.UploadObject(c, bucketName, &google.StorageObject{
@@ -774,10 +854,12 @@ func handleStorjToGoogleCloud(c echo.Context) error {
 		Data: data,
 	})
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
-	return c.String(http.StatusOK, fmt.Sprintf("object %s was successfully uploaded from Storj to Google Cloud Storage", itemName))
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("object %s was successfully uploaded from Storj to Google Cloud Storage", itemName)})
 
 }
 
@@ -801,22 +883,28 @@ func handleAllFilesFromGoogleCloudBucketToStorj(c echo.Context) error {
 
 	objects, err := client.ListObjectsInBucket(c, bucketName)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	for _, o := range objects.Items {
 		obj, err := client.GetObject(c, bucketName, o.Name)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 
 		err = storj.UploadObject(context.Background(), accesGrant.Value, "google-cloud", obj.Name, obj.Data)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 	}
 
-	return c.String(http.StatusOK, fmt.Sprintf("all objects in bucket '"+bucketName+"' were successfully uploaded from Storj to Google Cloud Storage", bucketName))
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("all objects in bucket '"+bucketName+"' were successfully uploaded from Storj to Google Cloud Storage", bucketName)})
 
 }
 
@@ -828,22 +916,28 @@ func handleDropboxToStorj(c echo.Context) error {
 
 	client, err := dropbox.NewDropboxClient()
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	file, err := client.DownloadFile("/" + filePath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	data, err := io.ReadAll(file.Data)
 
 	err = storj.UploadObject(context.Background(), accesGrant.Value, "dropbox", file.Name, data)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
-	return c.String(http.StatusOK, fmt.Sprintf("object %s was successfully uploaded from Dropbox to Storj", file.Name))
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("object %s was successfully uploaded from Dropbox to Storj", file.Name)})
 }
 
 func handleStorjToDropbox(c echo.Context) error {
@@ -852,20 +946,26 @@ func handleStorjToDropbox(c echo.Context) error {
 
 	objData, err := storj.DownloadObject(context.Background(), accesGrant.Value, "dropbox", filePath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	client, err := dropbox.NewDropboxClient()
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 	data := bytes.NewReader(objData)
 	err = client.UploadFile(data, "/"+filePath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
-	return c.String(http.StatusOK, fmt.Sprintf("object %s was successfully uploaded from Storj to Dropbox", filePath))
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("object %s was successfully uploaded from Storj to Dropbox", filePath)})
 }
 
 // <<<<<------------ AWS S3 ------------>>>>>
@@ -876,10 +976,12 @@ func handleListAWSs3BucketFiles(c echo.Context) error {
 	s3sess := aws.ConnectAws()
 	data, err := s3sess.ListFiles(bucketName)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
-	return c.String(http.StatusOK, fmt.Sprintf("%+v", data))
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("%+v", data)})
 }
 
 func handleS3toStorj(c echo.Context) error {
@@ -887,7 +989,9 @@ func handleS3toStorj(c echo.Context) error {
 	itemName := c.Param("itemName")
 	accesGrant, err := c.Cookie("storj_access_token")
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	dirPath := filepath.Join("./cache", utils.CreateUserTempCacheFolder())
@@ -896,27 +1000,35 @@ func handleS3toStorj(c echo.Context) error {
 
 	file, err := os.Create(path)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 	defer os.Remove(path)
 
 	s3sess := aws.ConnectAws()
 	err = s3sess.DownloadFile(bucketName, itemName, file)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	data, err := io.ReadAll(file)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	err = storj.UploadObject(context.Background(), accesGrant.Value, "aws-s3", itemName, data)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
-	return c.String(http.StatusOK, fmt.Sprintf("object %s was successfully uploaded from AWS S3 bucket to Storj", itemName))
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("object %s was successfully uploaded from AWS S3 bucket to Storj", itemName)})
 }
 
 func handleStorjToS3(c echo.Context) error {
@@ -924,12 +1036,14 @@ func handleStorjToS3(c echo.Context) error {
 	itemName := c.Param("itemName")
 	accesGrant, err := c.Cookie("storj_access_token")
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	data, err := storj.DownloadObject(context.Background(), accesGrant.Value, "aws-s3", itemName)
 	if err != nil {
-		return c.String(http.StatusForbidden, "error downloading object from Storj"+err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{"message": "error downloading object from Storj" + err.Error(), "error": err.Error()})
 	}
 	dirPath := filepath.Join("./cache", utils.CreateUserTempCacheFolder())
 	path := filepath.Join(dirPath, itemName)
@@ -937,7 +1051,9 @@ func handleStorjToS3(c echo.Context) error {
 
 	file, err := os.Create(path)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 	file.Write(data)
 	file.Close()
@@ -945,15 +1061,19 @@ func handleStorjToS3(c echo.Context) error {
 
 	cachedFile, err := os.Open(path)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	s3sess := aws.ConnectAws()
 	err = s3sess.UploadFile(bucketName, itemName, cachedFile)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
-	return c.String(http.StatusOK, fmt.Sprintf("object %s was successfully uploaded from Storj to AWS S3 %s bucket", itemName, bucketName))
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("object %s was successfully uploaded from Storj to AWS S3 %s bucket", itemName, bucketName)})
 
 }
 
@@ -972,22 +1092,28 @@ func handleGithubCallback(c echo.Context) error {
 	cookie.Value = githubAccessToken
 	c.SetCookie(cookie)
 
-	return c.String(http.StatusOK, "you have been successfuly authenticated to github")
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": "you have been successfuly authenticated to github"})
 }
 
 func handleListRepos(c echo.Context) error {
 	accessToken, err := c.Cookie("github-auth")
 	if err != nil {
-		return c.String(http.StatusUnauthorized, "UNAUTHENTICATED!")
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"error": "UNAUTHENTICATED!",
+		})
 	}
 
 	gh, err := gthb.NewGithubClient(c)
 	if err != nil {
-		return c.String(http.StatusUnauthorized, "UNAUTHENTICATED!")
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"error": "UNAUTHENTICATED!",
+		})
 	}
 	reps, err := gh.ListReps(accessToken.Value)
 	if err != nil {
-		return c.String(http.StatusBadRequest, err.Error())
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 	var repositories []string
 	for _, r := range reps {
@@ -999,20 +1125,24 @@ func handleListRepos(c echo.Context) error {
 func handleGetRepository(c echo.Context) error {
 	accessToken, err := c.Cookie("github-auth")
 	if err != nil {
-		return c.String(http.StatusUnauthorized, "UNAUTHENTICATED!")
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"error": "UNAUTHENTICATED!",
+		})
 	}
 	owner := c.QueryParam("owner")
 	if owner == "" {
-		return c.String(http.StatusBadRequest, "owner is now specified")
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "owner is now specified"})
 	}
 	repo := c.QueryParam("repo")
 	if repo == "" {
-		return c.String(http.StatusBadRequest, "repo name is now specified")
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "repo name is now specified"})
 	}
 
 	gh, err := gthb.NewGithubClient(c)
 	if err != nil {
-		return c.String(http.StatusUnauthorized, "UNAUTHENTICATED!")
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"error": "UNAUTHENTICATED!",
+		})
 	}
 
 	repoPath, err := gh.DownloadRepositoryToCache(owner, repo, accessToken.Value)
@@ -1025,26 +1155,32 @@ func handleGetRepository(c echo.Context) error {
 func handleGithubRepositoryToStorj(c echo.Context) error {
 	accessToken, err := c.Cookie("github-auth")
 	if err != nil {
-		return c.String(http.StatusUnauthorized, "UNAUTHENTICATED!")
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"error": "UNAUTHENTICATED!",
+		})
 	}
 
 	accesGrant, err := c.Cookie("storj_access_token")
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	owner := c.QueryParam("owner")
 	if owner == "" {
-		return c.String(http.StatusBadRequest, "owner is now specified")
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "owner is now specified"})
 	}
 	repo := c.QueryParam("repo")
 	if repo == "" {
-		return c.String(http.StatusBadRequest, "repo name is now specified")
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "repo name is now specified"})
 	}
 
 	gh, err := gthb.NewGithubClient(c)
 	if err != nil {
-		return c.String(http.StatusUnauthorized, "UNAUTHENTICATED!")
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"error": "UNAUTHENTICATED!",
+		})
 	}
 
 	repoPath, err := gh.DownloadRepositoryToCache(owner, repo, accessToken.Value)
@@ -1052,41 +1188,51 @@ func handleGithubRepositoryToStorj(c echo.Context) error {
 	defer os.RemoveAll(dir)
 	file, err := os.Open(repoPath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 	data, err := io.ReadAll(file)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	err = storj.UploadObject(context.Background(), accesGrant.Value, "github", repoName, data)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 	file.Close()
 
-	return c.String(http.StatusOK, fmt.Sprintf("repo %s was successfully uploaded from Github to Storj", repoName))
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("repo %s was successfully uploaded from Github to Storj", repoName)})
 }
 
 func handleRepositoryFromStorjToGithub(c echo.Context) error {
 	accessToken, err := c.Cookie("github-auth")
 	if err != nil {
-		return c.String(http.StatusUnauthorized, "UNAUTHENTICATED!")
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"error": "UNAUTHENTICATED!",
+		})
 	}
 
 	accesGrant, err := c.Cookie("storj_access_token")
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	repo := c.QueryParam("repo")
 	if repo == "" {
-		return c.String(http.StatusBadRequest, "repo name is now specified")
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "repo name is now specified"})
 	}
 
 	repoData, err := storj.DownloadObject(context.Background(), accesGrant.Value, "github", repo)
 	if err != nil {
-		return c.String(http.StatusForbidden, "error downloading object from Storj"+err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{"message": "error downloading object from Storj" + err.Error(), "error": err.Error()})
 	}
 	dirPath := filepath.Join("./cache", utils.CreateUserTempCacheFolder())
 	basePath := filepath.Join(dirPath, repo+".zip")
@@ -1094,7 +1240,9 @@ func handleRepositoryFromStorjToGithub(c echo.Context) error {
 
 	file, err := os.Create(basePath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 	file.Write(repoData)
 	file.Close()
@@ -1106,16 +1254,22 @@ func handleRepositoryFromStorjToGithub(c echo.Context) error {
 
 	err = utils.Unzip(basePath, unzipPath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	gh, err := gthb.NewGithubClient(c)
 	if err != nil {
-		return c.String(http.StatusUnauthorized, "UNAUTHENTICATED!")
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"error": "UNAUTHENTICATED!",
+		})
 	}
 	username, err := gh.GetAuthenticatedUserName()
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	url := "https://api.github.com/user/repos"
@@ -1130,11 +1284,15 @@ func handleRepositoryFromStorjToGithub(c echo.Context) error {
 		if !di.IsDir() {
 			gitFile, err := os.Open(path)
 			if err != nil {
-				return c.String(http.StatusForbidden, err.Error())
+				return c.JSON(http.StatusForbidden, map[string]interface{}{
+					"error": err.Error(),
+				})
 			}
 			gitFileData, err := io.ReadAll(gitFile)
 			if err != nil {
-				return c.String(http.StatusForbidden, err.Error())
+				return c.JSON(http.StatusForbidden, map[string]interface{}{
+					"error": err.Error(),
+				})
 			}
 			gh.UploadFileToGithub(username, repo, path, gitFileData)
 			gitFile.Close()
@@ -1142,7 +1300,7 @@ func handleRepositoryFromStorjToGithub(c echo.Context) error {
 		return nil
 	})
 
-	return c.String(http.StatusOK, "repository "+repo+" restored to Github from Storj")
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": "repository " + repo + " restored to Github from Storj"})
 }
 
 // <<<<<<<--------- SHOPIFY --------->>>>>>>
@@ -1150,13 +1308,18 @@ func handleRepositoryFromStorjToGithub(c echo.Context) error {
 func createShopifyCleint(c echo.Context, shopname string) *shopify.ShopifyClient {
 	cookieToken, err := c.Cookie("shopify-auth")
 	if err != nil {
-		c.String(http.StatusUnauthorized, "Unauthorized")
+		c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"error": "UNAUTHENTICATED!",
+		})
 		return nil
 	}
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
 	token, err := database.ReadShopifyAuthToken(cookieToken.Value)
 	if err != nil {
-		c.String(http.StatusBadRequest, err.Error())
+		c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Error reading token from database",
+			"error":   err.Error(),
+		})
 		return nil
 	}
 	cleint := shopify.CreateClient(token, shopname)
@@ -1174,7 +1337,7 @@ func handleShopifyProductsToStorj(c echo.Context) error {
 	}
 	products, err := client.GetProducts()
 	if err != nil {
-		return c.String(http.StatusNotFound, "Error getting products")
+		return c.JSON(http.StatusNotFound, map[string]interface{}{"message": "Error getting products", "error": err.Error()})
 	}
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/shopify.db"
@@ -1185,22 +1348,30 @@ func handleShopifyProductsToStorj(c echo.Context) error {
 	if err == nil {
 		dbFile, err := os.Create(userCacheDBPath)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 		_, err = dbFile.Write(byteDB)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 	}
 
 	db, err := storage.ConnectToShopifyDB()
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 	for _, product := range products {
 		err = db.WriteProductsToDB(&product)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 	}
 
@@ -1209,28 +1380,36 @@ func handleShopifyProductsToStorj(c echo.Context) error {
 	// get db file data
 	dbByte, err := os.ReadFile(userCacheDBPath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// delete old db copy from storj
 	err = storj.DeleteObject(context.Background(), accesGrant.Value, "shopify", "shopify.db")
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// upload file to storj
 	err = storj.UploadObject(context.Background(), accesGrant.Value, "shopify", "shopify.db", dbByte)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// delete from local cache copy of database
 	err = os.Remove(userCacheDBPath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
-	return c.String(http.StatusOK, "DB with products data was successfully uploaded")
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": "DB with products data was successfully uploaded"})
 }
 
 func handleShopifyCustomersToStorj(c echo.Context) error {
@@ -1244,7 +1423,7 @@ func handleShopifyCustomersToStorj(c echo.Context) error {
 	}
 	customers, err := client.GetCustomers()
 	if err != nil {
-		return c.String(http.StatusNotFound, "Error getting customers")
+		return c.JSON(http.StatusNotFound, map[string]interface{}{"message": "Error getting customers", "error": err.Error()})
 	}
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/shopify.db"
@@ -1255,22 +1434,30 @@ func handleShopifyCustomersToStorj(c echo.Context) error {
 	if err == nil {
 		dbFile, err := os.Create(userCacheDBPath)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 		_, err = dbFile.Write(byteDB)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 	}
 
 	db, err := storage.ConnectToShopifyDB()
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 	for _, customer := range customers {
 		err = db.WriteCustomersToDB(&customer)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 	}
 
@@ -1279,28 +1466,36 @@ func handleShopifyCustomersToStorj(c echo.Context) error {
 	// get db file data
 	dbByte, err := os.ReadFile(userCacheDBPath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// delete old db copy from storj
 	err = storj.DeleteObject(context.Background(), accesGrant.Value, "shopify", "shopify.db")
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// upload file to storj
 	err = storj.UploadObject(context.Background(), accesGrant.Value, "shopify", "shopify.db", dbByte)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// delete from local cache copy of database
 	err = os.Remove(userCacheDBPath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
-	return c.String(http.StatusOK, "DB with customers data was successfully uploaded")
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": "DB with customers data was successfully uploaded"})
 
 }
 
@@ -1315,7 +1510,7 @@ func handleShopifyOrdersToStorj(c echo.Context) error {
 	}
 	orders, err := client.GetOrders()
 	if err != nil {
-		return c.String(http.StatusNotFound, "Error getting orders")
+		return c.JSON(http.StatusNotFound, map[string]interface{}{"message": "Error getting orders", "error": err.Error()})
 	}
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/shopify.db"
@@ -1326,22 +1521,30 @@ func handleShopifyOrdersToStorj(c echo.Context) error {
 	if err == nil {
 		dbFile, err := os.Create(userCacheDBPath)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 		_, err = dbFile.Write(byteDB)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 	}
 
 	db, err := storage.ConnectToShopifyDB()
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 	for _, order := range orders {
 		err = db.WriteOrdersToDB(&order)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 	}
 
@@ -1350,28 +1553,36 @@ func handleShopifyOrdersToStorj(c echo.Context) error {
 	// get db file data
 	dbByte, err := os.ReadFile(userCacheDBPath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// delete old db copy from storj
 	err = storj.DeleteObject(context.Background(), accesGrant.Value, "shopify", "shopify.db")
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// upload file to storj
 	err = storj.UploadObject(context.Background(), accesGrant.Value, "shopify", "shopify.db", dbByte)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// delete from local cache copy of database
 	err = os.Remove(userCacheDBPath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
-	return c.String(http.StatusOK, "DB with orders data was successfully uploaded")
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": "DB with orders data was successfully uploaded"})
 }
 
 // Create an oauth-authorize url for the app and redirect to it.
@@ -1387,15 +1598,20 @@ func handleShopifyAuth(c echo.Context) error {
 func handleShopifyAuthRedirect(c echo.Context) error {
 	// Check that the callback signature is valid
 	if ok, err := shopify.ShopifyInitApp.App.VerifyAuthorizationURL(c.Request().URL); !ok {
-		return c.String(http.StatusUnauthorized, "Invalid Signature\n"+err.Error())
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "Invalid Signature",
+			"error":   err.Error(),
+		})
 	}
 	query := c.Request().URL.Query()
 	shopName := query.Get("shop")
 	code := query.Get("code")
 	token, err := shopify.ShopifyInitApp.App.GetAccessToken(shopName, code)
 	if err != nil {
-		return c.String(http.StatusUnauthorized, "Invalid Signature\n"+err.Error())
-
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "Invalid Signature",
+			"error":   err.Error(),
+		})
 	}
 
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
@@ -1407,7 +1623,7 @@ func handleShopifyAuthRedirect(c echo.Context) error {
 
 	c.SetCookie(cookieNew)
 
-	return c.String(http.StatusOK, "Authorized!")
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": "Authorized!"})
 }
 
 // <<<<<<<--------- QUICKBOOKS --------->>>>>>>
@@ -1443,7 +1659,7 @@ func handleShopifyAuthRedirect(c echo.Context) error {
 // 	client, _ := quickbooks.CreateClient()
 // 	companyInfo, err := client.Client.FetchCompanyInfo()
 // 	if err != nil {
-// 		c.String(http.StatusForbidden, err.Error())
+// 		c.JSON(http.StatusForbidden, map[string]interface{}{ "message":  err.Error(), "error": err.Error()})
 // 	}
 // }
 
@@ -1453,7 +1669,9 @@ func handleQuickbooksCustomersToStorj(c echo.Context) error {
 	client, _ := quickbooks.CreateClient()
 	customers, err := client.Client.FetchCustomers()
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/quickbooks.db"
@@ -1464,22 +1682,30 @@ func handleQuickbooksCustomersToStorj(c echo.Context) error {
 	if err == nil {
 		dbFile, err := os.Create(userCacheDBPath)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 		_, err = dbFile.Write(byteDB)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 	}
 
 	db, err := storage.ConnectToQuickbooksDB()
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 	for _, n := range customers {
 		err = db.WriteCustomersToDB(&n)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 	}
 
@@ -1488,28 +1714,36 @@ func handleQuickbooksCustomersToStorj(c echo.Context) error {
 	// get db file data
 	dbByte, err := os.ReadFile(userCacheDBPath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// delete old db copy from storj
 	err = storj.DeleteObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db")
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// upload file to storj
 	err = storj.UploadObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db", dbByte)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// delete from local cache copy of database
 	err = os.Remove(userCacheDBPath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
-	return c.String(http.StatusOK, "customers are successfully uploaded from quickbooks to storj")
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": "customers are successfully uploaded from quickbooks to storj"})
 }
 
 func handleQuickbooksItemsToStorj(c echo.Context) error {
@@ -1518,7 +1752,9 @@ func handleQuickbooksItemsToStorj(c echo.Context) error {
 	client, _ := quickbooks.CreateClient()
 	items, err := client.Client.FetchItems()
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/quickbooks.db"
@@ -1529,22 +1765,30 @@ func handleQuickbooksItemsToStorj(c echo.Context) error {
 	if err == nil {
 		dbFile, err := os.Create(userCacheDBPath)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 		_, err = dbFile.Write(byteDB)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 	}
 
 	db, err := storage.ConnectToQuickbooksDB()
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 	for _, n := range items {
 		err = db.WriteItemsToDB(&n)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 	}
 
@@ -1553,28 +1797,36 @@ func handleQuickbooksItemsToStorj(c echo.Context) error {
 	// get db file data
 	dbByte, err := os.ReadFile(userCacheDBPath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// delete old db copy from storj
 	err = storj.DeleteObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db")
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// upload file to storj
 	err = storj.UploadObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db", dbByte)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// delete from local cache copy of database
 	err = os.Remove(userCacheDBPath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
-	return c.String(http.StatusOK, "items are successfully uploaded from quickbooks to storj")
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": "items are successfully uploaded from quickbooks to storj"})
 }
 
 func handleQuickbooksInvoicesToStorj(c echo.Context) error {
@@ -1583,7 +1835,9 @@ func handleQuickbooksInvoicesToStorj(c echo.Context) error {
 	client, _ := quickbooks.CreateClient()
 	invoices, err := client.Client.FetchInvoices()
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/quickbooks.db"
@@ -1594,22 +1848,30 @@ func handleQuickbooksInvoicesToStorj(c echo.Context) error {
 	if err == nil {
 		dbFile, err := os.Create(userCacheDBPath)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 		_, err = dbFile.Write(byteDB)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 	}
 
 	db, err := storage.ConnectToQuickbooksDB()
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 	for _, n := range invoices {
 		err = db.WriteInvoicesToDB(&n)
 		if err != nil {
-			return c.String(http.StatusForbidden, err.Error())
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
 	}
 
@@ -1618,26 +1880,34 @@ func handleQuickbooksInvoicesToStorj(c echo.Context) error {
 	// get db file data
 	dbByte, err := os.ReadFile(userCacheDBPath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// delete old db copy from storj
 	err = storj.DeleteObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db")
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// upload file to storj
 	err = storj.UploadObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db", dbByte)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// delete from local cache copy of database
 	err = os.Remove(userCacheDBPath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
-	return c.String(http.StatusOK, "invoices are successfully uploaded from quickbooks to storj")
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": "invoices are successfully uploaded from quickbooks to storj"})
 }

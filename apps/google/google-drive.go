@@ -60,18 +60,24 @@ func GetFileByID(c echo.Context) error {
 
 	name, data, err := GetFile(c, id)
 	if err != nil {
-		return c.String(http.StatusForbidden, "error")
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	userCachePath := "./cache/" + utils.CreateUserTempCacheFolder() + "/" + name
 
 	dbFile, err := os.Create(userCachePath)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 	_, err = dbFile.Write(data)
 	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	// delete file from cache after user get's it.

@@ -18,7 +18,9 @@ func HandleStorjAuthentication(c echo.Context) error {
 		Name:  "storj_access_token",
 		Value: storjAccessToken,
 	})
-	return c.String(http.StatusOK, "storj authentication was successful")
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "storj authentication was successful",
+	})
 }
 
 func UploadObject(ctx context.Context, accessGrant, bucketName, objectKey string, data []byte) error {
