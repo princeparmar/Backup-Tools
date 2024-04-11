@@ -158,45 +158,50 @@ func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
 		}
 	}
 
-	if msg.Payload.Parts != nil {
-		for _, part := range msg.Payload.Parts {
-			// If there is text in first layer payload.
-			if part.MimeType == "text/plain" {
-				// Body data is in Base64 format.
-				data, err := base64.URLEncoding.DecodeString(part.Body.Data)
-				if err != nil {
-					log.Fatalf("Unable to decode message body: %v", err)
-				}
-				GmailMSG.Body = string(data)
+	for _, part := range msg.Payload.Parts {
+		// If there is text in first layer payload.
+		if part.MimeType == "text/plain" {
+			// Body data is in Base64 format.
+			data, err := base64.URLEncoding.DecodeString(part.Body.Data)
+			if err != nil {
+				log.Fatalf("Unable to decode message body: %v", err)
+			}
+			GmailMSG.Body = string(data)
 
-				// If there is text in second layer payload.
-			} else if part.MimeType == "multipart/alternative" {
-				// Body data is split across multiple parts.
-				for _, subpart := range part.Parts {
-					if subpart.MimeType == "text/plain" {
-						// Body data is in Base64 format.
-						data, err := base64.StdEncoding.DecodeString(subpart.Body.Data)
-						if err != nil {
-							log.Fatalf("Unable to decode message body: %v", err)
-						}
-						GmailMSG.Body = string(data)
+			// If there is text in second layer payload.
+		} else if part.MimeType == "text/html" {
+			data, err := base64.URLEncoding.DecodeString(part.Body.Data)
+			if err != nil {
+				log.Fatalf("Unable to decode message body: %v", err)
+			}
+			GmailMSG.Body = string(data)
+
+		} else if part.MimeType == "multipart/alternative" {
+			// Body data is split across multiple parts.
+			for _, subpart := range part.Parts {
+				if subpart.MimeType == "text/plain" {
+					// Body data is in Base64 format.
+					data, err := base64.StdEncoding.DecodeString(subpart.Body.Data)
+					if err != nil {
+						log.Fatalf("Unable to decode message body: %v", err)
 					}
+					GmailMSG.Body = string(data)
 				}
+			}
 
-				// If there is text in third layer payload.
-			} else if part.MimeType == "multipart/mixed" {
-				for _, subpart := range part.Parts {
-					if subpart.MimeType == "multipart/alternative" {
-						for _, subsubpart := range part.Parts {
-							if subsubpart.MimeType == "text/plain" {
-								if strings.HasPrefix(subpart.Body.Data, "Content-Transfer-Encoding: base64") {
-									// Body data is in Base64 format.
-									data, err := base64.StdEncoding.DecodeString(subpart.Body.Data[28:])
-									if err != nil {
-										log.Fatalf("Unable to decode message body: %v", err)
-									}
-									GmailMSG.Body = string(data)
+			// If there is text in third layer payload.
+		} else if part.MimeType == "multipart/mixed" {
+			for _, subpart := range part.Parts {
+				if subpart.MimeType == "multipart/alternative" {
+					for _, subsubpart := range part.Parts {
+						if subsubpart.MimeType == "text/plain" {
+							if strings.HasPrefix(subpart.Body.Data, "Content-Transfer-Encoding: base64") {
+								// Body data is in Base64 format.
+								data, err := base64.StdEncoding.DecodeString(subpart.Body.Data[28:])
+								if err != nil {
+									log.Fatalf("Unable to decode message body: %v", err)
 								}
+								GmailMSG.Body = string(data)
 							}
 						}
 					}
