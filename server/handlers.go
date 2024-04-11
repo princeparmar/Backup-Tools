@@ -155,7 +155,7 @@ func handleSendFileFromStorjToGoogleDrive(c echo.Context) error {
 type AlbumsJSON struct {
 	Title string `json:"album_title"`
 	ID    string `json:"album_id"`
-	Items int64  `json:"items_count"`
+	Items string `json:"items_count"`
 }
 
 // Shows list of user's Google Photos albums.
@@ -184,7 +184,7 @@ func handleListGPhotosAlbums(c echo.Context) error {
 		photosListJSON = append(photosListJSON, &AlbumsJSON{
 			Title: v.Title,
 			ID:    v.ID,
-			Items: v.TotalMediaItems,
+			Items: v.MediaItemsCount,
 		})
 	}
 
@@ -240,8 +240,8 @@ type AllPhotosJSON struct {
 	MimeType     string `json:"mime_type"`
 	AlbumName    string `json:"album_name"`
 	CreationTime string `json:"creation_time"`
-	Width        int64  `json:"width"`
-	Height       int64  `json:"height"`
+	Width        string `json:"width"`
+	Height       string `json:"height"`
 }
 
 func handleListAllPhotos(c echo.Context) error {

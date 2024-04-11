@@ -92,5 +92,5 @@ func StartServer(db *storage.PosgresStore) {
 	quickbooks.GET("/items-to-storj", handleQuickbooksItemsToStorj)
 	quickbooks.GET("/invoices-to-storj", handleQuickbooksInvoicesToStorj)
 
-	e.Start(":8000")
+	e.Start(":8005")
 }
