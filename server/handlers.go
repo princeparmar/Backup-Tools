@@ -18,8 +18,12 @@ import (
 	"storj-integrations/storage"
 	"storj-integrations/storj"
 	"storj-integrations/utils"
+	"sync"
 
+	"github.com/gphotosuploader/google-photos-api-client-go/v2/albums"
+	"github.com/gphotosuploader/google-photos-api-client-go/v2/media_items"
 	"github.com/labstack/echo/v4"
+	"golang.org/x/sync/errgroup"
 )
 
 // <<<<<------------ GOOGLE DRIVE ------------>>>>>
@@ -217,7 +221,7 @@ func handleListPhotosInAlbum(c echo.Context) error {
 			})
 		}
 	}
-	files, err := client.ListFilesFromAlbum(c, id)
+	files, err := client.ListFilesFromAlbum(c.Request().Context(), id)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -267,15 +271,47 @@ func handleListAllPhotos(c echo.Context) error {
 			"error": err.Error(),
 		})
 	}
-	var photosRespJSON []*AllPhotosJSON
+
+	type albumData struct {
+		albumTitle string
+		files      []media_items.MediaItem
+	}
+
+	var finalData []albumData
+
+	var mt sync.Mutex
+	g, ctx := errgroup.WithContext(c.Request().Context())
+	g.SetLimit(10)
+
 	for _, alb := range albs {
-		files, err := client.ListFilesFromAlbum(c, alb.ID)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
+		func(alb albums.Album) { // added this function to avoid closure issue https://stackoverflow.com/questions/26692844/captured-closure-for-loop-variable-in-go
+			g.Go(func() error {
+				files, err := client.ListFilesFromAlbum(ctx, alb.ID)
+				if err != nil {
+					return err
+				}
+
+				mt.Lock()
+				defer mt.Unlock()
+				finalData = append(finalData, albumData{
+					albumTitle: alb.Title,
+					files:      files,
+				})
+
+				return nil
 			})
-		}
-		for _, v := range files {
+		}(alb)
+	}
+
+	if err := g.Wait(); err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
+	var photosRespJSON []*AllPhotosJSON
+	for _, data := range finalData {
+		for _, v := range data.files {
 			photosRespJSON = append(photosRespJSON, &AllPhotosJSON{
 				Name:         v.Filename,
 				ID:           v.ID,
@@ -283,13 +319,14 @@ func handleListAllPhotos(c echo.Context) error {
 				BaseURL:      v.BaseURL,
 				ProductURL:   v.ProductURL,
 				MimeType:     v.MimeType,
-				AlbumName:    alb.Title,
+				AlbumName:    data.albumTitle,
 				CreationTime: v.MediaMetadata.CreationTime,
 				Width:        v.MediaMetadata.Width,
 				Height:       v.MediaMetadata.Height,
 			})
 		}
 	}
+
 	return c.JSON(http.StatusOK, photosRespJSON)
 
 }
@@ -416,7 +453,7 @@ func handleSendAllFilesFromGooglePhotosToStorj(c echo.Context) error {
 			})
 		}
 	}
-	files, err := client.ListFilesFromAlbum(c, id)
+	files, err := client.ListFilesFromAlbum(c.Request().Context(), id)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),

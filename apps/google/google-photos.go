@@ -57,8 +57,8 @@ func (gpclient *GPotosClient) UploadFileToGPhotos(c echo.Context, filename, albu
 }
 
 // Func takes Google Photos album ID and returns files data in this album.
-func (gpclient *GPotosClient) ListFilesFromAlbum(c echo.Context, albumID string) ([]media_items.MediaItem, error) {
-	files, err := gpclient.MediaItems.ListByAlbum(context.Background(), albumID)
+func (gpclient *GPotosClient) ListFilesFromAlbum(ctx context.Context, albumID string) ([]media_items.MediaItem, error) {
+	files, err := gpclient.MediaItems.ListByAlbum(ctx, albumID)
 	if err != nil {
 		return nil, err
 	}
