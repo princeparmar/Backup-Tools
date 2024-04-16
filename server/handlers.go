@@ -221,6 +221,14 @@ func handleListPhotosInAlbum(c echo.Context) error {
 			})
 		}
 	}
+
+	albm, err := client.Albums.GetById(c.Request().Context(), id)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
 	files, err := client.ListFilesFromAlbum(c.Request().Context(), id)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -228,11 +236,19 @@ func handleListPhotosInAlbum(c echo.Context) error {
 		})
 	}
 
-	var photosRespJSON []*PhotosJSON
+	var photosRespJSON []*AllPhotosJSON
 	for _, v := range files {
-		photosRespJSON = append(photosRespJSON, &PhotosJSON{
-			Name: v.Filename,
-			ID:   v.ID,
+		photosRespJSON = append(photosRespJSON, &AllPhotosJSON{
+			Name:         v.Filename,
+			ID:           v.ID,
+			Description:  v.Description,
+			BaseURL:      v.BaseURL,
+			ProductURL:   v.ProductURL,
+			MimeType:     v.MimeType,
+			AlbumName:    albm.Title,
+			CreationTime: v.MediaMetadata.CreationTime,
+			Width:        v.MediaMetadata.Width,
+			Height:       v.MediaMetadata.Height,
 		})
 	}
 
