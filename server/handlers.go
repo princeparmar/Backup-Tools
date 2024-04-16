@@ -266,6 +266,7 @@ type AllPhotosJSON struct {
 	CreationTime string `json:"creation_time"`
 	Width        string `json:"width"`
 	Height       string `json:"height"`
+	Synced       bool   `json:"synced"`
 }
 
 func handleListAllPhotos(c echo.Context) error {
