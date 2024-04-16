@@ -60,15 +60,14 @@ func handleSendFileFromGoogleDriveToStorj(c echo.Context) error {
 			})
 		}
 	}
-	accesGrant, err := c.Cookie("storj_access_token")
-	if err != nil {
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"message": "Storj is unauthenticated",
-			"error":   err.Error(),
+			"error": "storj access token is missing",
 		})
 	}
 
-	err = storj.UploadObject(context.Background(), accesGrant.Value, "google-drive", name, data)
+	err = storj.UploadObject(context.Background(), accesGrant, "google-drive", name, data)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"error": fmt.Sprintf("failed to upload file to Storj: %v", err),
@@ -102,15 +101,14 @@ func handleSendAllFilesFromGoogleDriveToStorj(c echo.Context) error {
 				"error":   err.Error(),
 			})
 		}
-		accesGrant, err := c.Cookie("storj_access_token")
-		if err != nil {
+		accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+		if accesGrant == "" {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"message": "Storj is unauthenticated",
-				"error":   err.Error(),
+				"error": "storj access token is missing",
 			})
 		}
 
-		err = storj.UploadObject(context.Background(), accesGrant.Value, "google-drive", name, data)
+		err = storj.UploadObject(context.Background(), accesGrant, "google-drive", name, data)
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 				"message": fmt.Sprintf("failed to upload file to Storj: %v", err),
@@ -126,14 +124,14 @@ func handleSendAllFilesFromGoogleDriveToStorj(c echo.Context) error {
 // Sends file from Storj to Google Drive
 func handleSendFileFromStorjToGoogleDrive(c echo.Context) error {
 	name := c.Param("name")
-	accesGrant, err := c.Cookie("storj_access_token")
-	if err != nil {
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "Storj is unauthenticated",
+			"error": "storj access token is missing",
 		})
 	}
 
-	data, err := storj.DownloadObject(context.Background(), accesGrant.Value, "google-drive", name)
+	data, err := storj.DownloadObject(context.Background(), accesGrant, "google-drive", name)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"error": fmt.Sprintf("failed to download object from Storj: %v", err),
@@ -351,14 +349,14 @@ func handleListAllPhotos(c echo.Context) error {
 // Sends photo item from Storj to Google Photos.
 func handleSendFileFromStorjToGooglePhotos(c echo.Context) error {
 	name := c.Param("name")
-	accesGrant, err := c.Cookie("storj_access_token")
-	if err != nil {
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
+			"error": "storj access token is missing",
 		})
 	}
 
-	data, err := storj.DownloadObject(context.Background(), accesGrant.Value, "google-photos", name)
+	data, err := storj.DownloadObject(context.Background(), accesGrant, "google-photos", name)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -403,11 +401,10 @@ func handleSendFileFromStorjToGooglePhotos(c echo.Context) error {
 // Sends photo item from Google Photos to Storj.
 func handleSendFileFromGooglePhotosToStorj(c echo.Context) error {
 	id := c.Param("ID")
-	accesGrant, err := c.Cookie("storj_access_token")
-	if err != nil {
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error":   err.Error(),
-			"message": "storj is unauthenticated",
+			"error": "storj access token is missing",
 		})
 	}
 
@@ -443,7 +440,7 @@ func handleSendFileFromGooglePhotosToStorj(c echo.Context) error {
 		})
 	}
 
-	err = storj.UploadObject(context.Background(), accesGrant.Value, "google-photos", item.Filename, body)
+	err = storj.UploadObject(context.Background(), accesGrant, "google-photos", item.Filename, body)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -484,11 +481,10 @@ func handleSendAllFilesFromGooglePhotosToStorj(c echo.Context) error {
 			ID:   v.ID,
 		})
 	}
-	accesGrant, err := c.Cookie("storj_access_token")
-	if err != nil {
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error":   err.Error(),
-			"message": "storj is unauthenticated",
+			"error": "storj access token is missing",
 		})
 	}
 
@@ -514,7 +510,7 @@ func handleSendAllFilesFromGooglePhotosToStorj(c echo.Context) error {
 			})
 		}
 
-		err = storj.UploadObject(context.Background(), accesGrant.Value, "google-photos", item.Filename, body)
+		err = storj.UploadObject(context.Background(), accesGrant, "google-photos", item.Filename, body)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),
@@ -635,7 +631,12 @@ func handleGmailGetMessage(c echo.Context) error {
 // If there's no database yet - creates one.
 func handleGmailMessageToStorj(c echo.Context) error {
 	id := c.Param("ID")
-	accesGrant, err := c.Cookie("storj_access_token")
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "storj access token is missing",
+		})
+	}
 
 	// FETCH THE EMAIL TO GOLANG STRUCT
 
@@ -671,7 +672,7 @@ func handleGmailMessageToStorj(c echo.Context) error {
 
 	if len(msg.Attachments) > 0 {
 		for _, att := range msg.Attachments {
-			err = storj.UploadObject(context.Background(), accesGrant.Value, "gmail", att.FileName, att.Data)
+			err = storj.UploadObject(context.Background(), accesGrant, "gmail", att.FileName, att.Data)
 			if err != nil {
 				return c.JSON(http.StatusForbidden, map[string]interface{}{
 					"error": err.Error(),
@@ -685,7 +686,7 @@ func handleGmailMessageToStorj(c echo.Context) error {
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
 
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant.Value, "gmail", "gmails.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "gmail", "gmails.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
@@ -730,7 +731,7 @@ func handleGmailMessageToStorj(c echo.Context) error {
 	}
 
 	// delete old db copy from storj
-	err = storj.DeleteObject(context.Background(), accesGrant.Value, "gmail", "gmails.db")
+	err = storj.DeleteObject(context.Background(), accesGrant, "gmail", "gmails.db")
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -738,7 +739,7 @@ func handleGmailMessageToStorj(c echo.Context) error {
 	}
 
 	// upload file to storj
-	err = storj.UploadObject(context.Background(), accesGrant.Value, "gmail", "gmails.db", dbByte)
+	err = storj.UploadObject(context.Background(), accesGrant, "gmail", "gmails.db", dbByte)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -757,10 +758,15 @@ func handleGmailMessageToStorj(c echo.Context) error {
 }
 
 func handleGetGmailDBFromStorj(c echo.Context) error {
-	accesGrant, err := c.Cookie("storj_access_token")
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "storj access token is missing",
+		})
+	}
 
 	// Copy file from storj to local cache if everything's fine.
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant.Value, "gmail", "gmails.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "gmail", "gmails.db")
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{"message": "no emails saved in Storj database", "error": err.Error()})
 	}
@@ -845,7 +851,12 @@ func handleStorageListObjects(c echo.Context) error {
 func handleGoogleCloudItemToStorj(c echo.Context) error {
 	bucketName := c.Param("bucketName")
 	itemName := c.Param("itemName")
-	accesGrant, err := c.Cookie("storj_access_token")
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "storj access token is missing",
+		})
+	}
 
 	client, err := google.NewGoogleStorageClient(c)
 	if err != nil {
@@ -867,7 +878,7 @@ func handleGoogleCloudItemToStorj(c echo.Context) error {
 		})
 	}
 
-	err = storj.UploadObject(context.Background(), accesGrant.Value, "google-cloud", obj.Name, obj.Data)
+	err = storj.UploadObject(context.Background(), accesGrant, "google-cloud", obj.Name, obj.Data)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -881,7 +892,12 @@ func handleGoogleCloudItemToStorj(c echo.Context) error {
 func handleStorjToGoogleCloud(c echo.Context) error {
 	bucketName := c.Param("bucketName")
 	itemName := c.Param("itemName")
-	accesGrant, err := c.Cookie("storj_access_token")
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "storj access token is missing",
+		})
+	}
 
 	client, err := google.NewGoogleStorageClient(c)
 	if err != nil {
@@ -896,7 +912,7 @@ func handleStorjToGoogleCloud(c echo.Context) error {
 		}
 	}
 
-	data, err := storj.DownloadObject(context.Background(), accesGrant.Value, "google-cloud", itemName)
+	data, err := storj.DownloadObject(context.Background(), accesGrant, "google-cloud", itemName)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -920,7 +936,12 @@ func handleStorjToGoogleCloud(c echo.Context) error {
 func handleAllFilesFromGoogleCloudBucketToStorj(c echo.Context) error {
 	bucketName := c.Param("bucketName")
 
-	accesGrant, err := c.Cookie("storj_access_token")
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "storj access token is missing",
+		})
+	}
 
 	client, err := google.NewGoogleStorageClient(c)
 	if err != nil {
@@ -950,7 +971,7 @@ func handleAllFilesFromGoogleCloudBucketToStorj(c echo.Context) error {
 			})
 		}
 
-		err = storj.UploadObject(context.Background(), accesGrant.Value, "google-cloud", obj.Name, obj.Data)
+		err = storj.UploadObject(context.Background(), accesGrant, "google-cloud", obj.Name, obj.Data)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),
@@ -966,7 +987,12 @@ func handleAllFilesFromGoogleCloudBucketToStorj(c echo.Context) error {
 
 func handleDropboxToStorj(c echo.Context) error {
 	filePath := c.Param("filePath")
-	accesGrant, err := c.Cookie("storj_access_token")
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "storj access token is missing",
+		})
+	}
 
 	client, err := dropbox.NewDropboxClient()
 	if err != nil {
@@ -984,7 +1010,7 @@ func handleDropboxToStorj(c echo.Context) error {
 
 	data, err := io.ReadAll(file.Data)
 
-	err = storj.UploadObject(context.Background(), accesGrant.Value, "dropbox", file.Name, data)
+	err = storj.UploadObject(context.Background(), accesGrant, "dropbox", file.Name, data)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -996,9 +1022,14 @@ func handleDropboxToStorj(c echo.Context) error {
 
 func handleStorjToDropbox(c echo.Context) error {
 	filePath := c.Param("filePath")
-	accesGrant, err := c.Cookie("storj_access_token")
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "storj access token is missing",
+		})
+	}
 
-	objData, err := storj.DownloadObject(context.Background(), accesGrant.Value, "dropbox", filePath)
+	objData, err := storj.DownloadObject(context.Background(), accesGrant, "dropbox", filePath)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -1041,10 +1072,10 @@ func handleListAWSs3BucketFiles(c echo.Context) error {
 func handleS3toStorj(c echo.Context) error {
 	bucketName := c.Param("bucketName")
 	itemName := c.Param("itemName")
-	accesGrant, err := c.Cookie("storj_access_token")
-	if err != nil {
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
+			"error": "storj access token is missing",
 		})
 	}
 
@@ -1075,7 +1106,7 @@ func handleS3toStorj(c echo.Context) error {
 		})
 	}
 
-	err = storj.UploadObject(context.Background(), accesGrant.Value, "aws-s3", itemName, data)
+	err = storj.UploadObject(context.Background(), accesGrant, "aws-s3", itemName, data)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -1088,14 +1119,14 @@ func handleS3toStorj(c echo.Context) error {
 func handleStorjToS3(c echo.Context) error {
 	bucketName := c.Param("bucketName")
 	itemName := c.Param("itemName")
-	accesGrant, err := c.Cookie("storj_access_token")
-	if err != nil {
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
+			"error": "storj access token is missing",
 		})
 	}
 
-	data, err := storj.DownloadObject(context.Background(), accesGrant.Value, "aws-s3", itemName)
+	data, err := storj.DownloadObject(context.Background(), accesGrant, "aws-s3", itemName)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{"message": "error downloading object from Storj" + err.Error(), "error": err.Error()})
 	}
@@ -1214,10 +1245,10 @@ func handleGithubRepositoryToStorj(c echo.Context) error {
 		})
 	}
 
-	accesGrant, err := c.Cookie("storj_access_token")
-	if err != nil {
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
+			"error": "storj access token is missing",
 		})
 	}
 
@@ -1253,7 +1284,7 @@ func handleGithubRepositoryToStorj(c echo.Context) error {
 		})
 	}
 
-	err = storj.UploadObject(context.Background(), accesGrant.Value, "github", repoName, data)
+	err = storj.UploadObject(context.Background(), accesGrant, "github", repoName, data)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -1272,10 +1303,10 @@ func handleRepositoryFromStorjToGithub(c echo.Context) error {
 		})
 	}
 
-	accesGrant, err := c.Cookie("storj_access_token")
-	if err != nil {
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
+			"error": "storj access token is missing",
 		})
 	}
 
@@ -1284,7 +1315,7 @@ func handleRepositoryFromStorjToGithub(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "repo name is now specified"})
 	}
 
-	repoData, err := storj.DownloadObject(context.Background(), accesGrant.Value, "github", repo)
+	repoData, err := storj.DownloadObject(context.Background(), accesGrant, "github", repo)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{"message": "error downloading object from Storj" + err.Error(), "error": err.Error()})
 	}
@@ -1381,7 +1412,12 @@ func createShopifyCleint(c echo.Context, shopname string) *shopify.ShopifyClient
 }
 
 func handleShopifyProductsToStorj(c echo.Context) error {
-	accesGrant, err := c.Cookie("storj_access_token")
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "storj access token is missing",
+		})
+	}
 	shopname := c.Param("shopname")
 
 	client := createShopifyCleint(c, shopname)
@@ -1396,7 +1432,7 @@ func handleShopifyProductsToStorj(c echo.Context) error {
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/shopify.db"
 
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant.Value, "shopify", "shopify.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "shopify", "shopify.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
@@ -1440,7 +1476,7 @@ func handleShopifyProductsToStorj(c echo.Context) error {
 	}
 
 	// delete old db copy from storj
-	err = storj.DeleteObject(context.Background(), accesGrant.Value, "shopify", "shopify.db")
+	err = storj.DeleteObject(context.Background(), accesGrant, "shopify", "shopify.db")
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -1448,7 +1484,7 @@ func handleShopifyProductsToStorj(c echo.Context) error {
 	}
 
 	// upload file to storj
-	err = storj.UploadObject(context.Background(), accesGrant.Value, "shopify", "shopify.db", dbByte)
+	err = storj.UploadObject(context.Background(), accesGrant, "shopify", "shopify.db", dbByte)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -1467,7 +1503,12 @@ func handleShopifyProductsToStorj(c echo.Context) error {
 }
 
 func handleShopifyCustomersToStorj(c echo.Context) error {
-	accesGrant, err := c.Cookie("storj_access_token")
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "storj access token is missing",
+		})
+	}
 	shopname := c.Param("shopname")
 
 	client := createShopifyCleint(c, shopname)
@@ -1482,7 +1523,7 @@ func handleShopifyCustomersToStorj(c echo.Context) error {
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/shopify.db"
 
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant.Value, "shopify", "shopify.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "shopify", "shopify.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
@@ -1526,7 +1567,7 @@ func handleShopifyCustomersToStorj(c echo.Context) error {
 	}
 
 	// delete old db copy from storj
-	err = storj.DeleteObject(context.Background(), accesGrant.Value, "shopify", "shopify.db")
+	err = storj.DeleteObject(context.Background(), accesGrant, "shopify", "shopify.db")
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -1534,7 +1575,7 @@ func handleShopifyCustomersToStorj(c echo.Context) error {
 	}
 
 	// upload file to storj
-	err = storj.UploadObject(context.Background(), accesGrant.Value, "shopify", "shopify.db", dbByte)
+	err = storj.UploadObject(context.Background(), accesGrant, "shopify", "shopify.db", dbByte)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -1554,7 +1595,12 @@ func handleShopifyCustomersToStorj(c echo.Context) error {
 }
 
 func handleShopifyOrdersToStorj(c echo.Context) error {
-	accesGrant, err := c.Cookie("storj_access_token")
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "storj access token is missing",
+		})
+	}
 	shopname := c.Param("shopname")
 
 	client := createShopifyCleint(c, shopname)
@@ -1569,7 +1615,7 @@ func handleShopifyOrdersToStorj(c echo.Context) error {
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/shopify.db"
 
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant.Value, "shopify", "shopify.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "shopify", "shopify.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
@@ -1613,7 +1659,7 @@ func handleShopifyOrdersToStorj(c echo.Context) error {
 	}
 
 	// delete old db copy from storj
-	err = storj.DeleteObject(context.Background(), accesGrant.Value, "shopify", "shopify.db")
+	err = storj.DeleteObject(context.Background(), accesGrant, "shopify", "shopify.db")
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -1621,7 +1667,7 @@ func handleShopifyOrdersToStorj(c echo.Context) error {
 	}
 
 	// upload file to storj
-	err = storj.UploadObject(context.Background(), accesGrant.Value, "shopify", "shopify.db", dbByte)
+	err = storj.UploadObject(context.Background(), accesGrant, "shopify", "shopify.db", dbByte)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -1718,7 +1764,12 @@ func handleShopifyAuthRedirect(c echo.Context) error {
 // }
 
 func handleQuickbooksCustomersToStorj(c echo.Context) error {
-	accesGrant, err := c.Cookie("storj_access_token")
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "storj access token is missing",
+		})
+	}
 
 	client, _ := quickbooks.CreateClient()
 	customers, err := client.Client.FetchCustomers()
@@ -1730,7 +1781,7 @@ func handleQuickbooksCustomersToStorj(c echo.Context) error {
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/quickbooks.db"
 
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
@@ -1774,7 +1825,7 @@ func handleQuickbooksCustomersToStorj(c echo.Context) error {
 	}
 
 	// delete old db copy from storj
-	err = storj.DeleteObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db")
+	err = storj.DeleteObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db")
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -1782,7 +1833,7 @@ func handleQuickbooksCustomersToStorj(c echo.Context) error {
 	}
 
 	// upload file to storj
-	err = storj.UploadObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db", dbByte)
+	err = storj.UploadObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db", dbByte)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -1801,7 +1852,12 @@ func handleQuickbooksCustomersToStorj(c echo.Context) error {
 }
 
 func handleQuickbooksItemsToStorj(c echo.Context) error {
-	accesGrant, err := c.Cookie("storj_access_token")
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "storj access token is missing",
+		})
+	}
 
 	client, _ := quickbooks.CreateClient()
 	items, err := client.Client.FetchItems()
@@ -1813,7 +1869,7 @@ func handleQuickbooksItemsToStorj(c echo.Context) error {
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/quickbooks.db"
 
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
@@ -1857,7 +1913,7 @@ func handleQuickbooksItemsToStorj(c echo.Context) error {
 	}
 
 	// delete old db copy from storj
-	err = storj.DeleteObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db")
+	err = storj.DeleteObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db")
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -1865,7 +1921,7 @@ func handleQuickbooksItemsToStorj(c echo.Context) error {
 	}
 
 	// upload file to storj
-	err = storj.UploadObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db", dbByte)
+	err = storj.UploadObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db", dbByte)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -1884,7 +1940,12 @@ func handleQuickbooksItemsToStorj(c echo.Context) error {
 }
 
 func handleQuickbooksInvoicesToStorj(c echo.Context) error {
-	accesGrant, err := c.Cookie("storj_access_token")
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "storj access token is missing",
+		})
+	}
 
 	client, _ := quickbooks.CreateClient()
 	invoices, err := client.Client.FetchInvoices()
@@ -1896,7 +1957,7 @@ func handleQuickbooksInvoicesToStorj(c echo.Context) error {
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/quickbooks.db"
 
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
@@ -1940,7 +2001,7 @@ func handleQuickbooksInvoicesToStorj(c echo.Context) error {
 	}
 
 	// delete old db copy from storj
-	err = storj.DeleteObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db")
+	err = storj.DeleteObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db")
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -1948,7 +2009,7 @@ func handleQuickbooksInvoicesToStorj(c echo.Context) error {
 	}
 
 	// upload file to storj
-	err = storj.UploadObject(context.Background(), accesGrant.Value, "quickbooks", "quickbooks.db", dbByte)
+	err = storj.UploadObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db", dbByte)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
