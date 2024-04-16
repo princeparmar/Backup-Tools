@@ -400,7 +400,14 @@ func handleSendFileFromStorjToGooglePhotos(c echo.Context) error {
 
 // Sends photo item from Google Photos to Storj.
 func handleSendFileFromGooglePhotosToStorj(c echo.Context) error {
-	id := c.Param("ID")
+	allIDs := []string{}
+	err := c.Bind(&allIDs)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
 	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -420,36 +427,46 @@ func handleSendFileFromGooglePhotosToStorj(c echo.Context) error {
 			})
 		}
 	}
-	item, err := client.GetPhoto(c, id)
-	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
-	resp, err := http.Get(item.BaseURL)
-	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
-		})
+
+	g, ctx := errgroup.WithContext(c.Request().Context())
+	g.SetLimit(10)
+
+	for _, id := range allIDs {
+		func(id string) {
+			g.Go(func() error {
+				return uploadSingleFileFromPhotosToStorj(ctx, client, id, accesGrant)
+			})
+		}(id)
 	}
 
-	err = storj.UploadObject(context.Background(), accesGrant, "google-photos", item.Filename, body)
-	if err != nil {
+	if err := g.Wait(); err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message": "file " + item.Filename + " was successfully uploaded from Google Photos to Storj",
+		"message": "all files were successfully uploaded from Google Photos to Storj",
 	})
+}
+
+func uploadSingleFileFromPhotosToStorj(ctx context.Context, client *google.GPotosClient, id, accesGrant string) error {
+	item, err := client.GetPhoto(ctx, id)
+	if err != nil {
+		return err
+	}
+	resp, err := http.Get(item.BaseURL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	return storj.UploadObject(context.Background(), accesGrant, "google-photos", item.Filename, body)
+
 }
 
 func handleSendAllFilesFromGooglePhotosToStorj(c echo.Context) error {
