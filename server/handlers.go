@@ -507,7 +507,7 @@ func handleSendAllFilesFromGooglePhotosToStorj(c echo.Context) error {
 
 	for _, p := range photosRespJSON {
 
-		item, err := client.GetPhoto(c, p.ID)
+		item, err := client.GetPhoto(c.Request().Context(), p.ID)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),
