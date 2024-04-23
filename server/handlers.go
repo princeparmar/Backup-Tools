@@ -205,6 +205,13 @@ type PhotosJSON struct {
 
 // Shows list of user's Google Photos items in given album.
 func handleListPhotosInAlbum(c echo.Context) error {
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "storj access token is missing",
+		})
+	}
+
 	id := c.Param("ID")
 
 	client, err := google.NewGPhotosClient(c)
@@ -234,6 +241,13 @@ func handleListPhotosInAlbum(c echo.Context) error {
 		})
 	}
 
+	listFromStorj, err := storj.ListObjects(c.Request().Context(), accesGrant, "google-photos")
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"error": fmt.Sprintf("failed to list objects from Storj: %v", err),
+		})
+	}
+
 	var photosRespJSON []*AllPhotosJSON
 	for _, v := range files {
 		photosRespJSON = append(photosRespJSON, &AllPhotosJSON{
@@ -247,6 +261,7 @@ func handleListPhotosInAlbum(c echo.Context) error {
 			CreationTime: v.MediaMetadata.CreationTime,
 			Width:        v.MediaMetadata.Width,
 			Height:       v.MediaMetadata.Height,
+			Synced:       listFromStorj[v.Filename],
 		})
 	}
 
