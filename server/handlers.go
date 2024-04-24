@@ -18,6 +18,7 @@ import (
 	"storj-integrations/storage"
 	"storj-integrations/storj"
 	"storj-integrations/utils"
+	"strings"
 	"sync"
 
 	"github.com/gphotosuploader/google-photos-api-client-go/v2/albums"
@@ -415,13 +416,21 @@ func handleSendFileFromStorjToGooglePhotos(c echo.Context) error {
 
 // Sends photo item from Google Photos to Storj.
 func handleSendFileFromGooglePhotosToStorj(c echo.Context) error {
-	allIDs := []string{}
-	err := c.Bind(&allIDs)
+
+	err := c.Request().ParseForm()
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
+
+	ids := c.FormValue("ids")
+	if ids == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "ids are missing",
+		})
+	}
+	allIDs := strings.Split(ids, ",")
 
 	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
 	if accesGrant == "" {
