@@ -529,9 +529,9 @@ func handleSendAllFilesFromGooglePhotosToStorj(c echo.Context) error {
 	for _, p := range photosRespJSON {
 		func(id string) {
 			g.Go(func() error {
-				return uploadSingleFileFromPhotosToStorj(ctx, client, p.ID, accesGrant)
+				return uploadSingleFileFromPhotosToStorj(ctx, client, id, accesGrant)
 			})
-		}(id)
+		}(p.ID)
 	}
 
 	if err := g.Wait(); err != nil {
