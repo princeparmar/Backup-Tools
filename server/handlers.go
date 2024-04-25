@@ -472,6 +472,7 @@ func uploadSingleFileFromPhotosToStorj(ctx context.Context, client *google.GPoto
 	if err != nil {
 		return err
 	}
+
 	resp, err := http.Get(item.BaseURL)
 	if err != nil {
 		return err
@@ -522,34 +523,21 @@ func handleSendAllFilesFromGooglePhotosToStorj(c echo.Context) error {
 		})
 	}
 
+	g, ctx := errgroup.WithContext(c.Request().Context())
+	g.SetLimit(10)
+
 	for _, p := range photosRespJSON {
+		func(id string) {
+			g.Go(func() error {
+				return uploadSingleFileFromPhotosToStorj(ctx, client, p.ID, accesGrant)
+			})
+		}(id)
+	}
 
-		item, err := client.GetPhoto(c.Request().Context(), p.ID)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-		resp, err := http.Get(item.BaseURL)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-		defer resp.Body.Close()
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-
-		err = storj.UploadObject(context.Background(), accesGrant, "google-photos", item.Filename, body)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
+	if err := g.Wait(); err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{"message": "all photos from album were successfully uploaded from Google Photos to Storj"})
