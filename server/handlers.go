@@ -487,7 +487,7 @@ func uploadSingleFileFromPhotosToStorj(ctx context.Context, client *google.GPoto
 }
 
 func handleSendAllFilesFromGooglePhotosToStorj(c echo.Context) error {
-	id := c.Param("ID")
+	id := c.FormValue("album_id")
 
 	client, err := google.NewGPhotosClient(c)
 	if err != nil {
