@@ -417,13 +417,6 @@ func handleSendFileFromStorjToGooglePhotos(c echo.Context) error {
 // Sends photo item from Google Photos to Storj.
 func handleSendFileFromGooglePhotosToStorj(c echo.Context) error {
 
-	err := c.Request().ParseForm()
-	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
-
 	ids := c.FormValue("ids")
 	if ids == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
