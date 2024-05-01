@@ -1,6 +1,7 @@
 package server
 
 import (
+	"log/slog"
 	googlepack "storj-integrations/apps/google"
 	"storj-integrations/storage"
 	"storj-integrations/storj"
@@ -37,7 +38,8 @@ func StartServer(db *storage.PosgresStore) {
 	google.GET("/drive-get-file-names", handleGetGoogleDriveFileNames)
 	google.GET("/drive-get-file/:ID", googlepack.GetFileByID)
 	google.GET("/all-drive-to-storj", handleSendAllFilesFromGoogleDriveToStorj)
-
+	google.GET("/folder/:name/list", handleListAllFolderFiles)
+	google.POST("/folder/:name/sync", handleSyncAllFolderFiles)
 	// Google Photos
 	google.GET("/photos-list-albums", handleListGPhotosAlbums)
 	google.GET("/photos-list-photos-in-album/:ID", handleListPhotosInAlbum)
@@ -96,5 +98,7 @@ func StartServer(db *storage.PosgresStore) {
 	quickbooks.GET("/items-to-storj", handleQuickbooksItemsToStorj)
 	quickbooks.GET("/invoices-to-storj", handleQuickbooksInvoicesToStorj)
 
-	e.Start(":8000")
+	if err := e.Start(":8000"); err != nil {
+		slog.Error("Error starting server", "error", err)
+	}
 }

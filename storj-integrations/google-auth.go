@@ -1,5 +1,5 @@
-package google
-
+package main
+/*
 import (
 	"context"
 	"log"
@@ -61,3 +61,4 @@ func Autentificate(c echo.Context) error {
 	frontendURL := os.Getenv("FRONTEND_URL") // Add Frontend URL for redirect to file .env
 	return c.Redirect(http.StatusTemporaryRedirect, frontendURL)
 }
+*/

@@ -39,8 +39,9 @@ func Autentificate(c echo.Context) error {
 	var redirectAddr string
 	frontendURL := os.Getenv("FRONTEND_URL") // Add Frontend URL for redirect to file .env
 
-	fmt.Println(err.Error())
+	
 	if err != nil {
+		fmt.Println(err.Error())
 		if code == "" {
 			authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
 			c.Redirect(http.StatusTemporaryRedirect, authURL)

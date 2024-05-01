@@ -5,8 +5,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"storj-integrations/storage"
 	"storj-integrations/utils"
+	"strings"
 
 	"net/http"
 	"os"
@@ -22,7 +24,8 @@ type FilesJSON struct {
 	ID   string `json:"file_id"`
 }
 
-// Retrievs all file names and their ID's from your Google Drive.
+
+// GetFileNames retrieves all file names and their IDs from Google Drive
 func GetFileNames(c echo.Context) ([]*FilesJSON, error) {
 	client, err := client(c)
 	if err != nil {
@@ -34,25 +37,34 @@ func GetFileNames(c echo.Context) ([]*FilesJSON, error) {
 		return nil, fmt.Errorf("failed to create Drive service: %v", err)
 	}
 
-	r, err := srv.Files.List().Fields("nextPageToken, files(id, name)").Do()
-	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve files: %v", err)
-	}
-
 	var fileResp []*FilesJSON
-	if len(r.Files) == 0 { // should return null if there is no docs
-		fileResp = nil
-	} else {
+
+	// Loop to handle pagination
+	pageToken := ""
+	for {
+		r, err := srv.Files.List().PageToken(pageToken).Do()
+		if err != nil {
+			return nil, fmt.Errorf("failed to retrieve files: %v", err)
+		}
+
+		// Append files to response
 		for _, i := range r.Files {
 			fileResp = append(fileResp, &FilesJSON{
 				Name: i.Name,
 				ID:   i.Id,
 			})
 		}
+
+		// Check if there's another page
+		pageToken = r.NextPageToken
+		if pageToken == "" {
+			break // No more pages
+		}
 	}
 
 	return fileResp, nil
 }
+
 
 // Returns file by ID as attachment.
 func GetFileByID(c echo.Context) error {
@@ -123,10 +135,27 @@ func GetFile(c echo.Context, id string) (string, []byte, error) {
 	if err != nil {
 		return "", nil, fmt.Errorf("unable to retrieve file metadata: %v", err)
 	}
-
+	slog.Debug("file", "name",file.Name, "mimetype", file.MimeType)
 	res, err := srv.Files.Get(id).Download()
 	if err != nil {
-		return "", nil, fmt.Errorf("unable to download file: %v", err)
+		if strings.Contains(err.Error(), "Use Export with Docs Editors files., fileNotDownloadable") {
+			var mt string
+			switch file.MimeType{
+			case "application/vnd.google-apps.document":
+				mt = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+			case "application/vnd.google-apps.spreadsheet":
+				mt ="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+			case "application/vnd.google-apps.presentation":
+				mt = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+			default:
+				mt=file.MimeType
+			}
+			if res, err = srv.Files.Export(id, mt).Download(); err != nil {
+				return "", nil, fmt.Errorf("unable to download file: %v", err)
+			}
+		} else {
+			return "", nil, fmt.Errorf("unable to download file: %v", err)
+		}
 	}
 	defer res.Body.Close()
 
@@ -158,4 +187,53 @@ func UploadFile(c echo.Context, name string, data []byte) error {
 		return err
 	}
 	return nil
+}
+
+
+
+// GetFilesInFolder retrieves all files within a specific folder from Google Drive
+func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
+	client, err := client(c)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Google Drive client: %v", err)
+	}
+
+	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Drive service: %v", err)
+	}
+
+	// Get folder ID by name
+	folderID, err := getFolderIDByName(srv, folderName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get folder ID: %v", err)
+	}
+
+	// List all files within the folder
+	r, err := srv.Files.List().Q(fmt.Sprintf("'%s' in parents", folderID)).Do()
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve files: %v", err)
+	}
+
+	var files []*FilesJSON
+	for _, f := range r.Files {
+		files = append(files, &FilesJSON{
+			Name: f.Name,
+			ID:   f.Id,
+		})
+	}
+
+	return files, nil
+}
+
+// Helper function to get folder ID by name
+func getFolderIDByName(srv *drive.Service, folderName string) (string, error) {
+	r, err := srv.Files.List().Q(fmt.Sprintf("name='%s' and mimeType='application/vnd.google-apps.folder'", folderName)).Fields("files(id)").Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to retrieve folder ID: %v", err)
+	}
+	if len(r.Files) == 0 {
+		return "", fmt.Errorf("folder '%s' not found", folderName)
+	}
+	return r.Files[0].Id, nil
 }
