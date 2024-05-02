@@ -20,12 +20,14 @@ import (
 	"storj-integrations/storage"
 	"storj-integrations/storj"
 	"storj-integrations/utils"
+	"strings"
 
 	"github.com/labstack/echo/v4"
 )
 
 // <<<<<------------ GOOGLE DRIVE ------------>>>>>
 
+// Get all files names in a google drive even in folder
 func handleGetGoogleDriveFileNames(c echo.Context) error {
 	fileNames, err := google.GetFileNames(c)
 	if err != nil {
@@ -43,6 +45,25 @@ func handleGetGoogleDriveFileNames(c echo.Context) error {
 	return c.JSON(http.StatusOK, fileNames)
 }
 
+// Get all files names in a google drive even in folder
+func handleRootGoogleDriveFileNames(c echo.Context) error {
+	fileNames, err := google.GetFileNamesInRoot(c)
+	if err != nil {
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			slog.Debug("Error retrieving file names from drive", "error", err)
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": "failed to retrieve file from Google Drive",
+			})
+		}
+	}
+	return c.JSON(http.StatusOK, fileNames)
+}
+
+// List all files in a folder given the folder name
 func handleListAllFolderFiles(c echo.Context) error {
 	folderName := c.Param("name")
 	fileNames, err := google.GetFilesInFolder(c, folderName)
@@ -60,6 +81,69 @@ func handleListAllFolderFiles(c echo.Context) error {
 	}
 	return c.JSON(http.StatusOK, fileNames)
 }
+
+// List all files in a folder given the folder ID
+func handleListAllFolderFilesByID(c echo.Context) error {
+	folderName := c.Param("id")
+	fileNames, err := google.GetFilesInFolderByID(c, folderName)
+	if err != nil {
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			slog.Debug("Error retrieving file names from drive", "error", err)
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": "failed to retrieve file from Google Drive",
+			})
+		}
+	}
+	return c.JSON(http.StatusOK, fileNames)
+}
+
+func handleFolder(folderName, folderID string, c echo.Context) error {
+	fileNames, err := google.GetFilesInFolderByID(c, folderID)
+	if err != nil {
+		return err
+	}
+	// If folder is empty, create an empty folder
+
+	accesGrant, err := c.Cookie("storj_access_token")
+	if err != nil {
+		return err
+	}
+	err = storj.UploadObject(context.Background(), accesGrant.Value, "google-drive", folderName+"/", nil)
+	if err != nil {
+		return err
+	}
+
+	for _, file := range fileNames {
+		name, data, err := google.GetFile(c, file.ID)
+		if err != nil {
+			if strings.Contains(err.Error(), "folder error") {
+				if err = handleFolder(path.Join(folderName, file.Name), file.ID, c); err != nil {
+					return err
+				}
+			} else if strings.Contains(err.Error(), "The requested conversion is not supported") || strings.Contains(err.Error(), "Export only supports Docs Editors files") {
+				// No conversion for this type
+				continue
+			} else {
+
+				return err
+			}
+		} else {
+			accesGrant, err := c.Cookie("storj_access_token")
+			if err != nil {
+				return err
+			}
+			err = storj.UploadObject(context.Background(), accesGrant.Value, "google-drive", path.Join(folderName, name), data)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
 func handleSyncAllFolderFiles(c echo.Context) error {
 	folderName := c.Param("name")
 	fileNames, err := google.GetFilesInFolder(c, folderName)
@@ -75,6 +159,21 @@ func handleSyncAllFolderFiles(c echo.Context) error {
 			})
 		}
 	}
+	// If folder is empty, create an empty folder
+
+	accesGrant, err := c.Cookie("storj_access_token")
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "Storj is unauthenticated",
+		})
+	}
+	err = storj.UploadObject(context.Background(), accesGrant.Value, "google-drive", folderName+"/", nil)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"error": fmt.Sprintf("failed to upload file to Storj: %v", err),
+		})
+	}
+
 	for _, file := range fileNames {
 		name, data, err := google.GetFile(c, file.ID)
 		if err != nil {
@@ -82,24 +181,108 @@ func handleSyncAllFolderFiles(c echo.Context) error {
 				return c.JSON(http.StatusUnauthorized, map[string]interface{}{
 					"error": "token expired",
 				})
+
+			} else if strings.Contains(err.Error(), "folder error") {
+				if err = handleFolder(path.Join(folderName, file.Name), file.ID, c); err != nil {
+					return c.JSON(http.StatusForbidden, map[string]interface{}{
+						"error": "failed to retrieve file from Google Drive folder:" + err.Error(),
+					})
+				}
+			} else if strings.Contains(err.Error(), "The requested conversion is not supported") || strings.Contains(err.Error(), "Export only supports Docs Editors files") {
+				// No conversion for this type
+				continue
 			} else {
 				return c.JSON(http.StatusForbidden, map[string]interface{}{
-					"error": "failed to retrieve file from Google Drive",
+					"error": "failed to retrieve file from Google Drive" + err.Error(),
+				})
+			}
+		} else {
+			accesGrant, err := c.Cookie("storj_access_token")
+			if err != nil {
+				return c.JSON(http.StatusForbidden, map[string]interface{}{
+					"error": "Storj is unauthenticated",
+				})
+			}
+
+			err = storj.UploadObject(context.Background(), accesGrant.Value, "google-drive", path.Join(folderName, name), data)
+			if err != nil {
+				return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+					"error": fmt.Sprintf("failed to upload file to Storj: %v", err),
 				})
 			}
 		}
-		accesGrant, err := c.Cookie("storj_access_token")
-		if err != nil {
+	}
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "all files were successfully uploaded from Google Drive folder to Storj",
+	})
+
+}
+func handleSyncAllFolderFilesByID(c echo.Context) error {
+	folderID := c.Param("id")
+	folderName, fileNames, err := google.GetFolderNameAndFilesInFolderByID(c, folderID)
+	if err != nil {
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			slog.Debug("Error retrieving file names from drive", "error", err)
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "Storj is unauthenticated",
+				"error": "failed to retrieve file from Google Drive",
 			})
 		}
+	}
+	// If folder is empty, create an empty folder
 
-		err = storj.UploadObject(context.Background(), accesGrant.Value, "google-drive", path.Join(folderName, name), data)
+	accesGrant, err := c.Cookie("storj_access_token")
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "Storj is unauthenticated",
+		})
+	}
+	err = storj.UploadObject(context.Background(), accesGrant.Value, "google-drive", folderName+"/", nil)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"error": fmt.Sprintf("failed to upload file to Storj: %v", err),
+		})
+	}
+
+	for _, file := range fileNames {
+		name, data, err := google.GetFile(c, file.ID)
 		if err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-				"error": fmt.Sprintf("failed to upload file to Storj: %v", err),
-			})
+			if err.Error() == "token error" {
+				return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+					"error": "token expired",
+				})
+
+			} else if strings.Contains(err.Error(), "folder error") {
+				if err = handleFolder(path.Join(folderName, file.Name), file.ID, c); err != nil {
+					return c.JSON(http.StatusForbidden, map[string]interface{}{
+						"error": "failed to retrieve file from Google Drive folder:" + err.Error(),
+					})
+				}
+			} else if strings.Contains(err.Error(), "The requested conversion is not supported") || strings.Contains(err.Error(), "Export only supports Docs Editors files") {
+				// No conversion for this type
+				continue
+			} else {
+				return c.JSON(http.StatusForbidden, map[string]interface{}{
+					"error": "failed to retrieve file from Google Drive" + err.Error(),
+				})
+			}
+		} else {
+			accesGrant, err := c.Cookie("storj_access_token")
+			if err != nil {
+				return c.JSON(http.StatusForbidden, map[string]interface{}{
+					"error": "Storj is unauthenticated",
+				})
+			}
+
+			err = storj.UploadObject(context.Background(), accesGrant.Value, "google-drive", path.Join(folderName, name), data)
+			if err != nil {
+				return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+					"error": fmt.Sprintf("failed to upload file to Storj: %v", err),
+				})
+			}
 		}
 	}
 	return c.JSON(http.StatusOK, map[string]interface{}{
@@ -144,7 +327,8 @@ func handleSendFileFromGoogleDriveToStorj(c echo.Context) error {
 }
 
 func handleSendAllFilesFromGoogleDriveToStorj(c echo.Context) error {
-	resp, err := google.GetFileNames(c)
+	// Get only file names in root
+	resp, err := google.GetFileNamesInRoot(c)
 	if err != nil {
 		if err.Error() == "token error" {
 			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -161,23 +345,40 @@ func handleSendAllFilesFromGoogleDriveToStorj(c echo.Context) error {
 	for _, f := range resp {
 		name, data, err := google.GetFile(c, f.ID)
 		if err != nil {
-			slog.Debug("Error retrieving google drive", "error", err)
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "failed to retrieve file from Google Drive",
-			})
-		}
-		accesGrant, err := c.Cookie("storj_access_token")
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "Storj is unauthenticated",
-			})
-		}
+			if err.Error() == "token error" {
+				return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+					"error": "token expired",
+				})
 
-		err = storj.UploadObject(context.Background(), accesGrant.Value, "google-drive", name, data)
-		if err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-				"error": fmt.Sprintf("failed to upload file to Storj: %v", err),
-			})
+			} else if strings.Contains(err.Error(), "folder error") {
+				if err = handleFolder(f.Name, f.ID, c); err != nil {
+					return c.JSON(http.StatusForbidden, map[string]interface{}{
+						"error": "failed to retrieve file from Google Drive folder:" + err.Error(),
+					})
+				}
+			} else if strings.Contains(err.Error(), "The requested conversion is not supported") || strings.Contains(err.Error(), "Export only supports Docs Editors files") {
+				// No conversion for this type
+				continue
+			} else {
+
+				return c.JSON(http.StatusForbidden, map[string]interface{}{
+					"error": "failed to retrieve file from Google Drive",
+				})
+			}
+		} else {
+			accesGrant, err := c.Cookie("storj_access_token")
+			if err != nil {
+				return c.JSON(http.StatusForbidden, map[string]interface{}{
+					"error": "Storj is unauthenticated",
+				})
+			}
+
+			err = storj.UploadObject(context.Background(), accesGrant.Value, "google-drive", name, data)
+			if err != nil {
+				return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+					"error": fmt.Sprintf("failed to upload file to Storj: %v", err),
+				})
+			}
 		}
 	}
 	return c.JSON(http.StatusOK, map[string]interface{}{
