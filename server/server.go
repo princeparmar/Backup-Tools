@@ -28,10 +28,24 @@ func StartServer(db *storage.PosgresStore) {
 
 	// Google Drive
 	google.GET("/drive-to-storj/:ID", handleSendFileFromGoogleDriveToStorj)
+	
 	google.GET("/storj-to-drive/:name", handleSendFileFromStorjToGoogleDrive)
+	// list all files in root and in root folders. 
+	google.GET("/drive-root-file-names", handleRootGoogleDriveFileNames)
+	// List all files in root and not in root folder. Only files and folders in Root
 	google.GET("/drive-get-file-names", handleGetGoogleDriveFileNames)
 	google.GET("/drive-get-file/:ID", googlepack.GetFileByID)
+
+	// All files and folders from drive to storj
 	google.GET("/all-drive-to-storj", handleSendAllFilesFromGoogleDriveToStorj)
+	// List files in a folder by name
+	google.GET("/folder/:name/list", handleListAllFolderFiles)
+	// sync all files from drive folder to storj using the folder name
+	google.POST("/folder/:name/sync", handleSyncAllFolderFiles)
+	// list files in folder by folder ID
+	google.GET("/folder/:id", handleListAllFolderFilesByID)
+	// sync files in folder by folder ID
+	google.POST("/folder/:id", handleSyncAllFolderFilesByID)
 
 	// Google Photos
 	google.GET("/photos-list-albums", handleListGPhotosAlbums)

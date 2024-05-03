@@ -2,6 +2,8 @@ package main
 
 import (
 	"log"
+	"log/slog"
+	"os"
 	"storj-integrations/server"
 	"storj-integrations/storage"
 
@@ -23,6 +25,7 @@ func main() {
 
 // Loads all data from .env file into Environmental variables.
 func init() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{AddSource: true, Level: slog.LevelDebug})))
 	err := godotenv.Load()
 	if err != nil {
 		log.Fatal(err)
