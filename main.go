@@ -25,7 +25,7 @@ func main() {
 
 // Loads all data from .env file into Environmental variables.
 func init() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{AddSource: true, Level: slog.LevelDebug})))
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{AddSource: true, Level: slog.LevelInfo})))
 	err := godotenv.Load()
 	if err != nil {
 		log.Fatal(err)

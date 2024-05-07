@@ -2,27 +2,35 @@ package google
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
-	"storj-integrations/storage"
-	"storj-integrations/utils"
-	"strings"
-
 	"net/http"
 	"os"
+	"path"
+	"slices"
+	"storj-integrations/storage"
+	"storj-integrations/storj"
+	"storj-integrations/utils"
+	"strings"
 
 	"github.com/labstack/echo/v4"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
+	"storj.io/uplink"
 )
 
 type FilesJSON struct {
-	Name string `json:"file_name"`
-	ID   string `json:"file_id"`
+	Name              string `json:"file_name"`
+	ID                string `json:"file_id"`
+	MimeType          string `json:"mime_type"`
+	Synced            bool   `json:"synced"`
+	Size              int64  `json:"size"`
+	FullFileExtension string `json:"full_file_extension"`
+	FileExtension     string `json:"file_extension"`
 }
 
 // GetFileNames retrieves all file names and their IDs from Google Drive
@@ -111,7 +119,6 @@ func client(c echo.Context) (*http.Client, error) {
 	if err != nil {
 		return nil, echo.NewHTTPError(http.StatusUnauthorized, "user is not authorized")
 	}
-	fmt.Println(tok.AccessToken)
 	client := config.Client(context.Background(), &tok)
 
 	return client, nil
@@ -133,7 +140,7 @@ func GetFile(c echo.Context, id string) (string, []byte, error) {
 	if err != nil {
 		return "", nil, fmt.Errorf("unable to retrieve file metadata: %v", err)
 	}
-	slog.Debug("file", "name", file.Name, "mimetype", file.MimeType)
+
 	res, err := srv.Files.Get(id).Download()
 	if err != nil {
 		if strings.Contains(err.Error(), "Use Export with Docs Editors files., fileNotDownloadable") {
@@ -150,12 +157,6 @@ func GetFile(c echo.Context, id string) (string, []byte, error) {
 				file.Name += ".pptx"
 			case "application/vnd.google-apps.site":
 				mt = "text/plain"
-			/*case "application/vnd.google-apps.shortcut":
-				fmt.Println(*file)
-				mt = file.MimeType
-			case "application/vnd.google-apps.form":
-				fmt.Println(*file)
-				//mt = file.MimeType*/
 			case "application/vnd.google-apps.script":
 				mt = "application/vnd.google-apps.script+json"
 				file.Name += ".json"
@@ -208,6 +209,10 @@ func UploadFile(c echo.Context, name string, data []byte) error {
 
 // GetFilesInFolder retrieves all files within a specific folder from Google Drive
 func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return nil, errors.New("storj access missing")
+	}
 	client, err := client(c)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get Google Drive client: %v", err)
@@ -223,7 +228,17 @@ func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get folder ID: %v", err)
 	}
-
+	folderName, err = GetFolderPathByID(context.Background(), srv, folderID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get folder name: %v", err)
+	}
+	o, err := storj.GetFilesInFolder(context.Background(), accesGrant, "google-drive", folderName+"/")
+	if err != nil {
+		return nil, errors.New("failed to get list from storj with error:" + err.Error())
+	}
+	slices.SortStableFunc(o, func(a, b uplink.Object) int {
+		return cmp.Compare(a.Key, b.Key)
+	})
 	// List all files within the folder
 	r, err := srv.Files.List().Q(fmt.Sprintf("'%s' in parents", folderID)).Do()
 	if err != nil {
@@ -231,18 +246,62 @@ func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
 	}
 
 	var files []*FilesJSON
-	for _, f := range r.Files {
-		files = append(files, &FilesJSON{
-			Name: f.Name,
-			ID:   f.Id,
-		})
+	for _, i := range r.Files {
+		if i.MimeType != "application/vnd.google-apps.folder" {
+			switch i.MimeType {
+			case "application/vnd.google-apps.document":
+				i.Name += ".docx"
+			case "application/vnd.google-apps.spreadsheet":
+				i.Name += ".xlsx"
+			case "application/vnd.google-apps.presentation":
+				i.Name += ".pptx"
+			case "application/vnd.google-apps.site":
+
+			case "application/vnd.google-apps.script":
+				i.Name += ".json"
+			}
+			_, synced := slices.BinarySearchFunc(o, path.Join(folderName, i.Name), func(a uplink.Object, b string) int {
+				return cmp.Compare(a.Key, b)
+			})
+			files = append(files, &FilesJSON{
+				Name:     i.Name,
+				ID:       i.Id,
+				MimeType: i.MimeType,
+				Size:     i.Size,
+				Synced:   synced,
+			})
+		} else {
+			_, synced := slices.BinarySearchFunc(o, path.Join(folderName, i.Name)+"/", func(a uplink.Object, b string) int {
+				return cmp.Compare(a.Key, b)
+			})
+			if synced {
+				folderFiles, _ := GetFilesInFolderByID(c, i.Id)
+				//var synced bool
+				for _, v := range folderFiles {
+					synced = v.Synced
+				}
+			}
+
+			files = append(files, &FilesJSON{
+				Name:     i.Name,
+				ID:       i.Id,
+				MimeType: i.MimeType,
+				Size:     i.Size,
+				Synced:   synced,
+			})
+		}
 	}
 
 	return files, nil
 }
 
+// func embeddedSynced(c echo.Context, folderID, folderName string)
 // GetFilesInFolder retrieves all files within a specific folder from Google Drive
 func GetFilesInFolderByID(c echo.Context, folderID string) ([]*FilesJSON, error) {
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return nil, errors.New("storj access missing")
+	}
 	client, err := client(c)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get Google Drive client: %v", err)
@@ -252,7 +311,18 @@ func GetFilesInFolderByID(c echo.Context, folderID string) ([]*FilesJSON, error)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Drive service: %v", err)
 	}
-
+	//fpath, err :=
+	folderName, err := GetFolderPathByID(context.Background(), srv, folderID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get folder name: %v", err)
+	}
+	o, err := storj.GetFilesInFolder(context.Background(), accesGrant, "google-drive", folderName+"/")
+	if err != nil {
+		return nil, errors.New("failed to get list from storj with error:" + err.Error())
+	}
+	slices.SortStableFunc(o, func(a, b uplink.Object) int {
+		return cmp.Compare(a.Key, b.Key)
+	})
 	// List all files within the folder
 	r, err := srv.Files.List().Q(fmt.Sprintf("'%s' in parents", folderID)).Do()
 	if err != nil {
@@ -260,23 +330,61 @@ func GetFilesInFolderByID(c echo.Context, folderID string) ([]*FilesJSON, error)
 	}
 
 	var files []*FilesJSON
-	for _, f := range r.Files {
-		files = append(files, &FilesJSON{
-			Name: f.Name,
-			ID:   f.Id,
-		})
+	for _, i := range r.Files {
+		if i.MimeType != "application/vnd.google-apps.folder" {
+			switch i.MimeType {
+			case "application/vnd.google-apps.document":
+				i.Name += ".docx"
+			case "application/vnd.google-apps.spreadsheet":
+				i.Name += ".xlsx"
+			case "application/vnd.google-apps.presentation":
+				i.Name += ".pptx"
+			case "application/vnd.google-apps.site":
+
+			case "application/vnd.google-apps.script":
+				i.Name += ".json"
+			}
+			_, synced := slices.BinarySearchFunc(o, path.Join(folderName, i.Name), func(a uplink.Object, b string) int {
+				return cmp.Compare(a.Key, b)
+			})
+			files = append(files, &FilesJSON{
+				Name:     i.Name,
+				ID:       i.Id,
+				MimeType: i.MimeType,
+				Size:     i.Size,
+				Synced:   synced,
+			})
+		} else {
+			_, synced := slices.BinarySearchFunc(o, path.Join(folderName, i.Name)+"/", func(a uplink.Object, b string) int {
+				return cmp.Compare(a.Key, b)
+			})
+			if synced {
+				folderFiles, _ := GetFilesInFolderByID(c, i.Id)
+				//var synced bool
+				for _, v := range folderFiles {
+					synced = v.Synced
+				}
+			}
+
+			files = append(files, &FilesJSON{
+				Name:     i.Name,
+				ID:       i.Id,
+				MimeType: i.MimeType,
+				Size:     i.Size,
+				Synced:   synced,
+			})
+		}
 	}
 
 	return files, nil
 }
 
-
 // GetFilesInFolder retrieves all files within a specific folder from Google Drive
 func GetFolderNameAndFilesInFolderByID(c echo.Context, folderID string) (string, []*FilesJSON, error) {
-	
+
 	client, err := client(c)
 	if err != nil {
-		return "",nil, fmt.Errorf("failed to get Google Drive client: %v", err)
+		return "", nil, fmt.Errorf("failed to get Google Drive client: %v", err)
 	}
 
 	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
@@ -330,6 +438,18 @@ func getFolderNameByID(srv *drive.Service, folderID string) (string, error) {
 
 // This function gets files only in root. It does not list files in folders
 func GetFileNamesInRoot(c echo.Context) ([]*FilesJSON, error) {
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return nil, errors.New("storj access missing")
+	}
+	o, err := storj.ListObjects1(context.Background(), accesGrant, "google-drive")
+	if err != nil {
+		return nil, errors.New("failed to get list from storj with error:" + err.Error())
+	}
+
+	slices.SortStableFunc(o, func(a, b uplink.Object) int {
+		return cmp.Compare(a.Key, b.Key)
+	})
 	client, err := client(c)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get Google Drive client: %v", err)
@@ -342,8 +462,16 @@ func GetFileNamesInRoot(c echo.Context) ([]*FilesJSON, error) {
 
 	var fileResp []*FilesJSON
 
+	folderOnly := c.QueryParam("folder_only")
+	filesOnly := c.QueryParam("files_only")
 	// Query to list files not in any folders
 	query := "'root' in parents"
+
+	if folderOnly == "true" {
+		query += " and mimeType = 'application/vnd.google-apps.folder'"
+	} else if filesOnly == "true" {
+		query += " and mimeType != 'application/vnd.google-apps.folder'"
+	}
 
 	// Loop to handle pagination
 	pageToken := ""
@@ -355,9 +483,94 @@ func GetFileNamesInRoot(c echo.Context) ([]*FilesJSON, error) {
 
 		// Append files to response
 		for _, i := range r.Files {
+			//check if file is synced in storx
+			if i.MimeType != "application/vnd.google-apps.folder" {
+				switch i.MimeType {
+				case "application/vnd.google-apps.document":
+					i.Name += ".docx"
+				case "application/vnd.google-apps.spreadsheet":
+					i.Name += ".xlsx"
+				case "application/vnd.google-apps.presentation":
+					i.Name += ".pptx"
+				case "application/vnd.google-apps.site":
+
+				case "application/vnd.google-apps.script":
+					i.Name += ".json"
+				}
+				_, synced := slices.BinarySearchFunc(o, i.Name, func(a uplink.Object, b string) int {
+					return cmp.Compare(a.Key, b)
+				})
+				fileResp = append(fileResp, &FilesJSON{
+					Name:              i.Name,
+					ID:                i.Id,
+					MimeType:          i.MimeType,
+					Size:              i.Size,
+					Synced:            synced,
+					FullFileExtension: i.FullFileExtension,
+					FileExtension:     i.FileExtension,
+				})
+			} else {
+				// Checked if the folder exist
+				_, synced := slices.BinarySearchFunc(o, i.Name+"/", func(a uplink.Object, b string) int {
+					return cmp.Compare(a.Key, b)
+				})
+				if synced {
+					folderFiles, _ := GetFilesInFolderByID(c, i.Id)
+					//
+					for _, v := range folderFiles {
+						synced = v.Synced
+					}
+				}
+				fileResp = append(fileResp, &FilesJSON{
+					Name:     i.Name,
+					ID:       i.Id,
+					MimeType: i.MimeType,
+					Synced:   synced,
+				})
+			}
+		}
+
+		// Check if there's another page
+		pageToken = r.NextPageToken
+		if pageToken == "" {
+			break // No more pages
+		}
+	}
+
+	return fileResp, nil
+}
+
+func GetSharedFiles(c echo.Context) ([]*FilesJSON, error) {
+	client, err := client(c)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Google Drive client: %v", err)
+	}
+
+	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Drive service: %v", err)
+	}
+
+	var fileResp []*FilesJSON
+
+	// Query to list files that have been shared
+	query := "sharedWithMe=true"
+
+	// Loop to handle pagination
+	pageToken := ""
+	for {
+		r, err := srv.Files.List().Q(query).PageToken(pageToken).Do()
+		if err != nil {
+			return nil, fmt.Errorf("failed to retrieve shared files: %v", err)
+		}
+
+		// Append files to response
+		for _, i := range r.Files {
 			fileResp = append(fileResp, &FilesJSON{
-				Name: i.Name,
-				ID:   i.Id,
+				Name:     i.Name,
+				ID:       i.Id,
+				MimeType: i.MimeType,
+				Size:     i.Size,
 			})
 		}
 
@@ -369,4 +582,46 @@ func GetFileNamesInRoot(c echo.Context) ([]*FilesJSON, error) {
 	}
 
 	return fileResp, nil
+}
+
+func GetFolderPathByID(ctx context.Context, srv *drive.Service, folderID string) (string, error) {
+	// Get folder metadata
+	folder, err := srv.Files.Get(folderID).Fields("name,parents").Do()
+	if err != nil {
+		return "", fmt.Errorf("unable to retrieve folder metadata: %v", err)
+	}
+	// Check if the folder is in the root
+	if len(folder.Parents) == 0 {
+		return folder.Name, nil
+	}
+
+	// Initialize the path with the folder name
+	p := folder.Name
+
+	// Recursively traverse parent folders to build the full path
+	for {
+		if len(folder.Parents) == 0 {
+			break
+		}
+		parentID := folder.Parents[0]
+		if parentID == "root" {
+			break // Reached the root folder
+		}
+
+		// Get the parent folder metadata
+		parent, err := srv.Files.Get(parentID).Fields("name,parents").Do()
+		if err != nil {
+			return "", fmt.Errorf("unable to retrieve parent folder metadata: %v", err)
+		}
+
+		// Prepend the parent folder name to the path
+		if parent.Name != "My Drive" {
+			p = path.Join(parent.Name, p)
+		}
+
+		// Update folder to the parent folder for the next iteration
+		folder = parent
+	}
+
+	return p, nil
 }

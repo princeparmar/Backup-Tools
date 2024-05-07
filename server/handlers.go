@@ -50,8 +50,26 @@ func handleGetGoogleDriveFileNames(c echo.Context) error {
 	return c.JSON(http.StatusOK, fileNames)
 }
 
-// Get all files names in a google drive even in folder
+// Get all files names in a google drive root
 func handleRootGoogleDriveFileNames(c echo.Context) error {
+	fileNames, err := google.GetFileNamesInRoot(c)
+	if err != nil {
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			slog.Debug("Error retrieving file names from drive", "error", err)
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": "failed to retrieve file from Google Drive",
+			})
+		}
+	}
+	return c.JSON(http.StatusOK, fileNames)
+}
+
+// Get all files names in a google drive root
+func handleSharedGoogleDriveFileNames(c echo.Context) error {
 	fileNames, err := google.GetFileNamesInRoot(c)
 	if err != nil {
 		if err.Error() == "token error" {
@@ -223,6 +241,38 @@ func handleSyncAllFolderFiles(c echo.Context) error {
 		"message": "all files were successfully uploaded from Google Drive folder to Storj",
 	})
 
+}
+
+func handleSTorjDrive(c echo.Context) error {
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "storj access token is missing",
+		})
+	}
+	o, err := storj.ListObjects1(context.Background(), accesGrant, "google-drive")
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"error": fmt.Sprintf("failed to get file list from Storj: %v", err),
+		})
+	}
+	return c.JSON(http.StatusOK, o)
+}
+
+func handleStorjDriveFolder(c echo.Context) error {
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "storj access token is missing",
+		})
+	}
+	o, err := storj.GetFilesInFolder(context.Background(), accesGrant, "google-drive", c.Param("name")+"/")
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"error": fmt.Sprintf("failed to get file list from Storj: %v", err),
+		})
+	}
+	return c.JSON(http.StatusOK, o)
 }
 func handleSyncAllFolderFilesByID(c echo.Context) error {
 	folderID := c.Param("id")

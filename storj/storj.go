@@ -119,9 +119,9 @@ func ListObjects(ctx context.Context, accessGrant, bucketName string) (map[strin
 		return nil, err
 	}
 	listIter := project.ListObjects(ctx, bucketName, nil)
-	if err != nil {
+	/*if err != nil {
 		return nil, fmt.Errorf("could not open object: %v", err)
-	}
+	}*/
 
 	objects := map[string]bool{}
 	for listIter.Next() {
@@ -162,4 +162,75 @@ func DeleteObject(ctx context.Context, accessGrant, bucketName, objectKey string
 	}
 	return nil
 
+}
+
+func ListObjects1(ctx context.Context, accessGrant, bucketName string) ([]uplink.Object, error) {
+	// Parse the Access Grant.
+	access, err := uplink.ParseAccess(accessGrant)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse access grant: %v", err)
+	}
+
+	// Open up the Project we will be working with.
+	project, err := uplink.OpenProject(ctx, access)
+	if err != nil {
+		return nil, fmt.Errorf("could not open project: %v", err)
+	}
+	defer project.Close()
+
+	// Ensure the desired Bucket within the Project is created.
+	_, err = project.EnsureBucket(ctx, bucketName)
+	if err != nil {
+		return nil, err
+	}
+	listIter := project.ListObjects(ctx, bucketName, nil)
+	/*if err != nil {
+		return nil, fmt.Errorf("could not open object: %v", err)
+	}*/
+
+	objects := []uplink.Object{}
+	for listIter.Next() {
+		//objects[listIter.Item().Key] = true
+		objects = append(objects, *listIter.Item())
+	}
+
+	if listIter.Err() != nil {
+		return nil, fmt.Errorf("could not list objects: %v", listIter.Err())
+	}
+
+	return objects, nil
+}
+
+func GetFilesInFolder(ctx context.Context, accessGrant, bucketName, prefix string) ([]uplink.Object, error) {
+	// Parse the Access Grant.
+	access, err := uplink.ParseAccess(accessGrant)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse access grant: %v", err)
+	}
+
+	// Open up the Project we will be working with.
+	project, err := uplink.OpenProject(ctx, access)
+	if err != nil {
+		return nil, fmt.Errorf("could not open project: %v", err)
+	}
+	defer project.Close()
+
+	// Ensure the desired Bucket within the Project is created.
+	_, err = project.EnsureBucket(ctx, bucketName)
+	if err != nil {
+		return nil, err
+	}
+	listIter := project.ListObjects(ctx, bucketName, &uplink.ListObjectsOptions{Prefix: prefix})
+
+	objects := []uplink.Object{}
+	for listIter.Next() {
+		//objects[listIter.Item().Key] = true
+		objects = append(objects, *listIter.Item())
+	}
+
+	if listIter.Err() != nil {
+		return nil, fmt.Errorf("could not list objects: %v", listIter.Err())
+	}
+
+	return objects, nil
 }
