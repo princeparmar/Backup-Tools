@@ -542,6 +542,10 @@ func GetFileNamesInRoot(c echo.Context) ([]*FilesJSON, error) {
 }
 
 func GetSharedFiles(c echo.Context) ([]*FilesJSON, error) {
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return nil, errors.New("storj access missing")
+	}
 	client, err := client(c)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get Google Drive client: %v", err)
@@ -551,8 +555,15 @@ func GetSharedFiles(c echo.Context) ([]*FilesJSON, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Drive service: %v", err)
 	}
+	o, err := storj.GetFilesInFolder(context.Background(), accesGrant, "google-drive", "shared with me/")
+	if err != nil {
+		return nil, errors.New("failed to get list from storj with error:" + err.Error())
+	}
+	slices.SortStableFunc(o, func(a, b uplink.Object) int {
+		return cmp.Compare(a.Key, b.Key)
+	})
 
-	var fileResp []*FilesJSON
+	var files []*FilesJSON
 
 	// Query to list files that have been shared
 	query := "sharedWithMe=true"
@@ -567,12 +578,49 @@ func GetSharedFiles(c echo.Context) ([]*FilesJSON, error) {
 
 		// Append files to response
 		for _, i := range r.Files {
-			fileResp = append(fileResp, &FilesJSON{
-				Name:     i.Name,
-				ID:       i.Id,
-				MimeType: i.MimeType,
-				Size:     i.Size,
-			})
+			if i.MimeType != "application/vnd.google-apps.folder" {
+				switch i.MimeType {
+				case "application/vnd.google-apps.document":
+					i.Name += ".docx"
+				case "application/vnd.google-apps.spreadsheet":
+					i.Name += ".xlsx"
+				case "application/vnd.google-apps.presentation":
+					i.Name += ".pptx"
+				case "application/vnd.google-apps.site":
+	
+				case "application/vnd.google-apps.script":
+					i.Name += ".json"
+				}
+				_, synced := slices.BinarySearchFunc(o, path.Join("shared with me", i.Name), func(a uplink.Object, b string) int {
+					return cmp.Compare(a.Key, b)
+				})
+				files = append(files, &FilesJSON{
+					Name:     i.Name,
+					ID:       i.Id,
+					MimeType: i.MimeType,
+					Size:     i.Size,
+					Synced:   synced,
+				})
+			} else {
+				_, synced := slices.BinarySearchFunc(o, path.Join("shared with me", i.Name)+"/", func(a uplink.Object, b string) int {
+					return cmp.Compare(a.Key, b)
+				})
+				if synced {
+					folderFiles, _ := GetFilesInFolderByID(c, i.Id)
+					//var synced bool
+					for _, v := range folderFiles {
+						synced = v.Synced
+					}
+				}
+	
+				files = append(files, &FilesJSON{
+					Name:     i.Name,
+					ID:       i.Id,
+					MimeType: i.MimeType,
+					Size:     i.Size,
+					Synced:   synced,
+				})
+			}
 		}
 
 		// Check if there's another page
@@ -582,7 +630,7 @@ func GetSharedFiles(c echo.Context) ([]*FilesJSON, error) {
 		}
 	}
 
-	return fileResp, nil
+	return files, nil
 }
 
 func GetFolderPathByID(ctx context.Context, srv *drive.Service, folderID string) (string, error) {

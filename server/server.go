@@ -53,7 +53,9 @@ func StartServer(db *storage.PosgresStore) {
 	google.POST("/folder/:id", handleSyncAllFolderFilesByID)
 	// Get all shared files
 	google.GET("/get-shared-filenames", handleSharedGoogleDriveFileNames)
-
+	// Sync all shared files
+	google.POST("/sync-shared", handleSyncAllSharedFolderAndFiles)
+	
 	// Google Photos
 	google.GET("/photos-list-albums", handleListGPhotosAlbums)
 	google.GET("/photos-list-photos-in-album/:ID", handleListPhotosInAlbum)
