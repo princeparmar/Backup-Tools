@@ -60,6 +60,7 @@ func GetFileNames(c echo.Context) ([]*FilesJSON, error) {
 			fileResp = append(fileResp, &FilesJSON{
 				Name: i.Name,
 				ID:   i.Id,
+				MimeType: i.MimeType,
 			})
 		}
 
