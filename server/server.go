@@ -55,6 +55,8 @@ func StartServer(db *storage.PosgresStore) {
 	google.GET("/get-shared-filenames", handleSharedGoogleDriveFileNames)
 	// Sync all shared files
 	google.POST("/sync-shared", handleSyncAllSharedFolderAndFiles)
+	// Send a list of items from google drive to storj
+	google.POST("/sync-list-from-drive", handleSendListFromGoogleDriveToStorj)
 
 	// Google Photos
 	google.GET("/photos-list-albums", handleListGPhotosAlbums)

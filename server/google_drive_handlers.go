@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -600,5 +601,54 @@ func handleSendFileFromStorjToGoogleDrive(c echo.Context) error {
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": fmt.Sprintf("file %s was successfully uploaded from Storj to Google Drive", name),
+	})
+}
+
+func handleSendListFromGoogleDriveToStorj(c echo.Context) error {
+	// Get only file names in root
+	var allIDs []string
+	json.NewDecoder(c.Request().Body).Decode(&allIDs)
+
+	for _, id := range allIDs {
+		name, data, err := google.GetFile(c, id)
+		if err != nil {
+			if err.Error() == "token error" {
+				return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+					"error": "token expired",
+				})
+
+			} else if strings.Contains(err.Error(), "folder error") {
+				if err = handleFolder(name, id, c); err != nil {
+					return c.JSON(http.StatusForbidden, map[string]interface{}{
+						"error": "failed to retrieve file from Google Drive folder:" + err.Error(),
+					})
+				}
+			} else if strings.Contains(err.Error(), "The requested conversion is not supported") || strings.Contains(err.Error(), "Export only supports Docs Editors files") {
+				// No conversion for this type
+				continue
+			} else {
+
+				return c.JSON(http.StatusForbidden, map[string]interface{}{
+					"error": "failed to retrieve file from Google Drive",
+				})
+			}
+		} else {
+			accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+			if accesGrant == "" {
+				return c.JSON(http.StatusForbidden, map[string]interface{}{
+					"error": "storj access token is missing",
+				})
+			}
+
+			err = storj.UploadObject(context.Background(), accesGrant, "google-drive", name, data)
+			if err != nil {
+				return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+					"error": fmt.Sprintf("failed to upload file to Storj: %v", err),
+				})
+			}
+		}
+	}
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "all files were successfully uploaded from Google Drive to Storj",
 	})
 }
