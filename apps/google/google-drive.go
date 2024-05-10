@@ -58,8 +58,8 @@ func GetFileNames(c echo.Context) ([]*FilesJSON, error) {
 		// Append files to response
 		for _, i := range r.Files {
 			fileResp = append(fileResp, &FilesJSON{
-				Name: i.Name,
-				ID:   i.Id,
+				Name:     i.Name,
+				ID:       i.Id,
 				MimeType: i.MimeType,
 			})
 		}
@@ -587,7 +587,7 @@ func GetSharedFiles(c echo.Context) ([]*FilesJSON, error) {
 				case "application/vnd.google-apps.presentation":
 					i.Name += ".pptx"
 				case "application/vnd.google-apps.site":
-	
+
 				case "application/vnd.google-apps.script":
 					i.Name += ".json"
 				}
@@ -612,7 +612,7 @@ func GetSharedFiles(c echo.Context) ([]*FilesJSON, error) {
 						synced = v.Synced
 					}
 				}
-	
+
 				files = append(files, &FilesJSON{
 					Name:     i.Name,
 					ID:       i.Id,

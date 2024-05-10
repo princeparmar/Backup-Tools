@@ -55,7 +55,7 @@ func StartServer(db *storage.PosgresStore) {
 	google.GET("/get-shared-filenames", handleSharedGoogleDriveFileNames)
 	// Sync all shared files
 	google.POST("/sync-shared", handleSyncAllSharedFolderAndFiles)
-	
+
 	// Google Photos
 	google.GET("/photos-list-albums", handleListGPhotosAlbums)
 	google.GET("/photos-list-photos-in-album/:ID", handleListPhotosInAlbum)
@@ -68,7 +68,9 @@ func StartServer(db *storage.PosgresStore) {
 	google.GET("/gmail-list-threads", handleGmailGetThreads)
 	google.GET("/gmail-list-messages", handleGmailGetMessages)
 	google.GET("/gmail-get-message/:ID", handleGmailGetMessage)
-	google.GET("/gmail-message-to-storj/:ID", handleGmailMessageToStorj)
+	google.POST("/all-gmail-to-storj", handleAllGmailMessagesToStorj)
+	google.POST("/gmail-list-to-storj", handleListGmailMessagesToStorj)
+	google.POST("/gmail-message-to-storj/:ID", handleGmailMessageToStorj)
 	google.GET("/get-gmail-db-from-storj", handleGetGmailDBFromStorj)
 
 	// Google Cloud Storage

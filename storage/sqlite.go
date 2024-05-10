@@ -4,15 +4,14 @@ import (
 	"fmt"
 	"os"
 
-	quickbooksLibrary "github.com/rwestlund/quickbooks-go"
-
 	goshopify "github.com/bold-commerce/go-shopify"
 	"github.com/glebarez/sqlite"
+	quickbooksLibrary "github.com/rwestlund/quickbooks-go"
 	"gorm.io/gorm"
 )
 
 type GmailMessageSQL struct {
-	ID          uint64 `gorm:"primaryKey"`
+	ID          string `gorm:"primaryKey"`
 	Date        int64
 	From        string
 	To          string
@@ -25,9 +24,7 @@ type SQLiteEmailDatabase struct {
 	*gorm.DB
 }
 
-func ConnectToEmailDB() (*SQLiteEmailDatabase, error) {
-	dbPath := "./cache/gmails.db"
-
+func ConnectToEmailDB(dbPath string) (*SQLiteEmailDatabase, error) {
 	// TODO check if db exists locally
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		// Database file does not exist, create new file
@@ -56,6 +53,14 @@ func (db *SQLiteEmailDatabase) WriteEmailToDB(msg *GmailMessageSQL) error {
 		return resp.Error
 	}
 	return nil
+}
+
+func (db *SQLiteEmailDatabase) GetAllEmailsFromDB() ([]*GmailMessageSQL, error) {
+	var messages []*GmailMessageSQL
+	if err := db.Order("id asc").Find(&messages).Error; err != nil {
+		return nil, err
+	}
+	return messages, nil
 }
 
 // SHOPIFY

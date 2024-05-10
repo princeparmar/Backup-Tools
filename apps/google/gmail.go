@@ -4,9 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"storj-integrations/utils"
-
 	"strings"
 
 	"github.com/labstack/echo/v4"
@@ -28,18 +27,19 @@ type ThreadsResponce struct {
 	} `json:"threads"`
 }
 
-type MessagesResponce struct {
-	Messages []struct {
+type MessagesResponse struct {
+	/*Messages []struct {
 		ID       string `json:"id"`
 		ThreadID string `json:"threadId"`
-	} `json:"messages"`
-	NextPageToken      string `json:"nextPageToken"`
-	ResultSizeEstimate int    `json:"resultSizeEstimate"`
+	} `json:"messages"`*/
+	Messages           []gmail.Message `json:"messages"`
+	NextPageToken      string          `json:"nextPageToken"`
+	ResultSizeEstimate int             `json:"resultSizeEstimate"`
 }
 
 // Change in SQLite too if changing smth here
 type GmailMessage struct {
-	ID          uint64        `json:"message_id"`
+	ID          string        `json:"message_id"`
 	Date        int64         `json:"date"`
 	From        string        `json:"from"`
 	To          string        `json:"to"`
@@ -101,33 +101,23 @@ func (client *GmailClient) GetUserThreads(nextPageToken string) (*ThreadsResponc
 
 // Function takes nextPageToken and returns 100 results of User's messages.
 // (Pass `""` if you don't want to specify nextPageToken and get latest messages).
-func (client *GmailClient) GetUserMessages(nextPageToken string) (*MessagesResponce, error) {
+func (client *GmailClient) GetUserMessages(nextPageToken string) (*gmail.ListMessagesResponse, error) {
 	var msgs *gmail.ListMessagesResponse
 	var err error
 
 	// Checks is there is page token passed to func.
 	if nextPageToken == "" {
-		msgs, err = client.Users.Messages.List("me").Do()
+		msgs, err = client.Users.Messages.List("me").MaxResults(500).Do()
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		msgs, err = client.Users.Messages.List("me").PageToken(nextPageToken).Do()
+		msgs, err = client.Users.Messages.List("me").MaxResults(500).PageToken(nextPageToken).Do()
 		if err != nil {
 			return nil, err
 		}
 	}
-
-	jsonMsgs, err := msgs.MarshalJSON()
-	if err != nil {
-		return nil, err
-	}
-	var res MessagesResponce
-	err = json.Unmarshal(jsonMsgs, &res)
-	if err != nil {
-		return nil, err
-	}
-	return &res, nil
+	return msgs, nil
 }
 
 func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
@@ -138,7 +128,7 @@ func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
 
 	var GmailMSG GmailMessage
 
-	GmailMSG.ID = msg.HistoryId
+	GmailMSG.ID = msg.Id
 	GmailMSG.Date = msg.InternalDate
 
 	for _, v := range msg.Payload.Headers {
@@ -164,16 +154,13 @@ func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
 			// Body data is in Base64 format.
 			data, err := base64.URLEncoding.DecodeString(part.Body.Data)
 			if err != nil {
-				log.Fatalf("Unable to decode message body: %v", err)
+				GmailMSG.Body = part.Body.Data
+			} else {
+				GmailMSG.Body = string(data)
 			}
-			GmailMSG.Body = string(data)
 
 			// If there is text in second layer payload.
 		} else if part.MimeType == "text/html" {
-			// data, err := base64.URLEncoding.DecodeString(part.Body.Data)
-			// if err != nil {
-			// 	log.Fatalf("Unable to decode message body: %v", err)
-			// }
 			GmailMSG.Body = string(part.Body.Data)
 
 		} else if part.MimeType == "multipart/alternative" {
@@ -183,9 +170,10 @@ func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
 					// Body data is in Base64 format.
 					data, err := base64.StdEncoding.DecodeString(subpart.Body.Data)
 					if err != nil {
-						log.Fatalf("Unable to decode message body: %v", err)
+						GmailMSG.Body = subpart.Body.Data
+					} else {
+						GmailMSG.Body = string(data)
 					}
-					GmailMSG.Body = string(data)
 				}
 			}
 
@@ -199,9 +187,14 @@ func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
 								// Body data is in Base64 format.
 								data, err := base64.StdEncoding.DecodeString(subpart.Body.Data[28:])
 								if err != nil {
-									log.Fatalf("Unable to decode message body: %v", err)
+									if strings.Contains(err.Error(), "illegal base64 data at input byte 383") {
+										slog.Warn("Unable to decode message body: ", "error", err, "WARNING", "using the raw body")
+										GmailMSG.Body = subsubpart.Body.Data
+									}
+								} else {
+									GmailMSG.Body = string(data)
 								}
-								GmailMSG.Body = string(data)
+
 							}
 						}
 					}
@@ -214,12 +207,14 @@ func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
 		if part.Filename != "" {
 			data, err := base64.URLEncoding.DecodeString(part.Body.Data)
 			if err != nil {
-				log.Fatalf("Unable to decode attachment data: %v", err)
+				slog.Warn("Unable to decode attachment data: ", "error", err)
+			} else {
+				GmailMSG.Attachments = append(GmailMSG.Attachments, &Attachment{
+					FileName: part.Filename,
+					Data:     data,
+				})
 			}
-			GmailMSG.Attachments = append(GmailMSG.Attachments, &Attachment{
-				FileName: part.Filename,
-				Data:     data,
-			})
+
 		}
 	}
 

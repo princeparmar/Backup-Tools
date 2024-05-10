@@ -1,7 +1,6 @@
 package main
 
 import (
-	"log"
 	"log/slog"
 	"os"
 	"storj-integrations/server"
@@ -13,11 +12,15 @@ import (
 func main() {
 	storage, err := storage.NewPostgresStore()
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("error starting the postgress store", "error", err)
+		slog.Warn("exiting...")
+		os.Exit(1)
 	}
 	err = storage.Migrate()
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("error migrating to the postgress store", "error", err)
+		slog.Warn("exiting...")
+		os.Exit(1)
 	}
 
 	server.StartServer(storage)
@@ -28,7 +31,9 @@ func init() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{AddSource: true, Level: slog.LevelInfo})))
 	err := godotenv.Load()
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("error loading the environment", "error", err)
+		slog.Warn("exiting...")
+		os.Exit(1)
 	}
 
 }
