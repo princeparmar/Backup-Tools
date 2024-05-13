@@ -19,7 +19,7 @@ func (m *mockDB) WriteGoogleAuthToken(token, key string) {
 }
 
 // Mock verifyToken function
-func verifyTokenTest(googleKey string) (bool, error) {
+func verifyTokenTest(_ string) (bool, error) {
 	// Mock implementation
 	return true, nil
 }

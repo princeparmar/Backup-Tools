@@ -409,7 +409,7 @@ func handleSyncAllFolderFilesByID(c echo.Context) error {
 func handleSendFileFromGoogleDriveToStorj(c echo.Context) error {
 	id := c.Param("ID")
 
-	name, data, err := google.GetFile(c, id)
+	name, data, err := google.GetFileAndPath(c, id)
 	if err != nil {
 		if err.Error() == "token error" {
 			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -621,7 +621,7 @@ func handleSendListFromGoogleDriveToStorj(c echo.Context) error {
 	}
 
 	for _, id := range allIDs {
-		name, data, err := google.GetFile(c, id)
+		name, data, err := google.GetFileAndPath(c, id)
 		if err != nil {
 			if err.Error() == "token error" {
 				return c.JSON(http.StatusUnauthorized, map[string]interface{}{

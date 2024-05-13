@@ -680,3 +680,67 @@ func GetFolderPathByID(ctx context.Context, srv *drive.Service, folderID string)
 
 	return p, nil
 }
+
+// GetFile downloads file from Google Drive by ID
+func GetFileAndPath(c echo.Context, id string) (string, []byte, error) {
+	client, err := client(c)
+	if err != nil {
+		return "", nil, err
+	}
+
+	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
+	if err != nil {
+		return "", nil, fmt.Errorf("token error")
+	}
+
+	file, err := srv.Files.Get(id).Do()
+	if err != nil {
+		return "", nil, fmt.Errorf("unable to retrieve file metadata: %v", err)
+	}
+	p, err := GetFolderPathByID(context.Background(), srv,file.Id)
+	if err != nil {
+		return "", nil, fmt.Errorf("unable to read file content: %v", err)
+	}
+	res, err := srv.Files.Get(id).Download()
+	if err != nil {
+		if strings.Contains(err.Error(), "Use Export with Docs Editors files., fileNotDownloadable") {
+			var mt string
+			switch file.MimeType {
+			case "application/vnd.google-apps.document":
+				mt = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+				file.Name += ".docx"
+			case "application/vnd.google-apps.spreadsheet":
+				mt = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+				file.Name += ".xlsx"
+			case "application/vnd.google-apps.presentation":
+				mt = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+				file.Name += ".pptx"
+			case "application/vnd.google-apps.site":
+				mt = "text/plain"
+			case "application/vnd.google-apps.script":
+				mt = "application/vnd.google-apps.script+json"
+				file.Name += ".json"
+			default:
+				mt = file.MimeType
+			}
+			// handle folders
+			if mt != "application/vnd.google-apps.folder" {
+				if res, err = srv.Files.Export(id, mt).Download(); err != nil {
+					return "", nil, fmt.Errorf("unable to download file: %v", err)
+				}
+			} else {
+				return p, nil, errors.New("folder error")
+			}
+		} else {
+			return "", nil, fmt.Errorf("unable to download file: %v", err)
+		}
+	}
+	defer res.Body.Close()
+
+	data, err := io.ReadAll(res.Body)
+	if err != nil {
+		return "", nil, fmt.Errorf("unable to read file content: %v", err)
+	}
+	
+	return p, data, nil
+}
