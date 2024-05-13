@@ -65,6 +65,7 @@ func StartServer(db *storage.PosgresStore) {
 	google.GET("/storj-to-photos/:name", handleSendFileFromStorjToGooglePhotos)
 	google.POST("/photos-to-storj", handleSendFileFromGooglePhotosToStorj)
 	google.POST("/all-photos-from-album-to-storj", handleSendAllFilesFromGooglePhotosToStorj)
+	google.POST("/list-photos-to-storj", handleSendListFilesFromGooglePhotosToStorj)
 
 	// Gmail
 	google.GET("/gmail-list-threads", handleGmailGetThreads)

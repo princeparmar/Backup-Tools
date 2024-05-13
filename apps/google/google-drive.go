@@ -31,6 +31,7 @@ type FilesJSON struct {
 	Size              int64  `json:"size"`
 	FullFileExtension string `json:"full_file_extension"`
 	FileExtension     string `json:"file_extension"`
+	Path              string `json:"path"`
 }
 
 // GetFileNames retrieves all file names and their IDs from Google Drive
@@ -57,10 +58,15 @@ func GetFileNames(c echo.Context) ([]*FilesJSON, error) {
 
 		// Append files to response
 		for _, i := range r.Files {
+			pathH, _ := GetFolderPathByID(context.Background(), srv, i.Id)
 			fileResp = append(fileResp, &FilesJSON{
 				Name:     i.Name,
 				ID:       i.Id,
 				MimeType: i.MimeType,
+				Path: pathH,
+				Size: i.Size,
+				FullFileExtension: i.FullFileExtension,
+				FileExtension: i.FileExtension,
 			})
 		}
 
