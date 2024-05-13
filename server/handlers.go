@@ -622,7 +622,11 @@ func handleDropboxToStorj(c echo.Context) error {
 	}
 
 	data, err := io.ReadAll(file.Data)
-
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
 	err = storj.UploadObject(context.Background(), accesGrant, "dropbox", file.Name, data)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -844,6 +848,11 @@ func handleGetRepository(c echo.Context) error {
 	}
 
 	repoPath, err := gh.DownloadRepositoryToCache(owner, repo, accessToken.Value)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
 	dir, _ := filepath.Split(repoPath)
 	defer os.RemoveAll(dir)
 
@@ -882,6 +891,11 @@ func handleGithubRepositoryToStorj(c echo.Context) error {
 	}
 
 	repoPath, err := gh.DownloadRepositoryToCache(owner, repo, accessToken.Value)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
 	dir, repoName := filepath.Split(repoPath)
 	defer os.RemoveAll(dir)
 	file, err := os.Open(repoPath)
@@ -997,7 +1011,11 @@ func handleRepositoryFromStorjToGithub(c echo.Context) error {
 		}
 		return nil
 	})
-
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
 	return c.JSON(http.StatusOK, map[string]interface{}{"message": "repository " + repo + " restored to Github from Storj"})
 }
 

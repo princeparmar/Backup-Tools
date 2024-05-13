@@ -607,7 +607,18 @@ func handleSendFileFromStorjToGoogleDrive(c echo.Context) error {
 func handleSendListFromGoogleDriveToStorj(c echo.Context) error {
 	// Get only file names in root
 	var allIDs []string
-	json.NewDecoder(c.Request().Body).Decode(&allIDs)
+	if strings.Contains(c.Request().Header.Get(echo.HeaderContentType), echo.MIMEApplicationJSON) {
+		// Decode JSON array from request body
+		if err := json.NewDecoder(c.Request().Body).Decode(&allIDs); err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"error": "invalid JSON format",
+			})
+		}
+	} else {
+		// Handle form data
+		formIDs := c.FormValue("ids")
+		allIDs = strings.Split(formIDs, ",")
+	}
 
 	for _, id := range allIDs {
 		name, data, err := google.GetFile(c, id)

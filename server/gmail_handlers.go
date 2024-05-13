@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -81,7 +80,6 @@ func handleGmailGetMessages(c echo.Context) error {
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
-		fmt.Println(userCacheDBPath)
 		dbFile, err := utils.CreateFile(userCacheDBPath)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -97,7 +95,6 @@ func handleGmailGetMessages(c echo.Context) error {
 	} else {
 		if strings.Contains(err.Error(), "object not found") {
 			slog.Warn("gmail db not found")
-			fmt.Println(userCacheDBPath)
 			dbFile, err := utils.CreateFile(userCacheDBPath)
 			if err != nil {
 				return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -273,7 +270,6 @@ func handleGmailMessageToStorj(c echo.Context) error {
 	} else {
 		if strings.Contains(err.Error(), "object not found") {
 			slog.Warn("gmail db not found")
-			fmt.Println(userCacheDBPath)
 			dbFile, err := utils.CreateFile(userCacheDBPath)
 			if err != nil {
 				return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -369,7 +365,6 @@ func handleAllGmailMessagesToStorj(c echo.Context) error {
 	} else {
 		if strings.Contains(err.Error(), "object not found") {
 			slog.Warn("gmail db not found")
-			fmt.Println(userCacheDBPath)
 			dbFile, err := utils.CreateFile(userCacheDBPath)
 			if err != nil {
 				return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -514,7 +509,6 @@ func handleListGmailMessagesToStorj(c echo.Context) error {
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
-		fmt.Println(userCacheDBPath)
 		dbFile, err := utils.CreateFile(userCacheDBPath)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -530,7 +524,6 @@ func handleListGmailMessagesToStorj(c echo.Context) error {
 	} else {
 		if strings.Contains(err.Error(), "object not found") {
 			slog.Warn("gmail db not found")
-			fmt.Println(userCacheDBPath)
 			dbFile, err := utils.CreateFile(userCacheDBPath)
 			if err != nil {
 				return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -571,8 +564,19 @@ func handleListGmailMessagesToStorj(c echo.Context) error {
 		}
 	}
 	var allIDs []string
-	json.NewDecoder(c.Request().Body).Decode(&allIDs)
-	fmt.Println("all ids", allIDs)
+	if strings.Contains(c.Request().Header.Get(echo.HeaderContentType), echo.MIMEApplicationJSON) {
+		// Decode JSON array from request body
+		if err := json.NewDecoder(c.Request().Body).Decode(&allIDs); err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"error": "invalid JSON format",
+			})
+		}
+	} else {
+		// Handle form data
+		formIDs := c.FormValue("ids")
+		allIDs = strings.Split(formIDs, ",")
+	}
+
 	for _, id := range allIDs {
 		msg, err := GmailClient.GetMessage(id)
 		if err != nil {
@@ -687,7 +691,6 @@ func handleGetGmailDBFromStorj(c echo.Context) error {
 
 	messages, err := db.GetAllEmailsFromDB()
 	if err != nil {
-		fmt.Println("Error retrieving messages from database:", err)
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
