@@ -351,6 +351,7 @@ func GetFilesInFolderByID(c echo.Context, folderID string) ([]*FilesJSON, error)
 			case "application/vnd.google-apps.script":
 				i.Name += ".json"
 			}
+			fmt.Println(path.Join(folderName, i.Name))
 			_, synced := slices.BinarySearchFunc(o, path.Join(folderName, i.Name), func(a uplink.Object, b string) int {
 				return cmp.Compare(a.Key, b)
 			})
@@ -362,6 +363,7 @@ func GetFilesInFolderByID(c echo.Context, folderID string) ([]*FilesJSON, error)
 				Synced:   synced,
 			})
 		} else {
+			fmt.Println(path.Join(folderName, i.Name))
 			_, synced := slices.BinarySearchFunc(o, path.Join(folderName, i.Name)+"/", func(a uplink.Object, b string) int {
 				return cmp.Compare(a.Key, b)
 			})
@@ -708,18 +710,18 @@ func GetFileAndPath(c echo.Context, id string) (string, []byte, error) {
 			switch file.MimeType {
 			case "application/vnd.google-apps.document":
 				mt = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-				file.Name += ".docx"
+				p += ".docx"
 			case "application/vnd.google-apps.spreadsheet":
 				mt = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-				file.Name += ".xlsx"
+				p += ".xlsx"
 			case "application/vnd.google-apps.presentation":
 				mt = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-				file.Name += ".pptx"
+				p += ".pptx"
 			case "application/vnd.google-apps.site":
 				mt = "text/plain"
 			case "application/vnd.google-apps.script":
 				mt = "application/vnd.google-apps.script+json"
-				file.Name += ".json"
+				p += ".json"
 			default:
 				mt = file.MimeType
 			}

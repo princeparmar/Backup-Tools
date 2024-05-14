@@ -650,7 +650,7 @@ func handleSendListFromGoogleDriveToStorj(c echo.Context) error {
 					"error": "storj access token is missing",
 				})
 			}
-
+			fmt.Println(name)
 			err = storj.UploadObject(context.Background(), accesGrant, "google-drive", name, data)
 			if err != nil {
 				return c.JSON(http.StatusInternalServerError, map[string]interface{}{
