@@ -28,16 +28,16 @@ func NewGoogleStorageClient(c echo.Context) (*StorageClient, error) {
 }
 
 // Takes project name and returns JSON list of all buckets in this project.
-func (client *StorageClient) ListBucketsJSON(c echo.Context, projectName string) (string, error) {
+func (client *StorageClient) ListBucketsJSON(c echo.Context, projectName string) (*storage.Buckets, error) {
 	bucketList, err := client.Buckets.List(projectName).Do()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	listJSON, err := bucketList.MarshalJSON()
+	/*listJSON, err := bucketList.MarshalJSON()
 	if err != nil {
 		return "", err
-	}
-	return string(listJSON), nil
+	}*/
+	return bucketList, nil
 }
 
 func (client *StorageClient) ListObjectsInBucket(c echo.Context, bucketName string) (*storage.Objects, error) {

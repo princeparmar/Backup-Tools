@@ -18,6 +18,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"golang.org/x/oauth2/google"
+	gs "google.golang.org/api/storage/v1"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
 	"storj.io/uplink"
@@ -114,7 +115,7 @@ func client(c echo.Context) (*http.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to read client secret file: %v", err)
 	}
-	config, err := google.ConfigFromJSON(b, drive.DriveScope)
+	config, err := google.ConfigFromJSON(b, drive.DriveScope, gs.CloudPlatformScope, gs.DevstorageFullControlScope, gs.DevstorageReadWriteScope, gs.CloudPlatformReadOnlyScope )
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse client secret file to config: %v", err)
 	}

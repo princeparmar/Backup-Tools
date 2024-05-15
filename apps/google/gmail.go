@@ -3,7 +3,6 @@ package google
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"log/slog"
 	"storj-integrations/utils"
 	"strings"
@@ -17,14 +16,10 @@ type GmailClient struct {
 	*gmail.Service
 }
 
-type ThreadsResponce struct {
+type ThreadsResponse struct {
 	NextPageToken      string `json:"nextPageToken"`
 	ResultSizeEstimate int    `json:"resultSizeEstimate"`
-	Threads            []struct {
-		HistoryID string `json:"historyId"`
-		ID        string `json:"id"`
-		Snippet   string `json:"snippet,omitempty"`
-	} `json:"threads"`
+	Threads            []*gmail.Thread `json:"threads"`
 }
 
 type MessagesResponse struct {
@@ -32,7 +27,7 @@ type MessagesResponse struct {
 		ID       string `json:"id"`
 		ThreadID string `json:"threadId"`
 	} `json:"messages"`*/
-	Messages           []gmail.Message `json:"messages"`
+	Messages           []*gmail.Message `json:"messages"`
 	NextPageToken      string          `json:"nextPageToken"`
 	ResultSizeEstimate int             `json:"resultSizeEstimate"`
 }
@@ -70,56 +65,99 @@ func NewGmailClient(c echo.Context) (*GmailClient, error) {
 
 // Function takes nextPageToken and returns 100 results of User's threads.
 // (Pass `""` if you don't want to specify nextPageToken and get latest threads).
-func (client *GmailClient) GetUserThreads(nextPageToken string) (*ThreadsResponce, error) {
+func (client *GmailClient) GetUserThreads(nextPageToken string) (*ThreadsResponse, error) {
 	var threads *gmail.ListThreadsResponse
 	var err error
-
+	var ts []*gmail.Thread
 	// Checks is there is page token passed to func.
 	if nextPageToken == "" {
-		threads, err = client.Users.Threads.List("me").Do()
+		threads, err = client.Users.Threads.List("me").MaxResults(500).Do()
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		threads, err = client.Users.Threads.List("me").PageToken(nextPageToken).Do()
+		threads, err = client.Users.Threads.List("me").MaxResults(500).PageToken(nextPageToken).Do()
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	jsonThreads, err := threads.MarshalJSON()
-	if err != nil {
-		return nil, err
+	for _, t := range threads.Threads{
+		t, _ := client.Users.Threads.Get("me", t.Id).Do()
+		ts = append(ts, t)
 	}
-	var res ThreadsResponce
-	err = json.Unmarshal(jsonThreads, &res)
-	if err != nil {
-		return nil, err
-	}
-	return &res, nil
+	return &ThreadsResponse{threads.NextPageToken, int(threads.ResultSizeEstimate),ts }, nil
 }
 
+func (client *GmailClient) GetUserThreadsIDs(nextPageToken string) (*gmail.ListThreadsResponse, error) {
+	var threads *gmail.ListThreadsResponse
+	var err error
+	// Checks is there is page token passed to func.
+	if nextPageToken == "" {
+		threads, err = client.Users.Threads.List("me").MaxResults(500).Do()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		threads, err = client.Users.Threads.List("me").MaxResults(500).PageToken(nextPageToken).Do()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return threads, nil
+}
 // Function takes nextPageToken and returns 100 results of User's messages.
 // (Pass `""` if you don't want to specify nextPageToken and get latest messages).
-func (client *GmailClient) GetUserMessages(nextPageToken string) (*gmail.ListMessagesResponse, error) {
-	var msgs *gmail.ListMessagesResponse
+func (client *GmailClient) GetUserMessages(nextPageToken string) (*MessagesResponse, error) {
+	var msgs MessagesResponse
 	var err error
-
+	var messages []*gmail.Message
+	var res *gmail.ListMessagesResponse
 	// Checks is there is page token passed to func.
 	if nextPageToken == "" {
-		msgs, err = client.Users.Messages.List("me").MaxResults(500).Do()
+		res, err = client.Users.Messages.List("me").MaxResults(500).Do()
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		msgs, err = client.Users.Messages.List("me").MaxResults(500).PageToken(nextPageToken).Do()
+		res, err = client.Users.Messages.List("me").MaxResults(500).PageToken(nextPageToken).Do()
 		if err != nil {
 			return nil, err
 		}
 	}
-	return msgs, nil
+	for _, msg := range res.Messages {
+		message, err := client.Users.Messages.Get("me", msg.Id).Do()
+		if err != nil {
+			//log.Printf("Failed to retrieve message with ID %s: %v", msg.Id, err)
+			continue
+		}
+		messages = append(messages, message)
+	}
+	msgs.Messages = messages
+	msgs.NextPageToken = res.NextPageToken
+	return &msgs, nil
 }
 
+
+func (client *GmailClient) GetUserMessagesIDs(nextPageToken string) (*gmail.ListMessagesResponse, error) {
+	var err error
+	var res *gmail.ListMessagesResponse
+	// Checks is there is page token passed to func.
+	if nextPageToken == "" {
+		res, err = client.Users.Messages.List("me").MaxResults(500).Do()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		res, err = client.Users.Messages.List("me").MaxResults(500).PageToken(nextPageToken).Do()
+		if err != nil {
+			return nil, err
+		}
+	}
+	
+	return res, nil
+}
 func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
 	msg, err := client.Users.Messages.Get("me", msgID).Format("full").Do()
 	if err != nil {

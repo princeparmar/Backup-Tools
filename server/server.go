@@ -19,6 +19,7 @@ func StartServer(db *storage.PosgresStore) {
 
 	e.POST("/storj-auth", storj.HandleStorjAuthentication)
 	e.POST("/google-auth", googlepack.Autentificate)
+	e.GET("/google-auth", googlepack.Autentificateg)
 
 	google := e.Group("/google")
 
@@ -70,6 +71,8 @@ func StartServer(db *storage.PosgresStore) {
 	// Gmail
 	google.GET("/gmail-list-threads", handleGmailGetThreads)
 	google.GET("/gmail-list-messages", handleGmailGetMessages)
+	google.GET("/gmail-list-messages-ids", handleGmailGetMessagesIDs)
+	google.GET("/gmail-list-threads-ids", handleGmailGetThreadsIDs)
 	google.GET("/gmail-get-message/:ID", handleGmailGetMessage)
 	google.POST("/all-gmail-to-storj", handleAllGmailMessagesToStorj)
 	google.POST("/gmail-list-to-storj", handleListGmailMessagesToStorj)
@@ -82,6 +85,9 @@ func StartServer(db *storage.PosgresStore) {
 	google.GET("/storage-item-to-storj/:bucketName/:itemName", handleGoogleCloudItemToStorj)
 	google.GET("/storage-item-from-storj-to-google-cloud/:bucketName/:itemName", handleStorjToGoogleCloud)
 	google.GET("/storage-all-items-to-storj/:bucketName", handleAllFilesFromGoogleCloudBucketToStorj)
+
+
+	google.GET("/cloud/list-projects", handleStorageListProjects)
 
 	// Dropbox
 	dropbox := e.Group("/dropbox")

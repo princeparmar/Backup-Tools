@@ -35,6 +35,31 @@ func handleStorageListBuckets(c echo.Context) error {
 	return c.JSON(http.StatusOK, bucketsJSON)
 }
 
+// Takes Google Cloud project name as a parameter, returns JSON responce with all the buckets in this project.
+func handleStorageListProjects(c echo.Context) error {
+	projectName := c.Param("projectName")
+
+	client, err := google.NewGoogleStorageClient(c)
+	if err != nil {
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+	}
+	bucketsJSON, err := client.ListBucketsJSON(c, projectName)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+	return c.JSON(http.StatusOK, bucketsJSON)
+}
+
 // Takes Google Cloud bucket name as a parameter, returns JSON responce with all the items in this bucket.
 func handleStorageListObjects(c echo.Context) error {
 	bucketName := c.Param("bucketName")
