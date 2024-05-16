@@ -169,7 +169,7 @@ func Autentificateg(c echo.Context) error {
 		log.Printf("Unable to read client secret file: %v", err)
 	}
 
-	config, err := google.ConfigFromJSON(b, drive.DriveScope, photoslibrary.PhotoslibraryScope, gmail.MailGoogleComScope, gs.CloudPlatformScope,gs.CloudPlatformReadOnlyScope, gs.DevstorageFullControlScope, gs.DevstorageReadWriteScope)
+	config, err := google.ConfigFromJSON(b, drive.DriveScope, photoslibrary.PhotoslibraryScope, gmail.MailGoogleComScope, gs.CloudPlatformScope, gs.CloudPlatformReadOnlyScope, gs.DevstorageFullControlScope, gs.DevstorageReadWriteScope)
 	if err != nil {
 		log.Printf("Unable to parse client secret file to config: %v", err)
 	}

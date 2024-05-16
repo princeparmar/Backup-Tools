@@ -44,9 +44,6 @@ func ListProjects(c echo.Context) (any, error) {
 		// first call to Next(). Not safe for concurrent access.
 		_ = it.Response.(*resourcemanagerpb.ListProjectsResponse)
 	}
-	if err != nil {
-		return nil, err
-	}
 
 	return p, nil
 }

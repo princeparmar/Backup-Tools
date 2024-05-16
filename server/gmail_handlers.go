@@ -47,7 +47,7 @@ func handleGmailGetThreads(c echo.Context) error {
 				"error": err.Error(),
 			})
 		}
-		threads = append(threads,res.Threads...)
+		threads = append(threads, res.Threads...)
 		//allMessages = append(allMessages, msgs.Messages...)
 		nextPageToken = res.NextPageToken
 
@@ -55,7 +55,7 @@ func handleGmailGetThreads(c echo.Context) error {
 			break
 		}
 	}
-	
+
 	return c.JSON(http.StatusOK, threads)
 }
 
@@ -81,7 +81,7 @@ func handleGmailGetThreadsIDs(c echo.Context) error {
 				"error": err.Error(),
 			})
 		}
-		threads = append(threads,res.Threads...)
+		threads = append(threads, res.Threads...)
 		//allMessages = append(allMessages, msgs.Messages...)
 		nextPageToken = res.NextPageToken
 
@@ -89,13 +89,13 @@ func handleGmailGetThreadsIDs(c echo.Context) error {
 			break
 		}
 	}
-	
+
 	return c.JSON(http.StatusOK, threads)
 }
 
 type MessageListJSON struct {
 	realgmail.Message
-	Synced   bool   `json:"synced"`
+	Synced bool `json:"synced"`
 }
 
 // Fetches user messages, returns their ID's and threat's IDs.
@@ -321,6 +321,31 @@ func handleGmailGetMessage(c echo.Context) error {
 		}
 	}
 	msg, err := GmailClient.GetMessage(id)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
+	return c.JSON(http.StatusOK, msg)
+}
+
+func handleGmailGetThread(c echo.Context) error {
+	id := c.Param("ID")
+
+	GmailClient, err := google.NewGmailClient(c)
+	if err != nil {
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+	}
+	msg, err := GmailClient.GetThread(id)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),

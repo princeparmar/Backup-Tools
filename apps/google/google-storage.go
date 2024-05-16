@@ -50,17 +50,9 @@ func (client *StorageClient) ListObjectsInBucket(c echo.Context, bucketName stri
 }
 
 // Takes bucket name and returns JSON list of all objects in this bucket.
-func (client *StorageClient) ListObjectsInBucketJSON(c echo.Context, bucketName string) (string, error) {
-	objects, err := client.Objects.List(bucketName).Do()
-	if err != nil {
-		return "", err
-	}
+func (client *StorageClient) ListObjectsInBucketJSON(c echo.Context, bucketName string) (*storage.Objects, error) {
+	return client.Objects.List(bucketName).Do()
 
-	objectsJSON, err := objects.MarshalJSON()
-	if err != nil {
-		return "", err
-	}
-	return string(objectsJSON), nil
 }
 
 type StorageObject struct {

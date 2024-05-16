@@ -18,9 +18,9 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"golang.org/x/oauth2/google"
-	gs "google.golang.org/api/storage/v1"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
+	gs "google.golang.org/api/storage/v1"
 	"storj.io/uplink"
 )
 
@@ -61,13 +61,13 @@ func GetFileNames(c echo.Context) ([]*FilesJSON, error) {
 		for _, i := range r.Files {
 			pathH, _ := GetFolderPathByID(context.Background(), srv, i.Id)
 			fileResp = append(fileResp, &FilesJSON{
-				Name:     i.Name,
-				ID:       i.Id,
-				MimeType: i.MimeType,
-				Path: pathH,
-				Size: i.Size,
+				Name:              i.Name,
+				ID:                i.Id,
+				MimeType:          i.MimeType,
+				Path:              pathH,
+				Size:              i.Size,
 				FullFileExtension: i.FullFileExtension,
-				FileExtension: i.FileExtension,
+				FileExtension:     i.FileExtension,
 			})
 		}
 
@@ -115,7 +115,7 @@ func client(c echo.Context) (*http.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to read client secret file: %v", err)
 	}
-	config, err := google.ConfigFromJSON(b, drive.DriveScope, gs.CloudPlatformScope, gs.DevstorageFullControlScope, gs.DevstorageReadWriteScope, gs.CloudPlatformReadOnlyScope )
+	config, err := google.ConfigFromJSON(b, drive.DriveScope, gs.CloudPlatformScope, gs.DevstorageFullControlScope, gs.DevstorageReadWriteScope, gs.CloudPlatformReadOnlyScope)
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse client secret file to config: %v", err)
 	}
@@ -700,7 +700,7 @@ func GetFileAndPath(c echo.Context, id string) (string, []byte, error) {
 	if err != nil {
 		return "", nil, fmt.Errorf("unable to retrieve file metadata: %v", err)
 	}
-	p, err := GetFolderPathByID(context.Background(), srv,file.Id)
+	p, err := GetFolderPathByID(context.Background(), srv, file.Id)
 	if err != nil {
 		return "", nil, fmt.Errorf("unable to read file content: %v", err)
 	}
@@ -744,6 +744,6 @@ func GetFileAndPath(c echo.Context, id string) (string, []byte, error) {
 	if err != nil {
 		return "", nil, fmt.Errorf("unable to read file content: %v", err)
 	}
-	
+
 	return p, data, nil
 }

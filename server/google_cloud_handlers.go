@@ -1,13 +1,16 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	google "storj-integrations/apps/google"
 	"storj-integrations/storj"
 
 	"github.com/labstack/echo/v4"
+	"storj.io/uplink"
 )
 
 // Takes Google Cloud project name as a parameter, returns JSON responce with all the buckets in this project.
@@ -83,8 +86,29 @@ func handleStorageListObjects(c echo.Context) error {
 			"error": err.Error(),
 		})
 	}
-
-	return c.JSON(http.StatusOK, objects)
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "storj access token is missing",
+		})
+	}
+	o, err := storj.ListObjectsRecurisive(context.Background(), accesGrant, "google-drive")
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"error": fmt.Sprintf("failed to get file list from Storj: %v", err),
+		})
+	}
+	slices.SortStableFunc(o, func(a, b uplink.Object) int {
+		return cmp.Compare(a.Key, b.Key)
+	})
+	var r []any
+	for _, item := range objects.Items {
+		_, synced := slices.BinarySearchFunc(o, item.Name, func(a uplink.Object, b string) int {
+			return cmp.Compare(a.Key, b)
+		})
+		r = append(r, map[string]any{"item": item, "synced": synced})
+	}
+	return c.JSON(http.StatusOK, r)
 
 }
 

@@ -17,8 +17,8 @@ type GmailClient struct {
 }
 
 type ThreadsResponse struct {
-	NextPageToken      string `json:"nextPageToken"`
-	ResultSizeEstimate int    `json:"resultSizeEstimate"`
+	NextPageToken      string          `json:"nextPageToken"`
+	ResultSizeEstimate int             `json:"resultSizeEstimate"`
 	Threads            []*gmail.Thread `json:"threads"`
 }
 
@@ -28,8 +28,8 @@ type MessagesResponse struct {
 		ThreadID string `json:"threadId"`
 	} `json:"messages"`*/
 	Messages           []*gmail.Message `json:"messages"`
-	NextPageToken      string          `json:"nextPageToken"`
-	ResultSizeEstimate int             `json:"resultSizeEstimate"`
+	NextPageToken      string           `json:"nextPageToken"`
+	ResultSizeEstimate int              `json:"resultSizeEstimate"`
 }
 
 // Change in SQLite too if changing smth here
@@ -82,11 +82,11 @@ func (client *GmailClient) GetUserThreads(nextPageToken string) (*ThreadsRespons
 		}
 	}
 
-	for _, t := range threads.Threads{
+	for _, t := range threads.Threads {
 		t, _ := client.Users.Threads.Get("me", t.Id).Do()
 		ts = append(ts, t)
 	}
-	return &ThreadsResponse{threads.NextPageToken, int(threads.ResultSizeEstimate),ts }, nil
+	return &ThreadsResponse{threads.NextPageToken, int(threads.ResultSizeEstimate), ts}, nil
 }
 
 func (client *GmailClient) GetUserThreadsIDs(nextPageToken string) (*gmail.ListThreadsResponse, error) {
@@ -107,6 +107,7 @@ func (client *GmailClient) GetUserThreadsIDs(nextPageToken string) (*gmail.ListT
 
 	return threads, nil
 }
+
 // Function takes nextPageToken and returns 100 results of User's messages.
 // (Pass `""` if you don't want to specify nextPageToken and get latest messages).
 func (client *GmailClient) GetUserMessages(nextPageToken string) (*MessagesResponse, error) {
@@ -139,7 +140,6 @@ func (client *GmailClient) GetUserMessages(nextPageToken string) (*MessagesRespo
 	return &msgs, nil
 }
 
-
 func (client *GmailClient) GetUserMessagesIDs(nextPageToken string) (*gmail.ListMessagesResponse, error) {
 	var err error
 	var res *gmail.ListMessagesResponse
@@ -155,7 +155,7 @@ func (client *GmailClient) GetUserMessagesIDs(nextPageToken string) (*gmail.List
 			return nil, err
 		}
 	}
-	
+
 	return res, nil
 }
 func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
@@ -257,4 +257,8 @@ func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
 	}
 
 	return &GmailMSG, nil
+}
+
+func (client *GmailClient) GetThread(threadID string) (*gmail.Thread, error) {
+	return client.Users.Threads.Get("me", threadID).Format("full").Do()
 }
