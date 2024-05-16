@@ -4,3 +4,4 @@ test.json
 test.html
 Storj integrations docs.json
 ./cache
+./cache/*/
