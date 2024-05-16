@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"net/http"
 	googlepack "storj-integrations/apps/google"
 	"storj-integrations/storage"
 	"storj-integrations/storj"
@@ -83,9 +85,30 @@ func StartServer(db *storage.PosgresStore) {
 	// Google Cloud Storage
 	google.GET("/storage-list-buckets/:projectName", handleStorageListBuckets)
 	google.GET("/storage-list-items/:bucketName", handleStorageListObjects)
+	google.GET("/bucket-metadata/:bucketName", handleBucketMetadata)
 	google.GET("/storage-item-to-storj/:bucketName/:itemName", handleGoogleCloudItemToStorj)
 	google.GET("/storage-item-from-storj-to-google-cloud/:bucketName/:itemName", handleStorjToGoogleCloud)
-	google.GET("/storage-all-items-to-storj/:bucketName", handleAllFilesFromGoogleCloudBucketToStorj)
+	google.POST("/storage-all-items-to-storj/:bucketName", handleAllFilesFromGoogleCloudBucketToStorj)
+	google.POST("/list-projects-to-storj", handleListProjects)
+	google.POST("/list-buckets-to-storj", handleListBuckets)
+	google.POST("/list-items-to-storj", handleSyncCloudItems)
+	e.GET("/storj/:bucketName", func(c echo.Context) error {
+		bucketName := c.Param("bucketName")
+
+		accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+		if accesGrant == "" {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": "storj access token is missing",
+			})
+		}
+		list, err:=storj.ListObjectsRecurisive(context.Background(), accesGrant, bucketName)
+		if err != nil {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+		return c.JSON(http.StatusOK, list)
+	})
 
 	google.GET("/cloud/list-projects", handleStorageListProjects)
 

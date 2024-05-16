@@ -16,7 +16,6 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"google.golang.org/api/gmail/v1"
-	realgmail "google.golang.org/api/gmail/v1"
 )
 
 type ThreadJSON struct {
@@ -94,7 +93,7 @@ func handleGmailGetThreadsIDs(c echo.Context) error {
 }
 
 type MessageListJSON struct {
-	realgmail.Message
+	gmail.Message
 	Synced bool `json:"synced"`
 }
 
@@ -567,7 +566,7 @@ func handleAllGmailMessagesToStorj(c echo.Context) error {
 			})
 		}
 	}
-	var allMessages []*realgmail.Message
+	var allMessages []*gmail.Message
 	var nextPageToken string
 	for {
 		msgs, err := GmailClient.GetUserMessagesIDs(nextPageToken)

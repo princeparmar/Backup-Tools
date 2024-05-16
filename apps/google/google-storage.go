@@ -40,6 +40,15 @@ func (client *StorageClient) ListBucketsJSON(c echo.Context, projectName string)
 	return bucketList, nil
 }
 
+func (client *StorageClient) GetBucket(c echo.Context, bucketName string) (*storage.Bucket, error) {
+	bucket, err := client.Buckets.Get(bucketName).Do()
+	if err != nil {
+		return nil, err
+	}
+	return bucket, nil
+}
+
+
 func (client *StorageClient) ListObjectsInBucket(c echo.Context, bucketName string) (*storage.Objects, error) {
 	objects, err := client.Objects.List(bucketName).Do()
 	if err != nil {
