@@ -12,6 +12,7 @@ import (
 	"storj-integrations/storage"
 	"storj-integrations/storj"
 	"storj-integrations/utils"
+	"strconv"
 	"strings"
 
 	"github.com/labstack/echo/v4"
@@ -860,4 +861,51 @@ func handleGetGmailDBFromStorj(c echo.Context) error {
 
 	// Return the list of messages as a JSON response
 	return c.JSON(http.StatusOK, messages)
+}
+
+func handleGmailGetThreadsIDsControlled(c echo.Context) error {
+	num := c.QueryParam("num")
+	var numInt int64
+	if num != ""{
+		var err error
+		if numInt, err = strconv.ParseInt(num, 10,64); err != nil{
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+	}else{
+		numInt = 500
+	}
+	nextPageToken := c.QueryParam("nextPageToken")
+	GmailClient, err := google.NewGmailClient(c)
+	if err != nil {
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+	}
+	//var nextPageToken string
+	var threads []*gmail.Message
+	//for {
+		res, err := GmailClient.GetUserMessagesControlled(nextPageToken, numInt)
+		if err != nil {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+		threads = append(threads, res.Messages...)
+		//allMessages = append(allMessages, msgs.Messages...)
+		nextPageToken = res.NextPageToken
+
+		//if nextPageToken == "" {
+		//	break
+		//}
+	//}
+
+	return c.JSON(http.StatusOK, map[string]any{"messages":threads, "nextPageToken": nextPageToken})
 }

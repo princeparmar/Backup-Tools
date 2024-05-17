@@ -262,3 +262,32 @@ func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
 func (client *GmailClient) GetThread(threadID string) (*gmail.Thread, error) {
 	return client.Users.Threads.Get("me", threadID).Format("full").Do()
 }
+func (client *GmailClient) GetUserMessagesControlled(nextPageToken string, num int64) (*MessagesResponse, error) {
+	var msgs MessagesResponse
+	var err error
+	var messages []*gmail.Message
+	var res *gmail.ListMessagesResponse
+	// Checks is there is page token passed to func.
+	if nextPageToken == "" {
+		res, err = client.Users.Messages.List("me").MaxResults(num).Do()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		res, err = client.Users.Messages.List("me").MaxResults(num).PageToken(nextPageToken).Do()
+		if err != nil {
+			return nil, err
+		}
+	}
+	for _, msg := range res.Messages {
+		message, err := client.Users.Messages.Get("me", msg.Id).Do()
+		if err != nil {
+			//log.Printf("Failed to retrieve message with ID %s: %v", msg.Id, err)
+			continue
+		}
+		messages = append(messages, message)
+	}
+	msgs.Messages = messages
+	msgs.NextPageToken = res.NextPageToken
+	return &msgs, nil
+}
