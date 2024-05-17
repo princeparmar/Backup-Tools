@@ -909,3 +909,106 @@ func handleGmailGetThreadsIDsControlled(c echo.Context) error {
 
 	return c.JSON(http.StatusOK, map[string]any{"messages":threads, "nextPageToken": nextPageToken})
 }
+
+// Fetches user messages, returns their ID's and threat's IDs.
+func handleGmailGetMessagesUsingWorkers(c echo.Context) error {
+
+	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "storj access token is missing",
+		})
+	}
+
+	// CHECK IF EMAIL DATABASE ALREADY EXISTS AND DOWNLOAD IT, IF NOT - CREATE NEW ONE
+	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
+	defer os.Remove(userCacheDBPath)
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "gmail", "gmails.db")
+	// Copy file from storj to local cache if everything's fine.
+	// Skip error check, if there's error - we will check that and create new file
+	if err == nil {
+		dbFile, err := utils.CreateFile(userCacheDBPath)
+		if err != nil {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+		_, err = dbFile.Write(byteDB)
+		if err != nil {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+	} else {
+		if strings.Contains(err.Error(), "object not found") {
+			slog.Warn("gmail db not found")
+			dbFile, err := utils.CreateFile(userCacheDBPath)
+			if err != nil {
+				return c.JSON(http.StatusForbidden, map[string]interface{}{
+					"error": err.Error(),
+				})
+			}
+			_, err = dbFile.Write(byteDB)
+			if err != nil {
+				return c.JSON(http.StatusForbidden, map[string]interface{}{
+					"error": err.Error(),
+				})
+			}
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+	}
+
+	db, err := storage.ConnectToEmailDB(userCacheDBPath)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
+	messages, err := db.GetAllEmailsFromDB()
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
+	GmailClient, err := google.NewGmailClient(c)
+	if err != nil {
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		} else {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+	}
+
+	var allMessages []MessageListJSON
+	var nextPageToken string
+	for {
+		msgs, err := GmailClient.GetUserMessagesUsingWorkers(nextPageToken, 25)
+		if err != nil {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+		for _, message := range msgs.Messages {
+			_, synced := slices.BinarySearchFunc(messages, message.Id, func(a *storage.GmailMessageSQL, b string) int {
+				return cmp.Compare(a.ID, b)
+			})
+			allMessages = append(allMessages, MessageListJSON{Message: *message, Synced: synced})
+		}
+		//allMessages = append(allMessages, msgs.Messages...)
+		nextPageToken = msgs.NextPageToken
+
+		if nextPageToken == "" {
+			break
+		}
+	}
+	return c.JSON(http.StatusOK, allMessages)
+}

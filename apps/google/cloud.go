@@ -14,36 +14,32 @@ import (
 func ListProjects(c echo.Context) (any, error) {
 	client, err := client(c)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create client: %w", err)
 	}
-	pc, err := rm.NewProjectsClient(context.Background(), option.WithHTTPClient(client))
+
+	pc, err := rm.NewProjectsRESTClient(context.Background(), option.WithHTTPClient(client))
 	if err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("failed to create projects REST client: %w", err)
 	}
 	defer pc.Close()
-	//it := pc.ListProjects(context.Background(), &resourcemanagerpb.ListProjectsRequest{})
-	rqst := &resourcemanagerpb.SearchProjectsRequest{
-		Query: fmt.Sprintf("name:*"),
+
+	rqst := &resourcemanagerpb.ListProjectsRequest{
+		Parent: "organizations/0", // Ensure the correct organization ID is used
 	}
-	it := pc.SearchProjects(context.Background(), rqst)
-	var p []any
+
+	it := pc.ListProjects(context.Background(), rqst)
+
+	var projects []any
 	for {
 		resp, err := it.Next()
 		if err == iterator.Done {
 			break
 		}
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to list projects: %w", err)
 		}
-		// TODO: Use resp.
-		p = append(p, resp)
-
-		// If you need to access the underlying RPC response,
-		// you can do so by casting the `Response` as below.
-		// Otherwise, remove this line. Only populated after
-		// first call to Next(). Not safe for concurrent access.
-		_ = it.Response.(*resourcemanagerpb.ListProjectsResponse)
+		projects = append(projects, resp)
 	}
 
-	return p, nil
+	return projects, nil
 }

@@ -73,6 +73,7 @@ func StartServer(db *storage.PosgresStore) {
 	// Gmail
 	google.GET("/gmail-list-threads", handleGmailGetThreads)
 	google.GET("/gmail-list-messages", handleGmailGetMessages)
+	google.GET("/gmail-list-messages-using-workers", handleGmailGetMessagesUsingWorkers)
 	google.GET("/gmail-list-messages-ids", handleGmailGetMessagesIDs)
 	google.GET("/gmail-list-threads-ids", handleGmailGetThreadsIDs)
 	google.GET("/gmail-get-message/:ID", handleGmailGetMessage)

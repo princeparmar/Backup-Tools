@@ -19,6 +19,7 @@ import (
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/gmail/v1"
 	gs "google.golang.org/api/storage/v1"
+	rm "cloud.google.com/go/resourcemanager/apiv3"
 )
 
 // for middleware database purposes
@@ -168,8 +169,9 @@ func Autentificateg(c echo.Context) error {
 	if err != nil {
 		log.Printf("Unable to read client secret file: %v", err)
 	}
-
-	config, err := google.ConfigFromJSON(b, drive.DriveScope, photoslibrary.PhotoslibraryScope, gmail.MailGoogleComScope, gs.CloudPlatformScope, gs.CloudPlatformReadOnlyScope, gs.DevstorageFullControlScope, gs.DevstorageReadWriteScope)
+	scopes := []string{drive.DriveScope, photoslibrary.PhotoslibraryScope, gmail.MailGoogleComScope, gs.CloudPlatformScope, gs.CloudPlatformReadOnlyScope, gs.DevstorageFullControlScope, gs.DevstorageReadWriteScope}
+	scopes = append(scopes,rm.DefaultAuthScopes()... )
+	config, err := google.ConfigFromJSON(b, scopes...)
 	if err != nil {
 		log.Printf("Unable to parse client secret file to config: %v", err)
 	}

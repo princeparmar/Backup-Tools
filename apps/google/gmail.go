@@ -3,9 +3,11 @@ package google
 import (
 	"context"
 	"encoding/base64"
+	"log"
 	"log/slog"
 	"storj-integrations/utils"
 	"strings"
+	"sync"
 
 	"github.com/labstack/echo/v4"
 	"google.golang.org/api/gmail/v1"
@@ -262,6 +264,7 @@ func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
 func (client *GmailClient) GetThread(threadID string) (*gmail.Thread, error) {
 	return client.Users.Threads.Get("me", threadID).Format("full").Do()
 }
+
 func (client *GmailClient) GetUserMessagesControlled(nextPageToken string, num int64) (*MessagesResponse, error) {
 	var msgs MessagesResponse
 	var err error
@@ -287,6 +290,71 @@ func (client *GmailClient) GetUserMessagesControlled(nextPageToken string, num i
 		}
 		messages = append(messages, message)
 	}
+	msgs.Messages = messages
+	msgs.NextPageToken = res.NextPageToken
+	return &msgs, nil
+}
+
+func (client *GmailClient) GetUserMessagesUsingWorkers(nextPageToken string, workerCount int) (*MessagesResponse, error) {
+	var msgs MessagesResponse
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var messages []*gmail.Message
+	errCh := make(chan error, 1)
+	msgCh := make(chan *gmail.Message, 500) // Buffer size can be adjusted based on expected number of messages
+	idCh := make(chan string, 500) // Channel to send message IDs to workers
+
+	// Fetch list of message IDs
+	var res *gmail.ListMessagesResponse
+	var err error
+
+	if nextPageToken == "" {
+		res, err = client.Users.Messages.List("me").MaxResults(500).Do()
+	} else {
+		res, err = client.Users.Messages.List("me").MaxResults(500).PageToken(nextPageToken).Do()
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Start worker Goroutines
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for msgID := range idCh {
+				message, err := client.Users.Messages.Get("me", msgID).Do()
+				if err != nil {
+					log.Printf("Failed to retrieve message with ID %s: %v", msgID, err)
+					continue
+				}
+				msgCh <- message
+			}
+		}()
+	}
+
+	// Send message IDs to workers
+	go func() {
+		for _, msg := range res.Messages {
+			idCh <- msg.Id
+		}
+		close(idCh)
+	}()
+
+	// Close msgCh when all workers are done
+	go func() {
+		wg.Wait()
+		close(msgCh)
+		close(errCh)
+	}()
+
+	// Collect messages
+	for message := range msgCh {
+		mu.Lock()
+		messages = append(messages, message)
+		mu.Unlock()
+	}
+
 	msgs.Messages = messages
 	msgs.NextPageToken = res.NextPageToken
 	return &msgs, nil
