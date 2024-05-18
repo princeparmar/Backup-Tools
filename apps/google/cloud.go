@@ -23,11 +23,11 @@ func ListProjects(c echo.Context) (any, error) {
 	}
 	defer pc.Close()
 
-	rqst := &resourcemanagerpb.ListProjectsRequest{
-		Parent: "organizations/0", // Ensure the correct organization ID is used
+	rqst := &resourcemanagerpb.SearchProjectsRequest{
+		//Parent: "organizations/0", // Ensure the correct organization ID is used
 	}
 
-	it := pc.ListProjects(context.Background(), rqst)
+	it := pc.SearchProjects(context.Background(), rqst)
 
 	var projects []any
 	for {
