@@ -113,6 +113,7 @@ func StartServer(db *storage.PosgresStore) {
 	})
 
 	google.GET("/cloud/list-projects", handleStorageListProjects)
+	google.GET("/cloud/list-organizations", handleStorageListOrganizations)
 
 	// Dropbox
 	dropbox := e.Group("/dropbox")

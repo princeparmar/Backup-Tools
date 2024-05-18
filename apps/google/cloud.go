@@ -43,3 +43,37 @@ func ListProjects(c echo.Context) (any, error) {
 
 	return projects, nil
 }
+
+
+func ListOrganizations(c echo.Context) (any, error) {
+	client, err := client(c)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create client: %w", err)
+	}
+
+	pc, err := rm.NewOrganizationsRESTClient(context.Background(), option.WithHTTPClient(client))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create projects REST client: %w", err)
+	}
+	defer pc.Close()
+
+	rqst := &resourcemanagerpb.SearchOrganizationsRequest{
+		//Parent: "organizations/0", // Ensure the correct organization ID is used
+	}
+
+	it := pc.SearchOrganizations(context.Background(), rqst)
+
+	orgs := []any{}
+	for {
+		resp, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to list projects: %w", err)
+		}
+		orgs = append(orgs, resp)
+	}
+
+	return orgs, nil
+}
