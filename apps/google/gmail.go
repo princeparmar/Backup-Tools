@@ -302,7 +302,7 @@ func (client *GmailClient) GetUserMessagesUsingWorkers(nextPageToken string, wor
 	var messages []*gmail.Message
 	errCh := make(chan error, 1)
 	msgCh := make(chan *gmail.Message, 500) // Buffer size can be adjusted based on expected number of messages
-	idCh := make(chan string, 500) // Channel to send message IDs to workers
+	idCh := make(chan string, 500)          // Channel to send message IDs to workers
 
 	// Fetch list of message IDs
 	var res *gmail.ListMessagesResponse

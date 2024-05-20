@@ -103,7 +103,7 @@ func StartServer(db *storage.PosgresStore) {
 				"error": "storj access token is missing",
 			})
 		}
-		list, err:=storj.ListObjectsRecurisive(context.Background(), accesGrant, bucketName)
+		list, err := storj.ListObjectsRecurisive(context.Background(), accesGrant, bucketName)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),

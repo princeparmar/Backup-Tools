@@ -41,7 +41,6 @@ func handleStorageListBuckets(c echo.Context) error {
 	return c.JSON(http.StatusOK, bucketsJSON)
 }
 
-
 func handleStorageListProjects(c echo.Context) error {
 	client, err := google.ListProjects(c)
 	if err != nil {
@@ -352,7 +351,7 @@ func syncCloudProject(c echo.Context, projectName string) (res *ProjectSyncRespo
 		res.Err = err
 		return
 	}
-	
+
 	for _, bucket := range bucketsJSON.Items {
 		err = syncCloudBucket(c, bucket.Name)
 		if err != nil {
@@ -387,13 +386,12 @@ func handleListProjects(c echo.Context) error {
 		allIDs = strings.Split(formIDs, ",")
 	}
 	var res []any
-	for _, id := range allIDs{
-		r :=syncCloudProject(c, id)
-		res=append(res, r)
+	for _, id := range allIDs {
+		r := syncCloudProject(c, id)
+		res = append(res, r)
 	}
 	return c.JSON(200, res)
 }
-
 
 func handleListBuckets(c echo.Context) error {
 	var allIDs []string
@@ -410,12 +408,12 @@ func handleListBuckets(c echo.Context) error {
 		allIDs = strings.Split(formIDs, ",")
 	}
 	var res []any
-	for _, id := range allIDs{
+	for _, id := range allIDs {
 		err := syncCloudBucket(c, id)
 		if err != nil {
-			res = append(res, map[string]any{"bukcetID":id, "success":false, "error":err})
-		}else{
-			res = append(res, map[string]any{"bukcetID":id, "success":false})
+			res = append(res, map[string]any{"bukcetID": id, "success": false, "error": err})
+		} else {
+			res = append(res, map[string]any{"bukcetID": id, "success": false})
 		}
 	}
 	return c.JSON(200, res)
@@ -462,23 +460,23 @@ func handleSyncCloudItems(c echo.Context) error {
 		allIDs = strings.Split(formIDs, ",")
 	}
 	var res []any
-	for _, id := range allIDs{
-		err := syncItem(c,client,accesGrant,id, bucketName)
+	for _, id := range allIDs {
+		err := syncItem(c, client, accesGrant, id, bucketName)
 		if err != nil {
-			res = append(res, map[string]any{"itemID":id, "success":false, "error":err})
-		}else{
-			res = append(res, map[string]any{"itemID":id, "success":false})
+			res = append(res, map[string]any{"itemID": id, "success": false, "error": err})
+		} else {
+			res = append(res, map[string]any{"itemID": id, "success": false})
 		}
 	}
 	return c.JSON(200, res)
 }
 
-func syncItem(c echo.Context,client *google.StorageClient,accessGrant, itemName, bucketName string) error{		
+func syncItem(c echo.Context, client *google.StorageClient, accessGrant, itemName, bucketName string) error {
 
 	obj, err := client.GetObject(c, bucketName, itemName)
 	if err != nil {
 		return err
 	}
 	return storj.UploadObject(context.Background(), accessGrant, "google-cloud", obj.Name, obj.Data)
-	
+
 }

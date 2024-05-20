@@ -48,7 +48,6 @@ func (client *StorageClient) GetBucket(c echo.Context, bucketName string) (*stor
 	return bucket, nil
 }
 
-
 func (client *StorageClient) ListObjectsInBucket(c echo.Context, bucketName string) (*storage.Objects, error) {
 	objects, err := client.Objects.List(bucketName).Do()
 	if err != nil {

@@ -44,7 +44,6 @@ func ListProjects(c echo.Context) (any, error) {
 	return projects, nil
 }
 
-
 func ListOrganizations(c echo.Context) (any, error) {
 	client, err := client(c)
 	if err != nil {
