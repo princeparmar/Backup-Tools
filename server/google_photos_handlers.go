@@ -311,22 +311,35 @@ func handleSendFileFromGooglePhotosToStorj(c echo.Context) error {
 	g, ctx := errgroup.WithContext(c.Request().Context())
 	g.SetLimit(10)
 
+	processedIDs, failedIDs := utils.NewLockedArray(), utils.NewLockedArray()
 	for _, id := range allIDs {
 		func(id string) {
 			g.Go(func() error {
-				return uploadSingleFileFromPhotosToStorj(ctx, client, id, accesGrant)
+				err := uploadSingleFileFromPhotosToStorj(ctx, client, id, accesGrant)
+				if err != nil {
+					failedIDs.Add(id)
+					return nil
+				}
+
+				processedIDs.Add(id)
+				return nil
 			})
 		}(id)
 	}
 
+	// as we are not returning any error this should not happend in any case
 	if err := g.Wait(); err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
+			"error":         err.Error(),
+			"failed_ids":    failedIDs.Get(),
+			"processed_ids": processedIDs.Get(),
 		})
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message": "all files were successfully uploaded from Google Photos to Storj",
+		"message":       "all files were successfully uploaded from Google Photos to Storj",
+		"failed_ids":    failedIDs.Get(),
+		"processed_ids": processedIDs.Get(),
 	})
 }
 
