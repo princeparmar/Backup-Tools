@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/labstack/echo/v4"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/api/gmail/v1"
 )
 
@@ -585,48 +586,64 @@ func handleAllGmailMessagesToStorj(c echo.Context) error {
 		}
 	}
 
+	g, ctx := errgroup.WithContext(c.Request().Context())
+	g.SetLimit(10)
+
+	processedIDs, failedIDs := utils.NewLockedArray(), utils.NewLockedArray()
 	for _, message := range allMessages {
-		msg, err := GmailClient.GetMessage(message.Id)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-
-		msgToSave := storage.GmailMessageSQL{
-			ID:      msg.ID,
-			Date:    msg.Date,
-			From:    msg.From,
-			To:      msg.To,
-			Subject: msg.Subject,
-			Body:    msg.Body,
-		}
-
-		// SAVE ATTACHMENTS TO THE STORJ BUCKET AND WRITE THEIR NAMES TO STRUCT
-
-		if len(msg.Attachments) > 0 {
-			for _, att := range msg.Attachments {
-				err = storj.UploadObject(context.Background(), accesGrant, "gmail", att.FileName, att.Data)
+		func(message *gmail.Message) {
+			g.Go(func() error {
+				msg, err := GmailClient.GetMessage(message.Id)
 				if err != nil {
-					return c.JSON(http.StatusForbidden, map[string]interface{}{
-						"error": err.Error(),
-					})
+					failedIDs.Add(message.Id)
+					return nil
 				}
-				msgToSave.Attachments = msgToSave.Attachments + "|" + att.FileName
-			}
-		}
 
-		// WRITE ALL EMAILS TO THE DATABASE LOCALLY
+				msgToSave := storage.GmailMessageSQL{
+					ID:      msg.ID,
+					Date:    msg.Date,
+					From:    msg.From,
+					To:      msg.To,
+					Subject: msg.Subject,
+					Body:    msg.Body,
+				}
 
-		err = db.WriteEmailToDB(&msgToSave)
-		if err != nil {
-			if !strings.Contains(err.Error(), "UNIQUE constraint failed") {
-				return c.JSON(http.StatusForbidden, map[string]interface{}{
-					"error": err.Error(),
-				})
-			}
-		}
+				// SAVE ATTACHMENTS TO THE STORJ BUCKET AND WRITE THEIR NAMES TO STRUCT
+
+				if len(msg.Attachments) > 0 {
+					for _, att := range msg.Attachments {
+						err = storj.UploadObject(ctx, accesGrant, "gmail", att.FileName, att.Data)
+						if err != nil {
+							failedIDs.Add(message.Id)
+							return nil
+						}
+						msgToSave.Attachments = msgToSave.Attachments + "|" + att.FileName
+					}
+				}
+
+				// WRITE ALL EMAILS TO THE DATABASE LOCALLY
+
+				err = db.WriteEmailToDB(&msgToSave)
+				if err != nil {
+					if !strings.Contains(err.Error(), "UNIQUE constraint failed") {
+						failedIDs.Add(message.Id)
+						return nil
+					}
+				}
+				processedIDs.Add(message.Id)
+				return nil
+			})
+		}(message)
 	}
+
+	if err := g.Wait(); err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error":         err.Error(),
+			"failed_ids":    failedIDs.Get(),
+			"processed_ids": processedIDs.Get(),
+		})
+	}
+
 	// DELETE OLD DB COPY FROM STORJ UPLOAD UP TO DATE DB FILE BACK TO STORJ AND DELETE IT FROM LOCAL CACHE
 
 	// get db file data
@@ -653,7 +670,11 @@ func handleAllGmailMessagesToStorj(c echo.Context) error {
 		})
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": "Emails were successfully uploaded"})
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message":       "all items were successfully uploaded from gmail to Storj",
+		"failed_ids":    failedIDs.Get(),
+		"processed_ids": processedIDs.Get(),
+	})
 }
 
 func handleListGmailMessagesToStorj(c echo.Context) error {
@@ -740,48 +761,62 @@ func handleListGmailMessagesToStorj(c echo.Context) error {
 		allIDs = strings.Split(formIDs, ",")
 	}
 
+	g, ctx := errgroup.WithContext(c.Request().Context())
+	g.SetLimit(10)
+
+	processedIDs, failedIDs := utils.NewLockedArray(), utils.NewLockedArray()
 	for _, id := range allIDs {
-		msg, err := GmailClient.GetMessage(id)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-
-		msgToSave := storage.GmailMessageSQL{
-			ID:      msg.ID,
-			Date:    msg.Date,
-			From:    msg.From,
-			To:      msg.To,
-			Subject: msg.Subject,
-			Body:    msg.Body,
-		}
-
-		// SAVE ATTACHMENTS TO THE STORJ BUCKET AND WRITE THEIR NAMES TO STRUCT
-
-		if len(msg.Attachments) > 0 {
-			for _, att := range msg.Attachments {
-				err = storj.UploadObject(context.Background(), accesGrant, "gmail", att.FileName, att.Data)
+		func(id string) {
+			g.Go(func() error {
+				msg, err := GmailClient.GetMessage(id)
 				if err != nil {
-					return c.JSON(http.StatusForbidden, map[string]interface{}{
-						"error": err.Error(),
-					})
+					failedIDs.Add(id)
+					return nil
 				}
-				msgToSave.Attachments = msgToSave.Attachments + "|" + att.FileName
-			}
-		}
 
-		// WRITE ALL EMAILS TO THE DATABASE LOCALLY
+				msgToSave := storage.GmailMessageSQL{
+					ID:      msg.ID,
+					Date:    msg.Date,
+					From:    msg.From,
+					To:      msg.To,
+					Subject: msg.Subject,
+					Body:    msg.Body,
+				}
 
-		err = db.WriteEmailToDB(&msgToSave)
-		if err != nil {
-			// This means that message already exist. We just it and go to the next
-			if !strings.Contains(err.Error(), "UNIQUE constraint failed") {
-				return c.JSON(http.StatusForbidden, map[string]interface{}{
-					"error": err.Error(),
-				})
-			}
-		}
+				// SAVE ATTACHMENTS TO THE STORJ BUCKET AND WRITE THEIR NAMES TO STRUCT
+
+				if len(msg.Attachments) > 0 {
+					for _, att := range msg.Attachments {
+						err = storj.UploadObject(ctx, accesGrant, "gmail", att.FileName, att.Data)
+						if err != nil {
+							failedIDs.Add(id)
+							return nil
+						}
+						msgToSave.Attachments = msgToSave.Attachments + "|" + att.FileName
+					}
+				}
+
+				// WRITE ALL EMAILS TO THE DATABASE LOCALLY
+
+				err = db.WriteEmailToDB(&msgToSave)
+				if err != nil {
+					// This means that message already exist. We just it and go to the next
+					if !strings.Contains(err.Error(), "UNIQUE constraint failed") {
+						failedIDs.Add(id)
+						return nil
+					}
+				}
+				processedIDs.Add(id)
+				return nil
+			})
+		}(id)
+	}
+	if err := g.Wait(); err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error":         err.Error(),
+			"failed_ids":    failedIDs.Get(),
+			"processed_ids": processedIDs.Get(),
+		})
 	}
 	// DELETE OLD DB COPY FROM STORJ UPLOAD UP TO DATE DB FILE BACK TO STORJ AND DELETE IT FROM LOCAL CACHE
 
@@ -809,7 +844,11 @@ func handleListGmailMessagesToStorj(c echo.Context) error {
 		})
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": "Emails were successfully uploaded"})
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message":       "all mails were successfully uploaded from Google mail to Storj",
+		"failed_ids":    failedIDs.Get(),
+		"processed_ids": processedIDs.Get(),
+	})
 }
 
 func handleGetGmailDBFromStorj(c echo.Context) error {
