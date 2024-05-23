@@ -610,17 +610,28 @@ func handleSendListFromGoogleDriveToStorj(c echo.Context) error {
 			g.Go(func() error {
 				name, data, err := google.GetFileAndPath(c, id)
 				if err != nil {
-					failedIDs.Add(id)
+					if strings.Contains(err.Error(), "folder error") {
+						if err = handleFolder(name, id, c); err != nil {
+							failedIDs.Add(id)
+							return nil
+						} else {
+							processedIDs.Add(id)
+							return nil
+						}
+					} else {
+
+						failedIDs.Add(id)
+						return nil
+					}
+				} else {
+
+					if err = storj.UploadObject(ctx, accesGrant, "google-drive", name, data); err != nil {
+						failedIDs.Add(id)
+						return nil
+					}
+					processedIDs.Add(id)
 					return nil
 				}
-
-				if err := storj.UploadObject(ctx, accesGrant, "google-drive", name, data); err != nil {
-					failedIDs.Add(id)
-					return nil
-				}
-
-				processedIDs.Add(id)
-				return nil
 			})
 		}(id)
 	}
@@ -633,7 +644,7 @@ func handleSendListFromGoogleDriveToStorj(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":       "all files were successfully uploaded from Google drive to Storj",
+		"message":       "all files were successfully uploaded from Google Photos to Storj",
 		"failed_ids":    failedIDs.Get(),
 		"processed_ids": processedIDs.Get(),
 	})
