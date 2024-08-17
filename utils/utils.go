@@ -2,6 +2,7 @@ package utils
 
 import (
 	"archive/zip"
+	"fmt"
 	"io"
 	"log"
 	"math/rand"
@@ -9,8 +10,30 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
+
+type lockedArray struct {
+	sync.Mutex
+	ar []string
+}
+
+func NewLockedArray() *lockedArray {
+	return &lockedArray{ar: make([]string, 0)}
+}
+
+func (la *lockedArray) Add(s string) {
+	la.Lock()
+	la.ar = append(la.ar, s)
+	la.Unlock()
+}
+
+func (la *lockedArray) Get() []string {
+	la.Lock()
+	defer la.Unlock()
+	return la.ar
+}
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
@@ -125,4 +148,21 @@ func Unzip(src, dest string) error {
 		}
 	}
 	return nil
+}
+
+func CreateFile(filePath string) (*os.File, error) {
+	// Create the directory if it doesn't exist
+	dir := filepath.Dir(filePath)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create directory: %v", err)
+		}
+	}
+
+	// Create the file
+	file, err := os.Create(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create file: %v", err)
+	}
+	return file, nil
 }

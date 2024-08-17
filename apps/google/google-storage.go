@@ -28,16 +28,24 @@ func NewGoogleStorageClient(c echo.Context) (*StorageClient, error) {
 }
 
 // Takes project name and returns JSON list of all buckets in this project.
-func (client *StorageClient) ListBucketsJSON(c echo.Context, projectName string) (string, error) {
+func (client *StorageClient) ListBucketsJSON(c echo.Context, projectName string) (*storage.Buckets, error) {
 	bucketList, err := client.Buckets.List(projectName).Do()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	listJSON, err := bucketList.MarshalJSON()
+	/*listJSON, err := bucketList.MarshalJSON()
 	if err != nil {
 		return "", err
+	}*/
+	return bucketList, nil
+}
+
+func (client *StorageClient) GetBucket(c echo.Context, bucketName string) (*storage.Bucket, error) {
+	bucket, err := client.Buckets.Get(bucketName).Do()
+	if err != nil {
+		return nil, err
 	}
-	return string(listJSON), nil
+	return bucket, nil
 }
 
 func (client *StorageClient) ListObjectsInBucket(c echo.Context, bucketName string) (*storage.Objects, error) {
@@ -50,17 +58,9 @@ func (client *StorageClient) ListObjectsInBucket(c echo.Context, bucketName stri
 }
 
 // Takes bucket name and returns JSON list of all objects in this bucket.
-func (client *StorageClient) ListObjectsInBucketJSON(c echo.Context, bucketName string) (string, error) {
-	objects, err := client.Objects.List(bucketName).Do()
-	if err != nil {
-		return "", err
-	}
+func (client *StorageClient) ListObjectsInBucketJSON(c echo.Context, bucketName string) (*storage.Objects, error) {
+	return client.Objects.List(bucketName).Do()
 
-	objectsJSON, err := objects.MarshalJSON()
-	if err != nil {
-		return "", err
-	}
-	return string(objectsJSON), nil
 }
 
 type StorageObject struct {
