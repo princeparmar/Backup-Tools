@@ -4,6 +4,7 @@ go 1.19
 
 require (
 	cloud.google.com/go/resourcemanager v1.9.5
+	github.com/bold-commerce/go-shopify v2.3.0+incompatible
 	github.com/dropbox/dropbox-sdk-go-unofficial/v6 v6.0.5
 	github.com/google/go-github/v53 v53.2.0
 	github.com/gphotosuploader/google-photos-api-client-go/v2 v2.4.2
@@ -21,7 +22,6 @@ require (
 	cloud.google.com/go/iam v1.1.6 // indirect
 	cloud.google.com/go/longrunning v0.5.5 // indirect
 	github.com/ProtonMail/go-crypto v0.0.0-20230923063757-afb1ddc0824c // indirect
-	github.com/bold-commerce/go-shopify v2.3.0+incompatible // indirect
 	github.com/cloudflare/circl v1.3.7 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect

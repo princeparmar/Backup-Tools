@@ -11,7 +11,7 @@ import (
 	"github.com/labstack/echo/v4/middleware"
 )
 
-func StartServer(db *storage.PosgresStore) {
+func StartServer(db *storage.PosgresStore, address string) {
 	e := echo.New()
 	e.HideBanner = true
 
@@ -152,5 +152,5 @@ func StartServer(db *storage.PosgresStore) {
 	quickbooks.GET("/items-to-storj", handleQuickbooksItemsToStorj)
 	quickbooks.GET("/invoices-to-storj", handleQuickbooksInvoicesToStorj)
 
-	e.Start(":8005")
+	e.Start(address)
 }

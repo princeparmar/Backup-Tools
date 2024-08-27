@@ -23,7 +23,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	server.StartServer(storage)
+	address := ":8005"
+	if envPortVal := os.Getenv("PORT"); envPortVal != "" {
+		address = envPortVal
+	}
+
+	server.StartServer(storage, address)
 }
 
 // Loads all data from .env file into Environmental variables.
