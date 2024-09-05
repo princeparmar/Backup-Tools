@@ -33,8 +33,8 @@ type CustomClaims struct {
 }
 
 var (
-	jwtSecretKey    = "your-secret-key"
-	tokenExpiration = time.Now().Add(24 * time.Hour) // Example: expires in 24 hours
+	JwtSecretKey    = "your-secret-key"
+	tokenExpiration = time.Duration(24 * time.Hour) // Example: expires in 24 hours
 )
 
 func CreateJWToken(googleToken string) string {
@@ -44,13 +44,13 @@ func CreateJWToken(googleToken string) string {
 		CustomClaims{
 			GoogleAuthToken: googleToken,
 			StandardClaims: jwt.StandardClaims{
-				ExpiresAt: tokenExpiration.Unix(),
+				ExpiresAt: time.Now().Add(tokenExpiration).Unix(),
 			},
 		},
 	)
 
 	// Sign the token with the secret key and get the complete, encoded token as a string
-	tokenString, err := token.SignedString([]byte(jwtSecretKey))
+	tokenString, err := token.SignedString([]byte(JwtSecretKey))
 	if err != nil {
 		fmt.Println("Error generating token:", err)
 		return ""
@@ -66,7 +66,7 @@ func GetGoogleTokenFromJWT(c echo.Context) (string, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
-		return []byte("your-secret-key"), nil
+		return []byte(JwtSecretKey), nil
 	})
 	if err != nil {
 		log.Print("Error parsing token:", err)
