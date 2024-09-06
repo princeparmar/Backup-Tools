@@ -11,6 +11,18 @@ import (
 	"storj.io/uplink"
 )
 
+const (
+	ReserveBucket_Gmail      = "gmail"
+	ReserveBucket_Drive      = "google-drive"
+	ReserveBucket_Cloud      = "google-cloud"
+	ReserveBucket_Photos     = "google-photos"
+	ReserveBucket_Dropbox    = "dropbox"
+	ReserveBucket_S3         = "aws-s3"
+	ReserveBucket_Github     = "github"
+	ReserveBucket_Shopify    = "shopify"
+	RestoreBucket_Quickbooks = "quickbooks"
+)
+
 // Authenticates app with your Storj accout.
 func HandleStorjAuthentication(c echo.Context) error {
 	storjAccessToken := c.FormValue("storj")

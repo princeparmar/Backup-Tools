@@ -193,7 +193,7 @@ func handleStorjToGoogleCloud(c echo.Context) error {
 		}
 	}
 
-	data, err := storj.DownloadObject(context.Background(), accesGrant, "google-cloud", itemName)
+	data, err := storj.DownloadObject(context.Background(), accesGrant, storj.ReserveBucket_Drive, itemName)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),

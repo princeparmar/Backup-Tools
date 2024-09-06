@@ -555,7 +555,7 @@ func handleSendFileFromStorjToGoogleDrive(c echo.Context) error {
 		})
 	}
 
-	data, err := storj.DownloadObject(context.Background(), accesGrant, "google-drive", name)
+	data, err := storj.DownloadObject(context.Background(), accesGrant, storj.ReserveBucket_Drive, name)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"error": fmt.Sprintf("failed to download object from Storj: %v", err),

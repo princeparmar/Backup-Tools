@@ -235,7 +235,7 @@ func handleSendFileFromStorjToGooglePhotos(c echo.Context) error {
 		})
 	}
 
-	data, err := storj.DownloadObject(context.Background(), accesGrant, "google-photos", name)
+	data, err := storj.DownloadObject(context.Background(), accesGrant, storj.ReserveBucket_Photos, name)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),

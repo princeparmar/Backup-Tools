@@ -71,7 +71,7 @@ func handleStorjToDropbox(c echo.Context) error {
 		})
 	}
 
-	objData, err := storj.DownloadObject(context.Background(), accesGrant, "dropbox", filePath)
+	objData, err := storj.DownloadObject(context.Background(), accesGrant, storj.ReserveBucket_Dropbox, filePath)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -168,7 +168,7 @@ func handleStorjToS3(c echo.Context) error {
 		})
 	}
 
-	data, err := storj.DownloadObject(context.Background(), accesGrant, "aws-s3", itemName)
+	data, err := storj.DownloadObject(context.Background(), accesGrant, storj.ReserveBucket_S3, itemName)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{"message": "error downloading object from Storj" + err.Error(), "error": err.Error()})
 	}
@@ -367,7 +367,7 @@ func handleRepositoryFromStorjToGithub(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "repo name is now specified"})
 	}
 
-	repoData, err := storj.DownloadObject(context.Background(), accesGrant, "github", repo)
+	repoData, err := storj.DownloadObject(context.Background(), accesGrant, storj.ReserveBucket_Github, repo)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{"message": "error downloading object from Storj" + err.Error(), "error": err.Error()})
 	}
@@ -488,7 +488,7 @@ func handleShopifyProductsToStorj(c echo.Context) error {
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/shopify.db"
 
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "shopify", "shopify.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, storj.ReserveBucket_Shopify, "shopify.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
@@ -579,7 +579,7 @@ func handleShopifyCustomersToStorj(c echo.Context) error {
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/shopify.db"
 
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "shopify", "shopify.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, storj.ReserveBucket_Shopify, "shopify.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
@@ -671,7 +671,7 @@ func handleShopifyOrdersToStorj(c echo.Context) error {
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/shopify.db"
 
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "shopify", "shopify.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, storj.ReserveBucket_Shopify, "shopify.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
@@ -837,7 +837,7 @@ func handleQuickbooksCustomersToStorj(c echo.Context) error {
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/quickbooks.db"
 
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, storj.RestoreBucket_Quickbooks, "quickbooks.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
@@ -925,7 +925,7 @@ func handleQuickbooksItemsToStorj(c echo.Context) error {
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/quickbooks.db"
 
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, storj.RestoreBucket_Quickbooks, "quickbooks.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
@@ -1013,7 +1013,7 @@ func handleQuickbooksInvoicesToStorj(c echo.Context) error {
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/quickbooks.db"
 
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, storj.RestoreBucket_Quickbooks, "quickbooks.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {

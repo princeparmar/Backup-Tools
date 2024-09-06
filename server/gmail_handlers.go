@@ -112,7 +112,7 @@ func handleGmailGetMessages(c echo.Context) error {
 	// CHECK IF EMAIL DATABASE ALREADY EXISTS AND DOWNLOAD IT, IF NOT - CREATE NEW ONE
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
 	defer os.Remove(userCacheDBPath)
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "gmail", "gmails.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, storj.ReserveBucket_Gmail, "gmails.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
@@ -215,7 +215,7 @@ func handleGmailGetMessagesIDs(c echo.Context) error {
 	// CHECK IF EMAIL DATABASE ALREADY EXISTS AND DOWNLOAD IT, IF NOT - CREATE NEW ONE
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
 	defer os.Remove(userCacheDBPath)
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "gmail", "gmails.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, storj.ReserveBucket_Gmail, "gmails.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
@@ -415,7 +415,7 @@ func handleGmailMessageToStorj(c echo.Context) error {
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
 	defer os.Remove(userCacheDBPath)
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "gmail", "gmails.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, storj.ReserveBucket_Gmail, "gmails.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
@@ -510,7 +510,7 @@ func handleAllGmailMessagesToStorj(c echo.Context) error {
 	// CHECK IF EMAIL DATABASE ALREADY EXISTS AND DOWNLOAD IT, IF NOT - CREATE NEW ONE
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
 	defer os.Remove(userCacheDBPath)
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "gmail", "gmails.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, storj.ReserveBucket_Gmail, "gmails.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
@@ -689,7 +689,7 @@ func handleListGmailMessagesToStorj(c echo.Context) error {
 	// CHECK IF EMAIL DATABASE ALREADY EXISTS AND DOWNLOAD IT, IF NOT - CREATE NEW ONE
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
 	defer os.Remove(userCacheDBPath)
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "gmail", "gmails.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, storj.ReserveBucket_Gmail, "gmails.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
@@ -860,7 +860,7 @@ func handleGetGmailDBFromStorj(c echo.Context) error {
 	}
 
 	// Download the SQLite database file from Storj
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "gmail", "gmails.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, storj.ReserveBucket_Gmail, "gmails.db")
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"message": "no emails saved in Storj database",
@@ -948,7 +948,7 @@ func handleGmailGetThreadsIDsControlled(c echo.Context) error {
 	// CHECK IF EMAIL DATABASE ALREADY EXISTS AND DOWNLOAD IT, IF NOT - CREATE NEW ONE
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
 	defer os.Remove(userCacheDBPath)
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "gmail", "gmails.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, storj.ReserveBucket_Gmail, "gmails.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
@@ -1023,7 +1023,7 @@ func handleGmailGetMessagesUsingWorkers(c echo.Context) error {
 	// CHECK IF EMAIL DATABASE ALREADY EXISTS AND DOWNLOAD IT, IF NOT - CREATE NEW ONE
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
 	defer os.Remove(userCacheDBPath)
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "gmail", "gmails.db")
+	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, storj.ReserveBucket_Gmail, "gmails.db")
 	// Copy file from storj to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
