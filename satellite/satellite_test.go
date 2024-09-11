@@ -1,4 +1,4 @@
-package storj
+package satellite
 
 import (
 	"context"

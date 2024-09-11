@@ -1,4 +1,4 @@
-module storj-integrations
+module github.com/StorX2-0/Backup-Tools
 
 go 1.19
 

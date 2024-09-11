@@ -7,9 +7,10 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"storj-integrations/storage"
-	"storj-integrations/utils"
 	"time"
+
+	"github.com/StorX2-0/Backup-Tools/storage"
+	"github.com/StorX2-0/Backup-Tools/utils"
 
 	rm "cloud.google.com/go/resourcemanager/apiv3"
 	"github.com/dgrijalva/jwt-go"

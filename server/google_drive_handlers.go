@@ -8,10 +8,11 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
-	google "storj-integrations/apps/google"
-	"storj-integrations/storj"
-	"storj-integrations/utils"
 	"strings"
+
+	google "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/satellite"
+	"github.com/StorX2-0/Backup-Tools/utils"
 
 	"github.com/labstack/echo/v4"
 	"golang.org/x/sync/errgroup"
@@ -116,11 +117,11 @@ func handleFolder(folderName, folderID string, c echo.Context) error {
 	}
 	// If folder is empty, create an empty folder
 
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
-		return errors.New("error: storj access token is missing")
+		return errors.New("error: access token not found")
 	}
-	err = storj.UploadObject(context.Background(), accesGrant, "google-drive", folderName+"/", nil)
+	err = satellite.UploadObject(context.Background(), accesGrant, "google-drive", folderName+"/", nil)
 	if err != nil {
 		return err
 	}
@@ -140,13 +141,13 @@ func handleFolder(folderName, folderID string, c echo.Context) error {
 				return err
 			}
 		} else {
-			accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+			accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 			if accesGrant == "" {
 				return c.JSON(http.StatusForbidden, map[string]interface{}{
-					"error": "storj access token is missing",
+					"error": "access token not found",
 				})
 			}
-			err = storj.UploadObject(context.Background(), accesGrant, "google-drive", path.Join(folderName, name), data)
+			err = satellite.UploadObject(context.Background(), accesGrant, "google-drive", path.Join(folderName, name), data)
 			if err != nil {
 				return err
 			}
@@ -171,16 +172,16 @@ func handleSyncAllSharedFolderAndFiles(c echo.Context) error {
 	}
 	// If folder is empty, create an empty folder
 
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
-	err = storj.UploadObject(context.Background(), accesGrant, "google-drive", "shared with me/", nil)
+	err = satellite.UploadObject(context.Background(), accesGrant, "google-drive", "shared with me/", nil)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"error": fmt.Sprintf("failed to upload file to Storj: %v", err),
+			"error": fmt.Sprintf("failed to upload file to Satellite: %v", err),
 		})
 	}
 
@@ -199,7 +200,7 @@ func handleSyncAllSharedFolderAndFiles(c echo.Context) error {
 
 				}
 
-				err = storj.UploadObject(ctx, accesGrant, "google-drive", path.Join("shared with me", name), data)
+				err = satellite.UploadObject(ctx, accesGrant, "google-drive", path.Join("shared with me", name), data)
 				if err != nil {
 					failedIDs.Add(file.ID)
 					return nil
@@ -219,7 +220,7 @@ func handleSyncAllSharedFolderAndFiles(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":       "all files were successfully uploaded from Google drive to Storj",
+		"message":       "all files were successfully uploaded from Google drive to Satellite",
 		"failed_ids":    failedIDs.Get(),
 		"processed_ids": processedIDs.Get(),
 	})
@@ -242,16 +243,16 @@ func handleSyncAllFolderFiles(c echo.Context) error {
 	}
 	// If folder is empty, create an empty folder
 
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
-	err = storj.UploadObject(context.Background(), accesGrant, "google-drive", folderName+"/", nil)
+	err = satellite.UploadObject(context.Background(), accesGrant, "google-drive", folderName+"/", nil)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"error": fmt.Sprintf("failed to upload file to Storj: %v", err),
+			"error": fmt.Sprintf("failed to upload file to Satellite: %v", err),
 		})
 	}
 
@@ -270,7 +271,7 @@ func handleSyncAllFolderFiles(c echo.Context) error {
 
 				}
 
-				err = storj.UploadObject(ctx, accesGrant, "google-drive", path.Join("shared with me", name), data)
+				err = satellite.UploadObject(ctx, accesGrant, "google-drive", path.Join("shared with me", name), data)
 				if err != nil {
 					failedIDs.Add(file.ID)
 					return nil
@@ -290,40 +291,40 @@ func handleSyncAllFolderFiles(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":       "all files were successfully uploaded from Google drive to Storj",
+		"message":       "all files were successfully uploaded from Google drive to Satellite",
 		"failed_ids":    failedIDs.Get(),
 		"processed_ids": processedIDs.Get(),
 	})
 
 }
 
-func handleSTorjDrive(c echo.Context) error {
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+func handleSatelliteDrive(c echo.Context) error {
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
-	o, err := storj.ListObjects1(context.Background(), accesGrant, "google-drive")
+	o, err := satellite.ListObjects1(context.Background(), accesGrant, "google-drive")
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"error": fmt.Sprintf("failed to get file list from Storj: %v", err),
+			"error": fmt.Sprintf("failed to get file list from Satellite: %v", err),
 		})
 	}
 	return c.JSON(http.StatusOK, o)
 }
 
-func handleStorjDriveFolder(c echo.Context) error {
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+func handleSatelliteDriveFolder(c echo.Context) error {
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
-	o, err := storj.GetFilesInFolder(context.Background(), accesGrant, "google-drive", c.Param("name")+"/")
+	o, err := satellite.GetFilesInFolder(context.Background(), accesGrant, "google-drive", c.Param("name")+"/")
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"error": fmt.Sprintf("failed to get file list from Storj: %v", err),
+			"error": fmt.Sprintf("failed to get file list from Satellite: %v", err),
 		})
 	}
 	return c.JSON(http.StatusOK, o)
@@ -345,16 +346,16 @@ func handleSyncAllFolderFilesByID(c echo.Context) error {
 	}
 	// If folder is empty, create an empty folder
 
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
-	err = storj.UploadObject(context.Background(), accesGrant, "google-drive", folderName+"/", nil)
+	err = satellite.UploadObject(context.Background(), accesGrant, "google-drive", folderName+"/", nil)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"error": fmt.Sprintf("failed to upload file to Storj: %v", err),
+			"error": fmt.Sprintf("failed to upload file to Satellite: %v", err),
 		})
 	}
 
@@ -373,7 +374,7 @@ func handleSyncAllFolderFilesByID(c echo.Context) error {
 
 				}
 
-				err = storj.UploadObject(ctx, accesGrant, "google-drive", path.Join("shared with me", name), data)
+				err = satellite.UploadObject(ctx, accesGrant, "google-drive", path.Join("shared with me", name), data)
 				if err != nil {
 					failedIDs.Add(file.ID)
 					return nil
@@ -393,14 +394,14 @@ func handleSyncAllFolderFilesByID(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":       "all files were successfully uploaded from Google drive to Storj",
+		"message":       "all files were successfully uploaded from Google drive to Satellite",
 		"failed_ids":    failedIDs.Get(),
 		"processed_ids": processedIDs.Get(),
 	})
 }
 
-// Sends file from Google Drive to Storj
-func handleSendFileFromGoogleDriveToStorj(c echo.Context) error {
+// Sends file from Google Drive to Satellite
+func handleSendFileFromGoogleDriveToSatellite(c echo.Context) error {
 	id := c.Param("ID")
 
 	name, data, err := google.GetFileAndPath(c, id)
@@ -415,31 +416,31 @@ func handleSendFileFromGoogleDriveToStorj(c echo.Context) error {
 			})
 		}
 	}
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
-	err = storj.UploadObject(context.Background(), accesGrant, "google-drive", name, data)
+	err = satellite.UploadObject(context.Background(), accesGrant, "google-drive", name, data)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"error": fmt.Sprintf("failed to upload file to Storj: %v", err),
+			"error": fmt.Sprintf("failed to upload file to Satellite: %v", err),
 		})
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message": fmt.Sprintf("file %s was successfully uploaded from Google Drive to Storj", name),
+		"message": fmt.Sprintf("file %s was successfully uploaded from Google Drive to Satellite", name),
 	})
 }
 
-func handleSendAllFilesFromGoogleDriveToStorj(c echo.Context) error {
+func handleSendAllFilesFromGoogleDriveToSatellite(c echo.Context) error {
 
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 	// Get only file names in root
@@ -464,10 +465,10 @@ func handleSendAllFilesFromGoogleDriveToStorj(c echo.Context) error {
 		}
 		// If folder is empty, create an empty folder
 
-		err = storj.UploadObject(ctx, accesGrant, "google-drive", "shared with me/", nil)
+		err = satellite.UploadObject(ctx, accesGrant, "google-drive", "shared with me/", nil)
 		/*if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-				"error": fmt.Sprintf("failed to upload file to Storj: %v", err),
+				"error": fmt.Sprintf("failed to upload file to Satellite: %v", err),
 			})
 		}*/
 
@@ -482,7 +483,7 @@ func handleSendAllFilesFromGoogleDriveToStorj(c echo.Context) error {
 
 					}
 
-					err = storj.UploadObject(ctx, accesGrant, "google-drive", path.Join("shared with me", name), data)
+					err = satellite.UploadObject(ctx, accesGrant, "google-drive", path.Join("shared with me", name), data)
 					if err != nil {
 						failedIDs.Add(file.ID)
 						return nil
@@ -519,7 +520,7 @@ func handleSendAllFilesFromGoogleDriveToStorj(c echo.Context) error {
 
 				}
 
-				err = storj.UploadObject(ctx, accesGrant, "google-drive", path.Join("shared with me", name), data)
+				err = satellite.UploadObject(ctx, accesGrant, "google-drive", path.Join("shared with me", name), data)
 				if err != nil {
 					failedIDs.Add(file.ID)
 					return nil
@@ -539,26 +540,26 @@ func handleSendAllFilesFromGoogleDriveToStorj(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":       "all files were successfully uploaded from Google drive to Storj",
+		"message":       "all files were successfully uploaded from Google drive to Satellite",
 		"failed_ids":    failedIDs.Get(),
 		"processed_ids": processedIDs.Get(),
 	})
 }
 
-// Sends file from Storj to Google Drive
-func handleSendFileFromStorjToGoogleDrive(c echo.Context) error {
+// Sends file from Satellite to Google Drive
+func handleSendFileFromSatelliteToGoogleDrive(c echo.Context) error {
 	name := c.Param("name")
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
-	data, err := storj.DownloadObject(context.Background(), accesGrant, storj.ReserveBucket_Drive, name)
+	data, err := satellite.DownloadObject(context.Background(), accesGrant, satellite.ReserveBucket_Drive, name)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"error": fmt.Sprintf("failed to download object from Storj: %v", err),
+			"error": fmt.Sprintf("failed to download object from Satellite: %v", err),
 		})
 	}
 
@@ -576,11 +577,11 @@ func handleSendFileFromStorjToGoogleDrive(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message": fmt.Sprintf("file %s was successfully uploaded from Storj to Google Drive", name),
+		"message": fmt.Sprintf("file %s was successfully uploaded from Satellite to Google Drive", name),
 	})
 }
 
-func handleSendListFromGoogleDriveToStorj(c echo.Context) error {
+func handleSendListFromGoogleDriveToSatellite(c echo.Context) error {
 	// Get only file names in root
 	var allIDs []string
 	if strings.Contains(c.Request().Header.Get(echo.HeaderContentType), echo.MIMEApplicationJSON) {
@@ -595,10 +596,10 @@ func handleSendListFromGoogleDriveToStorj(c echo.Context) error {
 		formIDs := c.FormValue("ids")
 		allIDs = strings.Split(formIDs, ",")
 	}
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 	g, ctx := errgroup.WithContext(c.Request().Context())
@@ -625,7 +626,7 @@ func handleSendListFromGoogleDriveToStorj(c echo.Context) error {
 					}
 				} else {
 
-					if err = storj.UploadObject(ctx, accesGrant, "google-drive", name, data); err != nil {
+					if err = satellite.UploadObject(ctx, accesGrant, "google-drive", name, data); err != nil {
 						failedIDs.Add(id)
 						return nil
 					}
@@ -644,7 +645,7 @@ func handleSendListFromGoogleDriveToStorj(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":       "all files were successfully uploaded from Google Photos to Storj",
+		"message":       "all files were successfully uploaded from Google Photos to Satellite",
 		"failed_ids":    failedIDs.Get(),
 		"processed_ids": processedIDs.Get(),
 	})

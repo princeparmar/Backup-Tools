@@ -8,9 +8,10 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
-	google "storj-integrations/apps/google"
-	"storj-integrations/storj"
 	"strings"
+
+	google "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/satellite"
 
 	"github.com/labstack/echo/v4"
 	"storj.io/uplink"
@@ -101,17 +102,17 @@ func handleStorageListObjects(c echo.Context) error {
 			"error": err.Error(),
 		})
 	}
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 	// We use bucket ids since its unique
-	o, err := storj.ListObjectsRecurisive(context.Background(), accesGrant, bucket.Id)
+	o, err := satellite.ListObjectsRecurisive(context.Background(), accesGrant, bucket.Id)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"error": fmt.Sprintf("failed to get file list from Storj: %v", err),
+			"error": fmt.Sprintf("failed to get file list from Satellite: %v", err),
 		})
 	}
 	slices.SortStableFunc(o, func(a, b uplink.Object) int {
@@ -128,14 +129,14 @@ func handleStorageListObjects(c echo.Context) error {
 
 }
 
-// Takes bucket name and item name as a parameters, downloads the object from Google Cloud Storage and uploads it into Storj "google-cloud" bucket.
-func handleGoogleCloudItemToStorj(c echo.Context) error {
+// Takes bucket name and item name as a parameters, downloads the object from Google Cloud Storage and uploads it into SATELLITE "google-cloud" bucket.
+func handleGoogleCloudItemToSatellite(c echo.Context) error {
 	bucketName := c.Param("bucketName")
 	itemName := c.Param("itemName")
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
@@ -159,24 +160,24 @@ func handleGoogleCloudItemToStorj(c echo.Context) error {
 		})
 	}
 
-	err = storj.UploadObject(context.Background(), accesGrant, "google-cloud", obj.Name, obj.Data)
+	err = satellite.UploadObject(context.Background(), accesGrant, "google-cloud", obj.Name, obj.Data)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("object %s was successfully uploaded from Google Cloud Storage to Storj", obj.Name)})
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("object %s was successfully uploaded from Google Cloud Storage to Satellite", obj.Name)})
 
 }
 
-// Takes bucket name and item name as a parameters, downloads the object from Storj bucket and uploads it into Google Cloud Storage bucket.
-func handleStorjToGoogleCloud(c echo.Context) error {
+// Takes bucket name and item name as a parameters, downloads the object from Satellite bucket and uploads it into Google Cloud Storage bucket.
+func handleSatelliteToGoogleCloud(c echo.Context) error {
 	bucketName := c.Param("bucketName")
 	itemName := c.Param("itemName")
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
@@ -193,7 +194,7 @@ func handleStorjToGoogleCloud(c echo.Context) error {
 		}
 	}
 
-	data, err := storj.DownloadObject(context.Background(), accesGrant, storj.ReserveBucket_Drive, itemName)
+	data, err := satellite.DownloadObject(context.Background(), accesGrant, satellite.ReserveBucket_Drive, itemName)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -210,17 +211,17 @@ func handleStorjToGoogleCloud(c echo.Context) error {
 		})
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("object %s was successfully uploaded from Storj to Google Cloud Storage", itemName)})
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("object %s was successfully uploaded from Satellite to Google Cloud Storage", itemName)})
 
 }
 
-func handleAllFilesFromGoogleCloudBucketToStorj(c echo.Context) error {
+func handleAllFilesFromGoogleCloudBucketToSatellite(c echo.Context) error {
 	bucketName := c.Param("bucketName")
 
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
@@ -258,7 +259,7 @@ func handleAllFilesFromGoogleCloudBucketToStorj(c echo.Context) error {
 			})
 		}
 
-		err = storj.UploadObject(context.Background(), accesGrant, bucket.Id, obj.Name, obj.Data)
+		err = satellite.UploadObject(context.Background(), accesGrant, bucket.Id, obj.Name, obj.Data)
 		fmt.Println("uploaded : "+obj.Name, "bucketID: ", bucket.Id)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -267,7 +268,7 @@ func handleAllFilesFromGoogleCloudBucketToStorj(c echo.Context) error {
 		}
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("all objects in bucket '"+bucketName+"' were successfully uploaded from Storj to Google Cloud Storage", bucketName)})
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("all objects in bucket '"+bucketName+"' were successfully uploaded from Satellite to Google Cloud Storage", bucketName)})
 
 }
 
@@ -295,9 +296,9 @@ func handleBucketMetadata(c echo.Context) error {
 }
 
 func syncCloudBucket(c echo.Context, bucketName string) error {
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
-		return errors.New("storj access token is missing")
+		return errors.New("access token not found")
 	}
 
 	client, err := google.NewGoogleStorageClient(c)
@@ -320,7 +321,7 @@ func syncCloudBucket(c echo.Context, bucketName string) error {
 			return err
 		}
 
-		err = storj.UploadObject(context.Background(), accesGrant, bucket.Id, obj.Name, obj.Data)
+		err = satellite.UploadObject(context.Background(), accesGrant, bucket.Id, obj.Name, obj.Data)
 		fmt.Println("uploaded : "+obj.Name, "bucketID: ", bucket.Id)
 		if err != nil {
 			return err
@@ -420,10 +421,10 @@ func handleListBuckets(c echo.Context) error {
 }
 
 func handleSyncCloudItems(c echo.Context) error {
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 	var allIDs []string
@@ -477,6 +478,6 @@ func syncItem(c echo.Context, client *google.StorageClient, accessGrant, itemNam
 	if err != nil {
 		return err
 	}
-	return storj.UploadObject(context.Background(), accessGrant, "google-cloud", obj.Name, obj.Data)
+	return satellite.UploadObject(context.Background(), accessGrant, "google-cloud", obj.Name, obj.Data)
 
 }

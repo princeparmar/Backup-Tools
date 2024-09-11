@@ -1,4 +1,4 @@
-package storj
+package satellite
 
 import (
 	"bytes"
@@ -23,15 +23,15 @@ const (
 	RestoreBucket_Quickbooks = "quickbooks"
 )
 
-// Authenticates app with your Storj accout.
-func HandleStorjAuthentication(c echo.Context) error {
-	storjAccessToken := c.FormValue("storj")
+// Authenticates app with your satellite accout.
+func HandleSatelliteAuthentication(c echo.Context) error {
+	accessToken := c.FormValue("satellite")
 	c.SetCookie(&http.Cookie{
-		Name:  "storj_access_token",
-		Value: storjAccessToken,
+		Name:  "access_token",
+		Value: accessToken,
 	})
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message": "storj authentication was successful",
+		"message": "authentication was successful",
 	})
 }
 
@@ -55,6 +55,7 @@ func UploadObject(ctx context.Context, accessGrant, bucketName, objectKey string
 		project.CreateBucket(ctx, bucketName)
 	}
 
+	fmt.Println("Uploading object to bucket:", bucketName, "with key:", objectKey)
 	// Intitiate the upload of our Object to the specified bucket and key.
 	upload, err := project.UploadObject(ctx, bucketName, objectKey, nil)
 	if err != nil {

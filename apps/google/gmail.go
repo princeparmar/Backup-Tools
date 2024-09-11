@@ -5,9 +5,10 @@ import (
 	"encoding/base64"
 	"log"
 	"log/slog"
-	"storj-integrations/utils"
 	"strings"
 	"sync"
+
+	"github.com/StorX2-0/Backup-Tools/utils"
 
 	"github.com/labstack/echo/v4"
 	"google.golang.org/api/gmail/v1"

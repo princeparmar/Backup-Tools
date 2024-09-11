@@ -11,7 +11,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"storj-integrations/utils"
+
+	"github.com/StorX2-0/Backup-Tools/utils"
 
 	"github.com/google/go-github/v53/github"
 	"github.com/labstack/echo/v4"

@@ -1,6 +1,6 @@
-# Storj Integrations Module
+# Satellite Integrations Module
 
-This is custom module for integration the most popular services with Storj decentralized cloud data storaging service. This service allowes to backup data to Storj and upload it back.
+This is custom module for integration the most popular services with Satellite decentralized cloud data storaging service. This service allowes to backup data to Satellite and upload it back.
 
 ## Current Integrations list
 - Google Drive

@@ -2,8 +2,9 @@ package server
 
 import (
 	"net/http"
-	"storj-integrations/apps/google"
-	"storj-integrations/storage"
+
+	"github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/storage"
 
 	"github.com/dgrijalva/jwt-go"
 	"github.com/labstack/echo/v4"

@@ -8,11 +8,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	google "storj-integrations/apps/google"
-	"storj-integrations/storj"
-	"storj-integrations/utils"
 	"strings"
 	"sync"
+
+	google "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/satellite"
+	"github.com/StorX2-0/Backup-Tools/utils"
 
 	"github.com/gphotosuploader/google-photos-api-client-go/v2/albums"
 	"github.com/gphotosuploader/google-photos-api-client-go/v2/media_items"
@@ -69,10 +70,10 @@ type PhotosJSON struct {
 
 // Shows list of user's Google Photos items in given album.
 func handleListPhotosInAlbum(c echo.Context) error {
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
@@ -105,10 +106,10 @@ func handleListPhotosInAlbum(c echo.Context) error {
 		})
 	}
 
-	listFromStorj, err := storj.ListObjects(c.Request().Context(), accesGrant, "google-photos")
+	listFromSatellite, err := satellite.ListObjects(c.Request().Context(), accesGrant, "google-photos")
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"error": fmt.Sprintf("failed to list objects from Storj: %v", err),
+			"error": fmt.Sprintf("failed to list objects from Satellite: %v", err),
 		})
 	}
 
@@ -125,7 +126,7 @@ func handleListPhotosInAlbum(c echo.Context) error {
 			CreationTime: v.MediaMetadata.CreationTime,
 			Width:        v.MediaMetadata.Width,
 			Height:       v.MediaMetadata.Height,
-			Synced:       listFromStorj[v.Filename],
+			Synced:       listFromSatellite[v.Filename],
 		})
 	}
 
@@ -225,17 +226,17 @@ func handleListAllPhotos(c echo.Context) error {
 
 }
 
-// Sends photo item from Storj to Google Photos.
-func handleSendFileFromStorjToGooglePhotos(c echo.Context) error {
+// Sends photo item from Satellite to Google Photos.
+func handleSendFileFromSatelliteToGooglePhotos(c echo.Context) error {
 	name := c.Param("name")
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
-	data, err := storj.DownloadObject(context.Background(), accesGrant, storj.ReserveBucket_Photos, name)
+	data, err := satellite.DownloadObject(context.Background(), accesGrant, satellite.ReserveBucket_Photos, name)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -265,7 +266,7 @@ func handleSendFileFromStorjToGooglePhotos(c echo.Context) error {
 			})
 		}
 	}
-	err = client.UploadFileToGPhotos(c, name, "Storj Album")
+	err = client.UploadFileToGPhotos(c, name, "Satellite Album")
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -273,12 +274,12 @@ func handleSendFileFromStorjToGooglePhotos(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message": "file " + name + " was successfully uploaded from Storj to Google Photos",
+		"message": "file " + name + " was successfully uploaded from Satellite to Google Photos",
 	})
 }
 
-// Sends photo item from Google Photos to Storj.
-func handleSendFileFromGooglePhotosToStorj(c echo.Context) error {
+// Sends photo item from Google Photos to Satellite.
+func handleSendFileFromGooglePhotosToSatellite(c echo.Context) error {
 
 	ids := c.FormValue("ids")
 	if ids == "" {
@@ -288,10 +289,10 @@ func handleSendFileFromGooglePhotosToStorj(c echo.Context) error {
 	}
 	allIDs := strings.Split(ids, ",")
 
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
@@ -315,7 +316,7 @@ func handleSendFileFromGooglePhotosToStorj(c echo.Context) error {
 	for _, id := range allIDs {
 		func(id string) {
 			g.Go(func() error {
-				err := uploadSingleFileFromPhotosToStorj(ctx, client, id, accesGrant)
+				err := uploadSingleFileFromPhotosToSatellite(ctx, client, id, accesGrant)
 				if err != nil {
 					failedIDs.Add(id)
 					return nil
@@ -337,13 +338,13 @@ func handleSendFileFromGooglePhotosToStorj(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":       "all files were successfully uploaded from Google Photos to Storj",
+		"message":       "all files were successfully uploaded from Google Photos to Satellite",
 		"failed_ids":    failedIDs.Get(),
 		"processed_ids": processedIDs.Get(),
 	})
 }
 
-func uploadSingleFileFromPhotosToStorj(ctx context.Context, client *google.GPotosClient, id, accesGrant string) error {
+func uploadSingleFileFromPhotosToSatellite(ctx context.Context, client *google.GPotosClient, id, accesGrant string) error {
 	item, err := client.GetPhoto(ctx, id)
 	if err != nil {
 		return err
@@ -359,11 +360,11 @@ func uploadSingleFileFromPhotosToStorj(ctx context.Context, client *google.GPoto
 		return err
 	}
 
-	return storj.UploadObject(context.Background(), accesGrant, "google-photos", item.Filename, body)
+	return satellite.UploadObject(context.Background(), accesGrant, "google-photos", item.Filename, body)
 
 }
 
-func handleSendAllFilesFromGooglePhotosToStorj(c echo.Context) error {
+func handleSendAllFilesFromGooglePhotosToSatellite(c echo.Context) error {
 	id := c.FormValue("album_id")
 
 	client, err := google.NewGPhotosClient(c)
@@ -392,15 +393,15 @@ func handleSendAllFilesFromGooglePhotosToStorj(c echo.Context) error {
 			ID:   v.ID,
 		})
 	}
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
 	for _, p := range photosRespJSON {
-		err := uploadSingleFileFromPhotosToStorj(c.Request().Context(), client, p.ID, accesGrant)
+		err := uploadSingleFileFromPhotosToSatellite(c.Request().Context(), client, p.ID, accesGrant)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),
@@ -408,10 +409,10 @@ func handleSendAllFilesFromGooglePhotosToStorj(c echo.Context) error {
 		}
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": "all photos from album were successfully uploaded from Google Photos to Storj"})
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": "all photos from album were successfully uploaded from Google Photos to Satellite"})
 }
 
-func handleSendListFilesFromGooglePhotosToStorj(c echo.Context) error {
+func handleSendListFilesFromGooglePhotosToSatellite(c echo.Context) error {
 	client, err := google.NewGPhotosClient(c)
 	if err != nil {
 		if err.Error() == "token error" {
@@ -425,10 +426,10 @@ func handleSendListFilesFromGooglePhotosToStorj(c echo.Context) error {
 		}
 	}
 
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
@@ -446,7 +447,7 @@ func handleSendListFilesFromGooglePhotosToStorj(c echo.Context) error {
 		allIDs = strings.Split(formIDs, ",")
 	}
 	for _, p := range allIDs {
-		err := uploadSingleFileFromPhotosToStorj(c.Request().Context(), client, p, accesGrant)
+		err := uploadSingleFileFromPhotosToSatellite(c.Request().Context(), client, p, accesGrant)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),
@@ -454,5 +455,5 @@ func handleSendListFilesFromGooglePhotosToStorj(c echo.Context) error {
 		}
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": "all photos from album were successfully uploaded from Google Photos to Storj"})
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": "all photos from album were successfully uploaded from Google Photos to Satellite"})
 }

@@ -2,6 +2,6 @@ credentials.json
 .env
 test.json
 test.html
-Storj integrations docs.json
+Satellite integrations docs.json
 ./cache
 ./cache/*/

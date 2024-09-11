@@ -3,8 +3,9 @@ package main
 import (
 	"log/slog"
 	"os"
-	"storj-integrations/server"
-	"storj-integrations/storage"
+
+	"github.com/StorX2-0/Backup-Tools/server"
+	"github.com/StorX2-0/Backup-Tools/storage"
 
 	"github.com/joho/godotenv"
 )
