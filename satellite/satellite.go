@@ -52,7 +52,10 @@ func UploadObject(ctx context.Context, accessGrant, bucketName, objectKey string
 	// Ensure the desired Bucket within the Project is created.
 	_, err = project.EnsureBucket(ctx, bucketName)
 	if err != nil {
-		project.CreateBucket(ctx, bucketName)
+		_, err := project.CreateBucket(ctx, bucketName)
+		if err != nil {
+			return fmt.Errorf("could not create bucket: %v", err)
+		}
 	}
 
 	fmt.Println("Uploading object to bucket:", bucketName, "with key:", objectKey)

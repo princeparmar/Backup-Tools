@@ -121,7 +121,7 @@ func handleFolder(folderName, folderID string, c echo.Context) error {
 	if accesGrant == "" {
 		return errors.New("error: access token not found")
 	}
-	err = satellite.UploadObject(context.Background(), accesGrant, "google-drive", folderName+"/", nil)
+	err = satellite.UploadObject(context.Background(), accesGrant, "google-drive", folderName+"/.file_placeholder", nil)
 	if err != nil {
 		return err
 	}
@@ -141,12 +141,6 @@ func handleFolder(folderName, folderID string, c echo.Context) error {
 				return err
 			}
 		} else {
-			accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
-			if accesGrant == "" {
-				return c.JSON(http.StatusForbidden, map[string]interface{}{
-					"error": "access token not found",
-				})
-			}
 			err = satellite.UploadObject(context.Background(), accesGrant, "google-drive", path.Join(folderName, name), data)
 			if err != nil {
 				return err

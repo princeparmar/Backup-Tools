@@ -464,8 +464,15 @@ func createShopifyCleint(c echo.Context, shopname string) *shopify.ShopifyClient
 		})
 		return nil
 	}
-	cleint := shopify.CreateClient(token, shopname)
-	return cleint
+	client, err := shopify.CreateClient(token, shopname)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Error creating shopify client",
+			"error":   err.Error(),
+		})
+		return nil
+	}
+	return client
 }
 
 func handleShopifyProductsToSatellite(c echo.Context) error {
@@ -747,7 +754,7 @@ func handleShopifyAuth(c echo.Context) error {
 	shopName := c.QueryParam("shop")
 	state := c.QueryParam("state")
 
-	authUrl := shopify.ShopifyInitApp.App.AuthorizeUrl(shopName, state)
+	authUrl, _ := shopify.ShopifyInitApp.App.AuthorizeUrl(shopName, state)
 
 	return c.Redirect(http.StatusFound, authUrl)
 }
@@ -763,7 +770,7 @@ func handleShopifyAuthRedirect(c echo.Context) error {
 	query := c.Request().URL.Query()
 	shopName := query.Get("shop")
 	code := query.Get("code")
-	token, err := shopify.ShopifyInitApp.App.GetAccessToken(shopName, code)
+	token, err := shopify.ShopifyInitApp.App.GetAccessToken(c.Request().Context(), shopName, code)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
 			"message": "Invalid Signature",

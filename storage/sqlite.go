@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	goshopify "github.com/bold-commerce/go-shopify"
+	goshopify "github.com/bold-commerce/go-shopify/v4"
 	"github.com/glebarez/sqlite"
 	quickbooksLibrary "github.com/rwestlund/quickbooks-go"
 	"gorm.io/gorm"
