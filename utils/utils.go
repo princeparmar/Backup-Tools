@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"google.golang.org/api/gmail/v1"
 )
 
 type lockedArray struct {
@@ -104,6 +106,25 @@ func CreateUserTempCacheFolder() string {
 // GetEnvWithKey : get env value
 func GetEnvWithKey(key string) string {
 	return os.Getenv(key)
+}
+
+func GenerateTitleFromGmailMessage(msg *gmail.Message) string {
+	var from, subject string
+
+	for _, v := range msg.Payload.Headers {
+		switch v.Name {
+		case "From":
+			res, ok := GetStringInBetweenTwoString(v.Value, "\u003c", "\u003e")
+			if ok {
+				from = res
+			} else {
+				from = v.Value
+			}
+		case "Subject":
+			subject = v.Value
+		}
+	}
+	return fmt.Sprintf("%s - %s - %s", from, subject, msg.Id)
 }
 
 func Unzip(src, dest string) error {

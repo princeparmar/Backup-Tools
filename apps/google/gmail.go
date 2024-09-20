@@ -161,8 +161,17 @@ func (client *GmailClient) GetUserMessagesIDs(nextPageToken string) (*gmail.List
 
 	return res, nil
 }
-func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
+
+func (client *GmailClient) GetMessageDirect(msgID string) (*gmail.Message, error) {
 	msg, err := client.Users.Messages.Get("me", msgID).Format("full").Do()
+	if err != nil {
+		return nil, err
+	}
+	return msg, nil
+}
+
+func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
+	msg, err := client.GetMessageDirect(msgID)
 	if err != nil {
 		return nil, err
 	}
