@@ -187,3 +187,10 @@ func CreateFile(filePath string) (*os.File, error) {
 	}
 	return file, nil
 }
+
+func MaskString(s string) string {
+	if len(s) < 4 {
+		return s
+	}
+	return "****************************************************" + s[len(s)-4:]
+}

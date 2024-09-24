@@ -3,9 +3,12 @@ package satellite
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net/http"
+	"os"
 
 	"github.com/labstack/echo/v4"
 	"storj.io/uplink"
@@ -285,4 +288,47 @@ func ListObjectsRecurisive(ctx context.Context, accessGrant, bucketName string) 
 	}
 
 	return objects, nil
+}
+
+var StorxSatelliteService = os.Getenv("STORX_SATELLITE_SERVICE")
+
+func GetUserdetails(token string) (string, error) {
+
+	url := StorxSatelliteService + "/api/v0/auth/account"
+
+	client := &http.Client{}
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+
+	if err != nil {
+		return "", err
+	}
+	req.Header.Add("accept", "application/json")
+	req.Header.Add("cookie", "_tokenKey="+token)
+
+	res, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return "", err
+	}
+
+	var userDetailResponse struct {
+		ID    string `json:"id"`
+		Error string `json:"error"`
+	}
+
+	err = json.Unmarshal(body, &userDetailResponse)
+	if err != nil {
+		return "", err
+	}
+
+	if userDetailResponse.Error != "" {
+		return "", err
+	}
+
+	return userDetailResponse.ID, nil
 }

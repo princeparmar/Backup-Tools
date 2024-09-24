@@ -25,6 +25,13 @@ func StartServer(db *storage.PosgresStore, address string) {
 	e.POST("/google-auth", googlepack.Autentificate)
 	e.GET("/google-auth", googlepack.Autentificateg)
 
+	autoSync := e.Group("/auto-sync")
+	job := autoSync.Group("/job")
+	job.GET("/", handleAutomaticSyncListForUser)
+	job.GET("/:job_id", handleAutomaticSyncDetails)
+	job.POST("/", handleAutomaticSyncCreate)
+	job.DELETE("/:job_id", handleAutomaticSyncDelete)
+
 	google := e.Group("/google")
 
 	google.Use(JWTMiddleware)
