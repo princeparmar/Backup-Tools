@@ -32,6 +32,9 @@ func StartServer(db *storage.PosgresStore, address string) {
 	job.POST("/", handleAutomaticSyncCreate)
 	job.DELETE("/:job_id", handleAutomaticSyncDelete)
 
+	task := autoSync.Group("/task")
+	task.GET("/", handleAutomaticSyncTaskList)
+
 	google := e.Group("/google")
 
 	google.Use(JWTMiddleware)
