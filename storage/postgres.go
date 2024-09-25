@@ -100,7 +100,7 @@ func (storage *PosgresStore) Migrate() error {
 func (storage *PosgresStore) GetAllCronJobsForUser(userID string) ([]CronJobListingDB, error) {
 	var res []CronJobListingDB
 	db := storage.DB.Where("user_id = ?", userID).Find(&res)
-	if db != nil {
+	if db != nil && db.Error != nil {
 		return nil, fmt.Errorf("error getting cron jobs for user: %v", db.Error)
 	}
 	return res, nil
@@ -115,7 +115,7 @@ func (storage *PosgresStore) IsCronAvailableForUser(userID string, jobID uint) b
 func (storage *PosgresStore) GetCronJobByID(ID uint) (*CronJobListingDB, error) {
 	var res CronJobListingDB
 	db := storage.DB.First(&res, ID)
-	if db != nil {
+	if db != nil && db.Error != nil {
 		return nil, fmt.Errorf("error getting cron job by ID: %v", db.Error)
 	}
 	return &res, nil
@@ -131,7 +131,7 @@ func (storage *PosgresStore) CreateCronJobForUser(userID, name, method, interval
 	}
 	// create new entry in database and return newly created cron job
 	res := storage.DB.Create(&data)
-	if res != nil {
+	if res != nil && res.Error != nil {
 		return nil, fmt.Errorf("error creating cron job: %v", res.Error)
 	}
 
@@ -140,7 +140,7 @@ func (storage *PosgresStore) CreateCronJobForUser(userID, name, method, interval
 
 func (storage *PosgresStore) DeleteCronJobByID(ID uint) error {
 	res := storage.DB.Delete(&CronJobListingDB{}, ID)
-	if res != nil {
+	if res != nil && res.Error != nil {
 		return fmt.Errorf("error deleting cron job: %v", res.Error)
 	}
 	return nil
@@ -148,7 +148,7 @@ func (storage *PosgresStore) DeleteCronJobByID(ID uint) error {
 
 func (storage *PosgresStore) UpdateCronJobByID(ID uint, m map[string]interface{}) error {
 	res := storage.DB.Model(&CronJobListingDB{}).Where("id = ?", ID).Updates(m)
-	if res != nil {
+	if res != nil && res.Error != nil {
 		return fmt.Errorf("error updating cron job interval: %v", res.Error)
 	}
 	return nil
@@ -157,7 +157,7 @@ func (storage *PosgresStore) UpdateCronJobByID(ID uint, m map[string]interface{}
 func (storage *PosgresStore) ListAllTasksByJobID(ID uint) ([]TaskListingDB, error) {
 	var res []TaskListingDB
 	db := storage.DB.Where("cron_job_id = ?", ID).Find(&res)
-	if db != nil {
+	if db != nil && db.Error != nil {
 		return nil, fmt.Errorf("error getting tasks for job: %v", db.Error)
 	}
 	return res, nil
