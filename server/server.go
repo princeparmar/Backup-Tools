@@ -30,7 +30,10 @@ func StartServer(db *storage.PosgresStore, address string) {
 	job.GET("/", handleAutomaticSyncListForUser)
 	job.GET("/:job_id", handleAutomaticSyncDetails)
 	job.POST("/", handleAutomaticSyncCreate)
+	job.PUT("/:job_id", handleAutomaticSyncUpdate)
 	job.DELETE("/:job_id", handleAutomaticSyncDelete)
+
+	job.GET("/interval", handleIntervalOnConfig)
 
 	task := autoSync.Group("/task")
 	task.GET("/", handleAutomaticSyncTaskList)

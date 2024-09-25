@@ -37,6 +37,14 @@ func handleAutomaticSyncListForUser(c echo.Context) error {
 	})
 }
 
+func handleIntervalOnConfig(c echo.Context) error {
+	c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "Interval Values",
+		"data":    intervalValues,
+	})
+	return nil
+}
+
 func handleAutomaticSyncDetails(c echo.Context) error {
 	jobID, err := strconv.Atoi(c.Param("job_id"))
 	if err != nil {
