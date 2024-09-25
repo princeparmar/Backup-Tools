@@ -325,7 +325,7 @@ func GetUserdetails(token string) (string, error) {
 	}
 
 	if userDetailResponse.Error != "" {
-		return "", err
+		return "", fmt.Errorf(userDetailResponse.Error)
 	}
 
 	return userDetailResponse.ID, nil
