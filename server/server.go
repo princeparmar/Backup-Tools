@@ -36,7 +36,7 @@ func StartServer(db *storage.PosgresStore, address string) {
 	job.GET("/interval", handleIntervalOnConfig)
 
 	task := autoSync.Group("/task")
-	task.GET("/", handleAutomaticSyncTaskList)
+	task.GET("/:job_id", handleAutomaticSyncTaskList)
 
 	google := e.Group("/google")
 

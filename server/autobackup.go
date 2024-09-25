@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
@@ -54,6 +55,9 @@ func handleAutomaticSyncDetails(c echo.Context) error {
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
 	jobDetails, err := database.GetCronJobByID(uint(jobID))
 	if err != nil {
+		if strings.Contains(err.Error(), "record not found") {
+			return c.JSON(http.StatusNotFound, map[string]interface{}{"message": "Cron Job Not Found", "error": err.Error()})
+		}
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"message": "Internal Server Error", "error": err.Error()})
 	}
 
