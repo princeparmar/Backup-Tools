@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/server"
 	"github.com/StorX2-0/Backup-Tools/storage"
 
@@ -42,4 +43,5 @@ func init() {
 		os.Exit(1)
 	}
 
+	satellite.StorxSatelliteService = os.Getenv("STORX_SATELLITE_SERVICE")
 }

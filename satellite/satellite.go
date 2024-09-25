@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
-	"os"
 
 	"github.com/labstack/echo/v4"
 	"storj.io/uplink"
@@ -25,6 +23,8 @@ const (
 	ReserveBucket_Shopify    = "shopify"
 	RestoreBucket_Quickbooks = "quickbooks"
 )
+
+var StorxSatelliteService string
 
 // Authenticates app with your satellite accout.
 func HandleSatelliteAuthentication(c echo.Context) error {
@@ -290,8 +290,6 @@ func ListObjectsRecurisive(ctx context.Context, accessGrant, bucketName string) 
 	return objects, nil
 }
 
-var StorxSatelliteService = os.Getenv("STORX_SATELLITE_SERVICE")
-
 func GetUserdetails(token string) (string, error) {
 
 	url := StorxSatelliteService + "/api/v0/auth/account"
@@ -311,7 +309,7 @@ func GetUserdetails(token string) (string, error) {
 	}
 	defer res.Body.Close()
 
-	body, err := ioutil.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 	if err != nil {
 		return "", err
 	}
