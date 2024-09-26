@@ -63,6 +63,47 @@ func (storage *PosgresStore) GetAllCronJobsForUser(userID string) ([]CronJobList
 	return res, nil
 }
 
+// GetJobsToProcess returns all cron jobs that are active and have not been run in the last 24 hours with table locking.
+func (storage *PosgresStore) GetJobsToProcess() ([]CronJobListingDB, error) {
+	var res []CronJobListingDB
+	tx := storage.DB.Begin()
+
+	// select from jobs inner join tasks where active is true
+	// and if interval is "daily" then last_run date should not be today
+	// and if interval is "weekly" then last_run date should not be this week and day should be same as today. like monday, tuesday etc
+	// and if interval is "monthly" then last_run date should not be this month and date should be same as today
+	// and there should not be any task in task table with "pushed" or "running" status
+
+	db := tx.Table("cron_job_listing_dbs").
+		Select("cron_job_listing_dbs.*").
+		Joins("left join task_listing_dbs on cron_job_listing_dbs.id = task_listing_dbs.cron_job_id").
+		Where("cron_job_listing_dbs.active = true").
+		Where("task_listing_dbs.id is null or task_listing_dbs.status in ('completed', 'failed')").
+		Where("cron_job_listing_dbs.interval = 'daily' and cron_job_listing_dbs.last_run != ?", time.Now().Format("2006-01-02")).
+		Or("cron_job_listing_dbs.interval = 'weekly' and cron_job_listing_dbs.last_run != ? and cron_job_listing_dbs.on = ?", time.Now().Format("2006-01-02"), time.Now().Weekday().String()).
+		Or("cron_job_listing_dbs.interval = 'monthly' and cron_job_listing_dbs.last_run != ? and cron_job_listing_dbs.on = ?", time.Now().Format("2006-01-02"), time.Now().Day()).
+		Find(&res)
+
+	// update message to "pushing to queue" and message status to "info"
+	for i := range res {
+		res[i].Message = "pushing to queue"
+		res[i].MessageStatus = "info"
+
+		db = tx.Save(&res[i])
+		if db != nil && db.Error != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("error updating cron job: %v", db.Error)
+		}
+	}
+
+	err := tx.Commit()
+	if err != nil && err.Error != nil {
+		return nil, fmt.Errorf("error committing transaction: %v", err.Error)
+	}
+
+	return res, nil
+}
+
 func (storage *PosgresStore) IsCronAvailableForUser(userID string, jobID uint) bool {
 	var res CronJobListingDB
 	db := storage.DB.Where("user_id = ? AND id = ?", userID, jobID).First(&res)
@@ -118,6 +159,14 @@ func (storage *PosgresStore) CreateTaskForCronJob(cronJobID uint) (*TaskListingD
 		return nil, fmt.Errorf("error creating task for cron job: %v", res.Error)
 	}
 	return &data, nil
+}
+
+func (storage *PosgresStore) UpdateTaskByID(ID uint, m map[string]interface{}) error {
+	res := storage.DB.Model(&TaskListingDB{}).Where("id = ?", ID).Updates(m)
+	if res != nil && res.Error != nil {
+		return fmt.Errorf("error updating task: %v", res.Error)
+	}
+	return nil
 }
 
 func (storage *PosgresStore) GetCronJobByID(ID uint) (*CronJobListingDB, error) {

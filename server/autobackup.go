@@ -1,7 +1,6 @@
 package server
 
 import (
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -232,16 +231,8 @@ func handleAutomaticSyncTaskList(c echo.Context) error {
 }
 
 func getUserDetailsFromSatellite(c echo.Context) (string, error) {
-	tokenKey, err := c.Request().Cookie("_tokenKey")
-	if err != nil {
-		return "", fmt.Errorf("Token Key not found", err)
-	}
-
-	if tokenKey == nil {
-		return "", fmt.Errorf("Token Key not found")
-	}
-
-	return satellite.GetUserdetails(tokenKey.Value)
+	tokenKey := c.Request().Header.Get("token_key")
+	return satellite.GetUserdetails(tokenKey)
 }
 
 func validateInterval(interval, on string) bool {
