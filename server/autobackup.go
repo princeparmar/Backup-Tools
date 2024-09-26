@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -126,7 +127,10 @@ func handleAutomaticSyncUpdate(c echo.Context) error {
 
 		AuthToken    *string `json:"auth_token"`
 		RefreshToken *string `json:"refresh_token"`
-		Active       *bool   `json:"active"`
+
+		StorxToken *string `json:"storx_token"`
+
+		Active *bool `json:"active"`
 	}
 
 	if err := c.Bind(&reqBody); err != nil {
@@ -154,6 +158,10 @@ func handleAutomaticSyncUpdate(c echo.Context) error {
 
 		updateRequest["auth_token"] = *reqBody.AuthToken
 		updateRequest["refresh_token"] = *reqBody.RefreshToken
+	}
+
+	if reqBody.StorxToken != nil {
+		updateRequest["storx_token"] = *reqBody.StorxToken
 	}
 
 	if reqBody.Active != nil {
@@ -224,8 +232,16 @@ func handleAutomaticSyncTaskList(c echo.Context) error {
 }
 
 func getUserDetailsFromSatellite(c echo.Context) (string, error) {
-	tokenKey := c.Request().Header.Get("token_key")
-	return satellite.GetUserdetails(tokenKey)
+	tokenKey, err := c.Request().Cookie("_tokenKey")
+	if err != nil {
+		return "", fmt.Errorf("Token Key not found", err)
+	}
+
+	if tokenKey == nil {
+		return "", fmt.Errorf("Token Key not found")
+	}
+
+	return satellite.GetUserdetails(tokenKey.Value)
 }
 
 func validateInterval(interval, on string) bool {

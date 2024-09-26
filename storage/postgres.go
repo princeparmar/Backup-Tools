@@ -47,8 +47,12 @@ type CronJobListingDB struct {
 
 	AuthToken    string `json:"auth_token"`
 	RefreshToken string `json:"refresh_token"`
-	TokenStatus  string `json:"token_status"`
-	Active       bool   `json:"active"`
+
+	StorxToken string `json:"storx_token"`
+
+	Message       string `json:"message"`
+	MessageStatus string `json:"message_status"`
+	Active        bool   `json:"active"`
 }
 
 func MastTokenForCronJobListingDB(cronJobs []CronJobListingDB) []CronJobListingDB {
@@ -64,20 +68,18 @@ func MastTokenForCronJobDB(cronJob *CronJobListingDB) {
 	cronJob.RefreshToken = utils.MaskString(cronJob.RefreshToken)
 }
 
-type StorxTokenDB struct {
-	ID      uint   `gorm:"primaryKey" json:"id"`
-	UserID  string `gorm:"unique" json:"user_id"`
-	Token   string `gorm:"unique" json:"token"`
-	Enabled bool   `json:"enabled"`
-}
-
 type TaskListingDB struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	CronJobID uint      `gorm:"foreignKey:CronJobListingDB.ID" json:"cron_job_id"`
-	Status    string    `json:"status"`
-	Message   string    `json:"message"`
-	StartTime time.Time `json:"start_time"`
-	Execution uint64    `json:"execution"`
+	ID        uint `gorm:"primaryKey" json:"id"`
+	CronJobID uint `gorm:"foreignKey:CronJobListingDB.ID" json:"cron_job_id"`
+
+	// Status will be one of the following: "pushed", "running", "completed", "failed"
+	Status              string    `json:"status"`
+	CompletedPercentage float64   `json:"completed_percentage"`
+	Message             string    `json:"message"`
+	StartTime           time.Time `json:"start_time"`
+
+	// Execution time in milliseconds
+	Execution uint64 `json:"execution"`
 }
 
 func NewPostgresStore() (*PosgresStore, error) {
@@ -93,7 +95,7 @@ func (storage *PosgresStore) Migrate() error {
 	return storage.DB.AutoMigrate(
 		&GoogleAuthStorage{}, &ShopifyAuthStorage{},
 		&QuickbooksAuthStorage{}, &CronJobListingDB{},
-		&StorxTokenDB{}, &TaskListingDB{},
+		&TaskListingDB{},
 	)
 }
 
@@ -110,6 +112,57 @@ func (storage *PosgresStore) IsCronAvailableForUser(userID string, jobID uint) b
 	var res CronJobListingDB
 	db := storage.DB.Where("user_id = ? AND id = ?", userID, jobID).First(&res)
 	return db == nil || db.Error == nil
+}
+
+// GetPushedTask gives pushed task and update the status to running and set start time with table locking.
+func (storage *PosgresStore) GetPushedTask() (*TaskListingDB, error) {
+	var res TaskListingDB
+	tx := storage.DB.Begin()
+	db := tx.Where("status = ?", "pushed").First(&res)
+	if db != nil && db.Error != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("error getting pushed task: %v", db.Error)
+	}
+
+	// Update status to running and set start time
+	res.Status = "running"
+	res.StartTime = time.Now()
+
+	db = tx.Save(&res)
+	if db != nil && db.Error != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("error updating pushed task status: %v", db.Error)
+	}
+
+	err := tx.Commit()
+	if err != nil && err.Error != nil {
+		return nil, fmt.Errorf("error committing transaction: %v", err.Error)
+	}
+
+	return &res, nil
+}
+
+func (storage *PosgresStore) GetTaskByID(ID uint) (*TaskListingDB, error) {
+	var res TaskListingDB
+	db := storage.DB.First(&res, ID)
+	if db != nil && db.Error != nil {
+		return nil, fmt.Errorf("error getting task by ID: %v", db.Error)
+	}
+	return &res, nil
+}
+
+func (storage *PosgresStore) CreateTaskForCronJob(cronJobID uint) (*TaskListingDB, error) {
+	data := TaskListingDB{
+		CronJobID: cronJobID,
+		Status:    "pushed",
+	}
+
+	// create new entry in database and return newly created task
+	res := storage.DB.Create(&data)
+	if res != nil && res.Error != nil {
+		return nil, fmt.Errorf("error creating task for cron job: %v", res.Error)
+	}
+	return &data, nil
 }
 
 func (storage *PosgresStore) GetCronJobByID(ID uint) (*CronJobListingDB, error) {
