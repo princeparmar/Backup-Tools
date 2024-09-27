@@ -1,8 +1,6 @@
 package storage
 
 import (
-	"os"
-
 	"golang.org/x/oauth2"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -32,8 +30,7 @@ type QuickbooksAuthStorage struct {
 	Token  string
 }
 
-func NewPostgresStore() (*PosgresStore, error) {
-	dsn := os.Getenv("POSTGRES_DSN")
+func NewPostgresStore(dsn string) (*PosgresStore, error) {
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		return nil, err
@@ -83,13 +80,10 @@ func (storage *PosgresStore) WriteGoogleAuthToken(JWToken, authToken string) err
 // 	return &res.Token, nil
 // }
 
-func (storage *PosgresStore) ReadGoogleAuthToken(JWTtoken string) (oauth2.Token, error) {
+func (storage *PosgresStore) ReadGoogleAuthToken(JWTtoken string) (string, error) {
 	var res GoogleAuthStorage
 	storage.DB.Where("jw_ttoken = ?", JWTtoken).First(&res)
-	return oauth2.Token{
-		AccessToken: res.AccessToken,
-		// RefreshToken: res.RefreshToken,
-	}, nil
+	return res.AccessToken, nil
 }
 
 func (storage *PosgresStore) WriteShopifyAuthToken(cookie string, token string) error {

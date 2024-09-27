@@ -3,11 +3,13 @@ package google
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"log"
 	"log/slog"
 	"strings"
 	"sync"
 
+	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/StorX2-0/Backup-Tools/utils"
 
 	"github.com/labstack/echo/v4"
@@ -53,7 +55,22 @@ type Attachment struct {
 }
 
 func NewGmailClient(c echo.Context) (*GmailClient, error) {
-	client, err := client(c)
+	database := c.Get(dbContextKey).(*storage.PosgresStore)
+
+	googleToken, err := GetGoogleTokenFromJWT(c)
+	if err != nil {
+		return nil, fmt.Errorf("unable to retrieve google-auth token from JWT: %v", err)
+	}
+	token, err := database.ReadGoogleAuthToken(googleToken)
+	if err != nil {
+		return nil, fmt.Errorf("unable to retrieve google-auth token from database: %v", err)
+	}
+
+	return NewGmailClientUsingToken(token)
+}
+
+func NewGmailClientUsingToken(token string) (*GmailClient, error) {
+	client, err := clientUsingToken(token)
 	if err != nil {
 		return nil, err
 	}

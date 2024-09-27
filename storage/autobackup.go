@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/utils"
+	"gorm.io/gorm/clause"
 )
 
 // Models for automated storage
@@ -22,7 +23,14 @@ type CronJobListingDB struct {
 
 	StorxToken string `json:"storx_token"`
 
-	Message       string `json:"message"`
+	// Message will be the message to be displayed to the user
+	// pushing to queue
+	// task is running
+	// task is completed for %d email|photos|files for (today|this week|this month)
+	// task failed with error %s
+	Message string `json:"message"`
+
+	// MessageStatus will be one of the following: "info", "warning", "error"
 	MessageStatus string `json:"message_status"`
 	Active        bool   `json:"active"`
 }
@@ -44,7 +52,7 @@ type TaskListingDB struct {
 	ID        uint `gorm:"primaryKey" json:"id"`
 	CronJobID uint `gorm:"foreignKey:CronJobListingDB.ID" json:"cron_job_id"`
 
-	// Status will be one of the following: "pushed", "running", "completed", "failed"
+	// Status will be one of the following: "pushed", "running", "success", "failed"
 	Status              string    `json:"status"`
 	CompletedPercentage float64   `json:"completed_percentage"`
 	Message             string    `json:"message"`
@@ -63,25 +71,39 @@ func (storage *PosgresStore) GetAllCronJobsForUser(userID string) ([]CronJobList
 	return res, nil
 }
 
-// GetJobsToProcess returns all cron jobs that are active and have not been run in the last 24 hours with table locking.
+// GetJobsToProcess returns all cron jobs that are active and have not been run in
+// given interval with table locking with limit 10.
 func (storage *PosgresStore) GetJobsToProcess() ([]CronJobListingDB, error) {
 	var res []CronJobListingDB
-	tx := storage.DB.Begin()
+	tx := storage.DB.Begin().Debug()
 
-	// select from jobs inner join tasks where active is true
-	// and if interval is "daily" then last_run date should not be today
-	// and if interval is "weekly" then last_run date should not be this week and day should be same as today. like monday, tuesday etc
-	// and if interval is "monthly" then last_run date should not be this month and date should be same as today
-	// and there should not be any task in task table with "pushed" or "running" status
-
-	db := tx.Table("cron_job_listing_dbs").
+	/*
+		SELECT cron_job_listing_dbs.*
+		FROM   "cron_job_listing_dbs"
+		       LEFT JOIN task_listing_dbs
+		              ON cron_job_listing_dbs.id = task_listing_dbs.cron_job_id
+		WHERE  cron_job_listing_dbs.active = true
+			   AND cron_job_listing_dbs.message != 'pushing to queue'
+		       AND cron_job_listing_dbs.last_run != '2024-09-26'
+		       AND ( task_listing_dbs.id IS NULL
+		              OR task_listing_dbs.status IN ( 'completed', 'failed' ) )
+		       AND ( cron_job_listing_dbs.interval = 'daily'
+		              OR ( cron_job_listing_dbs.interval = 'weekly'
+		                   AND cron_job_listing_dbs.on = 'Thursday' )
+		              OR ( cron_job_listing_dbs.interval = 'monthly'
+		                   AND cron_job_listing_dbs.on = 26 ) )
+	*/
+	db := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("cron_job_listing_dbs").
 		Select("cron_job_listing_dbs.*").
 		Joins("left join task_listing_dbs on cron_job_listing_dbs.id = task_listing_dbs.cron_job_id").
 		Where("cron_job_listing_dbs.active = true").
-		Where("task_listing_dbs.id is null or task_listing_dbs.status in ('completed', 'failed')").
-		Where("cron_job_listing_dbs.interval = 'daily' and cron_job_listing_dbs.last_run != ?", time.Now().Format("2006-01-02")).
-		Or("cron_job_listing_dbs.interval = 'weekly' and cron_job_listing_dbs.last_run != ? and cron_job_listing_dbs.on = ?", time.Now().Format("2006-01-02"), time.Now().Weekday().String()).
-		Or("cron_job_listing_dbs.interval = 'monthly' and cron_job_listing_dbs.last_run != ? and cron_job_listing_dbs.on = ?", time.Now().Format("2006-01-02"), time.Now().Day()).
+		Where("cron_job_listing_dbs.message != 'pushing to queue'").
+		Where("cron_job_listing_dbs.last_run != ?", time.Now().Format("2006-01-02")).
+		Where("task_listing_dbs.id IS NULL OR task_listing_dbs.status IN ('completed', 'failed')").
+		Where(`cron_job_listing_dbs.interval = 'daily'
+				OR ( cron_job_listing_dbs.interval = 'weekly' AND cron_job_listing_dbs.on = ?)
+				OR (cron_job_listing_dbs.interval = 'monthly' AND cron_job_listing_dbs.on = ?)`,
+			time.Now().Weekday().String(), time.Now().Day()).Limit(10).
 		Find(&res)
 
 	// update message to "pushing to queue" and message status to "info"
@@ -114,7 +136,8 @@ func (storage *PosgresStore) IsCronAvailableForUser(userID string, jobID uint) b
 func (storage *PosgresStore) GetPushedTask() (*TaskListingDB, error) {
 	var res TaskListingDB
 	tx := storage.DB.Begin()
-	db := tx.Where("status = ?", "pushed").First(&res)
+	// lock table tasks for update and select and return the first row
+	db := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("status = 'pushed'").First(&res)
 	if db != nil && db.Error != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf("error getting pushed task: %v", db.Error)

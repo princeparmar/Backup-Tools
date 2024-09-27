@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/StorX2-0/Backup-Tools/crons"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/server"
 	"github.com/StorX2-0/Backup-Tools/storage"
@@ -12,7 +13,9 @@ import (
 )
 
 func main() {
-	storage, err := storage.NewPostgresStore()
+	dsn := os.Getenv("POSTGRES_DSN")
+
+	storage, err := storage.NewPostgresStore(dsn)
 	if err != nil {
 		slog.Error("error starting the postgress store", "error", err)
 		slog.Warn("exiting...")
@@ -24,6 +27,10 @@ func main() {
 		slog.Warn("exiting...")
 		os.Exit(1)
 	}
+
+	// setup cron jobs
+	cronManager := crons.NewAutosyncManager(storage)
+	go cronManager.Start()
 
 	address := ":8005"
 	if envPortVal := os.Getenv("PORT"); envPortVal != "" {

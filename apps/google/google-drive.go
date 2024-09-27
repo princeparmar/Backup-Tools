@@ -18,6 +18,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/utils"
 
 	"github.com/labstack/echo/v4"
+	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
@@ -128,9 +129,29 @@ func client(c echo.Context) (*http.Client, error) {
 	if err != nil {
 		return nil, echo.NewHTTPError(http.StatusUnauthorized, "user is not authorized")
 	}
-	client := config.Client(context.Background(), &tok)
+	client := config.Client(context.Background(), &oauth2.Token{
+		AccessToken: tok,
+	})
 
 	return client, nil
+}
+
+func clientUsingToken(token string) (*http.Client, error) {
+	b, err := os.ReadFile("credentials.json")
+	if err != nil {
+		return nil, fmt.Errorf("unable to read client secret file: %v", err)
+	}
+	config, err := google.ConfigFromJSON(b, drive.DriveScope, gs.CloudPlatformScope, gs.DevstorageFullControlScope, gs.DevstorageReadWriteScope, gs.CloudPlatformReadOnlyScope)
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse client secret file to config: %v", err)
+	}
+
+	if err != nil {
+		return nil, echo.NewHTTPError(http.StatusUnauthorized, "user is not authorized")
+	}
+	return config.Client(context.Background(), &oauth2.Token{
+		AccessToken: token,
+	}), nil
 }
 
 // GetFile downloads file from Google Drive by ID
