@@ -2,6 +2,7 @@ package crons
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/storage"
@@ -121,6 +122,11 @@ func (a *AutosyncManager) UpdateTaskStatus(taskID, jobID uint, err error, proces
 	if err != nil {
 		status = "failed"
 		message = err.Error()
+
+		if strings.Contains(err.Error(), "googleapi: Error 401") {
+			message = "Invalid google credentials"
+		}
+
 		jobMessage = "Task failed at " + time.Now().Format("2006-01-02 15:04:05")
 		jobMessageStatus = "error"
 	}

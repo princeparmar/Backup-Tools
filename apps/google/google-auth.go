@@ -1,9 +1,11 @@
 package google
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -212,4 +214,79 @@ func AuthRequestChecker(c echo.Context) bool {
 		// Header does not exist
 		return false
 	}
+}
+
+func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
+	var credentials struct {
+		ClientID     string `json:"client_id"`
+		ClientSecret string `json:"client_secret"`
+		RefreshToken string `json:"refresh_token"`
+	}
+
+	var tokenResponse struct {
+		AccessToken  string `json:"access_token"`
+		ExpiresIn    int    `json:"expires_in"`
+		TokenType    string `json:"token_type"`
+		RefreshToken string `json:"refresh_token,omitempty"`
+	}
+
+	file, err := os.Open("./credentials.json")
+	if err != nil {
+		return "", fmt.Errorf("error opening credentials file: %v", err)
+	}
+
+	// Read the file
+	byteValue, err := ioutil.ReadAll(file)
+	if err != nil {
+		return "", fmt.Errorf("error reading credentials file: %v", err)
+	}
+
+	// Unmarshal the JSON into the Credentials struct
+	if err := json.Unmarshal(byteValue, &credentials); err != nil {
+		return "", fmt.Errorf("error parsing credentials JSON: %v", err)
+	}
+
+	// Create the request body
+	data := map[string]string{
+		"client_id":     credentials.ClientID,
+		"client_secret": credentials.ClientSecret,
+		"refresh_token": credentials.RefreshToken,
+		"grant_type":    "refresh_token",
+	}
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return "", fmt.Errorf("error encoding JSON: %v", err)
+	}
+
+	const tokenURL = "https://oauth2.googleapis.com/token"
+
+	// Create the HTTP request
+	req, err := http.NewRequest("POST", tokenURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("error creating request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Send the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("error making HTTP request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Read the response body
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("error reading response body: %v", err)
+	}
+
+	// Parse the response JSON
+	err = json.Unmarshal(body, &tokenResponse)
+	if err != nil {
+		return "", fmt.Errorf("error parsing response JSON: %v", err)
+	}
+
+	// Return the access token
+	return tokenResponse.AccessToken, nil
 }
