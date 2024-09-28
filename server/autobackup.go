@@ -163,6 +163,7 @@ func handleAutomaticSyncUpdate(c echo.Context) error {
 	}
 
 	if reqBody.Active != nil {
+		// TODO: Add validation if storx_token is present and auth_token is present
 		updateRequest["active"] = *reqBody.Active
 	}
 

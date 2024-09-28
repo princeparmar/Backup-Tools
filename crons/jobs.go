@@ -31,7 +31,7 @@ func NewAutosyncManager(store *storage.PosgresStore) *AutosyncManager {
 
 func (a *AutosyncManager) Start() {
 	c := cron.New()
-	c.AddFunc("@every 2h", func() {
+	c.AddFunc("@every 1m", func() {
 		fmt.Println("Creating task for all pending jobs")
 		err := a.CreateTaskForAllPendingJobs()
 		if err != nil {
@@ -42,7 +42,7 @@ func (a *AutosyncManager) Start() {
 		fmt.Println("Task created for all pending jobs")
 	})
 
-	c.AddFunc("@every 5h", func() {
+	c.AddFunc("@every 1m", func() {
 		fmt.Println("Processing task")
 		err := a.ProcessTask()
 		if err != nil {
@@ -62,6 +62,10 @@ func (a *AutosyncManager) CreateTaskForAllPendingJobs() error {
 		return err
 	}
 
+	if len(jobs) == 0 {
+		fmt.Println("No job to process")
+		return nil
+	}
 	for _, job := range jobs {
 		_, err := a.store.CreateTaskForCronJob(job.ID)
 		if err != nil {
@@ -73,27 +77,34 @@ func (a *AutosyncManager) CreateTaskForAllPendingJobs() error {
 }
 
 func (a *AutosyncManager) ProcessTask() error {
-	task, err := a.store.GetPushedTask()
-	if err != nil {
-		return err
-	}
+	for {
+		task, err := a.store.GetPushedTask()
+		if err != nil {
+			if err.Error() == "error getting pushed task: record not found" {
+				fmt.Println("No task to process")
+				break
+			}
+			return err
+		}
 
-	job, err := a.store.GetCronJobByID(task.CronJobID)
-	if err != nil {
-		return a.UpdateTaskStatus(task.ID, job.ID, err)
-	}
+		fmt.Println("Processing task", task.ID)
+		job, err := a.store.GetCronJobByID(task.CronJobID)
+		if err != nil {
+			return a.UpdateTaskStatus(task.ID, job.ID, err)
+		}
 
-	processor, ok := m[job.Method]
-	if !ok {
-		return a.UpdateTaskStatus(task.ID, job.ID, fmt.Errorf("method %s not found", job.Method))
-	}
+		processor, ok := m[job.Method]
+		if !ok {
+			return a.UpdateTaskStatus(task.ID, job.ID, fmt.Errorf("method %s not found", job.Method))
+		}
 
-	err = processor.Run(ProcessorInput{
-		StorxToken: job.StorxToken,
-		AuthToken:  job.AuthToken,
-	})
-	if err != nil {
-		return a.UpdateTaskStatus(task.ID, job.ID, err)
+		err = processor.Run(ProcessorInput{
+			StorxToken: job.StorxToken,
+			AuthToken:  job.AuthToken,
+		})
+		if err != nil {
+			return a.UpdateTaskStatus(task.ID, job.ID, err)
+		}
 	}
 
 	return nil

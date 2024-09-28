@@ -75,7 +75,7 @@ func (storage *PosgresStore) GetAllCronJobsForUser(userID string) ([]CronJobList
 // given interval with table locking with limit 10.
 func (storage *PosgresStore) GetJobsToProcess() ([]CronJobListingDB, error) {
 	var res []CronJobListingDB
-	tx := storage.DB.Begin().Debug()
+	tx := storage.DB.Begin()
 
 	/*
 		SELECT cron_job_listing_dbs.*
@@ -93,18 +93,33 @@ func (storage *PosgresStore) GetJobsToProcess() ([]CronJobListingDB, error) {
 		              OR ( cron_job_listing_dbs.interval = 'monthly'
 		                   AND cron_job_listing_dbs.on = 26 ) )
 	*/
-	db := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("cron_job_listing_dbs").
-		Select("cron_job_listing_dbs.*").
-		Joins("left join task_listing_dbs on cron_job_listing_dbs.id = task_listing_dbs.cron_job_id").
-		Where("cron_job_listing_dbs.active = true").
-		Where("cron_job_listing_dbs.message != 'pushing to queue'").
-		Where("cron_job_listing_dbs.last_run != ?", time.Now().Format("2006-01-02")).
-		Where("task_listing_dbs.id IS NULL OR task_listing_dbs.status IN ('completed', 'failed')").
-		Where(`cron_job_listing_dbs.interval = 'daily'
-				OR ( cron_job_listing_dbs.interval = 'weekly' AND cron_job_listing_dbs.on = ?)
-				OR (cron_job_listing_dbs.interval = 'monthly' AND cron_job_listing_dbs.on = ?)`,
-			time.Now().Weekday().String(), time.Now().Day()).Limit(10).
-		Find(&res)
+	// The raw SQL query
+	sqlQuery := `
+	WITH locked_jobs AS (
+		SELECT cron_job_listing_dbs.*
+		FROM cron_job_listing_dbs
+		WHERE cron_job_listing_dbs.active = true
+		AND cron_job_listing_dbs.message != 'pushing to queue'
+		AND cron_job_listing_dbs.last_run != '2024-09-28'
+		AND (cron_job_listing_dbs.interval = 'daily'
+			OR (cron_job_listing_dbs.interval = 'weekly' AND cron_job_listing_dbs.on = 'Saturday')
+			OR (cron_job_listing_dbs.interval = 'monthly' AND cron_job_listing_dbs.on = '28'))
+		LIMIT 10
+		FOR UPDATE
+	)
+	SELECT locked_jobs.*
+	FROM locked_jobs
+	LEFT JOIN task_listing_dbs
+	ON locked_jobs.id = task_listing_dbs.cron_job_id
+	WHERE task_listing_dbs.id IS NULL OR task_listing_dbs.status IN ('completed', 'failed');
+	`
+
+	// Execute the raw SQL query and store the result in the cronJobs slice
+	db := tx.Raw(sqlQuery).Scan(&res)
+	if db.Error != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("error getting jobs to process: %v", db.Error)
+	}
 
 	// update message to "pushing to queue" and message status to "info"
 	for i := range res {
