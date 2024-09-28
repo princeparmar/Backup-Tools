@@ -17,6 +17,12 @@ func StartServer(db *storage.PosgresStore, address string) {
 	e := echo.New()
 	e.HideBanner = true
 
+	// Enable logging middleware
+	e.Use(middleware.Logger())
+
+	// Enable recovery middleware to handle panics and return a 500
+	e.Use(middleware.Recover())
+
 	e.Use(DBMiddleware(db))
 
 	e.Use(middleware.CORS())
