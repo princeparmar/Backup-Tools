@@ -10,13 +10,13 @@ import (
 
 // Models for automated storage
 type CronJobListingDB struct {
-	ID       uint   `gorm:"primaryKey" json:"id"`
-	UserID   string `json:"user_id"`
-	Name     string `json:"name"`
-	Method   string `json:"method"`
-	Interval string `json:"interval"`
-	On       string `json:"on"`
-	LastRun  string `json:"last_run"`
+	ID       uint      `gorm:"primaryKey" json:"id"`
+	UserID   string    `json:"user_id"`
+	Name     string    `json:"name"`
+	Method   string    `json:"method"`
+	Interval string    `json:"interval"`
+	On       string    `json:"on"`
+	LastRun  time.Time `json:"last_run"`
 
 	AuthToken    string `json:"auth_token"`
 	RefreshToken string `json:"refresh_token"`
