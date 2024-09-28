@@ -100,7 +100,7 @@ func (storage *PosgresStore) GetJobsToProcess() ([]CronJobListingDB, error) {
 		FROM cron_job_listing_dbs
 		WHERE cron_job_listing_dbs.active = true
 		AND (cron_job_listing_dbs.message is null or cron_job_listing_dbs.message != 'pushing to queue')
-		AND cron_job_listing_dbs.last_run != ?
+		AND DATE(cron_job_listing_dbs.last_run) != ?
 		AND (cron_job_listing_dbs.interval = 'daily'
 			OR (cron_job_listing_dbs.interval = 'weekly' AND cron_job_listing_dbs.on = ?)
 			OR (cron_job_listing_dbs.interval = 'monthly' AND cron_job_listing_dbs.on = ?))
