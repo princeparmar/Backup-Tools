@@ -67,6 +67,8 @@ func (a *AutosyncManager) CreateTaskForAllPendingJobs() error {
 		return nil
 	}
 	for _, job := range jobs {
+		fmt.Println("Creating task for job", job.ID)
+
 		_, err := a.store.CreateTaskForCronJob(job.ID)
 		if err != nil {
 			return a.UpdateJobStatus(job.ID, "failed to push task "+err.Error(), "error")
