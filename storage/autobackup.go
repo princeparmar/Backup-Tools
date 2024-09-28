@@ -100,10 +100,10 @@ func (storage *PosgresStore) GetJobsToProcess() ([]CronJobListingDB, error) {
 		FROM cron_job_listing_dbs
 		WHERE cron_job_listing_dbs.active = true
 		AND cron_job_listing_dbs.message != 'pushing to queue'
-		AND cron_job_listing_dbs.last_run != '2024-09-28'
+		AND cron_job_listing_dbs.last_run != ?
 		AND (cron_job_listing_dbs.interval = 'daily'
-			OR (cron_job_listing_dbs.interval = 'weekly' AND cron_job_listing_dbs.on = 'Saturday')
-			OR (cron_job_listing_dbs.interval = 'monthly' AND cron_job_listing_dbs.on = '28'))
+			OR (cron_job_listing_dbs.interval = 'weekly' AND cron_job_listing_dbs.on = ?)
+			OR (cron_job_listing_dbs.interval = 'monthly' AND cron_job_listing_dbs.on = ?))
 		LIMIT 10
 		FOR UPDATE
 	)
@@ -115,7 +115,7 @@ func (storage *PosgresStore) GetJobsToProcess() ([]CronJobListingDB, error) {
 	`
 
 	// Execute the raw SQL query and store the result in the cronJobs slice
-	db := tx.Raw(sqlQuery).Scan(&res)
+	db := tx.Raw(sqlQuery, time.Now().Format("2006-01-02"), time.Now().Weekday().String(), fmt.Sprint(time.Now().Day())).Scan(&res)
 	if db.Error != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf("error getting jobs to process: %v", db.Error)
