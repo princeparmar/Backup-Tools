@@ -80,6 +80,7 @@ func (a *AutosyncManager) CreateTaskForAllPendingJobs() error {
 
 func (a *AutosyncManager) ProcessTask() error {
 	for {
+		startime := time.Now()
 		task, err := a.store.GetPushedTask()
 		if err != nil {
 			if err.Error() == "error getting pushed task: record not found" {
@@ -92,12 +93,12 @@ func (a *AutosyncManager) ProcessTask() error {
 		fmt.Println("Processing task", task.ID)
 		job, err := a.store.GetCronJobByID(task.CronJobID)
 		if err != nil {
-			return a.UpdateTaskStatus(task.ID, job.ID, err)
+			return a.UpdateTaskStatus(task.ID, job.ID, err, time.Since(startime))
 		}
 
 		processor, ok := m[job.Method]
 		if !ok {
-			return a.UpdateTaskStatus(task.ID, job.ID, fmt.Errorf("method %s not found", job.Method))
+			return a.UpdateTaskStatus(task.ID, job.ID, fmt.Errorf("method %s not found", job.Method), time.Since(startime))
 		}
 
 		err = processor.Run(ProcessorInput{
@@ -105,14 +106,14 @@ func (a *AutosyncManager) ProcessTask() error {
 			AuthToken:  job.AuthToken,
 		})
 		if err != nil {
-			return a.UpdateTaskStatus(task.ID, job.ID, err)
+			return a.UpdateTaskStatus(task.ID, job.ID, err, time.Since(startime))
 		}
 	}
 
 	return nil
 }
 
-func (a *AutosyncManager) UpdateTaskStatus(taskID, jobID uint, err error) error {
+func (a *AutosyncManager) UpdateTaskStatus(taskID, jobID uint, err error, processtime time.Duration) error {
 	status := "success"
 	message := ""
 	jobMessage := "Task completed successfully at " + time.Now().Format("2006-01-02 15:04:05")
@@ -125,8 +126,9 @@ func (a *AutosyncManager) UpdateTaskStatus(taskID, jobID uint, err error) error 
 	}
 
 	err = a.store.UpdateTaskByID(taskID, map[string]interface{}{
-		"status":  status,
-		"message": message,
+		"status":   status,
+		"message":  message,
+		"exection": processtime,
 	})
 	if err != nil {
 		return err
@@ -139,5 +141,6 @@ func (a *AutosyncManager) UpdateJobStatus(jobID uint, message, messageStatus str
 	return a.store.UpdateCronJobByID(jobID, map[string]interface{}{
 		"message":        message,
 		"message_status": messageStatus,
+		"last_run":       time.Now(),
 	})
 }
