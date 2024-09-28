@@ -126,9 +126,9 @@ func (a *AutosyncManager) UpdateTaskStatus(taskID, jobID uint, err error, proces
 	}
 
 	err = a.store.UpdateTaskByID(taskID, map[string]interface{}{
-		"status":   status,
-		"message":  message,
-		"exection": processtime,
+		"status":    status,
+		"message":   message,
+		"execution": processtime,
 	})
 	if err != nil {
 		return err
