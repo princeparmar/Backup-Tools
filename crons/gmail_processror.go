@@ -30,13 +30,21 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 
 	nextPageToken := ""
 
+	emptyLoopCount := 0
+
 	for {
 		res, err := gmailClient.GetUserMessagesControlled(nextPageToken, 500)
 		if err != nil {
 			return err
 		}
 
+		syncedData := false
 		for _, message := range res.Messages {
+			if !utils.Contains(message.LabelIds, "CATEGORY_PERSONAL") {
+				// only sync personal emails
+				continue
+			}
+
 			_, synced := emailListFromBucket[utils.GenerateTitleFromGmailMessage(message)]
 			if synced {
 				continue
@@ -47,12 +55,24 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 				return err
 			}
 
+			syncedData = true
 			err = satellite.UploadObject(context.TODO(), input.StorxToken, "gmail", utils.GenerateTitleFromGmailMessage(message), b)
 			if err != nil {
 				return err
 			}
 
 		}
+
+		if !syncedData {
+			// if we don't get any new data, we can break
+			emptyLoopCount++
+		}
+
+		if emptyLoopCount > 20 {
+			// if we get 5 empty loops, we can break
+			break
+		}
+
 		nextPageToken = res.NextPageToken
 		if nextPageToken == "" {
 			break
