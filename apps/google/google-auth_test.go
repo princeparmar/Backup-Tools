@@ -3,6 +3,7 @@ package google
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,6 +11,16 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 )
+
+func Test_AuthTokenUsingRefreshToken(t *testing.T) {
+
+	newToken, err := AuthTokenUsingRefreshToken("")
+	if err != nil {
+		t.Errorf("Error: %v", err)
+	}
+
+	fmt.Println(newToken)
+}
 
 // Mock database for testing
 type mockDB struct{}

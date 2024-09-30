@@ -62,6 +62,15 @@ type TaskListingDB struct {
 	Execution uint64 `json:"execution"`
 }
 
+func (storage *PosgresStore) GetAllCronJobs() ([]CronJobListingDB, error) {
+	var res []CronJobListingDB
+	db := storage.DB.Find(&res)
+	if db != nil && db.Error != nil {
+		return nil, fmt.Errorf("error getting cron jobs for user: %v", db.Error)
+	}
+	return res, nil
+}
+
 func (storage *PosgresStore) GetAllCronJobsForUser(userID string) ([]CronJobListingDB, error) {
 	var res []CronJobListingDB
 	db := storage.DB.Where("user_id = ?", userID).Find(&res)

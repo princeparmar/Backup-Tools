@@ -5,8 +5,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/robfig/cron/v3"
+	"github.com/zeebo/errs"
 )
 
 type ProcessorInput struct {
@@ -54,6 +56,17 @@ func (a *AutosyncManager) Start() {
 		fmt.Println("Task processed")
 	})
 
+	c.AddFunc("@every 1m", func() {
+		fmt.Println("Refreshing google auth token")
+		err := a.RefreshGoogleAuthToken()
+		if err != nil {
+			fmt.Println("Failed to refresh google auth token", err)
+			return
+		}
+
+		fmt.Println("Google auth token refreshed")
+	})
+
 	c.Start()
 }
 
@@ -77,6 +90,43 @@ func (a *AutosyncManager) CreateTaskForAllPendingJobs() error {
 	}
 
 	return nil
+}
+
+func (a *AutosyncManager) RefreshGoogleAuthToken() error {
+	jobs, err := a.store.GetAllCronJobs()
+	if err != nil {
+		return err
+	}
+
+	errGroup := errs.Group{}
+
+	for _, job := range jobs {
+		if job.AuthToken == "" || job.RefreshToken == "" || !job.Active {
+			continue
+		}
+
+		if !google.IsGoogleTokenExpired(job.AuthToken) {
+			continue
+		}
+
+		newToken, err := google.AuthTokenUsingRefreshToken(job.RefreshToken)
+		if err != nil {
+			errGroup.Add(err)
+			continue
+		}
+
+		err = a.store.UpdateCronJobByID(job.ID, map[string]interface{}{
+			"auth_token": newToken,
+		})
+		if err != nil {
+			errGroup.Add(err)
+			fmt.Println("Failed to update job", job.ID, err)
+		}
+
+		fmt.Println("Updated Google Auth Token for job", job.ID)
+	}
+
+	return errGroup.Err()
 }
 
 func (a *AutosyncManager) ProcessTask() error {

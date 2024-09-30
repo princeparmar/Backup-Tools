@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -217,10 +217,10 @@ func AuthRequestChecker(c echo.Context) bool {
 }
 
 func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
-	var credentials struct {
+	type credentials struct {
 		ClientID     string `json:"client_id"`
 		ClientSecret string `json:"client_secret"`
-		RefreshToken string `json:"refresh_token"`
+		TokenURI     string `json:"token_uri"`
 	}
 
 	var tokenResponse struct {
@@ -230,38 +230,42 @@ func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 		RefreshToken string `json:"refresh_token,omitempty"`
 	}
 
-	file, err := os.Open("./credentials.json")
-	if err != nil {
-		return "", fmt.Errorf("error opening credentials file: %v", err)
-	}
-
-	// Read the file
-	byteValue, err := ioutil.ReadAll(file)
+	byteValue, err := os.ReadFile("credentials.json")
 	if err != nil {
 		return "", fmt.Errorf("error reading credentials file: %v", err)
 	}
 
+	credMap := make(map[string]credentials)
 	// Unmarshal the JSON into the Credentials struct
-	if err := json.Unmarshal(byteValue, &credentials); err != nil {
+	if err := json.Unmarshal(byteValue, &credMap); err != nil {
 		return "", fmt.Errorf("error parsing credentials JSON: %v", err)
 	}
 
-	// Create the request body
-	data := map[string]string{
-		"client_id":     credentials.ClientID,
-		"client_secret": credentials.ClientSecret,
-		"refresh_token": credentials.RefreshToken,
-		"grant_type":    "refresh_token",
+	if len(credMap) == 0 {
+		return "", fmt.Errorf("no credentials found in JSON")
 	}
+
+	data := map[string]string{}
+	tokenURI := ""
+	for _, v := range credMap {
+		// Create the request body
+		data = map[string]string{
+			"client_id":     v.ClientID,
+			"client_secret": v.ClientSecret,
+			"refresh_token": refreshToken,
+			"grant_type":    "refresh_token",
+		}
+		tokenURI = v.TokenURI
+		break
+	}
+
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return "", fmt.Errorf("error encoding JSON: %v", err)
 	}
 
-	const tokenURL = "https://oauth2.googleapis.com/token"
-
 	// Create the HTTP request
-	req, err := http.NewRequest("POST", tokenURL, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest("POST", tokenURI, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return "", fmt.Errorf("error creating request: %v", err)
 	}
@@ -276,7 +280,7 @@ func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 	defer resp.Body.Close()
 
 	// Read the response body
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("error reading response body: %v", err)
 	}
@@ -289,4 +293,42 @@ func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 
 	// Return the access token
 	return tokenResponse.AccessToken, nil
+}
+
+// IsGoogleTokenExpired checks if the provided Google access token is valid or expired
+func IsGoogleTokenExpired(token string) bool {
+	// Token info endpoint with the provided token
+	url := fmt.Sprintf("https://oauth2.googleapis.com/tokeninfo?access_token=%s", token)
+
+	// Send an HTTP GET request to the token info endpoint
+	resp, err := http.Get(url)
+	if err != nil {
+		return true
+	}
+	defer resp.Body.Close()
+
+	// TokenInfo represents the response structure from Google's tokeninfo endpoint
+	type TokenInfo struct {
+		ExpiresIn int    `json:"expires_in"`
+		Error     string `json:"error,omitempty"`
+	}
+
+	// Parse the response into the TokenInfo struct
+	var tokenInfo TokenInfo
+	if err := json.NewDecoder(resp.Body).Decode(&tokenInfo); err != nil {
+		return true
+	}
+
+	// Check if the response contains an error
+	if tokenInfo.Error != "" {
+		return true
+	}
+
+	// Check if the token has expired (expires_in should be greater than 0)
+	if tokenInfo.ExpiresIn > 0 {
+		return false
+	}
+
+	// Token is expired
+	return true
 }
