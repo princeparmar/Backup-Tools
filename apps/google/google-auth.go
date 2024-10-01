@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/storage"
@@ -310,7 +311,7 @@ func IsGoogleTokenExpired(token string) bool {
 
 	// TokenInfo represents the response structure from Google's tokeninfo endpoint
 	type TokenInfo struct {
-		ExpiresIn int    `json:"expires_in"`
+		ExpiresIn string `json:"expires_in"`
 		Error     string `json:"error,omitempty"`
 	}
 
@@ -327,8 +328,14 @@ func IsGoogleTokenExpired(token string) bool {
 		return true
 	}
 
+	expireIn, err := strconv.Atoi(tokenInfo.ExpiresIn)
+	if err != nil {
+		fmt.Println("Error converting expires_in to int:", err)
+		return true
+	}
+
 	// Check if the token has expired (expires_in should be greater than 0)
-	if tokenInfo.ExpiresIn > 0 {
+	if expireIn > 0 {
 		fmt.Println("Token expires in:", tokenInfo.ExpiresIn, "seconds")
 		return false
 	}
