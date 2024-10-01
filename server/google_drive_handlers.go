@@ -639,7 +639,7 @@ func handleSendListFromGoogleDriveToSatellite(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":       "all files were successfully uploaded from Google Photos to Satellite",
+		"message":       "all files were successfully uploaded from Google Drive to Satellite",
 		"failed_ids":    failedIDs.Get(),
 		"processed_ids": processedIDs.Get(),
 	})
