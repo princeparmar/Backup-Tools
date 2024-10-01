@@ -10,6 +10,7 @@ require (
 	github.com/gphotosuploader/google-photos-api-client-go/v2 v2.4.2
 	github.com/gphotosuploader/googlemirror v0.5.0
 	github.com/labstack/echo/v4 v4.11.4
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/stretchr/testify v1.9.0
 	golang.org/x/oauth2 v0.17.0
 	google.golang.org/api v0.168.0
@@ -54,7 +55,6 @@ require (
 	github.com/mediocregopher/radix/v3 v3.8.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/vmihailenco/msgpack v4.0.4+incompatible // indirect
 	go.opencensus.io v0.24.0 // indirect

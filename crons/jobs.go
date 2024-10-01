@@ -8,12 +8,12 @@ import (
 	"github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/robfig/cron/v3"
-	"github.com/zeebo/errs"
 )
 
 type ProcessorInput struct {
 	StorxToken string
 	AuthToken  string
+	Task       *storage.TaskListingDB
 }
 
 type Processor interface {
@@ -56,16 +56,16 @@ func (a *AutosyncManager) Start() {
 		fmt.Println("Task processed")
 	})
 
-	c.AddFunc("@every 1m", func() {
-		fmt.Println("Refreshing google auth token")
-		err := a.RefreshGoogleAuthToken()
-		if err != nil {
-			fmt.Println("Failed to refresh google auth token", err)
-			return
-		}
+	// c.AddFunc("@every 1m", func() {
+	// 	fmt.Println("Refreshing google auth token")
+	// 	err := a.RefreshGoogleAuthToken()
+	// 	if err != nil {
+	// 		fmt.Println("Failed to refresh google auth token", err)
+	// 		return
+	// 	}
 
-		fmt.Println("Google auth token refreshed")
-	})
+	// 	fmt.Println("Google auth token refreshed")
+	// })
 
 	c.Start()
 }
@@ -92,43 +92,43 @@ func (a *AutosyncManager) CreateTaskForAllPendingJobs() error {
 	return nil
 }
 
-func (a *AutosyncManager) RefreshGoogleAuthToken() error {
-	jobs, err := a.store.GetAllCronJobs()
-	if err != nil {
-		return err
-	}
+// func (a *AutosyncManager) RefreshGoogleAuthToken() error {
+// 	jobs, err := a.store.GetAllCronJobs()
+// 	if err != nil {
+// 		return err
+// 	}
 
-	errGroup := errs.Group{}
+// 	errGroup := errs.Group{}
 
-	for _, job := range jobs {
-		if job.AuthToken == "" || job.RefreshToken == "" || !job.Active {
-			continue
-		}
+// 	for _, job := range jobs {
+// 		if job.RefreshToken == "" || !job.Active {
+// 			continue
+// 		}
 
-		if !google.IsGoogleTokenExpired(job.AuthToken) {
-			continue
-		}
+// 		if !google.IsGoogleTokenExpired(job.AuthToken) {
+// 			continue
+// 		}
 
-		newToken, err := google.AuthTokenUsingRefreshToken(job.RefreshToken)
-		if err != nil {
-			errGroup.Add(err)
-			continue
-		}
+// 		newToken, err := google.AuthTokenUsingRefreshToken(job.RefreshToken)
+// 		if err != nil {
+// 			errGroup.Add(err)
+// 			continue
+// 		}
 
-		err = a.store.UpdateCronJobByID(job.ID, map[string]interface{}{
-			"auth_token": newToken,
-		})
-		if err != nil {
-			errGroup.Add(err)
-			fmt.Println("Failed to update job", job.ID, err)
-			continue
-		}
+// 		err = a.store.UpdateCronJobByID(job.ID, map[string]interface{}{
+// 			"auth_token": newToken,
+// 		})
+// 		if err != nil {
+// 			errGroup.Add(err)
+// 			fmt.Println("Failed to update job", job.ID, err)
+// 			continue
+// 		}
 
-		fmt.Println("Updated Google Auth Token for job", job.ID)
-	}
+// 		fmt.Println("Updated Google Auth Token for job", job.ID)
+// 	}
 
-	return errGroup.Err()
-}
+// 	return errGroup.Err()
+// }
 
 func (a *AutosyncManager) ProcessTask() error {
 	for {
@@ -145,27 +145,33 @@ func (a *AutosyncManager) ProcessTask() error {
 		fmt.Println("Processing task", task.ID)
 		job, err := a.store.GetCronJobByID(task.CronJobID)
 		if err != nil {
-			return a.UpdateTaskStatus(task.ID, job.ID, err, time.Since(startime))
+			return a.UpdateTaskStatus(task, job, err, time.Since(startime))
 		}
 
 		processor, ok := m[job.Method]
 		if !ok {
-			return a.UpdateTaskStatus(task.ID, job.ID, fmt.Errorf("method %s not found", job.Method), time.Since(startime))
+			return a.UpdateTaskStatus(task, job, fmt.Errorf("method %s not found", job.Method), time.Since(startime))
+		}
+
+		newToken, err := google.AuthTokenUsingRefreshToken(job.RefreshToken)
+		if err != nil {
+			return a.UpdateTaskStatus(task, job, fmt.Errorf("Error while generating auth token: %s", err), time.Since(startime))
 		}
 
 		err = processor.Run(ProcessorInput{
 			StorxToken: job.StorxToken,
-			AuthToken:  job.AuthToken,
+			AuthToken:  newToken,
+			Task:       task,
 		})
 		if err != nil {
-			return a.UpdateTaskStatus(task.ID, job.ID, err, time.Since(startime))
+			return a.UpdateTaskStatus(task, job, err, time.Since(startime))
 		}
 	}
 
 	return nil
 }
 
-func (a *AutosyncManager) UpdateTaskStatus(taskID, jobID uint, err error, processtime time.Duration) error {
+func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *storage.CronJobListingDB, err error, processtime time.Duration) error {
 	status := "success"
 	message := ""
 	jobMessage := "Task completed successfully at " + time.Now().Format("2006-01-02 15:04:05")
@@ -182,16 +188,17 @@ func (a *AutosyncManager) UpdateTaskStatus(taskID, jobID uint, err error, proces
 		jobMessageStatus = "error"
 	}
 
-	err = a.store.UpdateTaskByID(taskID, map[string]interface{}{
-		"status":    status,
-		"message":   message,
-		"execution": processtime,
+	err = a.store.UpdateTaskByID(task.ID, map[string]interface{}{
+		"status":      status,
+		"message":     message,
+		"execution":   processtime,
+		"task_memory": task.TaskMemory,
 	})
 	if err != nil {
 		return err
 	}
 
-	return a.UpdateJobStatus(jobID, jobMessage, jobMessageStatus)
+	return a.UpdateJobStatus(job.ID, jobMessage, jobMessageStatus)
 }
 
 func (a *AutosyncManager) UpdateJobStatus(jobID uint, message, messageStatus string) error {

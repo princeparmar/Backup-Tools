@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/utils"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -18,7 +19,6 @@ type CronJobListingDB struct {
 	On       string    `json:"on"`
 	LastRun  time.Time `json:"last_run"`
 
-	AuthToken    string `json:"auth_token"`
 	RefreshToken string `json:"refresh_token"`
 
 	StorxToken string `json:"storx_token"`
@@ -44,8 +44,12 @@ func MastTokenForCronJobListingDB(cronJobs []CronJobListingDB) []CronJobListingD
 }
 
 func MastTokenForCronJobDB(cronJob *CronJobListingDB) {
-	cronJob.AuthToken = utils.MaskString(cronJob.AuthToken)
+	cronJob.StorxToken = utils.MaskString(cronJob.StorxToken)
 	cronJob.RefreshToken = utils.MaskString(cronJob.RefreshToken)
+}
+
+type TaskMemory struct {
+	NextToken *string `json:"next_token"`
 }
 
 type TaskListingDB struct {
@@ -53,13 +57,23 @@ type TaskListingDB struct {
 	CronJobID uint `gorm:"foreignKey:CronJobListingDB.ID" json:"cron_job_id"`
 
 	// Status will be one of the following: "pushed", "running", "success", "failed"
-	Status              string    `json:"status"`
-	CompletedPercentage float64   `json:"completed_percentage"`
-	Message             string    `json:"message"`
-	StartTime           time.Time `json:"start_time"`
+	Status string `json:"status"`
+
+	// Message will be the message to be displayed to the user
+	Message string `json:"message"`
+
+	// StartTime will be the time when the task was started
+	StartTime time.Time `json:"start_time"`
 
 	// Execution time in milliseconds
 	Execution uint64 `json:"execution"`
+
+	// RetryCount will be the number of times the task has been retried
+	// Maximum 3 retries are allowed
+	RetryCount uint `json:"retry_count"`
+
+	// Memory will be used to store the state of the task. this will be json field
+	TaskMemory TaskMemory `json:"task_memory" gorm:"type:jsonb"`
 }
 
 func (storage *PosgresStore) GetAllCronJobs() ([]CronJobListingDB, error) {
@@ -160,9 +174,10 @@ func (storage *PosgresStore) IsCronAvailableForUser(userID string, jobID uint) b
 func (storage *PosgresStore) GetPushedTask() (*TaskListingDB, error) {
 	var res TaskListingDB
 	tx := storage.DB.Begin()
-	// lock table tasks for update and select and return the first row
-	db := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("status = 'pushed'").First(&res)
-	if db != nil && db.Error != nil {
+	// lock table tasks for update and select and return the first row with status pushed
+	// or status 'failed' and retry count less than 3
+	db := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("status = ? OR (status = ? AND retry_count < 3)", "pushed", "failed").First(&res)
+	if db.Error != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf("error getting pushed task: %v", db.Error)
 	}
@@ -209,11 +224,32 @@ func (storage *PosgresStore) CreateTaskForCronJob(cronJobID uint) (*TaskListingD
 }
 
 func (storage *PosgresStore) UpdateTaskByID(ID uint, m map[string]interface{}) error {
-	res := storage.DB.Model(&TaskListingDB{}).Where("id = ?", ID).Updates(m)
-	if res != nil && res.Error != nil {
-		return fmt.Errorf("error updating task: %v", res.Error)
+	// update task by ID
+	// create a transaction to update the task and check if m["status"] == "failed"
+	// then update "retry_count" and "status"
+	tx := storage.DB.Begin()
+
+	db := tx.Model(&TaskListingDB{}).Where("id = ?", ID).Updates(m)
+	if db != nil && db.Error != nil {
+		tx.Rollback()
+		return fmt.Errorf("error updating task by ID: %v", db.Error)
 	}
+
+	if m["status"] == "failed" {
+		db = tx.Model(&TaskListingDB{}).Where("id = ?", ID).Update("retry_count", gorm.Expr("retry_count + 1"))
+		if db != nil && db.Error != nil {
+			tx.Rollback()
+			return fmt.Errorf("error updating task by ID: %v", db.Error)
+		}
+	}
+
+	err := tx.Commit()
+	if err != nil && err.Error != nil {
+		return fmt.Errorf("error committing transaction: %v", err.Error)
+	}
+
 	return nil
+
 }
 
 func (storage *PosgresStore) GetCronJobByID(ID uint) (*CronJobListingDB, error) {
