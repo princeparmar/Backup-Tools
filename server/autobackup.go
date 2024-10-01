@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/labstack/echo/v4"
@@ -123,7 +124,6 @@ func handleAutomaticSyncUpdate(c echo.Context) error {
 		Interval *string `json:"interval"`
 		On       *string `json:"on"`
 
-		AuthToken    *string `json:"auth_token"`
 		RefreshToken *string `json:"refresh_token"`
 
 		StorxToken *string `json:"storx_token"`
@@ -149,12 +149,12 @@ func handleAutomaticSyncUpdate(c echo.Context) error {
 		}
 	}
 
-	if reqBody.AuthToken != nil || reqBody.RefreshToken != nil {
-		if reqBody.AuthToken == nil || reqBody.RefreshToken == nil {
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "AuthToken and RefreshToken are required"})
+	if reqBody.RefreshToken != nil {
+		_, err := google.AuthTokenUsingRefreshToken(*reqBody.RefreshToken)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token"})
 		}
 
-		updateRequest["auth_token"] = *reqBody.AuthToken
 		updateRequest["refresh_token"] = *reqBody.RefreshToken
 	}
 

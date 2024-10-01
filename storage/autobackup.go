@@ -49,7 +49,8 @@ func MastTokenForCronJobDB(cronJob *CronJobListingDB) {
 }
 
 type TaskMemory struct {
-	NextToken *string `json:"next_token"`
+	GmailNextToken *string `json:"gmail_next_token"`
+	GmailSyncCount uint    `json:"gmail_sync_count"`
 }
 
 type TaskListingDB struct {

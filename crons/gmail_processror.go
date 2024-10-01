@@ -28,14 +28,14 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 		return err
 	}
 
-	if input.Task.TaskMemory.NextToken == nil {
-		input.Task.TaskMemory.NextToken = new(string)
+	if input.Task.TaskMemory.GmailNextToken == nil {
+		input.Task.TaskMemory.GmailNextToken = new(string)
 	}
 
 	emptyLoopCount := 0
 
 	for {
-		res, err := gmailClient.GetUserMessagesControlled(*input.Task.TaskMemory.NextToken, 500)
+		res, err := gmailClient.GetUserMessagesControlled(*input.Task.TaskMemory.GmailNextToken, 500)
 		if err != nil {
 			return err
 		}
@@ -63,6 +63,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 				return err
 			}
 
+			input.Task.TaskMemory.GmailSyncCount++
 		}
 
 		if !syncedData {
@@ -75,8 +76,8 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 			break
 		}
 
-		*input.Task.TaskMemory.NextToken = res.NextPageToken
-		if *input.Task.TaskMemory.NextToken == "" {
+		*input.Task.TaskMemory.GmailNextToken = res.NextPageToken
+		if *input.Task.TaskMemory.GmailNextToken == "" {
 			break
 		}
 	}
