@@ -303,6 +303,7 @@ func IsGoogleTokenExpired(token string) bool {
 	// Send an HTTP GET request to the token info endpoint
 	resp, err := http.Get(url)
 	if err != nil {
+		fmt.Println("Error sending HTTP request:", err)
 		return true
 	}
 	defer resp.Body.Close()
@@ -316,11 +317,13 @@ func IsGoogleTokenExpired(token string) bool {
 	// Parse the response into the TokenInfo struct
 	var tokenInfo TokenInfo
 	if err := json.NewDecoder(resp.Body).Decode(&tokenInfo); err != nil {
+		fmt.Println("Error decoding response:", err)
 		return true
 	}
 
 	// Check if the response contains an error
 	if tokenInfo.Error != "" {
+		fmt.Println("Error in response:", tokenInfo.Error)
 		return true
 	}
 
