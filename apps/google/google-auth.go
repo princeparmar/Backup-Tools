@@ -326,6 +326,7 @@ func IsGoogleTokenExpired(token string) bool {
 
 	// Check if the token has expired (expires_in should be greater than 0)
 	if tokenInfo.ExpiresIn > 0 {
+		fmt.Println("Token expires in:", tokenInfo.ExpiresIn, "seconds")
 		return false
 	}
 

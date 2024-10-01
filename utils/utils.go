@@ -134,7 +134,8 @@ func GenerateTitleFromGmailMessage(msg *gmail.Message) string {
 			subject = v.Value
 		}
 	}
-	return fmt.Sprintf("%s - %s - %s.gmail", from, subject, msg.Id)
+	title := fmt.Sprintf("%s - %s - %s.gmail", from, subject, msg.Id)
+	return strings.ReplaceAll(title, "/", "_")
 }
 
 func Unzip(src, dest string) error {

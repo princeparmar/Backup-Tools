@@ -121,6 +121,7 @@ func (a *AutosyncManager) RefreshGoogleAuthToken() error {
 		if err != nil {
 			errGroup.Add(err)
 			fmt.Println("Failed to update job", job.ID, err)
+			continue
 		}
 
 		fmt.Println("Updated Google Auth Token for job", job.ID)
