@@ -71,21 +71,21 @@ func (a *AutosyncManager) Start() {
 }
 
 func (a *AutosyncManager) CreateTaskForAllPendingJobs() error {
-	jobs, err := a.store.GetJobsToProcess()
+	jobIDs, err := a.store.GetJobsToProcess()
 	if err != nil {
 		return err
 	}
 
-	if len(jobs) == 0 {
+	if len(jobIDs) == 0 {
 		fmt.Println("No job to process")
 		return nil
 	}
-	for _, job := range jobs {
-		fmt.Println("Creating task for job", job.ID)
+	for _, jobID := range jobIDs {
+		fmt.Println("Creating task for job", jobID)
 
-		_, err := a.store.CreateTaskForCronJob(job.ID)
+		_, err := a.store.CreateTaskForCronJob(jobID)
 		if err != nil {
-			return a.UpdateJobStatus(job.ID, "failed to push task "+err.Error(), "error")
+			return a.UpdateJobStatus(jobID, "failed to push task "+err.Error(), "error")
 		}
 	}
 

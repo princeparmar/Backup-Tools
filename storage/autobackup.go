@@ -97,7 +97,7 @@ func (storage *PosgresStore) GetAllCronJobsForUser(userID string) ([]CronJobList
 
 // GetJobsToProcess returns all cron jobs that are active and have not been run in
 // given interval with table locking with limit 10.
-func (storage *PosgresStore) GetJobsToProcess() ([]CronJobListingDB, error) {
+func (storage *PosgresStore) GetJobsToProcess() ([]uint, error) {
 	var res []CronJobListingDB
 	tx := storage.DB.Begin()
 
@@ -135,7 +135,7 @@ func (storage *PosgresStore) GetJobsToProcess() ([]CronJobListingDB, error) {
 	FROM locked_jobs
 	LEFT JOIN task_listing_dbs
 	ON locked_jobs.id = task_listing_dbs.cron_job_id
-	WHERE task_listing_dbs.id IS NULL OR task_listing_dbs.status IN ('completed', 'failed');
+	WHERE task_listing_dbs.id IS NULL OR task_listing_dbs.status NOT IN ('running', 'pushed')
 	`
 
 	// Execute the raw SQL query and store the result in the cronJobs slice
@@ -145,6 +145,7 @@ func (storage *PosgresStore) GetJobsToProcess() ([]CronJobListingDB, error) {
 		return nil, fmt.Errorf("error getting jobs to process: %v", db.Error)
 	}
 
+	out := make([]uint, len(res))
 	// update message to "pushing to queue" and message status to "info"
 	for i := range res {
 		res[i].Message = "pushing to queue"
@@ -155,6 +156,8 @@ func (storage *PosgresStore) GetJobsToProcess() ([]CronJobListingDB, error) {
 			tx.Rollback()
 			return nil, fmt.Errorf("error updating cron job: %v", db.Error)
 		}
+
+		out[i] = res[i].ID
 	}
 
 	err := tx.Commit()
@@ -162,7 +165,7 @@ func (storage *PosgresStore) GetJobsToProcess() ([]CronJobListingDB, error) {
 		return nil, fmt.Errorf("error committing transaction: %v", err.Error)
 	}
 
-	return res, nil
+	return out, nil
 }
 
 func (storage *PosgresStore) IsCronAvailableForUser(userID string, jobID uint) bool {
