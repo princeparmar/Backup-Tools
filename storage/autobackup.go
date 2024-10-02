@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -51,6 +52,23 @@ func MastTokenForCronJobDB(cronJob *CronJobListingDB) {
 type TaskMemory struct {
 	GmailNextToken *string `json:"gmail_next_token"`
 	GmailSyncCount uint    `json:"gmail_sync_count"`
+}
+
+// Scan implements the sql.Scanner interface
+func (t *TaskMemory) Scan(value interface{}) error {
+
+	if value == nil {
+		return nil
+	}
+
+	switch v := value.(type) {
+	case string:
+		return json.Unmarshal([]byte(v), t)
+	case []uint8:
+		return json.Unmarshal(v, t)
+	default:
+		return fmt.Errorf("unsupported type: %T", v)
+	}
 }
 
 type TaskListingDB struct {
