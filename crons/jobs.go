@@ -191,7 +191,7 @@ func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *sto
 	err = a.store.UpdateTaskByID(task.ID, map[string]interface{}{
 		"status":      status,
 		"message":     message,
-		"execution":   processtime,
+		"execution":   processtime * time.Millisecond,
 		"task_memory": task.TaskMemory,
 	})
 	if err != nil {
