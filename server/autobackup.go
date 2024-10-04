@@ -147,6 +147,9 @@ func handleAutomaticSyncUpdate(c echo.Context) error {
 		if !validateInterval(*reqBody.Interval, *reqBody.On) {
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Interval or On"})
 		}
+
+		updateRequest["interval"] = *reqBody.Interval
+		updateRequest["on"] = *reqBody.On
 	}
 
 	if reqBody.RefreshToken != nil {
