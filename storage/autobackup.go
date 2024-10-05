@@ -34,6 +34,9 @@ type CronJobListingDB struct {
 	// MessageStatus will be one of the following: "info", "warning", "error"
 	MessageStatus string `json:"message_status"`
 	Active        bool   `json:"active"`
+
+	// Tasks associated with the cron job
+	Tasks []TaskListingDB `gorm:"foreignKey:CronJobID"`
 }
 
 func MastTokenForCronJobListingDB(cronJobs []CronJobListingDB) []CronJobListingDB {
@@ -73,7 +76,7 @@ func (t *TaskMemory) Scan(value interface{}) error {
 
 type TaskListingDB struct {
 	ID        uint `gorm:"primaryKey" json:"id"`
-	CronJobID uint `gorm:"foreignKey:CronJobListingDB.ID" json:"cron_job_id"`
+	CronJobID uint `gorm:"constraint:OnDelete:CASCADE;" json:"cron_job_id"` // Add delete cascade here
 
 	// Status will be one of the following: "pushed", "running", "success", "failed"
 	Status string `json:"status"`
