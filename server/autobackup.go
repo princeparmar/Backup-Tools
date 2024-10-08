@@ -63,8 +63,9 @@ func handleAutomaticSyncDetails(c echo.Context) error {
 
 	storage.MastTokenForCronJobDB(jobDetails)
 
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": "Cron Job Details",
-		"data": jobDetails,
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "Cron Job Details",
+		"data":    jobDetails,
 	})
 }
 
@@ -75,10 +76,8 @@ func handleAutomaticSyncCreate(c echo.Context) error {
 	}
 
 	var reqBody struct {
-		Name     string `json:"name"`
-		Method   string `json:"method"`
-		Interval string `json:"interval"`
-		On       string `json:"on"`
+		Method       string `json:"method"`
+		RefreshToken string `json:"refresh_token"`
 	}
 
 	if err := c.Bind(&reqBody); err != nil {
@@ -89,12 +88,28 @@ func handleAutomaticSyncCreate(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Method"})
 	}
 
-	if !validateInterval(reqBody.Interval, reqBody.On) {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Interval or On"})
+	if reqBody.RefreshToken == "" {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Refresh Token Required"})
 	}
 
+	authToken, err := google.AuthTokenUsingRefreshToken(reqBody.RefreshToken)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token"})
+	}
+
+	// Get User Email
+	userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(authToken)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token"})
+	}
+
+	if userDetails.Email == "" {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token"})
+	}
+	name := userDetails.Email
+
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
-	data, err := database.CreateCronJobForUser(userID, reqBody.Name, reqBody.Method, reqBody.Interval, reqBody.On)
+	data, err := database.CreateCronJobForUser(userID, name, reqBody.Method, reqBody.RefreshToken)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"message": "Internal Server Error", "error": err.Error()})
 	}
@@ -115,12 +130,12 @@ func handleAutomaticSyncUpdate(c echo.Context) error {
 
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
 
-	if !database.IsCronAvailableForUser(userID, uint(jobID)) {
+	job, err := database.GetJobByIDForUser(userID, uint(jobID))
+	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"message": "Unauthorized"})
 	}
 
 	var reqBody struct {
-		Name     *string `json:"name"`
 		Interval *string `json:"interval"`
 		On       *string `json:"on"`
 
@@ -136,9 +151,6 @@ func handleAutomaticSyncUpdate(c echo.Context) error {
 	}
 
 	updateRequest := map[string]interface{}{}
-	if reqBody.Name != nil {
-		updateRequest["name"] = *reqBody.Name
-	}
 
 	if reqBody.Interval != nil {
 		if reqBody.On == nil {
@@ -153,11 +165,24 @@ func handleAutomaticSyncUpdate(c echo.Context) error {
 	}
 
 	if reqBody.RefreshToken != nil {
-		_, err := google.AuthTokenUsingRefreshToken(*reqBody.RefreshToken)
+		authToken, err := google.AuthTokenUsingRefreshToken(*reqBody.RefreshToken)
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token"})
 		}
 
+		// Get User Email
+		userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(authToken)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token"})
+		}
+
+		if userDetails.Email == "" {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token"})
+		}
+
+		if userDetails.Email != job.Name {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token"})
+		}
 		updateRequest["refresh_token"] = *reqBody.RefreshToken
 	}
 
@@ -196,7 +221,7 @@ func handleAutomaticSyncDelete(c echo.Context) error {
 
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
 
-	if !database.IsCronAvailableForUser(userID, uint(jobID)) {
+	if _, err := database.GetJobByIDForUser(userID, uint(jobID)); err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"message": "Unauthorized"})
 	}
 
@@ -221,7 +246,7 @@ func handleAutomaticSyncTaskList(c echo.Context) error {
 
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
 
-	if !database.IsCronAvailableForUser(userID, uint(jobID)) {
+	if _, err := database.GetJobByIDForUser(userID, uint(jobID)); err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"message": "Unauthorized"})
 	}
 

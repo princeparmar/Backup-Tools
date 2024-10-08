@@ -189,10 +189,14 @@ func (storage *PosgresStore) GetJobsToProcess() ([]uint, error) {
 	return out, nil
 }
 
-func (storage *PosgresStore) IsCronAvailableForUser(userID string, jobID uint) bool {
+func (storage *PosgresStore) GetJobByIDForUser(userID string, jobID uint) (*CronJobListingDB, error) {
 	var res CronJobListingDB
 	db := storage.DB.Where("user_id = ? AND id = ?", userID, jobID).First(&res)
-	return db == nil || db.Error == nil
+	if db != nil && db.Error != nil {
+		return nil, fmt.Errorf("error getting cron job for user: %v", db.Error)
+	}
+
+	return &res, nil
 }
 
 // GetPushedTask gives pushed task and update the status to running and set start time with table locking.
@@ -286,13 +290,12 @@ func (storage *PosgresStore) GetCronJobByID(ID uint) (*CronJobListingDB, error) 
 	return &res, nil
 }
 
-func (storage *PosgresStore) CreateCronJobForUser(userID, name, method, interval, on string) (*CronJobListingDB, error) {
+func (storage *PosgresStore) CreateCronJobForUser(userID, name, method, refreshToken string) (*CronJobListingDB, error) {
 	data := CronJobListingDB{
-		UserID:   userID,
-		Name:     name,
-		Interval: interval,
-		Method:   method,
-		On:       on,
+		UserID:       userID,
+		Name:         name,
+		Method:       method,
+		RefreshToken: refreshToken,
 	}
 	// create new entry in database and return newly created cron job
 	res := storage.DB.Create(&data)

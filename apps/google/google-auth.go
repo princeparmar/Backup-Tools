@@ -36,6 +36,13 @@ type CustomClaims struct {
 	jwt.StandardClaims
 }
 
+type GoogleAuthResponse struct {
+	Email         string `json:"email"`
+	EmailVerified bool   `json:"email_verified"`
+	ExpiresIn     string `json:"expires_in"`
+	Error         string `json:"error"`
+}
+
 var (
 	JwtSecretKey    = "your-secret-key"
 	tokenExpiration = time.Duration(24 * time.Hour) // Example: expires in 24 hours
@@ -296,35 +303,36 @@ func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 	return tokenResponse.AccessToken, nil
 }
 
-// IsGoogleTokenExpired checks if the provided Google access token is valid or expired
-func IsGoogleTokenExpired(token string) bool {
+func GetGoogleAccountDetailsFromAccessToken(accessToken string) (*GoogleAuthResponse, error) {
 	// Token info endpoint with the provided token
-	url := fmt.Sprintf("https://oauth2.googleapis.com/tokeninfo?access_token=%s", token)
+	url := fmt.Sprintf("https://oauth2.googleapis.com/tokeninfo?access_token=%s", accessToken)
 
 	// Send an HTTP GET request to the token info endpoint
 	resp, err := http.Get(url)
 	if err != nil {
-		fmt.Println("Error sending HTTP request:", err)
-		return true
+		return nil, fmt.Errorf("error sending HTTP request: %v", err)
 	}
 	defer resp.Body.Close()
 
-	// TokenInfo represents the response structure from Google's tokeninfo endpoint
-	type TokenInfo struct {
-		ExpiresIn string `json:"expires_in"`
-		Error     string `json:"error,omitempty"`
-	}
-
-	// Parse the response into the TokenInfo struct
-	var tokenInfo TokenInfo
+	var tokenInfo GoogleAuthResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tokenInfo); err != nil {
-		fmt.Println("Error decoding response:", err)
-		return true
+		return nil, fmt.Errorf("error decoding response: %v", err)
 	}
 
 	// Check if the response contains an error
 	if tokenInfo.Error != "" {
-		fmt.Println("Error in response:", tokenInfo.Error)
+		return nil, fmt.Errorf("error in response: %v", tokenInfo.Error)
+	}
+
+	return &tokenInfo, nil
+}
+
+// IsGoogleTokenExpired checks if the provided Google access token is valid or expired
+func IsGoogleTokenExpired(token string) bool {
+
+	tokenInfo, err := GetGoogleAccountDetailsFromAccessToken(token)
+	if err != nil {
+		fmt.Println("Error getting account details:", err)
 		return true
 	}
 
