@@ -94,17 +94,17 @@ func handleAutomaticSyncCreate(c echo.Context) error {
 
 	authToken, err := google.AuthTokenUsingRefreshToken(reqBody.RefreshToken)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token"})
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token. Not able to generate auth token from refresh token"})
 	}
 
 	// Get User Email
 	userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(authToken)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token"})
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token. Not able to get user details from access token"})
 	}
 
 	if userDetails.Email == "" {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token"})
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token. Not able to get user email from access token"})
 	}
 	name := userDetails.Email
 
