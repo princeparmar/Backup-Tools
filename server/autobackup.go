@@ -72,7 +72,10 @@ func handleAutomaticSyncDetails(c echo.Context) error {
 func handleAutomaticSyncCreate(c echo.Context) error {
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"message": "Unauthorized"})
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "Unauthorized",
+			"error":   err.Error(),
+		})
 	}
 
 	var reqBody struct {
@@ -94,17 +97,26 @@ func handleAutomaticSyncCreate(c echo.Context) error {
 
 	authToken, err := google.AuthTokenUsingRefreshToken(reqBody.RefreshToken)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token. Not able to generate auth token from refresh token"})
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid Refresh Token. Not able to generate auth token from refresh token",
+			"error":   err.Error(),
+		})
 	}
 
 	// Get User Email
 	userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(authToken)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token. Not able to get user details from access token"})
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid Refresh Token. Not able to get user details from access token",
+			"error":   err.Error(),
+		})
 	}
 
 	if userDetails.Email == "" {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token. Not able to get user email from access token"})
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid Refresh Token. Not able to get user email from access token",
+			"error":   err.Error(),
+		})
 	}
 	name := userDetails.Email
 
