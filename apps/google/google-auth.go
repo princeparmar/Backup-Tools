@@ -38,7 +38,7 @@ type CustomClaims struct {
 
 type GoogleAuthResponse struct {
 	Email         string `json:"email"`
-	EmailVerified bool   `json:"email_verified"`
+	EmailVerified string `json:"email_verified"`
 	ExpiresIn     string `json:"expires_in"`
 	Error         string `json:"error"`
 }
