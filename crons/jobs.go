@@ -13,6 +13,7 @@ import (
 type ProcessorInput struct {
 	StorxToken string
 	AuthToken  string
+	Email      string
 	Task       *storage.TaskListingDB
 }
 
@@ -161,6 +162,7 @@ func (a *AutosyncManager) ProcessTask() error {
 		err = processor.Run(ProcessorInput{
 			StorxToken: job.StorxToken,
 			AuthToken:  newToken,
+			Email:      job.Name,
 			Task:       task,
 		})
 		if err != nil {

@@ -35,7 +35,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 	emptyLoopCount := 0
 
 	for {
-		res, err := gmailClient.GetUserMessagesControlled(*input.Task.TaskMemory.GmailNextToken, 500)
+		res, err := gmailClient.GetUserMessagesControlled(*input.Task.TaskMemory.GmailNextToken, "CATEGORY_PERSONAL", 500)
 		if err != nil {
 			return err
 		}
@@ -47,7 +47,8 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 				continue
 			}
 
-			_, synced := emailListFromBucket[utils.GenerateTitleFromGmailMessage(message)]
+			messagePath := input.Email + "/" + utils.GenerateTitleFromGmailMessage(message)
+			_, synced := emailListFromBucket[messagePath]
 			if synced {
 				continue
 			}
@@ -58,7 +59,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 			}
 
 			syncedData = true
-			err = satellite.UploadObject(context.TODO(), input.StorxToken, "gmail", utils.GenerateTitleFromGmailMessage(message), b)
+			err = satellite.UploadObject(context.TODO(), input.StorxToken, "gmail", messagePath, b)
 			if err != nil {
 				return err
 			}

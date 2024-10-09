@@ -751,7 +751,7 @@ func handleGmailGetThreadsIDsControlled(c echo.Context) error {
 
 	var threads []any
 
-	res, err := GmailClient.GetUserMessagesControlled(nextPageToken, numInt)
+	res, err := GmailClient.GetUserMessagesControlled(nextPageToken, "", numInt)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
