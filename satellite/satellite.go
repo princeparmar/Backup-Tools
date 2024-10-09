@@ -119,6 +119,10 @@ func DownloadObject(ctx context.Context, accessGrant, bucketName, objectKey stri
 }
 
 func ListObjects(ctx context.Context, accessGrant, bucketName string) (map[string]bool, error) {
+	return ListObjectsWithPrefix(ctx, accessGrant, bucketName, "")
+}
+
+func ListObjectsWithPrefix(ctx context.Context, accessGrant, bucketName, prefix string) (map[string]bool, error) {
 	// Parse the Access Grant.
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
@@ -137,7 +141,9 @@ func ListObjects(ctx context.Context, accessGrant, bucketName string) (map[strin
 	if err != nil {
 		return nil, err
 	}
-	listIter := project.ListObjects(ctx, bucketName, nil)
+	listIter := project.ListObjects(ctx, bucketName, &uplink.ListObjectsOptions{
+		Prefix: prefix,
+	})
 	/*if err != nil {
 		return nil, fmt.Errorf("could not open object: %v", err)
 	}*/

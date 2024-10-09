@@ -23,7 +23,12 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 		return err
 	}
 
-	emailListFromBucket, err := satellite.ListObjects(context.Background(), input.StorxToken, satellite.ReserveBucket_Gmail)
+	err = satellite.UploadObject(context.Background(), input.StorxToken, satellite.ReserveBucket_Gmail, input.Email+"/.file_placeholder", nil)
+	if err != nil {
+		return err
+	}
+
+	emailListFromBucket, err := satellite.ListObjectsWithPrefix(context.Background(), input.StorxToken, satellite.ReserveBucket_Gmail, input.Email+"/")
 	if err != nil && !strings.Contains(err.Error(), "object not found") {
 		return err
 	}
