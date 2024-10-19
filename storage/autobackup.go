@@ -324,9 +324,9 @@ func (storage *PosgresStore) UpdateCronJobByID(ID uint, m map[string]interface{}
 	return nil
 }
 
-func (storage *PosgresStore) ListAllTasksByJobID(ID uint) ([]TaskListingDB, error) {
+func (storage *PosgresStore) ListAllTasksByJobID(ID, limit, offset uint) ([]TaskListingDB, error) {
 	var res []TaskListingDB
-	db := storage.DB.Where("cron_job_id = ?", ID).Find(&res)
+	db := storage.DB.Where("cron_job_id = ?", ID).Limit(int(limit)).Offset(int(offset)).Find(&res)
 	if db != nil && db.Error != nil {
 		return nil, fmt.Errorf("error getting tasks for job: %v", db.Error)
 	}

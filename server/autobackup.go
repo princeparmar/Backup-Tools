@@ -250,6 +250,15 @@ func handleAutomaticSyncTaskList(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Job ID"})
 	}
+	limit, _ := strconv.Atoi(c.QueryParam("limit"))
+	if limit <= 0 || limit > 1000 {
+		limit = 10
+	}
+
+	offset, _ := strconv.Atoi(c.QueryParam("offset"))
+	if offset < 0 {
+		offset = 0
+	}
 
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
@@ -262,7 +271,7 @@ func handleAutomaticSyncTaskList(c echo.Context) error {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"message": "Unauthorized"})
 	}
 
-	data, err := database.ListAllTasksByJobID(uint(jobID))
+	data, err := database.ListAllTasksByJobID(uint(jobID), uint(limit), uint(offset))
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"message": "Internal Server Error", "error": err.Error()})
 	}
