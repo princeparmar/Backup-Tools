@@ -315,12 +315,7 @@ func GetGoogleAccountDetailsFromAccessToken(accessToken string) (*GoogleAuthResp
 	defer resp.Body.Close()
 
 	var tokenInfo GoogleAuthResponse
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("error reading response body: %v", err)
-	}
-	fmt.Println("Response body:", string(body))
-	if err := json.NewDecoder(bytes.NewBuffer(body)).Decode(&tokenInfo); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&tokenInfo); err != nil {
 		return nil, fmt.Errorf("error decoding response: %v", err)
 	}
 
