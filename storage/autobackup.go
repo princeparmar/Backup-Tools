@@ -236,6 +236,12 @@ func (storage *PosgresStore) GetPushedTask() (*TaskListingDB, error) {
 	job.Message = "started task at " + res.StartTime.Format(time.Kitchen)
 	job.MessageStatus = "info"
 
+	db = tx.Save(&job)
+	if db != nil && db.Error != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("error updating pushed task status: %v", db.Error)
+	}
+
 	err := tx.Commit()
 	if err != nil && err.Error != nil {
 		return nil, fmt.Errorf("error committing transaction: %v", err.Error)
