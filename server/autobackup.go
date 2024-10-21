@@ -115,7 +115,7 @@ func handleAutomaticSyncCreate(c echo.Context) error {
 	if userDetails.Email == "" {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"message": "Invalid Refresh Token. Not able to get user email from access token",
-			"error":   err.Error(),
+			"error":   "getting empty email id from google token",
 		})
 	}
 	name := userDetails.Email
