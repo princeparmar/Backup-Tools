@@ -226,6 +226,16 @@ func (storage *PosgresStore) GetPushedTask() (*TaskListingDB, error) {
 		return nil, fmt.Errorf("error updating pushed task status: %v", db.Error)
 	}
 
+	var job CronJobListingDB
+	db = tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=?", res.CronJobID).First(&job)
+	if db.Error != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("error getting job: %v", db.Error)
+	}
+
+	job.Message = "started task at " + res.StartTime.Format(time.Kitchen)
+	job.MessageStatus = "info"
+
 	err := tx.Commit()
 	if err != nil && err.Error != nil {
 		return nil, fmt.Errorf("error committing transaction: %v", err.Error)
