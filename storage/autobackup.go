@@ -156,9 +156,12 @@ func (storage *PosgresStore) GetJobsToProcess() ([]uint, error) {
 	)
 	SELECT locked_jobs.*
 	FROM locked_jobs
-	LEFT JOIN task_listing_dbs
-	ON locked_jobs.id = task_listing_dbs.cron_job_id
-	WHERE task_listing_dbs.id IS NULL OR task_listing_dbs.status NOT IN ('running', 'pushed')
+	LEFT JOIN (
+        SELECT cron_job_id FROM task_listing_dbs
+        WHERE task_listing_dbs.id IS NULL OR task_listing_dbs.status NOT IN ('running', 'pushed')
+        GROUP BY cron_job_id
+    ) t
+    ON locked_jobs.id = t.cron_job_id
 	`
 
 	// Execute the raw SQL query and store the result in the cronJobs slice
