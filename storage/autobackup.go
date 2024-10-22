@@ -28,7 +28,7 @@ type CronJobListingDB struct {
 	StorxToken string `json:"storx_token"`
 
 	// Message will be the message to be displayed to the user
-	// pushing to queue
+	// push to queue
 	// task is running
 	// task is completed for %d email|photos|files for (today|this week|this month)
 	// task failed with error %s
@@ -120,63 +120,43 @@ func (storage *PosgresStore) GetAllCronJobsForUser(userID string) ([]CronJobList
 	return res, nil
 }
 
-// GetJobsToProcess returns all cron jobs that are active and have not been run in
-// given interval with table locking with limit 10.
+// GetJobsToProcess gives the jobs that are to be processed next
 func (storage *PosgresStore) GetJobsToProcess() ([]uint, error) {
 	var res []CronJobListingDB
 	tx := storage.DB.Begin()
 
-	/*
-		SELECT cron_job_listing_dbs.*
-		FROM   "cron_job_listing_dbs"
-		       LEFT JOIN task_listing_dbs
-		              ON cron_job_listing_dbs.id = task_listing_dbs.cron_job_id
-		WHERE  cron_job_listing_dbs.active = true
-			   AND cron_job_listing_dbs.message != 'pushing to queue'
-		       AND cron_job_listing_dbs.last_run != '2024-09-26'
-		       AND ( task_listing_dbs.id IS NULL
-		              OR task_listing_dbs.status IN ( 'completed', 'failed' ) )
-		       AND ( cron_job_listing_dbs.interval = 'daily'
-		              OR ( cron_job_listing_dbs.interval = 'weekly'
-		                   AND cron_job_listing_dbs.on = 'Thursday' )
-		              OR ( cron_job_listing_dbs.interval = 'monthly'
-		                   AND cron_job_listing_dbs.on = 26 ) )
-	*/
 	// The raw SQL query
 	sqlQuery := `
-	WITH locked_jobs AS (
-		SELECT cron_job_listing_dbs.*
+		SELECT *
 		FROM cron_job_listing_dbs
-		WHERE cron_job_listing_dbs.active = true
-		AND (cron_job_listing_dbs.message is null or cron_job_listing_dbs.message != 'pushing to queue')
-		AND DATE(cron_job_listing_dbs.last_run) != ?
-		AND (cron_job_listing_dbs.interval = 'daily'
-			OR (cron_job_listing_dbs.interval = 'weekly' AND cron_job_listing_dbs.on = ?)
-			OR (cron_job_listing_dbs.interval = 'monthly' AND cron_job_listing_dbs.on = ?))
+		WHERE active = true
+		AND (message is null or message != 'push to queue')
+		AND DATE(last_run) != ?
+		AND (interval = 'daily'
+			OR (interval = 'weekly' AND on = ?)
+			OR (interval = 'monthly' AND on = ?))
+		AND id not in (
+			SELECT cron_job_id FROM task_listing_dbs
+			WHERE id IS NULL OR status IN ('running', 'pushed')
+			GROUP BY cron_job_id
+		)
 		LIMIT 10
 		FOR UPDATE
-	)
-	SELECT locked_jobs.*
-	FROM locked_jobs
-	LEFT JOIN (
-        SELECT cron_job_id FROM task_listing_dbs
-        WHERE task_listing_dbs.id IS NULL OR task_listing_dbs.status NOT IN ('running', 'pushed')
-        GROUP BY cron_job_id
-    ) t
-    ON locked_jobs.id = t.cron_job_id
 	`
 
 	// Execute the raw SQL query and store the result in the cronJobs slice
-	db := tx.Raw(sqlQuery, time.Now().Format("2006-01-02"), time.Now().Weekday().String(), fmt.Sprint(time.Now().Day())).Scan(&res)
+	db := tx.Raw(sqlQuery, time.Now().Format("2006-01-02"),
+		time.Now().Weekday().String(),
+		fmt.Sprint(time.Now().Day())).Scan(&res)
 	if db.Error != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf("error getting jobs to process: %v", db.Error)
 	}
 
 	out := make([]uint, len(res))
-	// update message to "pushing to queue" and message status to "info"
+	// update message to "push to queue" and message status to "info"
 	for i := range res {
-		res[i].Message = "pushing to queue"
+		res[i].Message = "push to queue"
 		res[i].MessageStatus = "info"
 
 		db = tx.Save(&res[i])
