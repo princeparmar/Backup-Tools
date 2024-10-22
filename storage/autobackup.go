@@ -12,7 +12,8 @@ import (
 
 // Models for automated storage
 type CronJobListingDB struct {
-	ID     uint   `gorm:"primaryKey" json:"id"`
+	gorm.Model
+
 	UserID string `json:"user_id"`
 
 	// In this table Name + Method should be unique
@@ -77,7 +78,8 @@ func (t *TaskMemory) Scan(value interface{}) error {
 }
 
 type TaskListingDB struct {
-	ID        uint `gorm:"primaryKey" json:"id"`
+	gorm.Model
+
 	CronJobID uint `gorm:"constraint:OnDelete:CASCADE;" json:"cron_job_id"` // Add delete cascade here
 
 	// Status will be one of the following: "pushed", "running", "success", "failed"

@@ -146,9 +146,6 @@ func clientUsingToken(token string) (*http.Client, error) {
 		return nil, fmt.Errorf("unable to parse client secret file to config: %v", err)
 	}
 
-	if err != nil {
-		return nil, echo.NewHTTPError(http.StatusUnauthorized, "user is not authorized")
-	}
 	return config.Client(context.Background(), &oauth2.Token{
 		AccessToken: token,
 	}), nil
