@@ -139,6 +139,7 @@ func (storage *PosgresStore) GetJobsToProcess() ([]uint, error) {
 			SELECT DISTINCT cron_job_id FROM task_listing_dbs
 			WHERE status IN ('running', 'pushed')
 		)
+		AND deleted_at is null
 		LIMIT 10
 		FOR UPDATE
 	`
