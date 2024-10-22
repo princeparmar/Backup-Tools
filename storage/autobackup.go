@@ -133,12 +133,11 @@ func (storage *PosgresStore) GetJobsToProcess() ([]uint, error) {
 		AND (message is null or message != 'push to queue')
 		AND DATE(last_run) != ?
 		AND (interval = 'daily'
-			OR (interval = 'weekly' AND on = ?)
-			OR (interval = 'monthly' AND on = ?))
+			OR (interval = 'weekly' AND "on" = ?)
+			OR (interval = 'monthly' AND "on" = ?))
 		AND id not in (
-			SELECT cron_job_id FROM task_listing_dbs
-			WHERE id IS NULL OR status IN ('running', 'pushed')
-			GROUP BY cron_job_id
+			SELECT DISTINCT cron_job_id FROM task_listing_dbs
+			WHERE status IN ('running', 'pushed')
 		)
 		LIMIT 10
 		FOR UPDATE
