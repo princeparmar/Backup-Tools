@@ -99,7 +99,7 @@ type TaskListingDB struct {
 	RetryCount uint `json:"retry_count"`
 
 	// LastHeartBeat will be the time when the task was last heartbeat
-	LastHeartBeat time.Time `json:"last_heartbeat"`
+	LastHeartBeat time.Time `json:"last_heart_beat"`
 
 	// Memory will be used to store the state of the task. this will be json field
 	TaskMemory TaskMemory `json:"task_memory" gorm:"type:jsonb"`
@@ -124,7 +124,7 @@ func (storage *PosgresStore) GetAllCronJobsForUser(userID string) ([]CronJobList
 }
 
 func (storage *PosgresStore) UpdateHeartBeatForTask(ID uint) error {
-	db := storage.DB.Model(&TaskListingDB{}).Where("id = ?", ID).Update("last_heartbeat", time.Now())
+	db := storage.DB.Model(&TaskListingDB{}).Where("id = ?", ID).Update("last_heart_beat", time.Now())
 	if db != nil && db.Error != nil {
 		return fmt.Errorf("error updating heartbeat for task: %v", db.Error)
 	}
@@ -133,7 +133,7 @@ func (storage *PosgresStore) UpdateHeartBeatForTask(ID uint) error {
 
 // MissedHeartbeatForTask updates the heartbeat for the task if it has not been updated for more than 10 minutes
 func (storage *PosgresStore) MissedHeartbeatForTask() error {
-	// start a transaction, select all tasks with lock where last_heartbeat is more than 1 minute ago
+	// start a transaction, select all tasks with lock where last_heart_beat is more than 1 minute ago
 	// update status to failed and message to "missed heartbeat"
 	// and for job set message to process got stuck because of some reason
 	// and message status to error
@@ -141,7 +141,7 @@ func (storage *PosgresStore) MissedHeartbeatForTask() error {
 
 	var tasks []TaskListingDB
 	db := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where("status = ? AND last_heartbeat < ?", "running", time.Now().Add(-5*time.Minute)).Find(&tasks)
+		Where("status = ? AND last_heart_beat < ?", "running", time.Now().Add(-5*time.Minute)).Find(&tasks)
 	if db.Error != nil {
 		tx.Rollback()
 		return fmt.Errorf("error getting tasks with missed heartbeat: %v", db.Error)
