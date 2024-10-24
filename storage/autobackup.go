@@ -265,6 +265,7 @@ func (storage *PosgresStore) GetPushedTask() (*TaskListingDB, error) {
 	// Update status to running and set start time
 	res.Status = "running"
 	res.StartTime = time.Now()
+	res.LastHeartBeat = time.Now()
 
 	db = tx.Save(&res)
 	if db != nil && db.Error != nil {
