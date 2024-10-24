@@ -47,6 +47,11 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 
 		syncedData := false
 		for _, message := range res.Messages {
+			err := input.HeartBeatFunc()
+			if err != nil {
+				return err
+			}
+
 			if !utils.Contains(message.LabelIds, "CATEGORY_PERSONAL") {
 				// only sync personal emails
 				continue

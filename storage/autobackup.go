@@ -98,6 +98,9 @@ type TaskListingDB struct {
 	// Maximum 3 retries are allowed
 	RetryCount uint `json:"retry_count"`
 
+	// LastHeartBeat will be the time when the task was last heartbeat
+	LastHeartBeat time.Time `json:"last_heartbeat"`
+
 	// Memory will be used to store the state of the task. this will be json field
 	TaskMemory TaskMemory `json:"task_memory" gorm:"type:jsonb"`
 }
@@ -118,6 +121,65 @@ func (storage *PosgresStore) GetAllCronJobsForUser(userID string) ([]CronJobList
 		return nil, fmt.Errorf("error getting cron jobs for user: %v", db.Error)
 	}
 	return res, nil
+}
+
+func (storage *PosgresStore) UpdateHeartBeatForTask(ID uint) error {
+	db := storage.DB.Model(&TaskListingDB{}).Where("id = ?", ID).Update("last_heartbeat", time.Now())
+	if db != nil && db.Error != nil {
+		return fmt.Errorf("error updating heartbeat for task: %v", db.Error)
+	}
+	return nil
+}
+
+// MissedHeartbeatForTask updates the heartbeat for the task if it has not been updated for more than 10 minutes
+func (storage *PosgresStore) MissedHeartbeatForTask() error {
+	// start a transaction, select all tasks with lock where last_heartbeat is more than 1 minute ago
+	// update status to failed and message to "missed heartbeat"
+	// and for job set message to process got stuck because of some reason
+	// and message status to error
+	tx := storage.DB.Begin()
+
+	var tasks []TaskListingDB
+	db := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("last_heartbeat < ?", time.Now().Add(-1*time.Minute)).Find(&tasks)
+	if db.Error != nil {
+		tx.Rollback()
+		return fmt.Errorf("error getting tasks with missed heartbeat: %v", db.Error)
+	}
+
+	for _, task := range tasks {
+		task.Status = "failed"
+		task.Message = "process got stuck because of some reason"
+
+		db = tx.Save(&task)
+		if db != nil && db.Error != nil {
+			tx.Rollback()
+			return fmt.Errorf("error updating task: %v", db.Error)
+		}
+
+		var job CronJobListingDB
+		db = tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=?", task.CronJobID).First(&job)
+		if db.Error != nil {
+			tx.Rollback()
+			return fmt.Errorf("error getting job: %v", db.Error)
+		}
+
+		job.Message = "process got stuck because of some reason"
+		job.MessageStatus = "error"
+
+		db = tx.Save(&job)
+		if db != nil && db.Error != nil {
+			tx.Rollback()
+			return fmt.Errorf("error updating job: %v", db.Error)
+		}
+	}
+
+	err := tx.Commit()
+	if err != nil && err.Error != nil {
+		return fmt.Errorf("error committing transaction: %v", err.Error)
+	}
+
+	return nil
 }
 
 // GetJobsToProcess gives the jobs that are to be processed next

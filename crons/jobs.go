@@ -11,10 +11,11 @@ import (
 )
 
 type ProcessorInput struct {
-	StorxToken string
-	AuthToken  string
-	Email      string
-	Task       *storage.TaskListingDB
+	StorxToken    string
+	AuthToken     string
+	Email         string
+	Task          *storage.TaskListingDB
+	HeartBeatFunc func() error
 }
 
 type Processor interface {
@@ -55,6 +56,15 @@ func (a *AutosyncManager) Start() {
 		}
 
 		fmt.Println("Task processed")
+	})
+
+	c.AddFunc("@every 1m", func() {
+		fmt.Println("Checking for missed heartbeat")
+		err := a.store.MissedHeartbeatForTask()
+		if err != nil {
+			fmt.Println("Failed to check for missed heartbeat", err)
+			return
+		}
 	})
 
 	// c.AddFunc("@every 1m", func() {
@@ -164,6 +174,9 @@ func (a *AutosyncManager) ProcessTask() error {
 			AuthToken:  newToken,
 			Email:      job.Name,
 			Task:       task,
+			HeartBeatFunc: func() error {
+				return a.store.UpdateHeartBeatForTask(task.ID)
+			},
 		})
 		if err != nil {
 			return a.UpdateTaskStatus(task, job, err, time.Since(startime))
