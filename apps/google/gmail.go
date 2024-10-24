@@ -298,6 +298,7 @@ func (client *GmailClient) GetUserMessagesControlled(nextPageToken, label string
 	var messages []*gmail.Message
 	var res *gmail.ListMessagesResponse
 
+	// order by oldest first
 	req := client.Users.Messages.List("me").MaxResults(num)
 	if nextPageToken != "" {
 		req.PageToken(nextPageToken)

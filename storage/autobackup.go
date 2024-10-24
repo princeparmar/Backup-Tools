@@ -148,6 +148,8 @@ func (storage *PosgresStore) MissedHeartbeatForTask() error {
 	}
 
 	for _, task := range tasks {
+		fmt.Println("Updating task", task.ID, "with missed heartbeat")
+
 		task.Status = "failed"
 		task.Message = "process got stuck because of some reason"
 
