@@ -185,7 +185,7 @@ func (storage *PosgresStore) MissedHeartbeatForTask() error {
 }
 
 // GetJobsToProcess gives the jobs that are to be processed next
-func (storage *PosgresStore) GetJobsToProcess() ([]uint, error) {
+func (storage *PosgresStore) GetJobsToProcess() ([]CronJobListingDB, error) {
 	var res []CronJobListingDB
 	tx := storage.DB.Begin()
 
@@ -217,7 +217,6 @@ func (storage *PosgresStore) GetJobsToProcess() ([]uint, error) {
 		return nil, fmt.Errorf("error getting jobs to process: %v", db.Error)
 	}
 
-	out := make([]uint, len(res))
 	// update message to "push to queue" and message status to "info"
 	for i := range res {
 		res[i].Message = "push to queue"
@@ -228,8 +227,6 @@ func (storage *PosgresStore) GetJobsToProcess() ([]uint, error) {
 			tx.Rollback()
 			return nil, fmt.Errorf("error updating cron job: %v", db.Error)
 		}
-
-		out[i] = res[i].ID
 	}
 
 	err := tx.Commit()
@@ -237,7 +234,7 @@ func (storage *PosgresStore) GetJobsToProcess() ([]uint, error) {
 		return nil, fmt.Errorf("error committing transaction: %v", err.Error)
 	}
 
-	return out, nil
+	return res, nil
 }
 
 func (storage *PosgresStore) GetJobByIDForUser(userID string, jobID uint) (*CronJobListingDB, error) {
@@ -387,6 +384,7 @@ func (storage *PosgresStore) UpdateCronJobByID(ID uint, m map[string]interface{}
 	if res != nil && res.Error != nil {
 		return fmt.Errorf("error updating cron job interval: %v", res.Error)
 	}
+
 	return nil
 }
 

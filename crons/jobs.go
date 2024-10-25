@@ -94,9 +94,9 @@ func (a *AutosyncManager) CreateTaskForAllPendingJobs() error {
 	for _, jobID := range jobIDs {
 		fmt.Println("Creating task for job", jobID)
 
-		_, err := a.store.CreateTaskForCronJob(jobID)
+		_, err := a.store.CreateTaskForCronJob(jobID.ID)
 		if err != nil {
-			return a.UpdateJobStatus(jobID, "failed to push task "+err.Error(), "error")
+			return a.store.DB.Save(&jobID).Error
 		}
 	}
 
@@ -187,39 +187,38 @@ func (a *AutosyncManager) ProcessTask() error {
 }
 
 func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *storage.CronJobListingDB, err error, processtime time.Duration) error {
-	status := "success"
-	message := ""
-	jobMessage := "Task completed successfully at " + time.Now().Format("2006-01-02 15:04:05")
-	jobMessageStatus := "info"
+	task.Status = "success"
+	task.Message = ""
+	task.Execution = uint64(processtime.Seconds())
+	job.Message = "Task completed successfully at " + time.Now().Format("2006-01-02 15:04:05")
+	job.MessageStatus = "info"
 	if err != nil {
-		status = "failed"
-		message = err.Error()
+		task.Status = "failed"
+		task.Message = err.Error()
 
 		if strings.Contains(err.Error(), "googleapi: Error 401") {
-			message = "Invalid google credentials"
+			job.Message = "Invalid google credentials"
 		}
 
-		jobMessage = "Task failed at " + time.Now().Format("2006-01-02 15:04:05")
-		jobMessageStatus = "error"
+		job.Message = "Task failed at " + time.Now().Format("2006-01-02 15:04:05")
+		if strings.Contains(err.Error(), "uplink: permission") {
+			job.Message = "Sync is failing because of insufficient permissions to upload to storx"
+			job.StorxToken = ""
+			// deactivate the job
+			job.Active = false
+		}
+		job.MessageStatus = "error"
 	}
 
-	err = a.store.UpdateTaskByID(task.ID, map[string]interface{}{
-		"status":      status,
-		"message":     message,
-		"execution":   processtime,
-		"task_memory": task.TaskMemory,
-	})
+	err = a.store.DB.Save(task).Error
 	if err != nil {
 		return err
 	}
 
-	return a.UpdateJobStatus(job.ID, jobMessage, jobMessageStatus)
-}
+	err = a.store.DB.Save(job).Error
+	if err != nil {
+		return err
+	}
 
-func (a *AutosyncManager) UpdateJobStatus(jobID uint, message, messageStatus string) error {
-	return a.store.UpdateCronJobByID(jobID, map[string]interface{}{
-		"message":        message,
-		"message_status": messageStatus,
-		"last_run":       time.Now(),
-	})
+	return nil
 }
