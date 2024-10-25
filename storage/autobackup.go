@@ -14,11 +14,11 @@ import (
 type CronJobListingDB struct {
 	gorm.Model
 
-	UserID string `json:"user_id"`
+	UserID string `json:"user_id" gorm:"uniqueIndex:idx_name_method_user"`
 
-	// In this table Name + Method should be unique
-	Name     string    `json:"name" gorm:"uniqueIndex:idx_name_method"`
-	Method   string    `json:"method" gorm:"uniqueIndex:idx_name_method"`
+	// In this table Name + Method + UserID should be unique
+	Name     string    `json:"name" gorm:"uniqueIndex:idx_name_method_user"`
+	Method   string    `json:"method" gorm:"uniqueIndex:idx_name_method_user"`
 	Interval string    `json:"interval"`
 	On       string    `json:"on"`
 	LastRun  time.Time `json:"last_run"`
