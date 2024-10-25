@@ -19,21 +19,27 @@ var intervalValues = map[string][]string{
 	"daily":  {"12am"},
 }
 
-// <<<<<------------ AUTOMATIC SYNC ------------>>>>>
+// <<<<<------------ AUTOMATIC BACKUP ------------>>>>>
 func handleAutomaticSyncListForUser(c echo.Context) error {
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"message": "Unauthorized", "error": err.Error()})
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "not able to authenticate user",
+			"error":   err.Error(),
+		})
 	}
 
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
 	automaticSyncList, err := database.GetAllCronJobsForUser(userID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"message": "Internal Server Error", "error": err.Error()})
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"message": "internal server error",
+			"error":   err.Error(),
+		})
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message": "Cron Jobs List",
+		"message": "Automatic Backup Accounts List",
 		"data":    storage.MastTokenForCronJobListingDB(automaticSyncList),
 	})
 }
@@ -49,22 +55,31 @@ func handleIntervalOnConfig(c echo.Context) error {
 func handleAutomaticSyncDetails(c echo.Context) error {
 	jobID, err := strconv.Atoi(c.Param("job_id"))
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Bad Request", "error": err.Error()})
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   err.Error(),
+		})
 	}
 
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
 	jobDetails, err := database.GetCronJobByID(uint(jobID))
 	if err != nil {
 		if strings.Contains(err.Error(), "record not found") {
-			return c.JSON(http.StatusNotFound, map[string]interface{}{"message": "Cron Job Not Found", "error": err.Error()})
+			return c.JSON(http.StatusNotFound, map[string]interface{}{
+				"message": "Invalid Request",
+				"error":   err.Error(),
+			})
 		}
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"message": "Internal Server Error", "error": err.Error()})
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"message": "Internal Server Error",
+			"error":   err.Error(),
+		})
 	}
 
 	storage.MastTokenForCronJobDB(jobDetails)
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message": "Cron Job Details",
+		"message": "Automatic Backup Account Details",
 		"data":    jobDetails,
 	})
 }
@@ -73,7 +88,7 @@ func handleAutomaticSyncCreate(c echo.Context) error {
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-			"message": "Unauthorized",
+			"message": "Invalid Request",
 			"error":   err.Error(),
 		})
 	}
@@ -84,15 +99,22 @@ func handleAutomaticSyncCreate(c echo.Context) error {
 	}
 
 	if err := c.Bind(&reqBody); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Bad Request"})
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   err.Error(),
+		})
 	}
 
 	if reqBody.Method != "gmail" {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Method"})
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Automatic Sync Method not supported",
+		})
 	}
 
 	if reqBody.RefreshToken == "" {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Refresh Token Required"})
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Refresh Token Required",
+		})
 	}
 
 	authToken, err := google.AuthTokenUsingRefreshToken(reqBody.RefreshToken)
@@ -107,44 +129,64 @@ func handleAutomaticSyncCreate(c echo.Context) error {
 	userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(authToken)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "Invalid Refresh Token. Not able to get user details from access token",
+			"message": "Invalid Refresh Token. May be it is expired or invalid",
 			"error":   err.Error(),
 		})
 	}
 
 	if userDetails.Email == "" {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "Invalid Refresh Token. Not able to get user email from access token",
+			"message": "Invalid Refresh Token. May be it is expired or invalid",
 			"error":   "getting empty email id from google token",
 		})
 	}
-	name := userDetails.Email
 
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
-	data, err := database.CreateCronJobForUser(userID, name, reqBody.Method, reqBody.RefreshToken)
+	data, err := database.CreateCronJobForUser(userID, userDetails.Email, reqBody.Method, reqBody.RefreshToken)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"message": "Internal Server Error", "error": err.Error()})
+		if strings.Contains(err.Error(), "duplicate key value") {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Email already exists",
+				"error":   err.Error(),
+			})
+		}
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"message": "internal server error",
+			"error":   err.Error(),
+		})
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": "Cron Job Created", "data": data})
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "Automatic Backup Created Successfully",
+		"data":    data,
+	})
 }
 
-func handleAutomaticSyncUpdate(c echo.Context) error {
+func handleAutomaticBackupUpdate(c echo.Context) error {
 	jobID, err := strconv.Atoi(c.Param("job_id"))
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Job ID"})
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   err.Error(),
+		})
 	}
 
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"message": "Unauthorized"})
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   err.Error(),
+		})
 	}
 
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
 
 	job, err := database.GetJobByIDForUser(userID, uint(jobID))
 	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"message": "Unauthorized"})
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   err.Error(),
+		})
 	}
 
 	var reqBody struct {
@@ -159,17 +201,26 @@ func handleAutomaticSyncUpdate(c echo.Context) error {
 	}
 
 	if err := c.Bind(&reqBody); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Bad Request"})
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   err.Error(),
+		})
 	}
 
 	updateRequest := map[string]interface{}{}
 
 	if reqBody.Interval != nil {
 		if reqBody.On == nil {
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "On is required with Interval"})
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Request",
+				"error":   "On is required with Interval",
+			})
 		}
 		if !validateInterval(*reqBody.Interval, *reqBody.On) {
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Interval or On"})
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Request",
+				"error":   "On is not valid for the given interval",
+			})
 		}
 
 		updateRequest["interval"] = *reqBody.Interval
@@ -179,21 +230,33 @@ func handleAutomaticSyncUpdate(c echo.Context) error {
 	if reqBody.RefreshToken != nil {
 		authToken, err := google.AuthTokenUsingRefreshToken(*reqBody.RefreshToken)
 		if err != nil {
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token"})
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Request",
+				"error":   err.Error(),
+			})
 		}
 
 		// Get User Email
 		userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(authToken)
 		if err != nil {
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token"})
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Request",
+				"error":   err.Error(),
+			})
 		}
 
 		if userDetails.Email == "" {
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token"})
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Request",
+				"error":   "getting empty email id from google token",
+			})
 		}
 
 		if userDetails.Email != job.Name {
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Refresh Token"})
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Request",
+				"error":   "email id mismatch",
+			})
 		}
 		updateRequest["refresh_token"] = *reqBody.RefreshToken
 	}
@@ -209,46 +272,72 @@ func handleAutomaticSyncUpdate(c echo.Context) error {
 
 	err = database.UpdateCronJobByID(uint(jobID), updateRequest)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"message": "Internal Server Error", "error": err.Error()})
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"message": "internal server error",
+			"error":   err.Error(),
+		})
 	}
 
 	data, err := database.GetCronJobByID(uint(jobID))
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"message": "Internal Server Error", "error": err.Error()})
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"message": "internal server error",
+			"error":   err.Error(),
+		})
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": "Cron Job Updated", "data": data})
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "Automatic Backup Updated Successfully",
+		"data":    data,
+	})
 }
 
 func handleAutomaticSyncDelete(c echo.Context) error {
 	jobID, err := strconv.Atoi(c.Param("job_id"))
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Job ID"})
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   err.Error(),
+		})
 	}
 
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"message": "Unauthorized"})
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   err.Error(),
+		})
 	}
 
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
 
 	if _, err := database.GetJobByIDForUser(userID, uint(jobID)); err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"message": "Unauthorized"})
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   err.Error(),
+		})
 	}
 
 	err = database.DeleteCronJobByID(uint(jobID))
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"message": "Internal Server Error", "error": err.Error()})
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"message": "internal server error",
+			"error":   err.Error(),
+		})
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": "Cron Job Deleted"})
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "Automatic Backup Deleted Successfully",
+	})
 }
 
 func handleAutomaticSyncTaskList(c echo.Context) error {
 	jobID, err := strconv.Atoi(c.Param("job_id"))
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Job ID"})
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   err.Error(),
+		})
 	}
 	limit, _ := strconv.Atoi(c.QueryParam("limit"))
 	if limit <= 0 || limit > 1000 {
@@ -262,21 +351,33 @@ func handleAutomaticSyncTaskList(c echo.Context) error {
 
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"message": "Unauthorized"})
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   err.Error(),
+		})
 	}
 
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
 
 	if _, err := database.GetJobByIDForUser(userID, uint(jobID)); err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"message": "Unauthorized"})
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   err.Error(),
+		})
 	}
 
 	data, err := database.ListAllTasksByJobID(uint(jobID), uint(limit), uint(offset))
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"message": "Internal Server Error", "error": err.Error()})
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"message": "internal server error",
+			"error":   err.Error(),
+		})
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": "Cron Job Tasks", "data": data})
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "Logs for Automatic Backup",
+		"data":    data,
+	})
 }
 
 func getUserDetailsFromSatellite(c echo.Context) (string, error) {
