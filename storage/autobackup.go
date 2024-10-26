@@ -276,7 +276,11 @@ func (storage *PosgresStore) GetPushedTask() (*TaskListingDB, error) {
 	tx := storage.DB.Begin()
 	// lock table tasks for update and select and return the first row with status pushed
 	// or status 'failed' and retry count less than 3
-	db := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("status = ? OR (status = ? AND retry_count < ?)", TaskStatusPushed, TaskStatusFailed, MaxRetryCount).First(&res)
+	db := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Joins("JOIN cron_job_listing_dbs ON task_listing_dbs.cron_job_id = cron_job_listing_dbs.id").
+		Where("cron_job_listing_dbs.active = ? AND (task_listing_dbs.status = ? OR (task_listing_dbs.status = ? AND task_listing_dbs.retry_count < ?))",
+			true, TaskStatusPushed, TaskStatusFailed, MaxRetryCount).
+		First(&res)
 	if db.Error != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf("error getting pushed task: %v", db.Error)
