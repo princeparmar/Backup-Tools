@@ -268,6 +268,10 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 	if reqBody.Active != nil {
 		// TODO: Add validation if storx_token is present and auth_token is present
 		updateRequest["active"] = *reqBody.Active
+		if *reqBody.Active {
+			updateRequest["message"] = "You Automatic backup is activated. it will start processing first backup soon"
+			updateRequest["message_status"] = storage.JobMessageStatusInfo
+		}
 	}
 
 	err = database.UpdateCronJobByID(uint(jobID), updateRequest)
