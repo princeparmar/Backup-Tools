@@ -287,6 +287,7 @@ func (storage *PosgresStore) GetPushedTask() (*TaskListingDB, error) {
 	startTime := time.Now()
 	res.StartTime = &startTime
 	res.LastHeartBeat = &startTime
+	res.Message = "Automatic backup started"
 
 	db = tx.Save(&res)
 	if db != nil && db.Error != nil {
