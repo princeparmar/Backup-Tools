@@ -17,6 +17,10 @@ func NewGmailProcessor() *gmailProcessor {
 }
 
 func (g *gmailProcessor) Run(input ProcessorInput) error {
+	err := input.HeartBeatFunc()
+	if err != nil {
+		return err
+	}
 
 	gmailClient, err := google.NewGmailClientUsingToken(input.AuthToken)
 	if err != nil {
@@ -30,6 +34,11 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 
 	emailListFromBucket, err := satellite.ListObjectsWithPrefix(context.Background(), input.Job.StorxToken, satellite.ReserveBucket_Gmail, input.Job.Name+"/")
 	if err != nil && !strings.Contains(err.Error(), "object not found") {
+		return err
+	}
+
+	err = input.HeartBeatFunc()
+	if err != nil {
 		return err
 	}
 

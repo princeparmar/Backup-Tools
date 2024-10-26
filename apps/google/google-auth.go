@@ -303,6 +303,25 @@ func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 	return tokenResponse.AccessToken, nil
 }
 
+func GetGoogleAccountDetailsFromContext(c echo.Context) (*GoogleAuthResponse, error) {
+	database := c.Get(dbContextKey).(*storage.PosgresStore)
+
+	googleToken, err := GetGoogleTokenFromJWT(c)
+	if err != nil {
+		return nil, fmt.Errorf("unable to retrieve google-auth token from JWT: %v", err)
+	}
+	token, err := database.ReadGoogleAuthToken(googleToken)
+	if err != nil {
+		return nil, fmt.Errorf("unable to retrieve google-auth token from database: %v", err)
+	}
+	// Get User Email
+	userDetails, err := GetGoogleAccountDetailsFromAccessToken(token)
+	if err != nil {
+		return nil, fmt.Errorf("unable to retrieve google-auth token from database: %v", err)
+	}
+	return userDetails, nil
+}
+
 func GetGoogleAccountDetailsFromAccessToken(accessToken string) (*GoogleAuthResponse, error) {
 	// Token info endpoint with the provided token
 	url := fmt.Sprintf("https://oauth2.googleapis.com/tokeninfo?access_token=%s", accessToken)

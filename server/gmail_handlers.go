@@ -626,6 +626,13 @@ func handleListGmailMessagesToSatellite(c echo.Context) error {
 		allIDs = strings.Split(formIDs, ",")
 	}
 
+	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
 	g, ctx := errgroup.WithContext(c.Request().Context())
 	g.SetLimit(10)
 
@@ -645,7 +652,9 @@ func handleListGmailMessagesToSatellite(c echo.Context) error {
 					return nil
 				}
 
-				err = satellite.UploadObject(ctx, accesGrant, "gmail", utils.GenerateTitleFromGmailMessage(msg), b)
+				messagePath := userDetails.Email + "/" + utils.GenerateTitleFromGmailMessage(msg)
+
+				err = satellite.UploadObject(ctx, accesGrant, "gmail", messagePath, b)
 				if err != nil {
 					failedIDs.Add(id)
 					return nil

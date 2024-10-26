@@ -163,7 +163,7 @@ func (storage *PosgresStore) MissedHeartbeatForTask() error {
 
 	var tasks []TaskListingDB
 	db := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where("status = ? AND (last_heart_beat < ? OR last_heart_beat is null)", "running", time.Now().Add(-5*time.Minute)).Find(&tasks)
+		Where("status = ? AND (last_heart_beat < ? OR last_heart_beat is null)", "running", time.Now().Add(-10*time.Minute)).Find(&tasks)
 	if db.Error != nil {
 		tx.Rollback()
 		return fmt.Errorf("error getting tasks with missed heartbeat: %v", db.Error)
