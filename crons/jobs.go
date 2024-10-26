@@ -217,6 +217,7 @@ func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *sto
 				task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
 			}
 		}
+		task.RetryCount++
 	}
 
 	err = a.store.DB.Save(task).Error
