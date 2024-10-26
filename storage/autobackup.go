@@ -10,6 +10,28 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+// Job message status constants
+const (
+	JobMessageStatusInfo    = "info"
+	JobMessageStatusWarning = "warning"
+	JobMessageStatusError   = "error"
+
+	JobMessagePushToQueue = "push to queue"
+)
+
+// Task status constants
+const (
+	TaskStatusPushed  = "pushed"
+	TaskStatusRunning = "running"
+	TaskStatusSuccess = "success"
+	TaskStatusFailed  = "failed"
+)
+
+// Other constants
+const (
+	MaxRetryCount = 3
+)
+
 // Models for automated storage
 type CronJobListingDB struct {
 	gorm.Model
@@ -37,6 +59,9 @@ type CronJobListingDB struct {
 	// MessageStatus will be one of the following: "info", "warning", "error"
 	MessageStatus string `json:"message_status"`
 	Active        bool   `json:"active"`
+
+	// Memory will be used to store the state of the task. this will be json field
+	TaskMemory TaskMemory `json:"task_memory" gorm:"type:jsonb"`
 
 	// Tasks associated with the cron job
 	Tasks []TaskListingDB `gorm:"foreignKey:CronJobID"`
@@ -89,7 +114,7 @@ type TaskListingDB struct {
 	Message string `json:"message"`
 
 	// StartTime will be the time when the task was started
-	StartTime time.Time `json:"start_time"`
+	StartTime *time.Time `json:"start_time"`
 
 	// Execution time in milliseconds
 	Execution uint64 `json:"execution"`
@@ -99,10 +124,7 @@ type TaskListingDB struct {
 	RetryCount uint `json:"retry_count"`
 
 	// LastHeartBeat will be the time when the task was last heartbeat
-	LastHeartBeat time.Time `json:"last_heart_beat"`
-
-	// Memory will be used to store the state of the task. this will be json field
-	TaskMemory TaskMemory `json:"task_memory" gorm:"type:jsonb"`
+	LastHeartBeat *time.Time `json:"last_heart_beat"`
 }
 
 func (storage *PosgresStore) GetAllCronJobs() ([]CronJobListingDB, error) {
@@ -194,14 +216,14 @@ func (storage *PosgresStore) GetJobsToProcess() ([]CronJobListingDB, error) {
 		SELECT *
 		FROM cron_job_listing_dbs
 		WHERE active = true
-		AND (message is null or message != 'push to queue')
+		AND (message is null or message != ?)
 		AND DATE(last_run) != ?
 		AND (interval = 'daily'
 			OR (interval = 'weekly' AND "on" = ?)
 			OR (interval = 'monthly' AND "on" = ?))
 		AND id not in (
 			SELECT DISTINCT cron_job_id FROM task_listing_dbs
-			WHERE status IN ('running', 'pushed')
+			WHERE status IN (?, ?)
 		)
 		AND deleted_at is null
 		LIMIT 10
@@ -209,9 +231,10 @@ func (storage *PosgresStore) GetJobsToProcess() ([]CronJobListingDB, error) {
 	`
 
 	// Execute the raw SQL query and store the result in the cronJobs slice
-	db := tx.Raw(sqlQuery, time.Now().Format("2006-01-02"),
+	db := tx.Raw(sqlQuery, JobMessagePushToQueue, time.Now().Format("2006-01-02"),
 		time.Now().Weekday().String(),
-		fmt.Sprint(time.Now().Day())).Scan(&res)
+		fmt.Sprint(time.Now().Day()),
+		TaskStatusRunning, TaskStatusPushed).Scan(&res)
 	if db.Error != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf("error getting jobs to process: %v", db.Error)
@@ -219,8 +242,8 @@ func (storage *PosgresStore) GetJobsToProcess() ([]CronJobListingDB, error) {
 
 	// update message to "push to queue" and message status to "info"
 	for i := range res {
-		res[i].Message = "push to queue"
-		res[i].MessageStatus = "info"
+		res[i].Message = JobMessagePushToQueue
+		res[i].MessageStatus = JobMessageStatusInfo
 
 		db = tx.Save(&res[i])
 		if db != nil && db.Error != nil {
@@ -253,16 +276,17 @@ func (storage *PosgresStore) GetPushedTask() (*TaskListingDB, error) {
 	tx := storage.DB.Begin()
 	// lock table tasks for update and select and return the first row with status pushed
 	// or status 'failed' and retry count less than 3
-	db := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("status = ? OR (status = ? AND retry_count < 3)", "pushed", "failed").First(&res)
+	db := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("status = ? OR (status = ? AND retry_count < ?)", TaskStatusPushed, TaskStatusFailed, MaxRetryCount).First(&res)
 	if db.Error != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf("error getting pushed task: %v", db.Error)
 	}
 
 	// Update status to running and set start time
-	res.Status = "running"
-	res.StartTime = time.Now()
-	res.LastHeartBeat = time.Now()
+	res.Status = TaskStatusRunning
+	startTime := time.Now()
+	res.StartTime = &startTime
+	res.LastHeartBeat = &startTime
 
 	db = tx.Save(&res)
 	if db != nil && db.Error != nil {
@@ -277,8 +301,8 @@ func (storage *PosgresStore) GetPushedTask() (*TaskListingDB, error) {
 		return nil, fmt.Errorf("error getting job: %v", db.Error)
 	}
 
-	job.Message = "started task at " + res.StartTime.Format(time.Kitchen)
-	job.MessageStatus = "info"
+	job.Message = "Automatic backup started"
+	job.MessageStatus = JobMessageStatusInfo
 
 	db = tx.Save(&job)
 	if db != nil && db.Error != nil {
@@ -306,7 +330,7 @@ func (storage *PosgresStore) GetTaskByID(ID uint) (*TaskListingDB, error) {
 func (storage *PosgresStore) CreateTaskForCronJob(cronJobID uint) (*TaskListingDB, error) {
 	data := TaskListingDB{
 		CronJobID: cronJobID,
-		Status:    "pushed",
+		Status:    TaskStatusPushed,
 	}
 
 	// create new entry in database and return newly created task
@@ -329,7 +353,7 @@ func (storage *PosgresStore) UpdateTaskByID(ID uint, m map[string]interface{}) e
 		return fmt.Errorf("error updating task by ID: %v", db.Error)
 	}
 
-	if m["status"] == "failed" {
+	if m["status"] == TaskStatusFailed {
 		db = tx.Model(&TaskListingDB{}).Where("id = ?", ID).Update("retry_count", gorm.Expr("retry_count + 1"))
 		if db != nil && db.Error != nil {
 			tx.Rollback()

@@ -23,24 +23,24 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 		return err
 	}
 
-	err = satellite.UploadObject(context.Background(), input.StorxToken, satellite.ReserveBucket_Gmail, input.Email+"/.file_placeholder", nil)
+	err = satellite.UploadObject(context.Background(), input.Job.StorxToken, satellite.ReserveBucket_Gmail, input.Job.Name+"/.file_placeholder", nil)
 	if err != nil {
 		return err
 	}
 
-	emailListFromBucket, err := satellite.ListObjectsWithPrefix(context.Background(), input.StorxToken, satellite.ReserveBucket_Gmail, input.Email+"/")
+	emailListFromBucket, err := satellite.ListObjectsWithPrefix(context.Background(), input.Job.StorxToken, satellite.ReserveBucket_Gmail, input.Job.Name+"/")
 	if err != nil && !strings.Contains(err.Error(), "object not found") {
 		return err
 	}
 
-	if input.Task.TaskMemory.GmailNextToken == nil {
-		input.Task.TaskMemory.GmailNextToken = new(string)
+	if input.Job.TaskMemory.GmailNextToken == nil {
+		input.Job.TaskMemory.GmailNextToken = new(string)
 	}
 
 	emptyLoopCount := 0
 
 	for {
-		res, err := gmailClient.GetUserMessagesControlled(*input.Task.TaskMemory.GmailNextToken, "CATEGORY_PERSONAL", 500)
+		res, err := gmailClient.GetUserMessagesControlled(*input.Job.TaskMemory.GmailNextToken, "CATEGORY_PERSONAL", 500)
 		if err != nil {
 			return err
 		}
@@ -57,7 +57,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 				continue
 			}
 
-			messagePath := input.Email + "/" + utils.GenerateTitleFromGmailMessage(message)
+			messagePath := input.Job.Name + "/" + utils.GenerateTitleFromGmailMessage(message)
 			_, synced := emailListFromBucket[messagePath]
 			if synced {
 				continue
@@ -69,12 +69,13 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 			}
 
 			syncedData = true
-			err = satellite.UploadObject(context.TODO(), input.StorxToken, "gmail", messagePath, b)
+			err = satellite.UploadObject(context.TODO(), input.Job.StorxToken, "gmail", messagePath, b)
 			if err != nil {
 				return err
 			}
 
-			input.Task.TaskMemory.GmailSyncCount++
+			input.Job.TaskMemory.GmailSyncCount++
+			emptyLoopCount = 0
 		}
 
 		if !syncedData {
@@ -84,11 +85,12 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 
 		if emptyLoopCount > 20 {
 			// if we get 5 empty loops, we can break
+			*input.Job.TaskMemory.GmailNextToken = ""
 			break
 		}
 
-		*input.Task.TaskMemory.GmailNextToken = res.NextPageToken
-		if *input.Task.TaskMemory.GmailNextToken == "" {
+		*input.Job.TaskMemory.GmailNextToken = res.NextPageToken
+		if *input.Job.TaskMemory.GmailNextToken == "" {
 			break
 		}
 	}

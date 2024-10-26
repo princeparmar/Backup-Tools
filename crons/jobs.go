@@ -11,10 +11,9 @@ import (
 )
 
 type ProcessorInput struct {
-	StorxToken    string
 	AuthToken     string
-	Email         string
 	Task          *storage.TaskListingDB
+	Job           *storage.CronJobListingDB
 	HeartBeatFunc func() error
 }
 
@@ -166,14 +165,13 @@ func (a *AutosyncManager) ProcessTask() error {
 
 		newToken, err := google.AuthTokenUsingRefreshToken(job.RefreshToken)
 		if err != nil {
-			return a.UpdateTaskStatus(task, job, fmt.Errorf("Error while generating auth token: %s", err), time.Since(startime))
+			return a.UpdateTaskStatus(task, job, fmt.Errorf("error while generating auth token: %s", err), time.Since(startime))
 		}
 
 		err = processor.Run(ProcessorInput{
-			StorxToken: job.StorxToken,
-			AuthToken:  newToken,
-			Email:      job.Name,
-			Task:       task,
+			AuthToken: newToken,
+			Job:       job,
+			Task:      task,
 			HeartBeatFunc: func() error {
 				return a.store.UpdateHeartBeatForTask(task.ID)
 			},
@@ -187,27 +185,38 @@ func (a *AutosyncManager) ProcessTask() error {
 }
 
 func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *storage.CronJobListingDB, err error, processtime time.Duration) error {
-	task.Status = "success"
-	task.Message = ""
+	task.Status = storage.TaskStatusSuccess
 	task.Execution = uint64(processtime.Seconds())
-	job.Message = "Task completed successfully at " + time.Now().Format("2006-01-02 15:04:05")
-	job.MessageStatus = "info"
+	job.Message = "Automatic backup completed successfully"
+	job.MessageStatus = storage.JobMessageStatusInfo
 	if err != nil {
-		task.Status = "failed"
+		task.Status = storage.TaskStatusFailed
 		task.Message = err.Error()
 
-		if strings.Contains(err.Error(), "googleapi: Error 401") {
-			job.Message = "Invalid google credentials"
-		}
+		job.Message = "Last Task Execution failed because of some error"
+		job.MessageStatus = storage.JobMessageStatusError
 
-		job.Message = "Task failed at " + time.Now().Format("2006-01-02 15:04:05")
-		if strings.Contains(err.Error(), "uplink: permission") {
-			job.Message = "Sync is failing because of insufficient permissions to upload to storx"
-			job.StorxToken = ""
-			// deactivate the job
-			job.Active = false
+		if strings.Contains(err.Error(), "googleapi: Error 401") {
+			if task.RetryCount < 2 {
+				job.Message = "Last Task Failed because of invalid google credentials. Retrying..."
+				task.Message = "Task Failed because of invalid google credentials. Retrying..."
+			} else {
+				job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
+				job.RefreshToken = ""
+				job.Active = false
+				task.Message = "Google Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
+			}
+		} else if strings.Contains(err.Error(), "uplink: permission") || strings.Contains(err.Error(), "uplink: invalid access") {
+			if task.RetryCount < 2 {
+				job.Message = "Last Task Failed because of insufficient permissions to upload to storx. Retrying..."
+				task.Message = "Task Failed because of insufficient permissions to upload to storx. Retrying..."
+			} else {
+				job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
+				job.StorxToken = ""
+				job.Active = false
+				task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
+			}
 		}
-		job.MessageStatus = "error"
 	}
 
 	err = a.store.DB.Save(task).Error
