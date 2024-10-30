@@ -790,7 +790,7 @@ func handleGmailGetThreadsIDsControlled(c echo.Context) error {
 	}
 
 	for _, message := range res.Messages {
-		_, synced := emailListFromBucket[utils.GenerateTitleFromGmailMessage(message)]
+		_, synced := emailListFromBucket[userDetails.Email+"/"+utils.GenerateTitleFromGmailMessage(message)]
 		threads = append(threads, MessageListJSON{Message: *message, Synced: synced})
 	}
 	nextPageToken = res.NextPageToken
