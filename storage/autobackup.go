@@ -172,8 +172,8 @@ func (storage *PosgresStore) MissedHeartbeatForTask() error {
 	for _, task := range tasks {
 		fmt.Println("Updating task", task.ID, "with missed heartbeat")
 
-		task.Status = "failed"
-		task.Message = "process got stuck because of some reason"
+		task.Status = TaskStatusFailed
+		task.Message = "Process got stuck because of some reason. Marked as failed"
 
 		db = tx.Save(&task)
 		if db != nil && db.Error != nil {
@@ -188,8 +188,8 @@ func (storage *PosgresStore) MissedHeartbeatForTask() error {
 			return fmt.Errorf("error getting job: %v", db.Error)
 		}
 
-		job.Message = "process got stuck because of some reason"
-		job.MessageStatus = "error"
+		job.Message = "Process got stuck because of some reason. Marked as failed"
+		job.MessageStatus = JobMessageStatusError
 
 		db = tx.Save(&job)
 		if db != nil && db.Error != nil {

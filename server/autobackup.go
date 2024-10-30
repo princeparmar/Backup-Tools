@@ -271,6 +271,9 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 		if *reqBody.Active {
 			updateRequest["message"] = "You Automatic backup is activated. it will start processing first backup soon"
 			updateRequest["message_status"] = storage.JobMessageStatusInfo
+		} else {
+			updateRequest["message"] = "You Automatic backup is deactivated. it will not process any backup"
+			updateRequest["message_status"] = storage.JobMessageStatusInfo
 		}
 	}
 
