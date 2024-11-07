@@ -113,7 +113,7 @@ type TaskListingDB struct {
 	// Message will be the message to be displayed to the user
 	Message string `json:"message"`
 
-	// StartTime will be the time when the task was started
+	// StartTime will be the time when the task was started.
 	StartTime *time.Time `json:"start_time"`
 
 	// Execution time in milliseconds
@@ -163,7 +163,7 @@ func (storage *PosgresStore) MissedHeartbeatForTask() error {
 
 	var tasks []TaskListingDB
 	db := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where("status = ? AND (last_heart_beat < ? OR last_heart_beat is null)", "running", time.Now().Add(-10*time.Minute)).Find(&tasks)
+		Where("status = ? AND (last_heart_beat < ? OR last_heart_beat is null)", "running", time.Now().Add(-10*time.Minute).String()).Find(&tasks)
 	if db.Error != nil {
 		tx.Rollback()
 		return fmt.Errorf("error getting tasks with missed heartbeat: %v", db.Error)
@@ -174,6 +174,9 @@ func (storage *PosgresStore) MissedHeartbeatForTask() error {
 
 		task.Status = TaskStatusFailed
 		task.Message = "Process got stuck because of some reason. Marked as failed"
+
+		task.Execution = uint64(time.Since(*task.StartTime).Seconds())
+		task.RetryCount++
 
 		db = tx.Save(&task)
 		if db != nil && db.Error != nil {

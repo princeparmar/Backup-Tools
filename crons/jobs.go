@@ -142,7 +142,6 @@ func (a *AutosyncManager) CreateTaskForAllPendingJobs() error {
 
 func (a *AutosyncManager) ProcessTask() error {
 	for {
-		startime := time.Now()
 		task, err := a.store.GetPushedTask()
 		if err != nil {
 			if err.Error() == "error getting pushed task: record not found" {
@@ -155,38 +154,51 @@ func (a *AutosyncManager) ProcessTask() error {
 		fmt.Println("Processing task", task.ID)
 		job, err := a.store.GetCronJobByID(task.CronJobID)
 		if err != nil {
-			return a.UpdateTaskStatus(task, job, err, time.Since(startime))
+			return a.UpdateTaskStatus(task, job, err)
 		}
 
-		processor, ok := m[job.Method]
-		if !ok {
-			return a.UpdateTaskStatus(task, job, fmt.Errorf("method %s not found", job.Method), time.Since(startime))
-		}
-
-		newToken, err := google.AuthTokenUsingRefreshToken(job.RefreshToken)
-		if err != nil {
-			return a.UpdateTaskStatus(task, job, fmt.Errorf("error while generating auth token: %s", err), time.Since(startime))
-		}
-
-		err = processor.Run(ProcessorInput{
-			AuthToken: newToken,
-			Job:       job,
-			Task:      task,
-			HeartBeatFunc: func() error {
-				return a.store.UpdateHeartBeatForTask(task.ID)
-			},
-		})
-		if err != nil {
-			return a.UpdateTaskStatus(task, job, err, time.Since(startime))
+		err = a.processTask(task, job)
+		if err := a.UpdateTaskStatus(task, job, err); err != nil {
+			return err
 		}
 	}
 
 	return nil
 }
 
-func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *storage.CronJobListingDB, err error, processtime time.Duration) error {
+func (a *AutosyncManager) processTask(task *storage.TaskListingDB, job *storage.CronJobListingDB) error {
+	processor, ok := m[job.Method]
+	if !ok {
+		return fmt.Errorf("method %s not found", job.Method)
+	}
+
+	newToken, err := google.AuthTokenUsingRefreshToken(job.RefreshToken)
+	if err != nil {
+		return fmt.Errorf("error while generating auth token: %s", err)
+	}
+
+	return processor.Run(ProcessorInput{
+		AuthToken: newToken,
+		Job:       job,
+		Task:      task,
+		HeartBeatFunc: func() error {
+			t, err := a.store.GetTaskByID(task.ID)
+			if err != nil {
+				return err
+			}
+
+			if t.Status != storage.TaskStatusRunning {
+				return fmt.Errorf("exit task because status changed")
+			}
+
+			return a.store.UpdateHeartBeatForTask(task.ID)
+		},
+	})
+}
+
+func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *storage.CronJobListingDB, err error) error {
 	task.Status = storage.TaskStatusSuccess
-	task.Execution = uint64(processtime.Seconds())
+	task.Execution = uint64(time.Since(*task.StartTime).Seconds())
 	job.Message = "Automatic backup completed successfully"
 	job.MessageStatus = storage.JobMessageStatusInfo
 	job.LastRun = time.Now()
