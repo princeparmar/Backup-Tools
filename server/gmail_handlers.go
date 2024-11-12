@@ -973,8 +973,6 @@ func handleGmailDownloadAndInsert(c echo.Context) error {
 			continue
 		}
 
-		fmt.Println("data: ", string(data))
-
 		// Parse the email data and insert into Gmail
 		var gmailMsg gmail.Message
 		if err := json.Unmarshal(data, &gmailMsg); err != nil {
@@ -984,7 +982,8 @@ func handleGmailDownloadAndInsert(c echo.Context) error {
 			continue
 		}
 
-		fmt.Println("gmailMsg: ", gmailMsg)
+		// Remove threadId if it exists
+		gmailMsg.ThreadId = "" // Ensure threadId is not set
 
 		// Insert message into Gmail
 		_, err = gmailClient.Users.Messages.Import("me", &gmailMsg).Do()
