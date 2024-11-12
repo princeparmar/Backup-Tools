@@ -210,25 +210,15 @@ func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *sto
 		job.MessageStatus = storage.JobMessageStatusError
 
 		if strings.Contains(err.Error(), "googleapi: Error 401") {
-			if task.RetryCount < 2 {
-				job.Message = "Last Task Failed because of invalid google credentials. Retrying..."
-				task.Message = "Task Failed because of invalid google credentials. Retrying..."
-			} else {
-				job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
-				job.RefreshToken = ""
-				job.Active = false
-				task.Message = "Google Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
-			}
+			job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
+			job.RefreshToken = ""
+			job.Active = false
+			task.Message = "Google Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
 		} else if strings.Contains(err.Error(), "uplink: permission") || strings.Contains(err.Error(), "uplink: invalid access") {
-			if task.RetryCount < 2 {
-				job.Message = "Last Task Failed because of insufficient permissions to upload to storx. Retrying..."
-				task.Message = "Task Failed because of insufficient permissions to upload to storx. Retrying..."
-			} else {
-				job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
-				job.StorxToken = ""
-				job.Active = false
-				task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
-			}
+			job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
+			job.StorxToken = ""
+			job.Active = false
+			task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
 		}
 		task.RetryCount++
 	}

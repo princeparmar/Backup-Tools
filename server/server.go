@@ -99,6 +99,9 @@ func StartServer(db *storage.PosgresStore, address string) {
 	google.GET("/gmail-list-threads-ids", handleGmailGetThreadsIDs)
 	google.GET("/gmail-get-message/:ID", handleGmailGetMessage)
 	google.GET("/gmail-get-thread/:ID", handleGmailGetThread)
+	// In the existing google group routes section
+	google.POST("/gmail/insert-mail", handleGmailDownloadAndInsert)
+
 	// google.POST("/all-gmail-to-satellite", handleAllGmailMessagesToSatellite)
 	google.POST("/gmail-list-to-satellite", handleListGmailMessagesToSatellite)
 	google.POST("/gmail-message-to-satellite/:ID", handleGmailMessageToSatellite)

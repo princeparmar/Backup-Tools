@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -900,3 +901,101 @@ func handleGmailGetThreadsIDsControlled(c echo.Context) error {
 // 	}
 // 	return c.JSON(http.StatusOK, allMessages)
 // }
+
+type DownloadAndInsertRequest struct {
+	Keys []string `json:"keys"`
+}
+
+func handleGmailDownloadAndInsert(c echo.Context) error {
+	// Get access token from header
+	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accessGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "access token not found",
+		})
+	}
+
+	// Parse request body
+	var req DownloadAndInsertRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
+	// Validate request
+	if len(req.Keys) == 0 {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"error": "no keys provided",
+		})
+	}
+	if len(req.Keys) > 10 {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"error": "maximum 10 keys allowed",
+		})
+	}
+
+	// Get Gmail client
+	gmailClient, err := google.NewGmailClient(c)
+	if err != nil {
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+				"error": "token expired",
+			})
+		}
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
+	// Process each key
+	results := make([]struct {
+		Key     string `json:"key"`
+		Success bool   `json:"success"`
+		Error   string `json:"error,omitempty"`
+	}, 0, len(req.Keys))
+
+	for _, key := range req.Keys {
+		result := struct {
+			Key     string `json:"key"`
+			Success bool   `json:"success"`
+			Error   string `json:"error,omitempty"`
+		}{
+			Key: key,
+		}
+
+		// Download file from Satellite
+		data, err := satellite.DownloadObject(c.Request().Context(), accessGrant, satellite.ReserveBucket_Gmail, key)
+		if err != nil {
+			result.Success = false
+			result.Error = fmt.Sprintf("failed to download file: %v", err)
+			results = append(results, result)
+			continue
+		}
+
+		// Parse the email data and insert into Gmail
+		var gmailMsg gmail.Message
+		if err := json.Unmarshal(data, &gmailMsg); err != nil {
+			result.Success = false
+			result.Error = fmt.Sprintf("failed to parse message data: %v", err)
+			results = append(results, result)
+			continue
+		}
+
+		// Insert message into Gmail
+		_, err = gmailClient.Users.Messages.Import("me", &gmailMsg).Do()
+		if err != nil {
+			result.Success = false
+			result.Error = fmt.Sprintf("failed to insert message: %v", err)
+		} else {
+			result.Success = true
+		}
+
+		results = append(results, result)
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "Gmail messages processed",
+		"results": results,
+	})
+}
