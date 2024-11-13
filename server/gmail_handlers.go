@@ -3,6 +3,7 @@ package server
 import (
 	"cmp"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -984,6 +985,9 @@ func handleGmailDownloadAndInsert(c echo.Context) error {
 
 		// Remove threadId if it exists
 		gmailMsg.ThreadId = "" // Ensure threadId is not set
+
+		rawMessage := base64.RawURLEncoding.EncodeToString(data) // Use the original data for encoding
+		gmailMsg.Raw = rawMessage                                // Set the raw message
 
 		// Insert message into Gmail
 		_, err = gmailClient.Users.Messages.Import("me", &gmailMsg).Do()
