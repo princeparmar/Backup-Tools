@@ -903,10 +903,6 @@ func handleGmailGetThreadsIDsControlled(c echo.Context) error {
 // 	return c.JSON(http.StatusOK, allMessages)
 // }
 
-type DownloadAndInsertRequest struct {
-	Keys []string `json:"keys"`
-}
-
 func handleGmailDownloadAndInsert(c echo.Context) error {
 	// Get access token from header
 	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
@@ -916,21 +912,27 @@ func handleGmailDownloadAndInsert(c echo.Context) error {
 		})
 	}
 
-	// Parse request body
-	var req DownloadAndInsertRequest
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
-		})
+	var allIDs []string
+	if strings.Contains(c.Request().Header.Get(echo.HeaderContentType), echo.MIMEApplicationJSON) {
+		// Decode JSON array from request body
+		if err := json.NewDecoder(c.Request().Body).Decode(&allIDs); err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"error": "invalid JSON format",
+			})
+		}
+	} else {
+		// Handle form data
+		formIDs := c.FormValue("ids")
+		allIDs = strings.Split(formIDs, ",")
 	}
 
 	// Validate request
-	if len(req.Keys) == 0 {
+	if len(allIDs) == 0 {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"error": "no keys provided",
 		})
 	}
-	if len(req.Keys) > 10 {
+	if len(allIDs) > 10 {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"error": "maximum 10 keys allowed",
 		})
@@ -954,9 +956,9 @@ func handleGmailDownloadAndInsert(c echo.Context) error {
 		Key     string `json:"key"`
 		Success bool   `json:"success"`
 		Error   string `json:"error,omitempty"`
-	}, 0, len(req.Keys))
+	}, 0, len(allIDs))
 
-	for _, key := range req.Keys {
+	for _, key := range allIDs {
 		result := struct {
 			Key     string `json:"key"`
 			Success bool   `json:"success"`
