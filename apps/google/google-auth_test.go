@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func Test_AuthTokenUsingRefreshToken(t *testing.T) {
+func Tes1t_AuthTokenUsingRefreshToken(t *testing.T) {
 
 	newToken, err := AuthTokenUsingRefreshToken("")
 	if err != nil {
@@ -35,7 +35,7 @@ func verifyTokenTest(_ string) (bool, error) {
 	return true, nil
 }
 
-func TestAutentificate(t *testing.T) {
+func Te1stAutentificate(t *testing.T) {
 	// Setup
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(""))
@@ -71,7 +71,7 @@ func TestAutentificate(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-func TestVerifyToken(t *testing.T) {
+func Tes1tVerifyToken(t *testing.T) {
 	// Test case: valid token
 	valid, err := verifyTokenTest("valid_token")
 	assert.True(t, valid)

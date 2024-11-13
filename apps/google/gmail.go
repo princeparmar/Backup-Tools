@@ -109,6 +109,14 @@ func (client *GmailClient) GetUserThreads(nextPageToken string) (*ThreadsRespons
 	return &ThreadsResponse{threads.NextPageToken, int(threads.ResultSizeEstimate), ts}, nil
 }
 
+// InsertMessage inserts a message into Gmail
+func (client *GmailClient) InsertMessage(message *gmail.Message) error {
+	message.ThreadId = "" // Ensure threadId is not set
+
+	_, err := client.Users.Messages.Import("me", message).Do()
+	return err
+}
+
 func (client *GmailClient) GetUserThreadsIDs(nextPageToken string) (*gmail.ListThreadsResponse, error) {
 	var threads *gmail.ListThreadsResponse
 	var err error

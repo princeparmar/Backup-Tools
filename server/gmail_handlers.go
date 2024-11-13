@@ -983,15 +983,11 @@ func handleGmailDownloadAndInsert(c echo.Context) error {
 			continue
 		}
 
-		// Remove threadId if it exists
-		gmailMsg.ThreadId = "" // Ensure threadId is not set
-
 		rawMessage := base64.RawURLEncoding.EncodeToString(data) // Use the original data for encoding
 		gmailMsg.Raw = rawMessage                                // Set the raw message
 
 		// Insert message into Gmail
-		_, err = gmailClient.Users.Messages.Import("me", &gmailMsg).Do()
-		if err != nil {
+		if err := gmailClient.InsertMessage(&gmailMsg); err != nil {
 			result.Success = false
 			result.Error = fmt.Sprintf("failed to insert message: %v", err)
 		} else {
