@@ -1,6 +1,7 @@
 package google
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/StorX2-0/Backup-Tools/utils"
@@ -111,9 +113,16 @@ func (client *GmailClient) GetUserThreads(nextPageToken string) (*ThreadsRespons
 
 // InsertMessage inserts a message into Gmail
 func (client *GmailClient) InsertMessage(message *gmail.Message) error {
-	message.ThreadId = "" // Ensure threadId is not set
 
-	_, err := client.Users.Messages.Import("me", message).Do()
+	raw, err := createRawMessage(message)
+	if err != nil {
+		return err
+	}
+	msg := &gmail.Message{
+		Raw: raw,
+	}
+
+	_, err = client.Users.Messages.Import("me", msg).Do()
 	return err
 }
 
@@ -397,4 +406,57 @@ func (client *GmailClient) GetUserMessagesUsingWorkers(nextPageToken string, wor
 	msgs.Messages = messages
 	msgs.NextPageToken = res.NextPageToken
 	return &msgs, nil
+}
+
+func createRawMessage(gmailMsg *gmail.Message) (string, error) {
+	var buf bytes.Buffer
+
+	// Write headers
+	for _, header := range gmailMsg.Payload.Headers {
+		// Skip duplicate headers
+		if strings.ToLower(header.Name) == "received" ||
+			strings.ToLower(header.Name) == "authentication-results" ||
+			strings.ToLower(header.Name) == "received-spf" ||
+			strings.ToLower(header.Name) == "x-received" {
+			continue
+		}
+		fmt.Fprintf(&buf, "%s: %s\r\n", header.Name, header.Value)
+	}
+
+	// Add boundary for multipart messages
+	boundary := "=-" + generateBoundary()
+	fmt.Fprintf(&buf, "Content-Type: multipart/alternative; boundary=\"%s\"\r\n", boundary)
+	buf.WriteString("\r\n")
+
+	// Write parts
+	for _, part := range gmailMsg.Payload.Parts {
+		fmt.Fprintf(&buf, "--%s\r\n", boundary)
+
+		// Write part headers
+		for _, header := range part.Headers {
+			fmt.Fprintf(&buf, "%s: %s\r\n", header.Name, header.Value)
+		}
+		buf.WriteString("\r\n")
+
+		// Decode and write part body
+		if part.Body != nil && part.Body.Data != "" {
+			data, err := base64.URLEncoding.DecodeString(part.Body.Data)
+			if err != nil {
+				return "", fmt.Errorf("failed to decode part body: %v", err)
+			}
+			buf.Write(data)
+			buf.WriteString("\r\n")
+		}
+	}
+
+	// Close multipart boundary
+	fmt.Fprintf(&buf, "--%s--\r\n", boundary)
+
+	// Base64 encode the entire message
+	raw := base64.URLEncoding.EncodeToString(buf.Bytes())
+	return raw, nil
+}
+
+func generateBoundary() string {
+	return fmt.Sprintf("lJAfp/%d", time.Now().UnixNano())
 }
