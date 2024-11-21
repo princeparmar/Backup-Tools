@@ -200,6 +200,7 @@ func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *sto
 	task.Status = storage.TaskStatusSuccess
 	task.Execution = uint64(time.Since(*task.StartTime).Seconds())
 	job.Message = "Automatic backup completed successfully"
+	task.Message = "Automatic backup completed successfully"
 	job.MessageStatus = storage.JobMessageStatusInfo
 	job.LastRun = time.Now()
 	if err != nil {

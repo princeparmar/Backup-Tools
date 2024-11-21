@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -951,56 +950,52 @@ func handleGmailDownloadAndInsert(c echo.Context) error {
 		})
 	}
 
-	// Process each key
-	results := make([]struct {
-		Key     string `json:"key"`
-		Success bool   `json:"success"`
-		Error   string `json:"error,omitempty"`
-	}, 0, len(allIDs))
+	g, ctx := errgroup.WithContext(c.Request().Context())
+	g.SetLimit(10)
+
+	processedIDs, failedIDs := utils.NewLockedArray(), utils.NewLockedArray()
 
 	for _, key := range allIDs {
-		result := struct {
-			Key     string `json:"key"`
-			Success bool   `json:"success"`
-			Error   string `json:"error,omitempty"`
-		}{
-			Key: key,
-		}
+		key := key
+		g.Go(func() error {
+			// Download file from Satellite
+			data, err := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Gmail, key)
+			if err != nil {
+				failedIDs.Add(key)
+				return nil
+			}
 
-		// Download file from Satellite
-		data, err := satellite.DownloadObject(c.Request().Context(), accessGrant, satellite.ReserveBucket_Gmail, key)
-		if err != nil {
-			result.Success = false
-			result.Error = fmt.Sprintf("failed to download file: %v", err)
-			results = append(results, result)
-			continue
-		}
+			// Parse the email data and insert into Gmail
+			var gmailMsg gmail.Message
+			if err := json.Unmarshal(data, &gmailMsg); err != nil {
+				failedIDs.Add(key)
+				return nil
+			}
 
-		// Parse the email data and insert into Gmail
-		var gmailMsg gmail.Message
-		if err := json.Unmarshal(data, &gmailMsg); err != nil {
-			result.Success = false
-			result.Error = fmt.Sprintf("failed to parse message data: %v", err)
-			results = append(results, result)
-			continue
-		}
+			rawMessage := base64.RawURLEncoding.EncodeToString(data) // Use the original data for encoding
+			gmailMsg.Raw = rawMessage                                // Set the raw message
 
-		rawMessage := base64.RawURLEncoding.EncodeToString(data) // Use the original data for encoding
-		gmailMsg.Raw = rawMessage                                // Set the raw message
+			// Insert message into Gmail
+			if err := gmailClient.InsertMessage(&gmailMsg); err != nil {
+				failedIDs.Add(key)
+			} else {
+				processedIDs.Add(key)
+			}
+			return nil
+		})
+	}
 
-		// Insert message into Gmail
-		if err := gmailClient.InsertMessage(&gmailMsg); err != nil {
-			result.Success = false
-			result.Error = fmt.Sprintf("failed to insert message: %v", err)
-		} else {
-			result.Success = true
-		}
-
-		results = append(results, result)
+	if err := g.Wait(); err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error":         err.Error(),
+			"failed_ids":    failedIDs.Get(),
+			"processed_ids": processedIDs.Get(),
+		})
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message": "Gmail messages processed",
-		"results": results,
+		"message":       "all gmail messages processed",
+		"failed_ids":    failedIDs.Get(),
+		"processed_ids": processedIDs.Get(),
 	})
 }
