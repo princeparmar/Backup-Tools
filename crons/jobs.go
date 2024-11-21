@@ -210,10 +210,16 @@ func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *sto
 		job.MessageStatus = storage.JobMessageStatusError
 
 		if strings.Contains(err.Error(), "googleapi: Error 401") {
-			job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
-			job.RefreshToken = ""
-			job.Active = false
-			task.Message = "Google Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
+			if task.RetryCount == storage.MaxRetryCount-1 {
+				job.RefreshToken = ""
+				job.Active = false
+
+				job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
+				task.Message = "Google Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
+			} else {
+				job.Message = "Invalid google credentials. Retrying..."
+				task.Message = "Google Credentials are invalid. Retrying..."
+			}
 		} else if strings.Contains(err.Error(), "uplink: permission") || strings.Contains(err.Error(), "uplink: invalid access") {
 			job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
 			job.StorxToken = ""
