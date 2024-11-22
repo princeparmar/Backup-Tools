@@ -957,6 +957,9 @@ func handleGmailDownloadAndInsert(c echo.Context) error {
 
 	for _, key := range allIDs {
 		key := key
+		if key == "" {
+			continue
+		}
 		g.Go(func() error {
 			// Download file from Satellite
 			data, err := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Gmail, key)
