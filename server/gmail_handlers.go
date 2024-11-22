@@ -925,8 +925,12 @@ func handleGmailDownloadAndInsert(c echo.Context) error {
 		allIDs = strings.Split(formIDs, ",")
 	}
 
+	for i := range allIDs {
+		allIDs[i] = strings.TrimSpace(allIDs[i])
+	}
+
 	// Validate request
-	if len(allIDs) == 0 {
+	if len(allIDs) == 0 || allIDs[0] == "" {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"error": "no keys provided",
 		})
