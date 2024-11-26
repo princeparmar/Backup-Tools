@@ -21,8 +21,8 @@ type Processor interface {
 }
 
 var m = map[string]Processor{
-	"gmail":    NewGmailProcessor(),
-	"database": NewDatabaseProcessor(),
+	"gmail":         NewGmailProcessor(),
+	"psql_database": NewPsqlDatabaseProcessor(),
 }
 
 type AutosyncManager struct {
