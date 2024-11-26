@@ -3,7 +3,6 @@ package server
 import (
 	"cmp"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -978,9 +977,6 @@ func handleGmailDownloadAndInsert(c echo.Context) error {
 				failedIDs.Add(key)
 				return nil
 			}
-
-			rawMessage := base64.RawURLEncoding.EncodeToString(data) // Use the original data for encoding
-			gmailMsg.Raw = rawMessage                                // Set the raw message
 
 			// Insert message into Gmail
 			if err := gmailClient.InsertMessage(&gmailMsg); err != nil {
