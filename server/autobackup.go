@@ -166,6 +166,15 @@ func handleAutomaticSyncCreateDatabase(c echo.Context) error {
 		})
 	}
 
+	method := c.Param("method")
+
+	if method != "psql_database" && method != "mysql_database" {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   "invalid method",
+		})
+	}
+
 	var reqBody struct {
 		Name         string `json:"name"`
 		DatabaseName string `json:"database_name"`
@@ -190,7 +199,7 @@ func handleAutomaticSyncCreateDatabase(c echo.Context) error {
 	}
 
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
-	data, err := database.CreateCronJobForUser(userID, reqBody.Name, "database", map[string]interface{}{
+	data, err := database.CreateCronJobForUser(userID, reqBody.Name, method, map[string]interface{}{
 		"database_name": reqBody.DatabaseName,
 		"host":          reqBody.Host,
 		"port":          reqBody.Port,
