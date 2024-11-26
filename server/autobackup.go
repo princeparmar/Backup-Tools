@@ -84,7 +84,7 @@ func handleAutomaticSyncDetails(c echo.Context) error {
 	})
 }
 
-func handleAutomaticSyncCreate(c echo.Context) error {
+func handleAutomaticSyncCreateGmail(c echo.Context) error {
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -94,7 +94,6 @@ func handleAutomaticSyncCreate(c echo.Context) error {
 	}
 
 	var reqBody struct {
-		Method       string `json:"method"`
 		RefreshToken string `json:"refresh_token"`
 	}
 
@@ -102,12 +101,6 @@ func handleAutomaticSyncCreate(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"message": "Invalid Request",
 			"error":   err.Error(),
-		})
-	}
-
-	if reqBody.Method != "gmail" {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "Automatic Sync Method not supported",
 		})
 	}
 
@@ -142,7 +135,9 @@ func handleAutomaticSyncCreate(c echo.Context) error {
 	}
 
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
-	data, err := database.CreateCronJobForUser(userID, userDetails.Email, reqBody.Method, reqBody.RefreshToken)
+	data, err := database.CreateCronJobForUser(userID, userDetails.Email, "gmail", map[string]interface{}{
+		"refresh_token": reqBody.RefreshToken,
+	})
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate key value") {
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -150,6 +145,60 @@ func handleAutomaticSyncCreate(c echo.Context) error {
 				"error":   err.Error(),
 			})
 		}
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"message": "internal server error",
+			"error":   err.Error(),
+		})
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "Automatic Backup Created Successfully",
+		"data":    data,
+	})
+}
+
+func handleAutomaticSyncCreateDatabase(c echo.Context) error {
+	userID, err := getUserDetailsFromSatellite(c)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   err.Error(),
+		})
+	}
+
+	var reqBody struct {
+		Name         string `json:"name"`
+		DatabaseName string `json:"database_name"`
+		Host         string `json:"host"`
+		Port         string `json:"port"`
+		Username     string `json:"username"`
+		Password     string `json:"password"`
+	}
+
+	if err := c.Bind(&reqBody); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   err.Error(),
+		})
+	}
+
+	if reqBody.Name == "" || reqBody.DatabaseName == "" || reqBody.Host == "" || reqBody.Port == "" || reqBody.Username == "" || reqBody.Password == "" {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   "all fields are required",
+		})
+	}
+
+	database := c.Get(dbContextKey).(*storage.PosgresStore)
+	data, err := database.CreateCronJobForUser(userID, reqBody.Name, "database", map[string]interface{}{
+		"database_name": reqBody.DatabaseName,
+		"host":          reqBody.Host,
+		"port":          reqBody.Port,
+		"username":      reqBody.Username,
+		"password":      reqBody.Password,
+	})
+
+	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"message": "internal server error",
 			"error":   err.Error(),
@@ -189,11 +238,21 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 		})
 	}
 
+	type DatabaseConnection struct {
+		DatabaseName string `json:"database_name"`
+		Host         string `json:"host"`
+		Port         string `json:"port"`
+		Username     string `json:"username"`
+		Password     string `json:"password"`
+	}
+
 	var reqBody struct {
 		Interval *string `json:"interval"`
 		On       *string `json:"on"`
 
 		RefreshToken *string `json:"refresh_token"`
+
+		DatabaseConnection *DatabaseConnection `json:"database_connection"`
 
 		StorxToken *string `json:"storx_token"`
 
@@ -228,6 +287,12 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 	}
 
 	if reqBody.RefreshToken != nil {
+		if job.Method != "gmail" {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Request",
+				"error":   "refresh token is not allowed for this method",
+			})
+		}
 		authToken, err := google.AuthTokenUsingRefreshToken(*reqBody.RefreshToken)
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -258,7 +323,24 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 				"error":   "email id mismatch",
 			})
 		}
-		updateRequest["refresh_token"] = *reqBody.RefreshToken
+		updateRequest["input_data"] = map[string]interface{}{
+			"refresh_token": *reqBody.RefreshToken,
+		}
+	} else if reqBody.DatabaseConnection != nil {
+		if job.Method != "database" {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Request",
+				"error":   "database connection is not allowed for this method",
+			})
+		}
+
+		updateRequest["input_data"] = map[string]interface{}{
+			"host":          reqBody.DatabaseConnection.Host,
+			"port":          reqBody.DatabaseConnection.Port,
+			"username":      reqBody.DatabaseConnection.Username,
+			"password":      reqBody.DatabaseConnection.Password,
+			"database_name": reqBody.DatabaseConnection.DatabaseName,
+		}
 	}
 
 	if reqBody.StorxToken != nil {

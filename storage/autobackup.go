@@ -45,7 +45,7 @@ type CronJobListingDB struct {
 	On       string    `json:"on"`
 	LastRun  time.Time `json:"last_run"`
 
-	RefreshToken string `json:"refresh_token"`
+	InputData map[string]interface{} `json:"input_data"`
 
 	StorxToken string `json:"storx_token"`
 
@@ -77,7 +77,9 @@ func MastTokenForCronJobListingDB(cronJobs []CronJobListingDB) []CronJobListingD
 
 func MastTokenForCronJobDB(cronJob *CronJobListingDB) {
 	cronJob.StorxToken = utils.MaskString(cronJob.StorxToken)
-	cronJob.RefreshToken = utils.MaskString(cronJob.RefreshToken)
+	if cronJob.InputData != nil && cronJob.InputData["refresh_token"] != nil {
+		cronJob.InputData["refresh_token"] = utils.MaskString(cronJob.InputData["refresh_token"].(string))
+	}
 }
 
 type TaskMemory struct {
@@ -387,12 +389,12 @@ func (storage *PosgresStore) GetCronJobByID(ID uint) (*CronJobListingDB, error) 
 	return &res, nil
 }
 
-func (storage *PosgresStore) CreateCronJobForUser(userID, name, method, refreshToken string) (*CronJobListingDB, error) {
+func (storage *PosgresStore) CreateCronJobForUser(userID, name, method string, inputData map[string]interface{}) (*CronJobListingDB, error) {
 	data := CronJobListingDB{
-		UserID:       userID,
-		Name:         name,
-		Method:       method,
-		RefreshToken: refreshToken,
+		UserID:    userID,
+		Name:      name,
+		Method:    method,
+		InputData: inputData,
 	}
 	// create new entry in database and return newly created cron job
 	res := storage.DB.Create(&data)

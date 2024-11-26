@@ -38,17 +38,17 @@ func HandleSatelliteAuthentication(c echo.Context) error {
 	})
 }
 
-func UploadObject(ctx context.Context, accessGrant, bucketName, objectKey string, data []byte) error {
+func GetUploader(ctx context.Context, accessGrant, bucketName, objectKey string) (*uplink.Upload, error) {
 	// Parse the Access Grant.
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
-		return fmt.Errorf("could not parse access grant: %v", err)
+		return nil, fmt.Errorf("could not parse access grant: %v", err)
 	}
 
 	// Open up the Project we will be working with.
 	project, err := uplink.OpenProject(ctx, access)
 	if err != nil {
-		return fmt.Errorf("could not open project: %v", err)
+		return nil, fmt.Errorf("could not open project: %v", err)
 	}
 	defer project.Close()
 
@@ -57,7 +57,7 @@ func UploadObject(ctx context.Context, accessGrant, bucketName, objectKey string
 	if err != nil {
 		_, err := project.CreateBucket(ctx, bucketName)
 		if err != nil {
-			return fmt.Errorf("could not create bucket: %v", err)
+			return nil, fmt.Errorf("could not create bucket: %v", err)
 		}
 	}
 
@@ -65,7 +65,16 @@ func UploadObject(ctx context.Context, accessGrant, bucketName, objectKey string
 	// Intitiate the upload of our Object to the specified bucket and key.
 	upload, err := project.UploadObject(ctx, bucketName, objectKey, nil)
 	if err != nil {
-		return fmt.Errorf("could not initiate upload: %v", err)
+		return nil, fmt.Errorf("could not initiate upload: %v", err)
+	}
+
+	return upload, nil
+}
+
+func UploadObject(ctx context.Context, accessGrant, bucketName, objectKey string, data []byte) error {
+	upload, err := GetUploader(ctx, accessGrant, bucketName, objectKey)
+	if err != nil {
+		return err
 	}
 
 	// Copy the data to the upload.

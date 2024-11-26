@@ -3,6 +3,7 @@ package crons
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
@@ -22,7 +23,17 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 		return err
 	}
 
-	gmailClient, err := google.NewGmailClientUsingToken(input.AuthToken)
+	refreshToken, ok := input.Job.InputData["refresh_token"].(string)
+	if !ok {
+		return fmt.Errorf("refresh token not found")
+	}
+
+	newToken, err := google.AuthTokenUsingRefreshToken(refreshToken)
+	if err != nil {
+		return fmt.Errorf("error while generating auth token: %s", err)
+	}
+
+	gmailClient, err := google.NewGmailClientUsingToken(newToken)
 	if err != nil {
 		return err
 	}

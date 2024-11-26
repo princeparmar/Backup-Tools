@@ -5,13 +5,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/robfig/cron/v3"
 )
 
 type ProcessorInput struct {
-	AuthToken     string
+	InputData     map[string]interface{}
 	Task          *storage.TaskListingDB
 	Job           *storage.CronJobListingDB
 	HeartBeatFunc func() error
@@ -22,7 +21,8 @@ type Processor interface {
 }
 
 var m = map[string]Processor{
-	"gmail": NewGmailProcessor(),
+	"gmail":    NewGmailProcessor(),
+	"database": NewDatabaseProcessor(),
 }
 
 type AutosyncManager struct {
@@ -172,13 +172,8 @@ func (a *AutosyncManager) processTask(task *storage.TaskListingDB, job *storage.
 		return fmt.Errorf("method %s not found", job.Method)
 	}
 
-	newToken, err := google.AuthTokenUsingRefreshToken(job.RefreshToken)
-	if err != nil {
-		return fmt.Errorf("error while generating auth token: %s", err)
-	}
-
 	return processor.Run(ProcessorInput{
-		AuthToken: newToken,
+		InputData: job.InputData,
 		Job:       job,
 		Task:      task,
 		HeartBeatFunc: func() error {
@@ -212,7 +207,7 @@ func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *sto
 
 		if strings.Contains(err.Error(), "googleapi: Error 401") {
 			if task.RetryCount == storage.MaxRetryCount-1 {
-				job.RefreshToken = ""
+				job.InputData["refresh_token"] = ""
 				job.Active = false
 
 				job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
