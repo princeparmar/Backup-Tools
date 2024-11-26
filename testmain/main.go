@@ -1,72 +1,15 @@
 package main
 
 import (
-	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"strings"
-	"time"
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
 	"google.golang.org/api/gmail/v1"
 )
 
-func createRawMessage(gmailMsg *gmail.Message) (string, error) {
-	var buf bytes.Buffer
-
-	// Write headers
-	for _, header := range gmailMsg.Payload.Headers {
-		// Skip duplicate headers
-		if strings.ToLower(header.Name) == "received" ||
-			strings.ToLower(header.Name) == "authentication-results" ||
-			strings.ToLower(header.Name) == "received-spf" ||
-			strings.ToLower(header.Name) == "x-received" {
-			continue
-		}
-		fmt.Fprintf(&buf, "%s: %s\r\n", header.Name, header.Value)
-	}
-
-	// Add boundary for multipart messages
-	boundary := "=-" + generateBoundary()
-	fmt.Fprintf(&buf, "Content-Type: multipart/alternative; boundary=\"%s\"\r\n", boundary)
-	buf.WriteString("\r\n")
-
-	// Write parts
-	for _, part := range gmailMsg.Payload.Parts {
-		fmt.Fprintf(&buf, "--%s\r\n", boundary)
-
-		// Write part headers
-		for _, header := range part.Headers {
-			fmt.Fprintf(&buf, "%s: %s\r\n", header.Name, header.Value)
-		}
-		buf.WriteString("\r\n")
-
-		// Decode and write part body
-		if part.Body != nil && part.Body.Data != "" {
-			data, err := base64.URLEncoding.DecodeString(part.Body.Data)
-			if err != nil {
-				return "", fmt.Errorf("failed to decode part body: %v", err)
-			}
-			buf.Write(data)
-			buf.WriteString("\r\n")
-		}
-	}
-
-	// Close multipart boundary
-	fmt.Fprintf(&buf, "--%s--\r\n", boundary)
-
-	// Base64 encode the entire message
-	raw := base64.URLEncoding.EncodeToString(buf.Bytes())
-	return raw, nil
-}
-
-func generateBoundary() string {
-	return fmt.Sprintf("lJAfp/%d", time.Now().UnixNano())
-}
-
 func main() {
-	googleToken := "ya29.a0AeDClZBE_Dib0lpDd0QVbFV5-ToxdAxIgY2HXv4W6WtbV_YGYqbjWhxeTbyRGJoocr7Pwj6U8kCgoU2_UZAViA93ITjUrL1gn5mbsURj6Wv6MXk7CsKNyhuVYCWpyScHc1q_ZuOrofjzT9quGHUZcbnKrP8iBIboUz7Ooa9BaCgYKAU4SARMSFQHGX2MinRZXcwG-0H-cIdl9j7H3yw0175"
+	googleToken := "ya29.a0AeDClZAO16NEAcq_ItMxHHEnAQBcXk3UI1YSa2jvLnkxvU99f_lbaJr9w9dcpawhtkmdVF7h138D4SdmmNAarfCYgerpE0C8Hk-yOb62VU-hivgepGIPoohMmbHVthdim_iIBkgJE1o-aRCyfT7g5Cx41lIczxICRqgLnW7IaCgYKAcgSARMSFQHGX2MiA81yXLiU9O_VHw_0hCLj7A0175"
 
 	gmailClient, err := google.NewGmailClientUsingToken(googleToken)
 	if err != nil {
@@ -74,7 +17,7 @@ func main() {
 	}
 
 	// Your example message JSON
-	messageJSON := `{"historyId":"11033907","id":"157799b6faa6e68a","internalDate":"1475213968000","labelIds":["IMPORTANT","CATEGORY_PERSONAL","INBOX"],"payload":{"body":{},"headers":[{"name":"Delivered-To","value":"prince.soamedia@gmail.com"},{"name":"Received","value":"by 10.157.58.116 with SMTP id j107csp65751otc;        Thu, 29 Sep 2016 22:40:12 -0700 (PDT)"},{"name":"X-Received","value":"by 10.157.9.209 with SMTP id 17mr3958217otz.87.1475214012423;        Thu, 29 Sep 2016 22:40:12 -0700 (PDT)"},{"name":"Return-Path","value":"\u003caccount-security-noreply@account.microsoft.com\u003e"},{"name":"Received","value":"from BAY004-OMC3S26.hotmail.com (bay004-omc3s26.hotmail.com. [65.54.190.164])        by mx.google.com with ESMTPS id p84si13274548oif.76.2016.09.29.22.40.12        for \u003cprince.soamedia@gmail.com\u003e        (version=TLS1_2 cipher=ECDHE-RSA-AES128-SHA bits=128/128);        Thu, 29 Sep 2016 22:40:12 -0700 (PDT)"},{"name":"Received-SPF","value":"pass (google.com: domain of account-security-noreply@account.microsoft.com designates 65.54.190.164 as permitted sender) client-ip=65.54.190.164;"},{"name":"Authentication-Results","value":"mx.google.com;       spf=pass (google.com: domain of account-security-noreply@account.microsoft.com designates 65.54.190.164 as permitted sender) smtp.mailfrom=account-security-noreply@account.microsoft.com;       dmarc=pass (p=NONE dis=NONE) header.from=account.microsoft.com"},{"name":"Received","value":"from BN3SCH030020521 ([65.54.190.187]) by BAY004-OMC3S26.hotmail.com over TLS secured channel with Microsoft SMTPSVC(7.5.7601.23008);\t Thu, 29 Sep 2016 22:39:29 -0700"},{"name":"Message-ID","value":"\u003cBN3SCH030020521F6A730B1B6CEA3C6B6B98AC10@phx.gbl\u003e"},{"name":"X-Message-Routing","value":"sKFde7CS5BHygFZaC4gFZWeHmOM+Rjf1iOmv8meDbQqeD+9kHFgbAflrz5UYy6v/Ov/vRliTx0hzi7ScTgwYCoH5DCnfaa3A1uxr6fxWdxBrCBqYWMayiR1cG6DXB/0YS8w6TyqrimIhKRQSTTFIio8LQcw=="},{"name":"Return-Path","value":"account-security-noreply@account.microsoft.com"},{"name":"From","value":"Microsoft account team \u003caccount-security-noreply@account.microsoft.com\u003e"},{"name":"To","value":"prince.soamedia@gmail.com"},{"name":"Date","value":"Thu, 29 Sep 2016 22:39:28 -0700"},{"name":"Subject","value":"Microsoft account password reset"},{"name":"X-Priority","value":"3"},{"name":"X-MSAPipeline","value":"MessageDispatcher"},{"name":"Message-ID","value":"\u003cERILEPYEDZT4.5EZ6VTFCWVAM2@BN3SCH030020521\u003e"},{"name":"X-MSAMetaData","value":"DeYtuwd!7vazlrDwLOtLYinIydDDe*mhuShJ2CVZTJX00Uz6mNFctq0*ySYogBQaw3sArdX6YtSEZAjoofIo3ZWrq32cCZAHr96w0GgtEjHeIHGXC6dnpOP3Vw2eM5tYmg$$"},{"name":"MIME-Version","value":"1.0"},{"name":"Content-Type","value":"multipart/alternative; boundary=\"=-lJAfp/3RMDMLc7Yn1HxdLA==\""},{"name":"X-OriginalArrivalTime","value":"30 Sep 2016 05:39:29.0456 (UTC) FILETIME=[036A5300:01D21ADD]"}],"mimeType":"multipart/alternative","parts":[{"body":{"data":"UGxlYXNlIHVzZSB0aGlzIGNvZGUgdG8gcmVzZXQgdGhlIHBhc3N3b3JkIGZvciB0aGUgTWljcm9zb2Z0IGFjY291bnQgcHIqKioqKkBnbWFpbC5jb20uDQoNCkhlcmUgaXMgeW91ciBjb2RlOiA2MDIxOTA5DQoNCg0KICAgICAgICAgICAgICAgIElmIHlvdSBkb24ndCByZWNvZ25pemUgdGhlIE1pY3Jvc29mdCBhY2NvdW50IHByKioqKipAZ21haWwuY29tLCB5b3UgY2FuIGNsaWNrIGh0dHBzOi8vYWNjb3VudC5saXZlLmNvbS9kcD9mdD1EY1dqaDhyVlBFaW9VUGhUUzhFcTc3aVl3dkNROG13eWh3eHJadipKMWU5Z2ltS3BPWFl0eVVGUEtEeDQ5Z1piNDJ1MXU3KmJ6QUUqU1JNUWp3N3FJTXVaMklOSjI5ZFRwYXRDNEgqRWVlbnhlITUzbm5RdHJEaCphOXhFenQ5RTRnVnUzUVdrd1llZkxWZTkhKk1FZEJEdmplc29OOTJNOUh2amVidUhjcCptTXEqbkRzWnZSMGx2WTJ1anZEZndsZGVaaHlUS2s2d3lUUjRpalJ3Vzc4NnR4VklxZVd0SiFuVXltYmE1SCpsVyoyVzBpajBVYnBMejg5WEtDRDMqTHJNQWFOcFZveFhmNkx1VWVFUkduUVZka1o4IWozdHRqbU84elp0ZFpOSzJBNHB1VkV6ODJFWmt3NXZCMHlZR09nJTI0JTI0IHRvIHJlbW92ZSB5b3VyIGVtYWlsIGFkZHJlc3MgZnJvbSB0aGF0IGFjY291bnQuDQoNClRoYW5rcywNClRoZSBNaWNyb3NvZnQgYWNjb3VudCB0ZWFtIA==","size":664},"headers":[{"name":"Content-Type","value":"text/plain; charset=windows-1252"},{"name":"Content-Transfer-Encoding","value":"8bit"}],"mimeType":"text/plain","partId":"0"},{"body":{"data":"IDwhRE9DVFlQRSBodG1sIFBVQkxJQyAiLS8vVzNDLy9EVEQgWEhUTUwgMS4wIFRyYW5zaXRpb25hbC8vRU4iICJodHRwOi8vd3d3LnczLm9yZy9UUi94aHRtbDEvRFREL3hodG1sMS10cmFuc2l0aW9uYWwuZHRkIj4NCjxodG1sIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5L3hodG1sIiBkaXI9Imx0ciI-IA0KPGhlYWQ-DQo8c3R5bGUgdHlwZT0idGV4dC9jc3MiPg0KIC5saW5rOmxpbmssIC5saW5rOmFjdGl2ZSwgLmxpbms6dmlzaXRlZCB7DQogICAgICAgY29sb3I6IzI2NzJlYyAhaW1wb3J0YW50Ow0KICAgICAgIHRleHQtZGVjb3JhdGlvbjpub25lICFpbXBvcnRhbnQ7DQogfQ0KDQogLmxpbms6aG92ZXIgew0KICAgICAgIGNvbG9yOiM0Mjg0ZWUgIWltcG9ydGFudDsNCiAgICAgICB0ZXh0LWRlY29yYXRpb246bm9uZSAhaW1wb3J0YW50Ow0KIH0NCjwvc3R5bGU-DQo8dGl0bGU-PC90aXRsZT4NCjwvaGVhZD4NCjxib2R5Pg0KPHRhYmxlIGRpcj0ibHRyIj4NCiAgICAgIDx0cj48dGQgaWQ9ImkxIiBzdHlsZT0icGFkZGluZzowOyBmb250LWZhbWlseTonU2Vnb2UgVUkgU2VtaWJvbGQnLCAnU2Vnb2UgVUkgQm9sZCcsICdTZWdvZSBVSScsICdIZWx2ZXRpY2EgTmV1ZSBNZWRpdW0nLCBBcmlhbCwgc2Fucy1zZXJpZjsgZm9udC1zaXplOjE3cHg7IGNvbG9yOiM3MDcwNzA7Ij5NaWNyb3NvZnQgYWNjb3VudDwvdGQ-PC90cj4NCiAgICAgIDx0cj48dGQgaWQ9ImkyIiBzdHlsZT0icGFkZGluZzowOyBmb250LWZhbWlseTonU2Vnb2UgVUkgTGlnaHQnLCAnU2Vnb2UgVUknLCAnSGVsdmV0aWNhIE5ldWUgTWVkaXVtJywgQXJpYWwsIHNhbnMtc2VyaWY7IGZvbnQtc2l6ZTo0MXB4OyBjb2xvcjojMjY3MmVjOyI-UGFzc3dvcmQgcmVzZXQgY29kZTwvdGQ-PC90cj4NCiAgICAgIDx0cj48dGQgaWQ9ImkzIiBzdHlsZT0icGFkZGluZzowOyBwYWRkaW5nLXRvcDoyNXB4OyBmb250LWZhbWlseTonU2Vnb2UgVUknLCBUYWhvbWEsIFZlcmRhbmEsIEFyaWFsLCBzYW5zLXNlcmlmOyBmb250LXNpemU6MTRweDsgY29sb3I6IzJhMmEyYTsiPlBsZWFzZSB1c2UgdGhpcyBjb2RlIHRvIHJlc2V0IHRoZSBwYXNzd29yZCBmb3IgdGhlIE1pY3Jvc29mdCBhY2NvdW50IDxhIGRpcj0ibHRyIiBpZD0iaUFjY291bnQiIGNsYXNzPSJsaW5rIiBzdHlsZT0iY29sb3I6IzI2NzJlYzsgdGV4dC1kZWNvcmF0aW9uOm5vbmUiIGhyZWY9Im1haWx0bzpwcioqKioqQGdtYWlsLmNvbSI-cHIqKioqKkBnbWFpbC5jb208L2E-LjwvdGQ-PC90cj4NCiAgICAgIDx0cj48dGQgaWQ9Imk0IiBzdHlsZT0icGFkZGluZzowOyBwYWRkaW5nLXRvcDoyNXB4OyBmb250LWZhbWlseTonU2Vnb2UgVUknLCBUYWhvbWEsIFZlcmRhbmEsIEFyaWFsLCBzYW5zLXNlcmlmOyBmb250LXNpemU6MTRweDsgY29sb3I6IzJhMmEyYTsiPkhlcmUgaXMgeW91ciBjb2RlOiA8c3BhbiBzdHlsZT0iZm9udC1mYW1pbHk6J1NlZ29lIFVJIEJvbGQnLCAnU2Vnb2UgVUkgU2VtaWJvbGQnLCAnU2Vnb2UgVUknLCAnSGVsdmV0aWNhIE5ldWUgTWVkaXVtJywgQXJpYWwsIHNhbnMtc2VyaWY7IGZvbnQtc2l6ZToxNHB4OyBmb250LXdlaWdodDpib2xkOyBjb2xvcjojMmEyYTJhOyI-NjAyMTkwOTwvc3Bhbj48L3RkPjwvdHI-DQogICAgICA8dHI-PHRkIGlkPSJpNSIgc3R5bGU9InBhZGRpbmc6MDsgcGFkZGluZy10b3A6MjVweDsgZm9udC1mYW1pbHk6J1NlZ29lIFVJJywgVGFob21hLCBWZXJkYW5hLCBBcmlhbCwgc2Fucy1zZXJpZjsgZm9udC1zaXplOjE0cHg7IGNvbG9yOiMyYTJhMmE7Ij4NCiAgICAgICAgICAgICAgICANCiAgICAgICAgICAgICAgICBJZiB5b3UgZG9uJ3QgcmVjb2duaXplIHRoZSBNaWNyb3NvZnQgYWNjb3VudCA8YSBkaXI9Imx0ciIgaWQ9ImlBY2NvdW50IiBjbGFzcz0ibGluayIgc3R5bGU9ImNvbG9yOiMyNjcyZWM7IHRleHQtZGVjb3JhdGlvbjpub25lIiBocmVmPSJtYWlsdG86cHIqKioqKkBnbWFpbC5jb20iPnByKioqKipAZ21haWwuY29tPC9hPiwgeW91IGNhbiA8YSBpZD0iaUxpbmsyIiBjbGFzcz0ibGluayIgc3R5bGU9ImNvbG9yOiMyNjcyZWM7IHRleHQtZGVjb3JhdGlvbjpub25lIiBocmVmPSJodHRwczovL2FjY291bnQubGl2ZS5jb20vZHA_ZnQ9RGNXamg4clZQRWlvVVBoVFM4RXE3N2lZd3ZDUThtd3lod3hyWnYqSjFlOWdpbUtwT1hZdHlVRlBLRHg0OWdaYjQydTF1NypiekFFKlNSTVFqdzdxSU11WjJJTkoyOWRUcGF0QzRIKkVlZW54ZSE1M25uUXRyRGgqYTl4RXp0OUU0Z1Z1M1FXa3dZZWZMVmU5ISpNRWRCRHZqZXNvTjkyTTlIdmplYnVIY3AqbU1xKm5Ec1p2UjBsdlkydWp2RGZ3bGRlWmh5VEtrNnd5VFI0aWpSd1c3ODZ0eFZJcWVXdEohblV5bWJhNUgqbFcqMlcwaWowVWJwTHo4OVhLQ0QzKkxyTUFhTnBWb3hYZjZMdVVlRVJHblFWZGtaOCFqM3R0am1POHpadGRaTksyQTRwdVZFejgyRVprdzV2QjB5WUdPZyUyNCUyNCI-Y2xpY2sgaGVyZTwvYT4gdG8gcmVtb3ZlIHlvdXIgZW1haWwgYWRkcmVzcyBmcm9tIHRoYXQgYWNjb3VudC4NCiAgICAgICAgICAgIDwvdGQ-PC90cj4NCiAgICAgIDx0cj48dGQgaWQ9Imk2IiBzdHlsZT0icGFkZGluZzowOyBwYWRkaW5nLXRvcDoyNXB4OyBmb250LWZhbWlseTonU2Vnb2UgVUknLCBUYWhvbWEsIFZlcmRhbmEsIEFyaWFsLCBzYW5zLXNlcmlmOyBmb250LXNpemU6MTRweDsgY29sb3I6IzJhMmEyYTsiPlRoYW5rcyw8L3RkPjwvdHI-DQogICAgICA8dHI-PHRkIGlkPSJpNyIgc3R5bGU9InBhZGRpbmc6MDsgZm9udC1mYW1pbHk6J1NlZ29lIFVJJywgVGFob21hLCBWZXJkYW5hLCBBcmlhbCwgc2Fucy1zZXJpZjsgZm9udC1zaXplOjE0cHg7IGNvbG9yOiMyYTJhMmE7Ij5UaGUgTWljcm9zb2Z0IGFjY291bnQgdGVhbTwvdGQ-PC90cj4NCjwvdGFibGU-DQo8L2JvZHk-DQo8L2h0bWw-","size":2895},"headers":[{"name":"Content-Type","value":"text/html; charset=windows-1252"},{"name":"Content-Transfer-Encoding","value":"8bit"}],"mimeType":"text/html","partId":"1"}]},"sizeEstimate":6111,"snippet":"Microsoft account Password reset code Please use this code to reset the password for the Microsoft account pr*****@gmail.com. Here is your code: 6021909 If you don\u0026#39;t recognize the Microsoft account","threadId":"157799b6faa6e68a"}` // Your full JSON here
+	messageJSON := `{"historyId":"11034008","id":"15d133f50ae4d1c4","internalDate":"1499266501000","labelIds":["IMPORTANT","CATEGORY_PERSONAL","INBOX"],"payload":{"body":{},"headers":[{"name":"Delivered-To","value":"prince.soamedia@gmail.com"},{"name":"Received","value":"by 10.103.144.87 with SMTP id s84csp952649vsd;        Wed, 5 Jul 2017 07:55:02 -0700 (PDT)"},{"name":"X-Received","value":"by 10.200.52.129 with SMTP id w1mr54713876qtb.77.1499266502831;        Wed, 05 Jul 2017 07:55:02 -0700 (PDT)"},{"name":"ARC-Seal","value":"i=1; a=rsa-sha256; t=1499266502; cv=none;        d=google.com; s=arc-20160816;        b=NhencNgb4bTsKr9VxgGIMQgTcpZlLAQgxZep+kbIyal0eWeqATMTFq6sr1kVBWUTgc         uyW55E6Ijx6AA9UAqxCA5fqV2vUCXy6cIGp5gFSKqCo+Ciilftem3PTuCwEgGFm820Mh         52eyk/4T8EZbEqwqOMlXfpP2IkCrnTwaFkjTmHFwCNAKs3QBSLX/KHONwXD/Y5l2ZUU9         tiNVL+vk/G7OfOqvOygynZE4DszD1glON+j6/T8T0sYwZQBtilW4admYylGb0BjmpPvK         Hm0rUC473Kbjj8v6TE5SfiyBm2nc7G/evaJAfFOXgTwrjZOWh247FuVLNaMxy6pXhSP4         ++5w=="},{"name":"ARC-Message-Signature","value":"i=1; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20160816;        h=to:subject:message-id:date:from:mime-version:dkim-signature         :arc-authentication-results;        bh=bQVI6Nqv/FlhfmSoabeSC2ebzCTd6pVLsSMpaS/cfGQ=;        b=s68fqa1wyAj3TiwTzAp+y8pb4uoP4YTKHQJI7kd75S34sFgSK/I0PZQSN4Fj+UQB2y         jFV9ttIsA9pGXoHAofCN2mDChKHZJ4GmqPSq30Mty0umR2sOtjHdE26w6ZHzDnEIMs+k         hUumEGLjGx5t2PyO6ZuZ+fTHkMED2mA+K+ZFvjQF1VNdUi9dYfi9G95UD9cqG0wYDb77         bvP10oeqavepoVTJO5rjxwrwsp2OMsiGC1ef1D5Bmzj4wfKRzkNeAmcBKXjyNpsT0U4u         NqbHG3sD2yjdQbQM6NGQU4wzDggcUHhYieCSPeVO61SxwmLbOSYEDuA26A+F5wlFk2OO         T5bA=="},{"name":"ARC-Authentication-Results","value":"i=1; mx.google.com;       dkim=pass header.i=@olacabs.com header.b=aBnHl4SC;       spf=pass (google.com: domain of careers@olacabs.com designates 2607:f8b0:400d:c0d::236 as permitted sender) smtp.mailfrom=careers@olacabs.com;       dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=olacabs.com"},{"name":"Return-Path","value":"\u003ccareers@olacabs.com\u003e"},{"name":"Received","value":"from mail-qt0-x236.google.com (mail-qt0-x236.google.com. [2607:f8b0:400d:c0d::236])        by mx.google.com with ESMTPS id e34si5355924qtf.222.2017.07.05.07.55.02        for \u003cprince.soamedia@gmail.com\u003e        (version=TLS1_2 cipher=ECDHE-RSA-AES128-GCM-SHA256 bits=128/128);        Wed, 05 Jul 2017 07:55:02 -0700 (PDT)"},{"name":"Received-SPF","value":"pass (google.com: domain of careers@olacabs.com designates 2607:f8b0:400d:c0d::236 as permitted sender) client-ip=2607:f8b0:400d:c0d::236;"},{"name":"Authentication-Results","value":"mx.google.com;       dkim=pass header.i=@olacabs.com header.b=aBnHl4SC;       spf=pass (google.com: domain of careers@olacabs.com designates 2607:f8b0:400d:c0d::236 as permitted sender) smtp.mailfrom=careers@olacabs.com;       dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=olacabs.com"},{"name":"Received","value":"by mail-qt0-x236.google.com with SMTP id 32so79499231qtv.1        for \u003cprince.soamedia@gmail.com\u003e; Wed, 05 Jul 2017 07:55:02 -0700 (PDT)"},{"name":"DKIM-Signature","value":"v=1; a=rsa-sha256; c=relaxed/relaxed;        d=olacabs.com; s=google;        h=mime-version:from:date:message-id:subject:to;        bh=bQVI6Nqv/FlhfmSoabeSC2ebzCTd6pVLsSMpaS/cfGQ=;        b=aBnHl4SCcMXKUdX1GM9X9mnGIr6RFUubRbZpXDsqRKnSXMZTgx6tgpGyZxrraGAw+l         gwxasQwNmFA7glouZxCn4hbc7TZH1kDtZfihGaFeDDEFP56m3hdwqZthSE9RJSt50YZf         Wujdo0+ufnG9KoQxhR6VzYVyBAgsbtasN+heLoJrlGJOle7V87Dzrse01L/Mzd7okGhw         weRPhnTHFoJgt+Fq4+iQBzXJXK78zokriqqj8VwjkJYTNT5MSbbp+guUvsYVyQ1GREOl         vU8HgAfGR30hYCOmaedqvj5SIV78o9S6EI/lZbais69ekySBUUbfIkfDWfOyG99968d4         5zEg=="},{"name":"X-Google-DKIM-Signature","value":"v=1; a=rsa-sha256; c=relaxed/relaxed;        d=1e100.net; s=20161025;        h=x-gm-message-state:mime-version:from:date:message-id:subject:to;        bh=bQVI6Nqv/FlhfmSoabeSC2ebzCTd6pVLsSMpaS/cfGQ=;        b=HsgJrE0bxclebhzPqJDqqE2jEZmyz18N21psr/9ZSbIwU0NHnailZLNQWm4xa3Jevf         RT9f3HnA+t3GFNYWW6TWbBvopXQcdisxRjOrimMVZiGLfWIlJIlTYnQ/jx27p4+puV86         dIC+MdWpNoSEVZVHdwsdBkiJTwMUeglNDImeCRPbWf6SVyH2VK1AQbO14SoNmJgtP7I3         FWlYfLEI4QcygM1RAf8FJbNgsrg3lznq/CBUMICaIzJ3NwITmQwIl4hnl6yswI97uc2N         Jn0lCTCLgj6WLP1j0qKUMNOUBTTrbL7fm6HKBcqYv3EsH8gL8BMOvGY4Tljie+8W9oni         ZwDA=="},{"name":"X-Gm-Message-State","value":"AIVw111fvg5+xDxFwfDNKX2M3/aYk74TMYWBHSoMPs5P/nEWqQdsrCIi Hc2kiyjRMuKRV44ArDKraVTNioyD6uj6iQQ="},{"name":"X-Received","value":"by 10.237.32.70 with SMTP id 64mr19772614qta.218.1499266502216; Wed, 05 Jul 2017 07:55:02 -0700 (PDT)"},{"name":"MIME-Version","value":"1.0"},{"name":"Received","value":"by 10.12.146.208 with HTTP; Wed, 5 Jul 2017 07:55:01 -0700 (PDT)"},{"name":"From","value":"\"Careers .\" \u003ccareers@olacabs.com\u003e"},{"name":"Date","value":"Wed, 5 Jul 2017 20:25:01 +0530"},{"name":"Message-ID","value":"\u003cCAHd4NbdHUFDpHpVySdFQ_KVOzTZRGwpduRH8n8tnT9Euow_RhQ@mail.gmail.com\u003e"},{"name":"Subject","value":"Thank you from Ola!"},{"name":"To","value":"prince.soamedia@gmail.com"},{"name":"Content-Type","value":"multipart/alternative; boundary=\"94eb2c0c98c849f3090553932fd7\""}],"mimeType":"multipart/alternative","parts":[{"body":{"data":"RGVhciBQcmFkaXAsDQoNClRoYW5rcyBmb3IgeW91ciBpbnRlcmVzdCBpbiBPbGEgYW5kIHRha2luZyB0aW1lIG91dCB0byBhdHRlbmQgdGhlDQp0ZWxlcGhvbmljIGludGVydmlldyB3aXRoIHVzLg0KDQpXZSBjYXJlZnVsbHkgcmV2aWV3ZWQgdGhlIHJlc3VsdHMgb2YgdGhlIHRlbGVwaG9uaWMgaW50ZXJ2aWV3IGFuZCBkZWNpZGVkDQpub3QgdG8gcHJvY2VlZCB3aXRoIHlvdXIgYXBwbGljYXRpb24gYXQgdGhpcyB0aW1lIGZvciB0aGUgY3VycmVudCBvcGVuIHJvbGUuDQoNCkFsdGhvdWdoIHRoaXMgcm9sZSBkaWRuJ3Qgd29yayBvdXQsIHdlIG1heSBjb250YWN0IHlvdSBpZiB3ZSBjb21lIGFjcm9zcw0KYW5vdGhlciBvcGVuaW5nIHRoYXQgd2UgdGhpbmsgY291bGQgaW50ZXJlc3QgeW91IGFuZCBtYXkgYmUgYSBnb29kIG1hdGNoDQpmb3IgeW91ciBza2lsbHMgYW5kIGV4cGVyaWVuY2UuDQoNCldpc2ggeW91IHRoZSB2ZXJ5IGJlc3QgZm9yIHlvdXIgZnV0dXJlIGVuZGVhdm9ycy4NCg0KUmVnYXJkcywNClRlYW0gSFINCk9sYSAoQU5JIFRlY2hub2xvZ2llcyBQdnQuIEx0ZC4pDQo=","size":560},"headers":[{"name":"Content-Type","value":"text/plain; charset=\"UTF-8\""}],"mimeType":"text/plain","partId":"0"},{"body":{"data":"PGRpdiBkaXI9Imx0ciI-PGRpdiBjbGFzcz0iZ21haWxfcXVvdGUiPjxkaXYgZGlyPSJsdHIiPjxkaXYgY2xhc3M9ImdtYWlsX3F1b3RlIj48ZGl2IGRpcj0ibHRyIj48ZGl2IGNsYXNzPSJnbWFpbF9xdW90ZSI-PGRpdiBkaXI9Imx0ciI-PGRpdiBjbGFzcz0iZ21haWxfcXVvdGUiPjxkaXYgZGlyPSJsdHIiPjxkaXYgY2xhc3M9ImdtYWlsX3F1b3RlIj48ZGl2IGRpcj0ibHRyIj48ZGl2IGNsYXNzPSJnbWFpbF9xdW90ZSI-PGRpdiBkaXI9Imx0ciI-PGRpdiBjbGFzcz0iZ21haWxfcXVvdGUiPjxkaXYgZGlyPSJsdHIiPjxkaXYgY2xhc3M9ImdtYWlsX3F1b3RlIj48ZGl2IGRpcj0ibHRyIj48ZGl2IGNsYXNzPSJnbWFpbF9xdW90ZSI-PGRpdiBkaXI9Imx0ciI-PGRpdiBjbGFzcz0iZ21haWxfcXVvdGUiPjxkaXYgZGlyPSJsdHIiPjxkaXYgY2xhc3M9ImdtYWlsX3F1b3RlIj48ZGl2IGRpcj0ibHRyIj48ZGl2IGNsYXNzPSJnbWFpbF9xdW90ZSI-PGRpdiBkaXI9Imx0ciI-PHNwYW4gc3R5bGU9ImZvbnQtc2l6ZToxMi44cHgiPkRlYXIgUHJhZGlwLDwvc3Bhbj48YnIgc3R5bGU9ImZvbnQtc2l6ZToxMi44cHgiPjxiciBzdHlsZT0iZm9udC1zaXplOjEyLjhweCI-PGRpdiBzdHlsZT0iZm9udC1zaXplOjEyLjhweCI-VGhhbmtzIGZvciB5b3VyIGludGVyZXN0IGluIE9sYSBhbmQgdGFraW5nIHRpbWUgb3V0IHRvIGF0dGVuZCB0aGUgdGVsZXBob25pYyBpbnRlcnZpZXcgd2l0aCB1cy4gwqA8YnI-PC9kaXY-PGRpdiBzdHlsZT0iZm9udC1zaXplOjEyLjhweCI-PGJyPjwvZGl2PjxkaXYgc3R5bGU9ImZvbnQtc2l6ZToxMi44cHgiPldlIGNhcmVmdWxseSByZXZpZXdlZCB0aGUgcmVzdWx0cyBvZiB0aGUgdGVsZXBob25pYyBpbnRlcnZpZXcgYW5kIGRlY2lkZWQgbm90IHRvIHByb2NlZWQgd2l0aCB5b3VyIGFwcGxpY2F0aW9uIGF0IHRoaXMgdGltZSBmb3IgdGhlIGN1cnJlbnQgb3BlbiByb2xlLjxicj48YnI-QWx0aG91Z2ggdGhpcyByb2xlIGRpZG4mIzM5O3Qgd29yayBvdXQsIHdlIG1heSBjb250YWN0IHlvdSBpZiB3ZSBjb21lIGFjcm9zcyBhbm90aGVyIG9wZW5pbmcgdGhhdCB3ZSB0aGluayBjb3VsZCBpbnRlcmVzdCB5b3UgYW5kIG1heSBiZSBhIGdvb2QgbWF0Y2ggZm9yIHlvdXIgc2tpbGxzIGFuZCBleHBlcmllbmNlLsKgPC9kaXY-PGRpdiBzdHlsZT0iZm9udC1zaXplOjEyLjhweCI-PGJyPjwvZGl2PjxkaXYgc3R5bGU9ImZvbnQtc2l6ZToxMi44cHgiPldpc2ggeW91IHRoZSB2ZXJ5IGJlc3QgZm9yIHlvdXIgZnV0dXJlIGVuZGVhdm9ycy48YnI-PGJyPjwvZGl2PjxkaXYgc3R5bGU9ImZvbnQtc2l6ZToxMi44cHgiPlJlZ2FyZHMsPC9kaXY-PGRpdiBzdHlsZT0iZm9udC1zaXplOjEyLjhweCI-PGZvbnQgY29sb3I9IiM2NjY2NjYiPlRlYW0gSFI8L2ZvbnQ-PC9kaXY-PGRpdiBzdHlsZT0iZm9udC1zaXplOjEyLjhweCI-PGZvbnQgY29sb3I9IiM2NjY2NjYiPk9sYSAoQU5JIFRlY2hub2xvZ2llcyBQdnQuIEx0ZC4pPC9mb250PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2PjwvZGl2Pg0KPC9kaXY-DQo=","size":1658},"headers":[{"name":"Content-Type","value":"text/html; charset=\"UTF-8\""},{"name":"Content-Transfer-Encoding","value":"quoted-printable"}],"mimeType":"text/html","partId":"1"}]},"sizeEstimate":7265,"snippet":"Dear Pradip, Thanks for your interest in Ola and taking time out to attend the telephonic interview with us. We carefully reviewed the results of the telephonic interview and decided not to proceed","threadId":"15d133f50ae4d1c4"}` // Your full JSON here
 
 	// Parse the message
 	var gmailMsg gmail.Message
@@ -82,19 +25,8 @@ func main() {
 		panic("failed to parse message: " + err.Error())
 	}
 
-	// Create raw message
-	raw, err := createRawMessage(&gmailMsg)
-	if err != nil {
-		panic("failed to create raw message: " + err.Error())
-	}
-
-	// Create new message with raw content
-	message := &gmail.Message{
-		Raw: raw,
-	}
-
 	// Insert the message
-	if err := gmailClient.InsertMessage(message); err != nil {
+	if err := gmailClient.InsertMessage(&gmailMsg); err != nil {
 		panic("failed to insert message: " + err.Error())
 	}
 
