@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -45,7 +46,7 @@ type CronJobListingDB struct {
 	On       string    `json:"on"`
 	LastRun  time.Time `json:"last_run"`
 
-	InputData map[string]interface{} `json:"input_data"`
+	InputData map[string]interface{} `json:"input_data" gorm:"type:jsonb"`
 
 	StorxToken string `json:"storx_token"`
 
@@ -65,6 +66,23 @@ type CronJobListingDB struct {
 
 	// Tasks associated with the cron job
 	Tasks []TaskListingDB `gorm:"foreignKey:CronJobID"`
+}
+
+// Add a Scanner interface implementation for InputData if needed
+func (c *CronJobListingDB) ScanJSON(value interface{}) error {
+	bytes, ok := value.([]byte)
+	if !ok {
+		return errors.New("failed to unmarshal JSONB value")
+	}
+
+	var temp map[string]interface{}
+	err := json.Unmarshal(bytes, &temp)
+	if err != nil {
+		return err
+	}
+
+	c.InputData = temp
+	return nil
 }
 
 func MastTokenForCronJobListingDB(cronJobs []CronJobListingDB) []CronJobListingDB {
