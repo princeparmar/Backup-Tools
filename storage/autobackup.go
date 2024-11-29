@@ -33,6 +33,29 @@ const (
 	MaxRetryCount = 3
 )
 
+// Add this type to handle the InputData field
+type JSONMap map[string]interface{}
+
+// Add Scanner implementation for JSONMap
+func (m *JSONMap) Scan(value interface{}) error {
+	if value == nil {
+		*m = nil
+		return nil
+	}
+
+	var data []byte
+	switch v := value.(type) {
+	case []byte:
+		data = v
+	case string:
+		data = []byte(v)
+	default:
+		return fmt.Errorf("unsupported type for JSONMap: %T", value)
+	}
+
+	return json.Unmarshal(data, m)
+}
+
 // Models for automated storage
 type CronJobListingDB struct {
 	gorm.Model
@@ -46,7 +69,8 @@ type CronJobListingDB struct {
 	On       string    `json:"on"`
 	LastRun  time.Time `json:"last_run"`
 
-	InputData map[string]interface{} `json:"input_data" gorm:"type:jsonb"`
+	// Change the type from map[string]interface{} to JSONMap
+	InputData JSONMap `json:"input_data" gorm:"type:jsonb"`
 
 	StorxToken string `json:"storx_token"`
 
