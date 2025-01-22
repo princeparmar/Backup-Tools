@@ -112,11 +112,21 @@ func (client *GmailClient) GetUserThreads(nextPageToken string) (*ThreadsRespons
 
 // InsertMessage inserts a message into Gmail
 func (client *GmailClient) InsertMessage(message *gmail.Message) error {
+	_, err := client.Users.Labels.Get("me", "RESTORED_STORX").Do()
+	if err != nil {
+		_, err = client.Users.Labels.Create("me", &gmail.Label{
+			Name: "RESTORED_STORX",
+		}).Do()
+		if err != nil {
+			return err
+		}
+	}
 
 	raw, err := createRawMessage(message)
 	if err != nil {
 		return err
 	}
+
 	msg := &gmail.Message{
 		Raw:      raw,
 		LabelIds: append(message.LabelIds, "RESTORED_STORX"),
