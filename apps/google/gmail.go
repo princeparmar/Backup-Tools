@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/StorX2-0/Backup-Tools/utils"
@@ -411,52 +410,77 @@ func (client *GmailClient) GetUserMessagesUsingWorkers(nextPageToken string, wor
 func createRawMessage(gmailMsg *gmail.Message) (string, error) {
 	var buf bytes.Buffer
 
+	var boundary string
+
 	// Write headers
 	for _, header := range gmailMsg.Payload.Headers {
 		// Skip duplicate headers
-		if strings.ToLower(header.Name) == "received" ||
-			strings.ToLower(header.Name) == "authentication-results" ||
-			strings.ToLower(header.Name) == "received-spf" ||
-			strings.ToLower(header.Name) == "x-received" {
-			continue
+		buf.WriteString(fmt.Sprintf("%s: %s\r\n", header.Name, header.Value))
+
+		if header.Name == "Content-Type" && strings.Contains(header.Value, "boundary=") {
+			boundary = "--" + strings.TrimSpace(strings.Split(header.Value, "boundary=")[1]) + "\n"
 		}
-		fmt.Fprintf(&buf, "%s: %s\r\n", header.Name, header.Value)
 	}
 
-	// Add boundary for multipart messages
-	boundary := "=-" + generateBoundary()
-	fmt.Fprintf(&buf, "Content-Type: multipart/alternative; boundary=\"%s\"\r\n", boundary)
 	buf.WriteString("\r\n")
 
-	// Write parts
 	for _, part := range gmailMsg.Payload.Parts {
-		fmt.Fprintf(&buf, "--%s\r\n", boundary)
+		buf.WriteString(boundary)
 
-		// Write part headers
-		for _, header := range part.Headers {
-			fmt.Fprintf(&buf, "%s: %s\r\n", header.Name, header.Value)
-		}
-		buf.WriteString("\r\n")
-
-		// Decode and write part body
-		if part.Body != nil && part.Body.Data != "" {
-			data, err := base64.URLEncoding.DecodeString(part.Body.Data)
-			if err != nil {
-				return "", fmt.Errorf("failed to decode part body: %v", err)
-			}
-			buf.Write(data)
-			buf.WriteString("\r\n")
+		err := createMessagePart(buf, part)
+		if err != nil {
+			return "", err
 		}
 	}
 
-	// Close multipart boundary
-	fmt.Fprintf(&buf, "--%s--\r\n", boundary)
+	buf.WriteString(boundary)
 
 	// Base64 encode the entire message
 	raw := base64.URLEncoding.EncodeToString(buf.Bytes())
 	return raw, nil
 }
 
-func generateBoundary() string {
-	return fmt.Sprintf("lJAfp/%d", time.Now().UnixNano())
+func createMessagePart(buf bytes.Buffer, part *gmail.MessagePart) error {
+
+	var boundary string
+	var skipUrlDecoding bool
+	for _, header := range part.Headers {
+		buf.WriteString(fmt.Sprintf("%s: %s\r\n", header.Name, header.Value))
+
+		if header.Name == "Content-Type" && strings.Contains(header.Value, "boundary=") {
+			boundary = "--" + strings.TrimSpace(strings.Split(header.Value, "boundary=")[1]) + "\n"
+		}
+
+		if header.Name == "Content-Transfer-Encoding" && header.Value == "base64" {
+			skipUrlDecoding = true
+		}
+	}
+
+	buf.WriteString("\r\n")
+
+	if part.Body != nil && part.Body.Data != "" {
+		if skipUrlDecoding {
+			buf.WriteString(part.Body.Data)
+		} else {
+			data, err := base64.URLEncoding.DecodeString(part.Body.Data)
+			if err != nil {
+				return err
+			}
+			buf.Write(data)
+		}
+	}
+
+	buf.WriteString("\r\n")
+
+	for _, subpart := range part.Parts {
+		buf.WriteString(boundary)
+		err := createMessagePart(buf, subpart)
+		if err != nil {
+			return err
+		}
+	}
+
+	buf.WriteString(boundary)
+
+	return nil
 }
