@@ -118,7 +118,8 @@ func (client *GmailClient) InsertMessage(message *gmail.Message) error {
 		return err
 	}
 	msg := &gmail.Message{
-		Raw: raw,
+		Raw:      raw,
+		LabelIds: append(message.LabelIds, "RESTORED_STORX"),
 	}
 
 	_, err = client.Users.Messages.Import("me", msg).Do()
