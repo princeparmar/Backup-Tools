@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -980,6 +981,7 @@ func handleGmailDownloadAndInsert(c echo.Context) error {
 
 			// Insert message into Gmail
 			if err := gmailClient.InsertMessage(&gmailMsg); err != nil {
+				fmt.Println(err)
 				failedIDs.Add(key)
 			} else {
 				processedIDs.Add(key)
