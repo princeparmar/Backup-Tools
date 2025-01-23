@@ -414,6 +414,8 @@ func createRawMessage(gmailMsg *gmail.Message) (string, error) {
 
 	// Write headers
 	for _, header := range gmailMsg.Payload.Headers {
+		fmt.Println("inserting header 1", header.Name, header.Value)
+
 		// Skip duplicate headers
 		rawMessage += fmt.Sprintf("%s: %s\n", header.Name, header.Value)
 
@@ -424,6 +426,7 @@ func createRawMessage(gmailMsg *gmail.Message) (string, error) {
 
 	for _, part := range gmailMsg.Payload.Parts {
 		rawMessage += boundary
+		fmt.Println("inserting boundary", boundary)
 
 		err := createMessagePart(&rawMessage, part)
 		if err != nil {
@@ -443,6 +446,7 @@ func createMessagePart(rawMessage *string, part *gmail.MessagePart) error {
 	var boundary string
 	var skipUrlDecoding bool
 	for _, header := range part.Headers {
+		fmt.Println("inserting header 2", header.Name, header.Value)
 		*rawMessage += fmt.Sprintf("%s: %s\n", header.Name, header.Value)
 
 		if header.Name == "Content-Type" && strings.Contains(header.Value, "boundary=") {
@@ -455,6 +459,7 @@ func createMessagePart(rawMessage *string, part *gmail.MessagePart) error {
 	}
 
 	if part.Body != nil && part.Body.Data != "" {
+		fmt.Println("inserting body", part.Body.Data)
 		if skipUrlDecoding {
 			*rawMessage += part.Body.Data
 		} else {
@@ -469,6 +474,7 @@ func createMessagePart(rawMessage *string, part *gmail.MessagePart) error {
 	*rawMessage += "\n"
 
 	for _, subpart := range part.Parts {
+		fmt.Println("inserting subpart", subpart.Headers)
 		*rawMessage += boundary
 		err := createMessagePart(rawMessage, subpart)
 		if err != nil {
@@ -476,6 +482,7 @@ func createMessagePart(rawMessage *string, part *gmail.MessagePart) error {
 		}
 	}
 
+	fmt.Println("inserting boundary 2", boundary)
 	*rawMessage += boundary + "\n"
 
 	return nil
