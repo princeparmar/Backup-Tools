@@ -2,6 +2,7 @@ package utils
 
 import (
 	"archive/zip"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
@@ -204,4 +205,12 @@ func MaskString(s string) string {
 		return s
 	}
 	return "****************************************************" + s[len(s)-4:]
+}
+
+func Base64Decode(s string) (string, error) {
+	decoded, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return "", err
+	}
+	return string(decoded), nil
 }

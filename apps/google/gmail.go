@@ -252,7 +252,7 @@ func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
 			for _, subpart := range part.Parts {
 				if subpart.MimeType == "text/plain" {
 					// Body data is in Base64 format.
-					data, err := base64.StdEncoding.DecodeString(subpart.Body.Data)
+					data, err := base64.URLEncoding.DecodeString(subpart.Body.Data)
 					if err != nil {
 						GmailMSG.Body = subpart.Body.Data
 					} else {
@@ -269,7 +269,7 @@ func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
 						if subsubpart.MimeType == "text/plain" {
 							if strings.HasPrefix(subpart.Body.Data, "Content-Transfer-Encoding: base64") {
 								// Body data is in Base64 format.
-								data, err := base64.StdEncoding.DecodeString(subpart.Body.Data[28:])
+								data, err := base64.URLEncoding.DecodeString(subpart.Body.Data[28:])
 								if err != nil {
 									if strings.Contains(err.Error(), "illegal base64 data at input byte 383") {
 										slog.Warn("Unable to decode message body: ", "error", err, "WARNING", "using the raw body")
