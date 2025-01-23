@@ -1,7 +1,6 @@
 package google
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -409,14 +408,14 @@ func (client *GmailClient) GetUserMessagesUsingWorkers(nextPageToken string, wor
 }
 
 func createRawMessage(gmailMsg *gmail.Message) (string, error) {
-	buf := &bytes.Buffer{}
+	var rawMessage string
 
 	var boundary string
 
 	// Write headers
 	for _, header := range gmailMsg.Payload.Headers {
 		// Skip duplicate headers
-		buf.WriteString(fmt.Sprintf("%s: %s\r\n", header.Name, header.Value))
+		rawMessage += fmt.Sprintf("%s: %s\r\n", header.Name, header.Value)
 
 		if header.Name == "Content-Type" && strings.Contains(header.Value, "boundary=") {
 			boundary = "--" + strings.TrimSpace(strings.Split(header.Value, "boundary=")[1]) + "\r\n"
@@ -424,9 +423,9 @@ func createRawMessage(gmailMsg *gmail.Message) (string, error) {
 	}
 
 	for _, part := range gmailMsg.Payload.Parts {
-		buf.WriteString(boundary)
+		rawMessage += boundary
 
-		err := createMessagePart(buf, part)
+		err := createMessagePart(&rawMessage, part)
 		if err != nil {
 			return "", err
 		}
@@ -435,16 +434,16 @@ func createRawMessage(gmailMsg *gmail.Message) (string, error) {
 	// buf.WriteString(boundary)
 
 	// Base64 encode the entire message
-	raw := base64.URLEncoding.EncodeToString(buf.Bytes())
+	raw := base64.URLEncoding.EncodeToString([]byte(rawMessage))
 	return raw, nil
 }
 
-func createMessagePart(buf *bytes.Buffer, part *gmail.MessagePart) error {
+func createMessagePart(rawMessage *string, part *gmail.MessagePart) error {
 
 	var boundary string
 	var skipUrlDecoding bool
 	for _, header := range part.Headers {
-		buf.WriteString(fmt.Sprintf("%s: %s\r\n", header.Name, header.Value))
+		*rawMessage += fmt.Sprintf("%s: %s\r\n", header.Name, header.Value)
 
 		if header.Name == "Content-Type" && strings.Contains(header.Value, "boundary=") {
 			boundary = "--" + strings.TrimSpace(strings.Split(header.Value, "boundary=")[1]) + "\r\n"
@@ -457,27 +456,27 @@ func createMessagePart(buf *bytes.Buffer, part *gmail.MessagePart) error {
 
 	if part.Body != nil && part.Body.Data != "" {
 		if skipUrlDecoding {
-			buf.WriteString(part.Body.Data)
+			*rawMessage += part.Body.Data
 		} else {
 			data, err := base64.URLEncoding.DecodeString(part.Body.Data)
 			if err != nil {
 				return err
 			}
-			buf.Write(data)
+			*rawMessage += string(data)
 		}
 	}
 
-	buf.WriteString("\r\n")
+	*rawMessage += "\r\n"
 
 	for _, subpart := range part.Parts {
-		buf.WriteString(boundary)
-		err := createMessagePart(buf, subpart)
+		*rawMessage += boundary
+		err := createMessagePart(rawMessage, subpart)
 		if err != nil {
 			return err
 		}
 	}
 
-	buf.WriteString(boundary + "\r\n")
+	*rawMessage += boundary + "\r\n"
 
 	return nil
 }
