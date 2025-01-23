@@ -3,6 +3,7 @@ package server
 import (
 	"cmp"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -927,6 +928,13 @@ func handleGmailDownloadAndInsert(c echo.Context) error {
 
 	for i := range allIDs {
 		allIDs[i] = strings.TrimSpace(allIDs[i])
+		decodedID, err := base64.URLEncoding.DecodeString(allIDs[i])
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"error": "invalid base64 format",
+			})
+		}
+		allIDs[i] = string(decodedID)
 	}
 
 	// Validate request
