@@ -415,10 +415,10 @@ func createRawMessage(gmailMsg *gmail.Message) (string, error) {
 	// Write headers
 	for _, header := range gmailMsg.Payload.Headers {
 		// Skip duplicate headers
-		rawMessage += fmt.Sprintf("%s: %s\r\n", header.Name, header.Value)
+		rawMessage += fmt.Sprintf("%s: %s\n", header.Name, header.Value)
 
 		if header.Name == "Content-Type" && strings.Contains(header.Value, "boundary=") {
-			boundary = "--" + strings.TrimSpace(strings.Split(header.Value, "boundary=")[1]) + "\r\n"
+			boundary = "--" + strings.TrimSpace(strings.Split(header.Value, "boundary=")[1]) + "\n"
 		}
 	}
 
@@ -443,10 +443,10 @@ func createMessagePart(rawMessage *string, part *gmail.MessagePart) error {
 	var boundary string
 	var skipUrlDecoding bool
 	for _, header := range part.Headers {
-		*rawMessage += fmt.Sprintf("%s: %s\r\n", header.Name, header.Value)
+		*rawMessage += fmt.Sprintf("%s: %s\n", header.Name, header.Value)
 
 		if header.Name == "Content-Type" && strings.Contains(header.Value, "boundary=") {
-			boundary = "--" + strings.TrimSpace(strings.Split(header.Value, "boundary=")[1]) + "\r\n"
+			boundary = "--" + strings.TrimSpace(strings.Split(header.Value, "boundary=")[1]) + "\n"
 		}
 
 		if header.Name == "Content-Transfer-Encoding" && header.Value == "base64" {
@@ -466,7 +466,7 @@ func createMessagePart(rawMessage *string, part *gmail.MessagePart) error {
 		}
 	}
 
-	*rawMessage += "\r\n"
+	*rawMessage += "\n"
 
 	for _, subpart := range part.Parts {
 		*rawMessage += boundary
@@ -476,7 +476,7 @@ func createMessagePart(rawMessage *string, part *gmail.MessagePart) error {
 		}
 	}
 
-	*rawMessage += boundary + "\r\n"
+	*rawMessage += boundary + "\n"
 
 	return nil
 }
