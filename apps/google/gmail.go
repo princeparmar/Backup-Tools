@@ -409,7 +409,7 @@ func (client *GmailClient) GetUserMessagesUsingWorkers(nextPageToken string, wor
 }
 
 func createRawMessage(gmailMsg *gmail.Message) (string, error) {
-	var buf bytes.Buffer
+	buf := &bytes.Buffer{}
 
 	var boundary string
 
@@ -419,11 +419,9 @@ func createRawMessage(gmailMsg *gmail.Message) (string, error) {
 		buf.WriteString(fmt.Sprintf("%s: %s\r\n", header.Name, header.Value))
 
 		if header.Name == "Content-Type" && strings.Contains(header.Value, "boundary=") {
-			boundary = "--" + strings.TrimSpace(strings.Split(header.Value, "boundary=")[1]) + "\n"
+			boundary = "--" + strings.TrimSpace(strings.Split(header.Value, "boundary=")[1]) + "\r\n"
 		}
 	}
-
-	buf.WriteString("\r\n")
 
 	for _, part := range gmailMsg.Payload.Parts {
 		buf.WriteString(boundary)
@@ -441,7 +439,7 @@ func createRawMessage(gmailMsg *gmail.Message) (string, error) {
 	return raw, nil
 }
 
-func createMessagePart(buf bytes.Buffer, part *gmail.MessagePart) error {
+func createMessagePart(buf *bytes.Buffer, part *gmail.MessagePart) error {
 
 	var boundary string
 	var skipUrlDecoding bool
@@ -449,15 +447,13 @@ func createMessagePart(buf bytes.Buffer, part *gmail.MessagePart) error {
 		buf.WriteString(fmt.Sprintf("%s: %s\r\n", header.Name, header.Value))
 
 		if header.Name == "Content-Type" && strings.Contains(header.Value, "boundary=") {
-			boundary = "--" + strings.TrimSpace(strings.Split(header.Value, "boundary=")[1]) + "\n"
+			boundary = "--" + strings.TrimSpace(strings.Split(header.Value, "boundary=")[1]) + "\r\n"
 		}
 
 		if header.Name == "Content-Transfer-Encoding" && header.Value == "base64" {
 			skipUrlDecoding = true
 		}
 	}
-
-	buf.WriteString("\r\n")
 
 	if part.Body != nil && part.Body.Data != "" {
 		if skipUrlDecoding {
@@ -470,8 +466,6 @@ func createMessagePart(buf bytes.Buffer, part *gmail.MessagePart) error {
 			buf.Write(data)
 		}
 	}
-
-	buf.WriteString("\r\n")
 
 	for _, subpart := range part.Parts {
 		buf.WriteString(boundary)
