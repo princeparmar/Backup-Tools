@@ -418,9 +418,12 @@ func createRawMessage(gmailMsg *gmail.Message) (string, error) {
 		rawMessage += fmt.Sprintf("%s: %s\n", header.Name, header.Value)
 
 		if header.Name == "Content-Type" && strings.Contains(header.Value, "boundary=") {
-			boundary = "--" + strings.TrimSpace(strings.Split(header.Value, "boundary=")[1]) + "\n"
+			boundary = "--" +
+				strings.Trim(strings.TrimSpace(strings.Split(header.Value, "boundary=")[1]), "\"") +
+				"\n"
 		}
 	}
+	rawMessage += "\n"
 
 	for _, part := range gmailMsg.Payload.Parts {
 		rawMessage += boundary
@@ -448,15 +451,17 @@ func createMessagePart(rawMessage *string, part *gmail.MessagePart) error {
 		*rawMessage += fmt.Sprintf("%s: %s\n", header.Name, header.Value)
 
 		if header.Name == "Content-Type" && strings.Contains(header.Value, "boundary=") {
-			boundary = "--" + strings.TrimSpace(strings.Split(header.Value, "boundary=")[1])
-			boundary = strings.ReplaceAll(boundary, "\"", "")
-			boundary += "\n"
+			boundary = "--" +
+				strings.Trim(strings.TrimSpace(strings.Split(header.Value, "boundary=")[1]), "\"") +
+				"\n"
 		}
 
 		if header.Name == "Content-Transfer-Encoding" && header.Value == "base64" {
 			skipUrlDecoding = true
 		}
 	}
+
+	*rawMessage += "\n"
 
 	if part.Body != nil && part.Body.Data != "" {
 		if skipUrlDecoding {
