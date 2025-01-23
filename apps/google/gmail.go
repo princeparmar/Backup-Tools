@@ -457,13 +457,14 @@ func createMessagePart(buf *bytes.Buffer, part *gmail.MessagePart) error {
 
 	if part.Body != nil && part.Body.Data != "" {
 		if skipUrlDecoding {
-			buf.WriteString(part.Body.Data)
+			buf.WriteString(part.Body.Data + "\r\n")
 		} else {
 			data, err := base64.URLEncoding.DecodeString(part.Body.Data)
 			if err != nil {
 				return err
 			}
 			buf.Write(data)
+			buf.WriteString("\r\n")
 		}
 	}
 
@@ -475,7 +476,7 @@ func createMessagePart(buf *bytes.Buffer, part *gmail.MessagePart) error {
 		}
 	}
 
-	buf.WriteString(boundary)
+	buf.WriteString(boundary + "\r\n")
 
 	return nil
 }
