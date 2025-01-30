@@ -425,6 +425,17 @@ func createRawMessage(gmailMsg *gmail.Message) (string, error) {
 	}
 	rawMessage += "\n"
 
+	if gmailMsg.Payload.Body != nil && gmailMsg.Payload.Body.Data != "" {
+		// decode the body
+		data, err := base64.URLEncoding.DecodeString(gmailMsg.Payload.Body.Data)
+		if err != nil {
+			return "", err
+		}
+		rawMessage += "\n"
+		rawMessage += string(data)
+		rawMessage += "\n"
+	}
+
 	for _, part := range gmailMsg.Payload.Parts {
 		rawMessage += boundary
 
@@ -466,7 +477,7 @@ func createMessagePart(rawMessage *string, part *gmail.MessagePart) error {
 		if skipUrlDecoding {
 			*rawMessage += part.Body.Data
 		} else {
-			data, err := base64.URLEncoding.DecodeString(part.Body.Data)
+			data, err := base64.StdEncoding.DecodeString(part.Body.Data)
 			if err != nil {
 				return err
 			}
