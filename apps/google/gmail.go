@@ -1,11 +1,13 @@
 package google
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
 	"log"
 	"log/slog"
+	"mime/quotedprintable"
 	"strings"
 	"sync"
 
@@ -410,42 +412,10 @@ func (client *GmailClient) GetUserMessagesUsingWorkers(nextPageToken string, wor
 func createRawMessage(gmailMsg *gmail.Message) (string, error) {
 	var rawMessage string
 
-	var boundary string
-
-	// Write headers
-	for _, header := range gmailMsg.Payload.Headers {
-		// Skip duplicate headers
-		rawMessage += fmt.Sprintf("%s: %s\n", header.Name, header.Value)
-
-		if header.Name == "Content-Type" && strings.Contains(header.Value, "boundary=") {
-			boundary = "--" +
-				strings.Trim(strings.TrimSpace(strings.Split(header.Value, "boundary=")[1]), "\"") +
-				"\n"
-		}
+	err := createMessagePart(&rawMessage, gmailMsg.Payload)
+	if err != nil {
+		return "", err
 	}
-	rawMessage += "\n"
-
-	if gmailMsg.Payload.Body != nil && gmailMsg.Payload.Body.Data != "" {
-		// decode the body
-		data, err := base64.URLEncoding.DecodeString(gmailMsg.Payload.Body.Data)
-		if err != nil {
-			return "", err
-		}
-		rawMessage += "\n"
-		rawMessage += string(data)
-		rawMessage += "\n"
-	}
-
-	for _, part := range gmailMsg.Payload.Parts {
-		rawMessage += boundary
-
-		err := createMessagePart(&rawMessage, part)
-		if err != nil {
-			return "", err
-		}
-	}
-
-	// buf.WriteString(boundary)
 
 	// Base64 encode the entire message
 
@@ -456,7 +426,7 @@ func createRawMessage(gmailMsg *gmail.Message) (string, error) {
 func createMessagePart(rawMessage *string, part *gmail.MessagePart) error {
 
 	var boundary string
-	var skipUrlDecoding bool
+	var contentTransferEncoding string
 	for _, header := range part.Headers {
 		*rawMessage += fmt.Sprintf("%s: %s\n", header.Name, header.Value)
 
@@ -466,21 +436,42 @@ func createMessagePart(rawMessage *string, part *gmail.MessagePart) error {
 				"\n"
 		}
 
-		if header.Name == "Content-Transfer-Encoding" && header.Value == "base64" {
-			skipUrlDecoding = true
+		if header.Name == "Content-Transfer-Encoding" {
+			contentTransferEncoding = header.Value
 		}
 	}
 
 	*rawMessage += "\n"
 
 	if part.Body != nil && part.Body.Data != "" {
-		if skipUrlDecoding {
+		if contentTransferEncoding == "base64" {
 			*rawMessage += part.Body.Data
+		} else if contentTransferEncoding == "quoted-printable" {
+			data, err := base64.StdEncoding.DecodeString(part.Body.Data)
+			if err != nil {
+				return err
+			}
+
+			var buf bytes.Buffer
+			writer := quotedprintable.NewWriter(&buf)
+
+			_, err = writer.Write(data)
+			if err != nil {
+				return err
+			}
+
+			err = writer.Close()
+			if err != nil {
+				return err
+			}
+
+			*rawMessage += buf.String()
 		} else {
 			data, err := base64.StdEncoding.DecodeString(part.Body.Data)
 			if err != nil {
 				return err
 			}
+
 			*rawMessage += string(data)
 		}
 	}
