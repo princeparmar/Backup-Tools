@@ -447,7 +447,7 @@ func createMessagePart(rawMessage *string, part *gmail.MessagePart) error {
 		if contentTransferEncoding == "base64" {
 			*rawMessage += part.Body.Data
 		} else if contentTransferEncoding == "quoted-printable" {
-			data, err := base64.StdEncoding.DecodeString(part.Body.Data)
+			data, err := base64.URLEncoding.DecodeString(part.Body.Data)
 			if err != nil {
 				return err
 			}
@@ -467,7 +467,7 @@ func createMessagePart(rawMessage *string, part *gmail.MessagePart) error {
 
 			*rawMessage += buf.String()
 		} else {
-			data, err := base64.StdEncoding.DecodeString(part.Body.Data)
+			data, err := base64.URLEncoding.DecodeString(part.Body.Data)
 			if err != nil {
 				return err
 			}
