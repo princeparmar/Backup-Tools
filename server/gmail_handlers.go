@@ -635,6 +635,12 @@ func handleListGmailMessagesToSatellite(c echo.Context) error {
 		})
 	}
 
+	if userDetails.Email == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "user email not found, please check access handling",
+		})
+	}
+
 	g, ctx := errgroup.WithContext(c.Request().Context())
 	g.SetLimit(10)
 
