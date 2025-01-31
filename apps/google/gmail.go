@@ -412,7 +412,7 @@ func (client *GmailClient) GetUserMessagesUsingWorkers(nextPageToken string, wor
 func createRawMessage(gmailMsg *gmail.Message) (string, error) {
 	var rawMessage string
 
-	err := createMessagePart(&rawMessage, gmailMsg.Payload)
+	err := createMessagePart(&rawMessage, gmailMsg.Payload, true)
 	if err != nil {
 		return "", err
 	}
@@ -423,7 +423,7 @@ func createRawMessage(gmailMsg *gmail.Message) (string, error) {
 	return raw, nil
 }
 
-func createMessagePart(rawMessage *string, part *gmail.MessagePart) error {
+func createMessagePart(rawMessage *string, part *gmail.MessagePart, skipEndBoundary bool) error {
 
 	var boundary string
 	var contentTransferEncoding string
@@ -480,13 +480,15 @@ func createMessagePart(rawMessage *string, part *gmail.MessagePart) error {
 
 	for _, subpart := range part.Parts {
 		*rawMessage += boundary
-		err := createMessagePart(rawMessage, subpart)
+		err := createMessagePart(rawMessage, subpart, false)
 		if err != nil {
 			return err
 		}
 	}
 
-	*rawMessage += boundary + "\n"
+	if !skipEndBoundary {
+		*rawMessage += boundary + "\n"
+	}
 
 	return nil
 }
