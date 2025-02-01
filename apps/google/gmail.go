@@ -202,7 +202,33 @@ func (client *GmailClient) GetMessageDirect(msgID string) (*gmail.Message, error
 	if err != nil {
 		return nil, err
 	}
+
+	err = client.updateAttachment(msgID, msg.Payload)
+	if err != nil {
+		return nil, err
+	}
+
 	return msg, nil
+}
+
+func (client *GmailClient) updateAttachment(msgID string, part *gmail.MessagePart) error {
+
+	if part.Body != nil && part.Body.AttachmentId != "" {
+		p, err := client.GetAttachment(msgID, part.Body.AttachmentId)
+		if err != nil {
+			return err
+		}
+		part.Body = p
+	}
+
+	for _, p := range part.Parts {
+		err := client.updateAttachment(msgID, p)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
@@ -310,6 +336,15 @@ func (client *GmailClient) GetThread(threadID string) (*gmail.Thread, error) {
 	return client.Users.Threads.Get("me", threadID).Format("full").Do()
 }
 
+func (client *GmailClient) GetAttachment(msgID, attachmentID string) (*gmail.MessagePartBody, error) {
+	msg, err := client.Users.Messages.Attachments.Get("me", msgID, attachmentID).Do()
+	if err != nil {
+		return nil, err
+	}
+
+	return msg, nil
+}
+
 func (client *GmailClient) GetUserMessagesControlled(nextPageToken, label string, num int64) (*MessagesResponse, error) {
 	var msgs MessagesResponse
 	var err error
@@ -412,7 +447,7 @@ func (client *GmailClient) GetUserMessagesUsingWorkers(nextPageToken string, wor
 func createRawMessage(gmailMsg *gmail.Message) (string, error) {
 	var rawMessage string
 
-	err := createMessagePart(&rawMessage, gmailMsg.Payload, true)
+	err := createMessagePart(&rawMessage, gmailMsg.Payload)
 	if err != nil {
 		return "", err
 	}
@@ -423,7 +458,7 @@ func createRawMessage(gmailMsg *gmail.Message) (string, error) {
 	return raw, nil
 }
 
-func createMessagePart(rawMessage *string, part *gmail.MessagePart, skipEndBoundary bool) error {
+func createMessagePart(rawMessage *string, part *gmail.MessagePart) error {
 
 	var boundary string
 	var contentTransferEncoding string
@@ -479,7 +514,7 @@ func createMessagePart(rawMessage *string, part *gmail.MessagePart, skipEndBound
 
 	for _, subpart := range part.Parts {
 		*rawMessage += boundary + "\n"
-		err := createMessagePart(rawMessage, subpart, false)
+		err := createMessagePart(rawMessage, subpart)
 		if err != nil {
 			return err
 		}
