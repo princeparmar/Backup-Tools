@@ -486,9 +486,9 @@ func createMessagePart(rawMessage *string, part *gmail.MessagePart, skipEndBound
 		}
 	}
 
-	if !skipEndBoundary {
-		*rawMessage += boundary + "\n"
-	}
+	// if !skipEndBoundary {
+	*rawMessage += boundary + "--" + "\n"
+	// }
 
 	return nil
 }
