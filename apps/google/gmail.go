@@ -432,8 +432,7 @@ func createMessagePart(rawMessage *string, part *gmail.MessagePart, skipEndBound
 
 		if header.Name == "Content-Type" && strings.Contains(header.Value, "boundary=") {
 			boundary = "--" +
-				strings.Trim(strings.TrimSpace(strings.Split(header.Value, "boundary=")[1]), "\"") +
-				"\n"
+				strings.Trim(strings.TrimSpace(strings.Split(header.Value, "boundary=")[1]), "\"")
 		}
 
 		if header.Name == "Content-Transfer-Encoding" {
@@ -479,7 +478,7 @@ func createMessagePart(rawMessage *string, part *gmail.MessagePart, skipEndBound
 	*rawMessage += "\n"
 
 	for _, subpart := range part.Parts {
-		*rawMessage += boundary
+		*rawMessage += boundary + "\n"
 		err := createMessagePart(rawMessage, subpart, false)
 		if err != nil {
 			return err
