@@ -454,7 +454,7 @@ func createRawMessage(gmailMsg *gmail.Message) (string, error) {
 
 	// Base64 encode the entire message
 
-	raw := base64.StdEncoding.EncodeToString([]byte(rawMessage))
+	raw := base64.URLEncoding.EncodeToString([]byte(rawMessage))
 	return raw, nil
 }
 
