@@ -218,6 +218,10 @@ func (client *GmailClient) updateAttachment(msgID string, part *gmail.MessagePar
 		if err != nil {
 			return err
 		}
+
+		p.Data = strings.ReplaceAll(p.Data, "_", "/")
+		p.Data = strings.ReplaceAll(p.Data, "-", "+")
+
 		part.Body = p
 	}
 
