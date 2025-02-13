@@ -1,0 +1,150 @@
+
+{
+  "historyId": "16752399",
+  "id": "194b5c203a28179a",
+  "internalDate": "1738216175000",
+  "labelIds": [
+    "CATEGORY_UPDATES",
+    "INBOX"
+  ],
+  "payload": {
+    "body": {
+      "data": "PGh0bWw-PGhlYWQ-PHN0eWxlIHR5cGU9InRleHQvY3NzIj4uemVfYm9keXtmb250LWZhbWlseTpIZWx2ZXRpY2EgLCBWZXJkYW5hICwgc2Fucy1zZXJpZjtmb250LXNpemU6MTNweDt9IHRhYmxle2ZvbnQtc2l6ZToxMDAlfSAuTXNvTm9ybWFse21hcmdpbjogMHB4fTwvc3R5bGU-PC9oZWFkPjxib2R5IGNsYXNzPSJ6ZV9ib2R5Ij48ZGl2IHN0eWxlPSJmb250LXNpemU6IDEzcHg7IGZvbnQtZmFtaWx5OiBIZWx2ZXRpY2EsIFZlcmRhbmEsIHNhbnMtc2VyaWYiPiA8ZGl2IHN0eWxlPSJiYWNrZ3JvdW5kOiByZ2IoMjMzLCAyMzMsIDIzMyk7IHBhZGRpbmc6IDEwcHggMTBweDsiPjxkaXYgc3R5bGU9ImJhY2tncm91bmQ6IHJnYigyMzMsIDIzMywgMjMzKTsgcGFkZGluZzogMTBweCAxMHB4OyI-PHRhYmxlIHN0eWxlPSJ3aWR0aDogMTAwJTsgbWFyZ2luOiAwIGF1dG87IGJhY2tncm91bmQ6IHJnYigyNTUsIDI1NSwgMjU1KTsgZm9udC1mYW1pbHk6IGx1Y2lkYSBncmFuZGUsIGx1Y2lkYSBzYW5zLCBsdWNpZGEgc2FucyB1bmljb2RlLCBoZWx2ZXRpY2EsIHZlcmRhbmEsIHNhbnMtc2VyaWY7IGJhY2tncm91bmQ6IHJnYigyNTUsIDI1NSwgMjU1KSIgY2VsbHBhZGRpbmc9IjAiIGNlbGxzcGFjaW5nPSIwIiBib3JkZXI9MD48dGJvZHk-PHRyPjx0ZD48dGFibGUgY2VsbHBhZGRpbmc9IjAiIGNlbGxzcGFjaW5nPSIwIiBzdHlsZT0iZGlzcGxheTogdGFibGU7IHdpZHRoOiAxMDAlIj48dGJvZHk-PHRyPjx0ZCBzdHlsZT0iYmFja2dyb3VuZC1jb2xvcjogcmdiKDIwMCwgMzcsIDU2KTsgaGVpZ2h0OiAxLjVweDsgd2lkdGg6IDI1JSI-PC90ZD48dGQgc3R5bGU9ImJhY2tncm91bmQtY29sb3I6IHJnYigyNSwgMTUzLCA3OSk7IGhlaWdodDogMS41cHg7IHdpZHRoOiAyNSUiPjwvdGQ-PHRkIHN0eWxlPSJiYWNrZ3JvdW5kLWNvbG9yOiByZ2IoMjYsIDEzMiwgMTk2KTsgaGVpZ2h0OiAxLjVweDsgd2lkdGg6IDI1JSI-PC90ZD48dGQgc3R5bGU9ImJhY2tncm91bmQtY29sb3I6IHJnYigyNTIsIDIwNywgNTYpOyBoZWlnaHQ6IDEuNXB4OyB3aWR0aDogMjUlIj48L3RkPjwvdHI-PC90Ym9keT48L3RhYmxlPjxkaXYgc3R5bGU9InBhZGRpbmc6IDEwcHggNTBweDsgYm9yZGVyOiAxcHggc29saWQgcmdiKDI0MywgMjQzLCAyNDMpOyBib3JkZXItYm90dG9tOiAwcHggc29saWQgcmdiKDI1NSwgMjU1LCAyNTUpIj48ZGl2IHN0eWxlPSJjb2xvcjogcmdiKDUxLCA1MSwgNTEpOyBmb250LXdlaWdodDogYm9sZDsgcGFkZGluZy10b3A6IDQ1cHgiPjxmb250IHNpemU9IjIiIGZhY2U9IkhlbHZldGljYSwgc2Fucy1zZXJpZiI-IEhlbGxvIDwvZm9udD48L2Rpdj48ZGl2IHN0eWxlPSJjb2xvcjogcmdiKDUxLCA1MSwgNTEpOyBwYWRkaW5nLXRvcDogMjVweCI-PGZvbnQgc2l6ZT0iMiIgZmFjZT0iSGVsdmV0aWNhLCBzYW5zLXNlcmlmIj5HcmVldGluZ3MgZnJvbSBab2hvIE1hcmtldHBsYWNlITxicj48YnI-WW91IGhhdmUgc3VjY2Vzc2Z1bGx5IGluc3RhbGxlZCBhbiBleHRlbnNpb24gZnJvbSB0aGUgWm9obyBNYXJrZXRwbGFjZS4gVGhlIGV4dGVuc2lvbiBkZXRhaWxzIGFyZSBhcyBmb2xsb3dzOjxicj48YnI-RXh0ZW5zaW9uIE5hbWU6IDxiPkxlYWRDaGFpbiBmb3IgWm9obyBDUk08L2I-PGJyPjxicj5Qcm9kdWN0OiA8Yj5DUk08L2I-PGJyPjxicj5EYXRlIG9mIGluc3RhbGxhdGlvbjogPGI-SmFuIDI5LCAyMDI1PC9iPjxicj48YnI-UGxlYXNlIGRvIG5vdCByZXBseSB0byB0aGlzIGUtbWFpbC4gRm9yIGFueSBmdXJ0aGVyIGZlZWRiYWNrIG9yIHF1ZXN0aW9ucywga2luZGx5IHJlYWNoIG91dCB0byA8Yj5zdXBwb3J0QHpvaG9tYXJrZXRwbGFjZS5jb208L2I-PC9mb250PjwvZGl2PjxkaXYgc3R5bGU9Im1hcmdpbi10b3A6IDMwcHgiPjxkaXYgc3R5bGU9ImNvbG9yOiByZ2IoNTEsIDUxLCA1MSk7Ij48c3BhbiBzdHlsZT0iY29sb3I6IHJnYig5MywgOTMsIDkzKTsiPjxmb250IHNpemU9IjIiIGZhY2U9IkhlbHZldGljYSwgc2Fucy1zZXJpZiI-IFRoYW5rcyAgJmFtcDsgUmVnYXJkcyw8L2ZvbnQ-PGRpdiBzdHlsZT0iY29sb3I6IHJnYig1MSwgNTEsIDUxKTsgZm9udC13ZWlnaHQ6IGJvbGQ7IHBhZGRpbmctdG9wOiA1cHgiPjxmb250IHNpemU9IjIiIGZhY2U9IkhlbHZldGljYSwgc2Fucy1zZXJpZiI-IDxkaXYgc3R5bGU9ImNvbG9yOnJnYig1MSw1MSw1MSk7Ij48ZGl2IHN0eWxlPSdjb2xvcjpyZ2IoNTEsNTEsNTEpOyc-PGltZyBhbHQ9J2xvZ29zJyBzcmM9Imh0dHBzOi8vc3RhdGljLnpvaG9jZG4uY29tL21hcmtldHBsYWNlL2ltYWdlcy96b2hvLWxvZ28ucG5nIiBoZWlnaHQ9JzMycHgnIHdpZHRoPScxNDBweCc-PC9kaXY-PC9kaXY-PC9mb250PjwvZGl2Pjwvc3Bhbj48YnI-PGRpdiBzdHlsZT0iZm9udC1zaXplOiAxM3B4OyBib3JkZXItdG9wOjFweCBzb2xpZCByZ2IoMjE2LCAyMTYsIDIxNik7Ij48ZGl2IHN0eWxlPSJwYWRkaW5nOiAxMHB4IDBweDsiPjx0YWJsZSBjZWxscGFkZGluZz0iMC41IiBjZWxsc3BhY2luZz0iMC41IiBzdHlsZT0id2lkdGg6IDEwMCUiPjx0Ym9keT48dHI-PHRkIHN0eWxlPSJ0ZXh0LWFsaWduOiBsZWZ0Ij48YSBocmVmPWh0dHBzOi8vd3d3LmZhY2Vib29rLmNvbS96b2hvbWFya2V0cGxhY2Ugc3R5bGU9Im1hcmdpbi1yaWdodDogOHB4OyB2ZXJ0aWNhbC1hbGlnbjogbWlkZGxlOyBkaXNwbGF5OiBpbmxpbmUtdGFibGU7IGN1cnNvcjogcG9pbnRlciI-IDxpbWcgYWx0PSJmYWNlYm9vayIgc3R5bGU9ImhlaWdodDogMjBweDsgd2lkdGg6IDIwcHgiIHNyYz0iaHR0cHM6Ly96b2hvLmNvbS9leHRlbnNpb25zL2ZhY2Vib29rLnBuZyIgaGVpZ2h0PSIyMCIgd2lkdGg9IjIwIj4gPC9hPiA8YSBocmVmPWh0dHBzOi8vd3d3LmxpbmtlZGluLmNvbS9zaG93Y2FzZS96b2hvLW1hcmtldHBsYWNlIHN0eWxlPSJtYXJnaW4tcmlnaHQ6IDVweDsgdmVydGljYWwtYWxpZ246IG1pZGRsZTsgZGlzcGxheTogaW5saW5lLXRhYmxlOyBjdXJzb3I6IHBvaW50ZXIiPiA8aW1nIGFsdD0ibGlua2VkSW4iIHNyYz0iaHR0cHM6Ly93d3cuem9oby5jb20vZXh0ZW5zaW9ucy9saW5rZWRpbi5wbmciIGhlaWdodD0iMjAiIHdpZHRoPSIyMCI-IDwvYT4gPGEgaHJlZj1odHRwczovL3R3aXR0ZXIuY29tL3pvaG9tYXJrZXRwbGFjZSBzdHlsZT0idmVydGljYWwtYWxpZ246IG1pZGRsZTsgZGlzcGxheTogaW5saW5lLXRhYmxlO21hcmdpbi1yaWdodDogOHB4OyBjdXJzb3I6IHBvaW50ZXIiPiA8aW1nIGFsdD0idHdpdHRlciIgc3JjPSJodHRwczovL21hcmtldHBsYWNlLnpvaG8uY29tL2ltYWdlcy90d2l0dGVyLnBuZyIgaGVpZ2h0PSIyMCIgd2lkdGg9IjI2Ij4gPC9hPjwvdGQ-PHRkIHN0eWxlPSJ0ZXh0LWFsaWduOiByaWdodCI-PGEgaHJlZj0iaHR0cHM6Ly93d3cuem9oby5jb20vYmxvZy9tYXJrZXRwbGFjZSIgc3R5bGU9ImZvbnQtc2l6ZTogMTNweDsgY29sb3I6IHJnYig1MSwgMTEyLCAxODcpOyB0ZXh0LWRlY29yYXRpb246IG5vbmU7IGN1cnNvcjogcG9pbnRlciI-IEJsb2dzIDwvYT4gPHNwYW4-ICYjMTI0Ozwvc3Bhbj48YSBocmVmPSJodHRwczovL2hlbHAuem9oby5jb20vcG9ydGFsL2VuL2NvbW11bml0eS96b2hvLW1hcmtldHBsYWNlIiB0YXJnZXQ9Il9ibGFuayIgc3R5bGU9ImZvbnQtc2l6ZTogMTNweDsgY29sb3I6IHJnYig1MSwgMTEyLCAxODcpOyB0ZXh0LWRlY29yYXRpb246IG5vbmU7IGN1cnNvcjogcG9pbnRlciI-IEZvcnVtcyA8L2E-IDxzcGFuPiAmIzEyNDsgPC9zcGFuPiA8YSBocmVmPSJodHRwczovL3d3dy56b2hvLmNvbS9tYXJrZXRwbGFjZS9oZWxwLWd1aWRlL3pvaG8tZGV2ZWxvcGVyLWNvbnNvbGUuaHRtbCIgdGFyZ2V0PSJfYmxhbmsiIHN0eWxlPSJmb250LXNpemU6IDEzcHg7IGNvbG9yOiByZ2IoNTEsIDExMiwgMTg3KTsgdGV4dC1kZWNvcmF0aW9uOiBub25lOyBjdXJzb3I6IHBvaW50ZXIiPiBIZWxwIDwvYT48L3RkPjwvdHI-PC90Ym9keT48L3RhYmxlPjwvZGl2PjwvZGl2PjwvZGl2PjxkaXYgc3R5bGU9InRleHQtYWxpZ246IGNlbnRlcjsgcGFkZGluZzogMTVweCAwIDAgMDsgY29sb3I6IHJnYigxNDUsIDE0NSwgMTQ1KTsgbWFyZ2luOiAwcHggYXV0bztmb250LXNpemU6IDEwcHg7Ij5HZW5lcmF0ZWQgYnkgIDxhIGhyZWY9Imh0dHBzOi8vbWFya2V0cGxhY2Uuem9oby5jb20iIHRhcmdldD0iX2JsYW4iPmh0dHBzOi8vbWFya2V0cGxhY2Uuem9oby5jb208L2E-PC9kaXY-PGRpdiBzdHlsZT0ndGV4dC1hbGlnbjpjZW50ZXI7cGFkZGluZzo1cHggMCAwIDA7Y29sb3I6ICM5MTkxOTE7bWFyZ2luOjBweCBhdXRvO2ZvbnQtc2l6ZTogMTBweDsnPklmIHlvdSB0aGluayB0aGlzIGlzIFNQQU0sIHBsZWFzZSByZXBvcnQgdG8gIGFidXNlQHpvaG9jb3JwLmNvbS4gPHAgc3R5bGU9Im1hcmdpbjo3cHggMDsgdGV4dC1hbGlnbjpjZW50ZXI7IGZvbnQtc2l6ZTo4cHg7IGNvbG9yOiAjOTE5MTkxOyI-Wm9obyBDb3JwLCA2ODAwIEJ1cmxlc29uIFJkLCBCdWlsZGluZyAzMTAsIFN1aXRlIDIwMCwgQXVzdGluLCBUWCA3ODc0NCwgVVNBLjwvcD48L2Rpdj48L2Rpdj48L2Rpdj48L3RkPjwvdHI-PC90Ym9keT48L3RhYmxlPjwvZGl2Pjxicj48YnI-PC9kaXY-PC9kaXY-PC9ib2R5PjwvaHRtbD4NCg==",
+      "size": 4609
+    },
+    "headers": [
+      {
+        "name": "Delivered-To",
+        "value": "prince.soamedia@gmail.com"
+      },
+      {
+        "name": "Received",
+        "value": "by 2002:a05:6214:3290:b0:6d8:f6eb:2d2a with SMTP id mu16csp150510qvb;        Wed, 29 Jan 2025 21:49:38 -0800 (PST)"
+      },
+      {
+        "name": "X-Google-Smtp-Source",
+        "value": "AGHT+IF9fMPWwoOJmzJcXnFp6130ga2IOO+Fzqdh/n79priJ05OHlo97UCsrRVC+QSNKfTcDvLAK"
+      },
+      {
+        "name": "X-Received",
+        "value": "by 2002:a17:903:24d:b0:21d:cd0c:a1ac with SMTP id d9443c01a7336-21dd7c624e0mr87495525ad.17.1738216178462;        Wed, 29 Jan 2025 21:49:38 -0800 (PST)"
+      },
+      {
+        "name": "ARC-Seal",
+        "value": "i=2; a=rsa-sha256; t=1738216178; cv=pass;        d=google.com; s=arc-20240605;        b=RdScLnHpHdIoaC2CVZL2hA/8wN/iiryrdAGKaXue2p6CjPj6AzKMG5EiNic3qZWaYE         NGp/ZYYbr/+ebCG33mdq9nvXnDZOCibB5BGzsBZJd36Npxr8XV+/u2+Cx9QnUEqI7kH1         p5jzB21/UafyoGK2iGRTzsITNVlomqk79wfMmC/owhqSgCMfrPFc/iKs0dZESmsQ5Bqv         E2y8Q7UprqW571fQXuFUbUOMTF1XPDZlAIyVexnN26OgZ6Lu9AMQ6zSS0XxCL68xsDyo         M8yH++jjYHX2MNbC2rqK223cPKhIESs2BrNDtX9PZVpzvu/Rr52nImKbhZAb8I4hMzQE         wUzA=="
+      },
+      {
+        "name": "ARC-Message-Signature",
+        "value": "i=2; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20240605;        h=tm-mail-jid:original-envelope-id:content-transfer-encoding         :mime-version:subject:message-id:to:reply-to:from:date         :dkim-signature;        bh=8yc+6DCTJlIsJ8it7eTSUPWPkh2arKcqpODyGW3noYY=;        fh=UGq0BSs6HjkHzLcIBuaPsWf1L9ajqdeN3WNbENNawxU=;        b=OIW5iVVa+4u65wuSY0J+1InfhLgsJ7eim37bQL8FmuqVUSGRpslyBRfI4ZnXkHSpiD         os6TibwGokcfNsXAJuXTo9+yegCtYHRpn8BKfw1JGN45j4ivD28TlaAjbhOGrBtlO0Wv         7h1XdofxJsb0pjKSHR56YdUKaxMSJYmDYzEm+9WqAfVBa+E3tRFzeGSVhrDEHk6RJJ9i         VtrGVd2ov73ECo9m4yXNhJlQR2QzdPfSrH1jdb/CKob3cYjMVIsPwsuhbsYE9mKE7dEH         TBVz7Q2D8uCXFqHLjEiNNDKXOIp4iRPbrdFiqeluoS8++42x2oJWTBjQ8f+qD0y5m5sO         xF5w==;        dara=google.com"
+      },
+      {
+        "name": "ARC-Authentication-Results",
+        "value": "i=2; mx.google.com;       dkim=pass header.i=@zohomarketplace.com header.s=1522905413783 header.b=hmz2zGsi;       arc=pass (i=1 spf=pass spfdomain=notification.zohomarketplace.com dkim=pass dkdomain=zohomarketplace.com dmarc=pass fromdomain=zohomarketplace.com>);       spf=pass (google.com: domain of bounces+fb800db0-decd-11ef-86bc-5254001dc20d_vt1@notification.zohomarketplace.com designates 135.84.80.175 as permitted sender) smtp.mailfrom=bounces+fb800db0-decd-11ef-86bc-5254001dc20d_vt1@notification.zohomarketplace.com;       dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=zohomarketplace.com"
+      },
+      {
+        "name": "Return-Path",
+        "value": "<bounces+fb800db0-decd-11ef-86bc-5254001dc20d_vt1@notification.zohomarketplace.com>"
+      },
+      {
+        "name": "Received",
+        "value": "from bmail-175.transmail.net (bmail-175.transmail.net. [135.84.80.175])        by mx.google.com with ESMTPS id d9443c01a7336-21de5e5294fsi1356555ad.185.2025.01.29.21.49.38        for <prince.soamedia@gmail.com>        (version=TLS1_3 cipher=TLS_AES_256_GCM_SHA384 bits=256/256);        Wed, 29 Jan 2025 21:49:38 -0800 (PST)"
+      },
+      {
+        "name": "Received-SPF",
+        "value": "pass (google.com: domain of bounces+fb800db0-decd-11ef-86bc-5254001dc20d_vt1@notification.zohomarketplace.com designates 135.84.80.175 as permitted sender) client-ip=135.84.80.175;"
+      },
+      {
+        "name": "Authentication-Results",
+        "value": "mx.google.com;       dkim=pass header.i=@zohomarketplace.com header.s=1522905413783 header.b=hmz2zGsi;       arc=pass (i=1 spf=pass spfdomain=notification.zohomarketplace.com dkim=pass dkdomain=zohomarketplace.com dmarc=pass fromdomain=zohomarketplace.com>);       spf=pass (google.com: domain of bounces+fb800db0-decd-11ef-86bc-5254001dc20d_vt1@notification.zohomarketplace.com designates 135.84.80.175 as permitted sender) smtp.mailfrom=bounces+fb800db0-decd-11ef-86bc-5254001dc20d_vt1@notification.zohomarketplace.com;       dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=zohomarketplace.com"
+      },
+      {
+        "name": "ARC-Seal",
+        "value": "i=1; a=rsa-sha256; t=1738216177; cv=none; d=us.zohomail360.com; s=zohoarc; b=AhKMmqCfV0PplD3ooVwblhgKvUVDX0dZti2Sis87H9gpQ78Ku6qvQKnYeEQIQEx//vpVVZ7s747TjyRuZ9Sa1NIohsa9fIXevMDh27fRWiy963oB+9FpO4nXqiq1pTeZSHMGDEq+QweIN/+8L9ZPvBgkkhI0TkROr4CCgNnMPoY="
+      },
+      {
+        "name": "ARC-Message-Signature",
+        "value": "i=1; a=rsa-sha256; c=relaxed/relaxed; d=us.zohomail360.com; s=zohoarc; t=1738216177; h=Content-Type:Content-Transfer-Encoding:Date:Date:From:From:MIME-Version:Message-ID:Reply-To:Reply-To:Subject:Subject:To:To:Message-Id:Cc; bh=8yc+6DCTJlIsJ8it7eTSUPWPkh2arKcqpODyGW3noYY=; b=JnET26zIAegjnoHhGulL2MJ2ZeN49rxeO0geLYcRE5wDryiJifRsRXzdXlhXRLeYyPlg2P7/gtYY5O20mwYCd510ZAOYSWSEpExf0X2KKrrwGyI+M227LMVgkBTFPKY60hxkkFjOoKzqDYIKc0auwnUxlTiuW3lDYGa0CvWGqec="
+      },
+      {
+        "name": "ARC-Authentication-Results",
+        "value": "i=1; mx.us.zohomail360.com; dkim=pass  header.i=zohomarketplace.com; spf=pass  smtp.mailfrom=bounces+fb800db0-decd-11ef-86bc-5254001dc20d_vt1@notification.zohomarketplace.com; dmarc=pass header.from=<noreply@zohomarketplace.com>"
+      },
+      {
+        "name": "Received",
+        "value": "by mx.zohomail.com with SMTPS id 1738216175219202.1225947938973; Wed, 29 Jan 2025 21:49:35 -0800 (PST)"
+      },
+      {
+        "name": "DKIM-Signature",
+        "value": "a=rsa-sha256; b=hmz2zGsiUiU3FGWeASzPQrM+L4Y31SZjPf4aYVVs356S+ZkeMyhH6Ks7q7kDrxIIr4Vv+8J5s9OM3Y2m7BSLr8nrJHhm4KnjLzmURLUHYWbc0GS2jLNetGfWb4K1SR7U7glXzQtf3fZFVj9NNqj6Uq2tLL/wrrUPmJnyimCYBC8=; c=relaxed/relaxed; s=1522905413783; d=zohomarketplace.com; v=1; bh=8yc+6DCTJlIsJ8it7eTSUPWPkh2arKcqpODyGW3noYY=; h=date:from:reply-to:to:message-id:subject:mime-version:content-type:content-transfer-encoding:date:from:reply-to:to:message-id:subject;"
+      },
+      {
+        "name": "Date",
+        "value": "Wed, 29 Jan 2025 21:49:35 -0800 (PST)"
+      },
+      {
+        "name": "From",
+        "value": "noreply@zohomarketplace.com"
+      },
+      {
+        "name": "Reply-To",
+        "value": "noreply@zohomarketplace.com"
+      },
+      {
+        "name": "To",
+        "value": "prince.soamedia@gmail.com"
+      },
+      {
+        "name": "Message-ID",
+        "value": "<2d6f.26eefc81.m1.fb800db0-decd-11ef-86bc-5254001dc20d.194b5c1f20b@notification.zohomarketplace.com>"
+      },
+      {
+        "name": "Subject",
+        "value": "Extension installed - confirmation."
+      },
+      {
+        "name": "MIME-Version",
+        "value": "1.0"
+      },
+      {
+        "name": "Content-Type",
+        "value": "text/html;charset=\"UTF-8\""
+      },
+      {
+        "name": "Content-Transfer-Encoding",
+        "value": "quoted-printable"
+      },
+      {
+        "name": "X-Transmail",
+        "value": "transmail"
+      },
+      {
+        "name": "Original-Envelope-Id",
+        "value": "2d6f.26eefc81.m1.fb800db0-decd-11ef-86bc-5254001dc20d.194b5c1f20b"
+      },
+      {
+        "name": "X-JID",
+        "value": "2d6f.26eefc81.m1.fb800db0-decd-11ef-86bc-5254001dc20d.194b5c1f20b"
+      },
+      {
+        "name": "TM-MAIL-JID",
+        "value": "2d6f.26eefc81.m1.fb800db0-decd-11ef-86bc-5254001dc20d.194b5c1f20b"
+      },
+      {
+        "name": "X-App-Message-ID",
+        "value": "2d6f.26eefc81.m1.fb800db0-decd-11ef-86bc-5254001dc20d.194b5c1f20b"
+      },
+      {
+        "name": "X-Report-Abuse",
+        "value": "<mailto:abuse+2d6f.26eefc81.m1.fb800db0-decd-11ef-86bc-5254001dc20d.194b5c1f20b@zeptomail.com>"
+      },
+      {
+        "name": "X-ZohoMailClient",
+        "value": "External"
+      }
+    ],
+    "mimeType": "text/html"
+  },
+  "sizeEstimate": 11096,
+  "snippet": "Hello Greetings from Zoho Marketplace! You have successfully installed an extension from the Zoho Marketplace. The extension details are as follows: Extension Name: LeadChain for Zoho CRM Product: CRM",
+  "threadId": "194b5c203a28179a"
+}

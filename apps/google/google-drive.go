@@ -11,12 +11,14 @@ import (
 	"os"
 	"path"
 	"slices"
-	"storj-integrations/storage"
-	"storj-integrations/storj"
-	"storj-integrations/utils"
 	"strings"
 
+	"github.com/StorX2-0/Backup-Tools/satellite"
+	"github.com/StorX2-0/Backup-Tools/storage"
+	"github.com/StorX2-0/Backup-Tools/utils"
+
 	"github.com/labstack/echo/v4"
+	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
@@ -127,9 +129,26 @@ func client(c echo.Context) (*http.Client, error) {
 	if err != nil {
 		return nil, echo.NewHTTPError(http.StatusUnauthorized, "user is not authorized")
 	}
-	client := config.Client(context.Background(), &tok)
+	client := config.Client(context.Background(), &oauth2.Token{
+		AccessToken: tok,
+	})
 
 	return client, nil
+}
+
+func clientUsingToken(token string) (*http.Client, error) {
+	b, err := os.ReadFile("credentials.json")
+	if err != nil {
+		return nil, fmt.Errorf("unable to read client secret file: %v", err)
+	}
+	config, err := google.ConfigFromJSON(b, drive.DriveScope, gs.CloudPlatformScope, gs.DevstorageFullControlScope, gs.DevstorageReadWriteScope, gs.CloudPlatformReadOnlyScope)
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse client secret file to config: %v", err)
+	}
+
+	return config.Client(context.Background(), &oauth2.Token{
+		AccessToken: token,
+	}), nil
 }
 
 // GetFile downloads file from Google Drive by ID
@@ -217,9 +236,9 @@ func UploadFile(c echo.Context, name string, data []byte) error {
 
 // GetFilesInFolder retrieves all files within a specific folder from Google Drive
 func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
-		return nil, errors.New("storj access missing")
+		return nil, errors.New("access token is missing")
 	}
 	client, err := client(c)
 	if err != nil {
@@ -240,9 +259,9 @@ func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get folder name: %v", err)
 	}
-	o, err := storj.GetFilesInFolder(context.Background(), accesGrant, "google-drive", folderName+"/")
+	o, err := satellite.GetFilesInFolder(context.Background(), accesGrant, "google-drive", folderName+"/")
 	if err != nil {
-		return nil, errors.New("failed to get list from storj with error:" + err.Error())
+		return nil, errors.New("failed to get list from satellite with error:" + err.Error())
 	}
 	slices.SortStableFunc(o, func(a, b uplink.Object) int {
 		return cmp.Compare(a.Key, b.Key)
@@ -306,9 +325,9 @@ func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
 // func embeddedSynced(c echo.Context, folderID, folderName string)
 // GetFilesInFolder retrieves all files within a specific folder from Google Drive
 func GetFilesInFolderByID(c echo.Context, folderID string) ([]*FilesJSON, error) {
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
-		return nil, errors.New("storj access missing")
+		return nil, errors.New("access token is missing")
 	}
 	client, err := client(c)
 	if err != nil {
@@ -324,9 +343,9 @@ func GetFilesInFolderByID(c echo.Context, folderID string) ([]*FilesJSON, error)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get folder name: %v", err)
 	}
-	o, err := storj.GetFilesInFolder(context.Background(), accesGrant, "google-drive", folderName+"/")
+	o, err := satellite.GetFilesInFolder(context.Background(), accesGrant, "google-drive", folderName+"/")
 	if err != nil {
-		return nil, errors.New("failed to get list from storj with error:" + err.Error())
+		return nil, errors.New("failed to get list from satellite with error:" + err.Error())
 	}
 	slices.SortStableFunc(o, func(a, b uplink.Object) int {
 		return cmp.Compare(a.Key, b.Key)
@@ -448,13 +467,13 @@ func getFolderNameByID(srv *drive.Service, folderID string) (string, error) {
 
 // This function gets files only in root. It does not list files in folders
 func GetFileNamesInRoot(c echo.Context) ([]*FilesJSON, error) {
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
-		return nil, errors.New("storj access missing")
+		return nil, errors.New("access token not found")
 	}
-	o, err := storj.ListObjects1(context.Background(), accesGrant, "google-drive")
+	o, err := satellite.ListObjects1(context.Background(), accesGrant, "google-drive")
 	if err != nil {
-		return nil, errors.New("failed to get list from storj with error:" + err.Error())
+		return nil, errors.New("failed to get list from satellite with error:" + err.Error())
 	}
 
 	slices.SortStableFunc(o, func(a, b uplink.Object) int {
@@ -551,9 +570,9 @@ func GetFileNamesInRoot(c echo.Context) ([]*FilesJSON, error) {
 }
 
 func GetSharedFiles(c echo.Context) ([]*FilesJSON, error) {
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
-		return nil, errors.New("storj access missing")
+		return nil, errors.New("access token not found")
 	}
 	client, err := client(c)
 	if err != nil {
@@ -564,9 +583,9 @@ func GetSharedFiles(c echo.Context) ([]*FilesJSON, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Drive service: %v", err)
 	}
-	o, err := storj.GetFilesInFolder(context.Background(), accesGrant, "google-drive", "shared with me/")
+	o, err := satellite.GetFilesInFolder(context.Background(), accesGrant, "google-drive", "shared with me/")
 	if err != nil {
-		return nil, errors.New("failed to get list from storj with error:" + err.Error())
+		return nil, errors.New("failed to get list from satellite with error:" + err.Error())
 	}
 	slices.SortStableFunc(o, func(a, b uplink.Object) int {
 		return cmp.Compare(a.Key, b.Key)

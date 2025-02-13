@@ -2,7 +2,9 @@ package server
 
 import (
 	"net/http"
-	"storj-integrations/storage"
+
+	"github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/storage"
 
 	"github.com/dgrijalva/jwt-go"
 	"github.com/labstack/echo/v4"
@@ -32,7 +34,7 @@ func JWTMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 				return nil, echo.NewHTTPError(http.StatusUnauthorized, "invalid token")
 			}
 			// Provide your JWT secret key here
-			return []byte("your-secret-key"), nil
+			return []byte(google.JwtSecretKey), nil
 		})
 
 		if err != nil {

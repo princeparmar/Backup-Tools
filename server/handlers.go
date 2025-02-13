@@ -9,26 +9,27 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"storj-integrations/apps/aws"
-	"storj-integrations/apps/dropbox"
-	gthb "storj-integrations/apps/github"
-	"storj-integrations/apps/quickbooks"
-	"storj-integrations/apps/shopify"
-	"storj-integrations/storage"
-	"storj-integrations/storj"
-	"storj-integrations/utils"
+
+	"github.com/StorX2-0/Backup-Tools/apps/aws"
+	"github.com/StorX2-0/Backup-Tools/apps/dropbox"
+	gthb "github.com/StorX2-0/Backup-Tools/apps/github"
+	"github.com/StorX2-0/Backup-Tools/apps/quickbooks"
+	"github.com/StorX2-0/Backup-Tools/apps/shopify"
+	"github.com/StorX2-0/Backup-Tools/satellite"
+	"github.com/StorX2-0/Backup-Tools/storage"
+	"github.com/StorX2-0/Backup-Tools/utils"
 
 	"github.com/labstack/echo/v4"
 )
 
 // <<<<<------------ DROPBOX ------------>>>>>
 
-func handleDropboxToStorj(c echo.Context) error {
+func handleDropboxToSatellite(c echo.Context) error {
 	filePath := c.Param("filePath")
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
@@ -52,26 +53,26 @@ func handleDropboxToStorj(c echo.Context) error {
 			"error": err.Error(),
 		})
 	}
-	err = storj.UploadObject(context.Background(), accesGrant, "dropbox", file.Name, data)
+	err = satellite.UploadObject(context.Background(), accesGrant, "dropbox", file.Name, data)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("object %s was successfully uploaded from Dropbox to Storj", file.Name)})
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("object %s was successfully uploaded from Dropbox to Satellite", file.Name)})
 }
 
-func handleStorjToDropbox(c echo.Context) error {
+func handleSatelliteToDropbox(c echo.Context) error {
 	filePath := c.Param("filePath")
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
-	objData, err := storj.DownloadObject(context.Background(), accesGrant, "dropbox", filePath)
+	objData, err := satellite.DownloadObject(context.Background(), accesGrant, satellite.ReserveBucket_Dropbox, filePath)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -92,7 +93,7 @@ func handleStorjToDropbox(c echo.Context) error {
 		})
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("object %s was successfully uploaded from Storj to Dropbox", filePath)})
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("object %s was successfully uploaded from Satellite to Dropbox", filePath)})
 }
 
 // <<<<<------------ AWS S3 ------------>>>>>
@@ -111,13 +112,13 @@ func handleListAWSs3BucketFiles(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("%+v", data)})
 }
 
-func handleS3toStorj(c echo.Context) error {
+func handleS3toSatellite(c echo.Context) error {
 	bucketName := c.Param("bucketName")
 	itemName := c.Param("itemName")
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
@@ -148,29 +149,29 @@ func handleS3toStorj(c echo.Context) error {
 		})
 	}
 
-	err = storj.UploadObject(context.Background(), accesGrant, "aws-s3", itemName, data)
+	err = satellite.UploadObject(context.Background(), accesGrant, "aws-s3", itemName, data)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("object %s was successfully uploaded from AWS S3 bucket to Storj", itemName)})
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("object %s was successfully uploaded from AWS S3 bucket to Satellite", itemName)})
 }
 
-func handleStorjToS3(c echo.Context) error {
+func handleSatelliteToS3(c echo.Context) error {
 	bucketName := c.Param("bucketName")
 	itemName := c.Param("itemName")
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
-	data, err := storj.DownloadObject(context.Background(), accesGrant, "aws-s3", itemName)
+	data, err := satellite.DownloadObject(context.Background(), accesGrant, satellite.ReserveBucket_S3, itemName)
 	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{"message": "error downloading object from Storj" + err.Error(), "error": err.Error()})
+		return c.JSON(http.StatusForbidden, map[string]interface{}{"message": "error downloading object from Satellite" + err.Error(), "error": err.Error()})
 	}
 	dirPath := filepath.Join("./cache", utils.CreateUserTempCacheFolder())
 	path := filepath.Join(dirPath, itemName)
@@ -200,7 +201,7 @@ func handleStorjToS3(c echo.Context) error {
 			"error": err.Error(),
 		})
 	}
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("object %s was successfully uploaded from Storj to AWS S3 %s bucket", itemName, bucketName)})
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("object %s was successfully uploaded from Satellite to AWS S3 %s bucket", itemName, bucketName)})
 
 }
 
@@ -284,7 +285,7 @@ func handleGetRepository(c echo.Context) error {
 	return c.File(repoPath)
 }
 
-func handleGithubRepositoryToStorj(c echo.Context) error {
+func handleGithubRepositoryToSatellite(c echo.Context) error {
 	accessToken, err := c.Cookie("github-auth")
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -292,10 +293,10 @@ func handleGithubRepositoryToStorj(c echo.Context) error {
 		})
 	}
 
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
@@ -336,7 +337,7 @@ func handleGithubRepositoryToStorj(c echo.Context) error {
 		})
 	}
 
-	err = storj.UploadObject(context.Background(), accesGrant, "github", repoName, data)
+	err = satellite.UploadObject(context.Background(), accesGrant, "github", repoName, data)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -344,10 +345,10 @@ func handleGithubRepositoryToStorj(c echo.Context) error {
 	}
 	file.Close()
 
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("repo %s was successfully uploaded from Github to Storj", repoName)})
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": fmt.Sprintf("repo %s was successfully uploaded from Github to Satellite", repoName)})
 }
 
-func handleRepositoryFromStorjToGithub(c echo.Context) error {
+func handleRepositoryFromSatelliteToGithub(c echo.Context) error {
 	accessToken, err := c.Cookie("github-auth")
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -355,10 +356,10 @@ func handleRepositoryFromStorjToGithub(c echo.Context) error {
 		})
 	}
 
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
@@ -367,9 +368,9 @@ func handleRepositoryFromStorjToGithub(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "repo name is now specified"})
 	}
 
-	repoData, err := storj.DownloadObject(context.Background(), accesGrant, "github", repo)
+	repoData, err := satellite.DownloadObject(context.Background(), accesGrant, satellite.ReserveBucket_Github, repo)
 	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{"message": "error downloading object from Storj" + err.Error(), "error": err.Error()})
+		return c.JSON(http.StatusForbidden, map[string]interface{}{"message": "error downloading object from Satellite" + err.Error(), "error": err.Error()})
 	}
 	dirPath := filepath.Join("./cache", utils.CreateUserTempCacheFolder())
 	basePath := filepath.Join(dirPath, repo+".zip")
@@ -441,7 +442,7 @@ func handleRepositoryFromStorjToGithub(c echo.Context) error {
 			"error": err.Error(),
 		})
 	}
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": "repository " + repo + " restored to Github from Storj"})
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": "repository " + repo + " restored to Github from Satellite"})
 }
 
 // <<<<<<<--------- SHOPIFY --------->>>>>>>
@@ -463,15 +464,22 @@ func createShopifyCleint(c echo.Context, shopname string) *shopify.ShopifyClient
 		})
 		return nil
 	}
-	cleint := shopify.CreateClient(token, shopname)
-	return cleint
+	client, err := shopify.CreateClient(token, shopname)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Error creating shopify client",
+			"error":   err.Error(),
+		})
+		return nil
+	}
+	return client
 }
 
-func handleShopifyProductsToStorj(c echo.Context) error {
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+func handleShopifyProductsToSatellite(c echo.Context) error {
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 	shopname := c.Param("shopname")
@@ -488,8 +496,8 @@ func handleShopifyProductsToStorj(c echo.Context) error {
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/shopify.db"
 
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "shopify", "shopify.db")
-	// Copy file from storj to local cache if everything's fine.
+	byteDB, err := satellite.DownloadObject(context.Background(), accesGrant, satellite.ReserveBucket_Shopify, "shopify.db")
+	// Copy file from satellite to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
 		dbFile, err := os.Create(userCacheDBPath)
@@ -521,7 +529,7 @@ func handleShopifyProductsToStorj(c echo.Context) error {
 		}
 	}
 
-	// DELETE OLD DB COPY FROM STORJ UPLOAD UP TO DATE DB FILE BACK TO STORJ AND DELETE IT FROM LOCAL CACHE
+	// DELETE OLD DB COPY FROM SATELLITE UPLOAD UP TO DATE DB FILE BACK TO SATELLITE AND DELETE IT FROM LOCAL CACHE
 
 	// get db file data
 	dbByte, err := os.ReadFile(userCacheDBPath)
@@ -531,16 +539,16 @@ func handleShopifyProductsToStorj(c echo.Context) error {
 		})
 	}
 
-	// delete old db copy from storj
-	err = storj.DeleteObject(context.Background(), accesGrant, "shopify", "shopify.db")
+	// delete old db copy from satellite
+	err = satellite.DeleteObject(context.Background(), accesGrant, "shopify", "shopify.db")
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
 
-	// upload file to storj
-	err = storj.UploadObject(context.Background(), accesGrant, "shopify", "shopify.db", dbByte)
+	// upload file to satellite
+	err = satellite.UploadObject(context.Background(), accesGrant, "shopify", "shopify.db", dbByte)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -558,11 +566,11 @@ func handleShopifyProductsToStorj(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]interface{}{"message": "DB with products data was successfully uploaded"})
 }
 
-func handleShopifyCustomersToStorj(c echo.Context) error {
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+func handleShopifyCustomersToSatellite(c echo.Context) error {
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 	shopname := c.Param("shopname")
@@ -579,8 +587,8 @@ func handleShopifyCustomersToStorj(c echo.Context) error {
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/shopify.db"
 
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "shopify", "shopify.db")
-	// Copy file from storj to local cache if everything's fine.
+	byteDB, err := satellite.DownloadObject(context.Background(), accesGrant, satellite.ReserveBucket_Shopify, "shopify.db")
+	// Copy file from satellite to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
 		dbFile, err := os.Create(userCacheDBPath)
@@ -612,7 +620,7 @@ func handleShopifyCustomersToStorj(c echo.Context) error {
 		}
 	}
 
-	// DELETE OLD DB COPY FROM STORJ UPLOAD UP TO DATE DB FILE BACK TO STORJ AND DELETE IT FROM LOCAL CACHE
+	// DELETE OLD DB COPY FROM SATELLITE UPLOAD UP TO DATE DB FILE BACK TO SATELLITE AND DELETE IT FROM LOCAL CACHE
 
 	// get db file data
 	dbByte, err := os.ReadFile(userCacheDBPath)
@@ -622,16 +630,16 @@ func handleShopifyCustomersToStorj(c echo.Context) error {
 		})
 	}
 
-	// delete old db copy from storj
-	err = storj.DeleteObject(context.Background(), accesGrant, "shopify", "shopify.db")
+	// delete old db copy from satellite
+	err = satellite.DeleteObject(context.Background(), accesGrant, "shopify", "shopify.db")
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
 
-	// upload file to storj
-	err = storj.UploadObject(context.Background(), accesGrant, "shopify", "shopify.db", dbByte)
+	// upload file to satellite
+	err = satellite.UploadObject(context.Background(), accesGrant, "shopify", "shopify.db", dbByte)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -650,11 +658,11 @@ func handleShopifyCustomersToStorj(c echo.Context) error {
 
 }
 
-func handleShopifyOrdersToStorj(c echo.Context) error {
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+func handleShopifyOrdersToSatellite(c echo.Context) error {
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 	shopname := c.Param("shopname")
@@ -671,8 +679,8 @@ func handleShopifyOrdersToStorj(c echo.Context) error {
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/shopify.db"
 
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "shopify", "shopify.db")
-	// Copy file from storj to local cache if everything's fine.
+	byteDB, err := satellite.DownloadObject(context.Background(), accesGrant, satellite.ReserveBucket_Shopify, "shopify.db")
+	// Copy file from satellite to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
 		dbFile, err := os.Create(userCacheDBPath)
@@ -704,7 +712,7 @@ func handleShopifyOrdersToStorj(c echo.Context) error {
 		}
 	}
 
-	// DELETE OLD DB COPY FROM STORJ UPLOAD UP TO DATE DB FILE BACK TO STORJ AND DELETE IT FROM LOCAL CACHE
+	// DELETE OLD DB COPY FROM SATELLITE UPLOAD UP TO DATE DB FILE BACK TO SATELLITE AND DELETE IT FROM LOCAL CACHE
 
 	// get db file data
 	dbByte, err := os.ReadFile(userCacheDBPath)
@@ -714,16 +722,16 @@ func handleShopifyOrdersToStorj(c echo.Context) error {
 		})
 	}
 
-	// delete old db copy from storj
-	err = storj.DeleteObject(context.Background(), accesGrant, "shopify", "shopify.db")
+	// delete old db copy from satellite
+	err = satellite.DeleteObject(context.Background(), accesGrant, "shopify", "shopify.db")
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
 
-	// upload file to storj
-	err = storj.UploadObject(context.Background(), accesGrant, "shopify", "shopify.db", dbByte)
+	// upload file to satellite
+	err = satellite.UploadObject(context.Background(), accesGrant, "shopify", "shopify.db", dbByte)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -746,7 +754,7 @@ func handleShopifyAuth(c echo.Context) error {
 	shopName := c.QueryParam("shop")
 	state := c.QueryParam("state")
 
-	authUrl := shopify.ShopifyInitApp.App.AuthorizeUrl(shopName, state)
+	authUrl, _ := shopify.ShopifyInitApp.App.AuthorizeUrl(shopName, state)
 
 	return c.Redirect(http.StatusFound, authUrl)
 }
@@ -762,7 +770,7 @@ func handleShopifyAuthRedirect(c echo.Context) error {
 	query := c.Request().URL.Query()
 	shopName := query.Get("shop")
 	code := query.Get("code")
-	token, err := shopify.ShopifyInitApp.App.GetAccessToken(shopName, code)
+	token, err := shopify.ShopifyInitApp.App.GetAccessToken(c.Request().Context(), shopName, code)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
 			"message": "Invalid Signature",
@@ -819,11 +827,11 @@ func handleShopifyAuthRedirect(c echo.Context) error {
 // 	}
 // }
 
-func handleQuickbooksCustomersToStorj(c echo.Context) error {
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+func handleQuickbooksCustomersToSatellite(c echo.Context) error {
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
@@ -837,8 +845,8 @@ func handleQuickbooksCustomersToStorj(c echo.Context) error {
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/quickbooks.db"
 
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db")
-	// Copy file from storj to local cache if everything's fine.
+	byteDB, err := satellite.DownloadObject(context.Background(), accesGrant, satellite.RestoreBucket_Quickbooks, "quickbooks.db")
+	// Copy file from satellite to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
 		dbFile, err := os.Create(userCacheDBPath)
@@ -870,7 +878,7 @@ func handleQuickbooksCustomersToStorj(c echo.Context) error {
 		}
 	}
 
-	// DELETE OLD DB COPY FROM STORJ UPLOAD UP TO DATE DB FILE BACK TO STORJ AND DELETE IT FROM LOCAL CACHE
+	// DELETE OLD DB COPY FROM SATELLITE UPLOAD UP TO DATE DB FILE BACK TO SATELLITE AND DELETE IT FROM LOCAL CACHE
 
 	// get db file data
 	dbByte, err := os.ReadFile(userCacheDBPath)
@@ -880,16 +888,16 @@ func handleQuickbooksCustomersToStorj(c echo.Context) error {
 		})
 	}
 
-	// delete old db copy from storj
-	err = storj.DeleteObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db")
+	// delete old db copy from satellite
+	err = satellite.DeleteObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db")
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
 
-	// upload file to storj
-	err = storj.UploadObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db", dbByte)
+	// upload file to satellite
+	err = satellite.UploadObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db", dbByte)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -904,14 +912,14 @@ func handleQuickbooksCustomersToStorj(c echo.Context) error {
 		})
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": "customers are successfully uploaded from quickbooks to storj"})
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": "customers are successfully uploaded from quickbooks to satellite"})
 }
 
-func handleQuickbooksItemsToStorj(c echo.Context) error {
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+func handleQuickbooksItemsToSatellite(c echo.Context) error {
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
@@ -925,8 +933,8 @@ func handleQuickbooksItemsToStorj(c echo.Context) error {
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/quickbooks.db"
 
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db")
-	// Copy file from storj to local cache if everything's fine.
+	byteDB, err := satellite.DownloadObject(context.Background(), accesGrant, satellite.RestoreBucket_Quickbooks, "quickbooks.db")
+	// Copy file from satellite to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
 		dbFile, err := os.Create(userCacheDBPath)
@@ -958,7 +966,7 @@ func handleQuickbooksItemsToStorj(c echo.Context) error {
 		}
 	}
 
-	// DELETE OLD DB COPY FROM STORJ UPLOAD UP TO DATE DB FILE BACK TO STORJ AND DELETE IT FROM LOCAL CACHE
+	// DELETE OLD DB COPY FROM SATELLITE UPLOAD UP TO DATE DB FILE BACK TO SATELLITE AND DELETE IT FROM LOCAL CACHE
 
 	// get db file data
 	dbByte, err := os.ReadFile(userCacheDBPath)
@@ -968,16 +976,16 @@ func handleQuickbooksItemsToStorj(c echo.Context) error {
 		})
 	}
 
-	// delete old db copy from storj
-	err = storj.DeleteObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db")
+	// delete old db copy from satellite
+	err = satellite.DeleteObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db")
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
 
-	// upload file to storj
-	err = storj.UploadObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db", dbByte)
+	// upload file to satellite
+	err = satellite.UploadObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db", dbByte)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -992,14 +1000,14 @@ func handleQuickbooksItemsToStorj(c echo.Context) error {
 		})
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": "items are successfully uploaded from quickbooks to storj"})
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": "items are successfully uploaded from quickbooks to satellite"})
 }
 
-func handleQuickbooksInvoicesToStorj(c echo.Context) error {
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+func handleQuickbooksInvoicesToSatellite(c echo.Context) error {
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
@@ -1013,8 +1021,8 @@ func handleQuickbooksInvoicesToStorj(c echo.Context) error {
 
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/quickbooks.db"
 
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db")
-	// Copy file from storj to local cache if everything's fine.
+	byteDB, err := satellite.DownloadObject(context.Background(), accesGrant, satellite.RestoreBucket_Quickbooks, "quickbooks.db")
+	// Copy file from satellite to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
 		dbFile, err := os.Create(userCacheDBPath)
@@ -1046,7 +1054,7 @@ func handleQuickbooksInvoicesToStorj(c echo.Context) error {
 		}
 	}
 
-	// DELETE OLD DB COPY FROM STORJ UPLOAD UP TO DATE DB FILE BACK TO STORJ AND DELETE IT FROM LOCAL CACHE
+	// DELETE OLD DB COPY FROM SATELLITE UPLOAD UP TO DATE DB FILE BACK TO SATELLITE AND DELETE IT FROM LOCAL CACHE
 
 	// get db file data
 	dbByte, err := os.ReadFile(userCacheDBPath)
@@ -1056,16 +1064,16 @@ func handleQuickbooksInvoicesToStorj(c echo.Context) error {
 		})
 	}
 
-	// delete old db copy from storj
-	err = storj.DeleteObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db")
+	// delete old db copy from satellite
+	err = satellite.DeleteObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db")
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
 
-	// upload file to storj
-	err = storj.UploadObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db", dbByte)
+	// upload file to satellite
+	err = satellite.UploadObject(context.Background(), accesGrant, "quickbooks", "quickbooks.db", dbByte)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -1080,5 +1088,5 @@ func handleQuickbooksInvoicesToStorj(c echo.Context) error {
 		})
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": "invoices are successfully uploaded from quickbooks to storj"})
+	return c.JSON(http.StatusOK, map[string]interface{}{"message": "invoices are successfully uploaded from quickbooks to satellite"})
 }

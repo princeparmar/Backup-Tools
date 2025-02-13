@@ -3,19 +3,23 @@ package server
 import (
 	"cmp"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"slices"
-	google "storj-integrations/apps/google"
-	"storj-integrations/storage"
-	"storj-integrations/storj"
-	"storj-integrations/utils"
 	"strconv"
 	"strings"
 
+	google "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/satellite"
+	"github.com/StorX2-0/Backup-Tools/storage"
+	"github.com/StorX2-0/Backup-Tools/utils"
+
 	"github.com/labstack/echo/v4"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/api/gmail/v1"
 )
 
@@ -101,18 +105,18 @@ type MessageListJSON struct {
 // Fetches user messages, returns their ID's and threat's IDs.
 func handleGmailGetMessages(c echo.Context) error {
 
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
 	// CHECK IF EMAIL DATABASE ALREADY EXISTS AND DOWNLOAD IT, IF NOT - CREATE NEW ONE
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
 	defer os.Remove(userCacheDBPath)
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "gmail", "gmails.db")
-	// Copy file from storj to local cache if everything's fine.
+	byteDB, err := satellite.DownloadObject(context.Background(), accesGrant, satellite.ReserveBucket_Gmail, "gmails.db")
+	// Copy file from satellite to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
 		dbFile, err := utils.CreateFile(userCacheDBPath)
@@ -204,18 +208,18 @@ func handleGmailGetMessages(c echo.Context) error {
 // Fetches user messages, returns their ID's and threat's IDs.
 func handleGmailGetMessagesIDs(c echo.Context) error {
 
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
 	// CHECK IF EMAIL DATABASE ALREADY EXISTS AND DOWNLOAD IT, IF NOT - CREATE NEW ONE
 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
 	defer os.Remove(userCacheDBPath)
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "gmail", "gmails.db")
-	// Copy file from storj to local cache if everything's fine.
+	byteDB, err := satellite.DownloadObject(context.Background(), accesGrant, satellite.ReserveBucket_Gmail, "gmails.db")
+	// Copy file from satellite to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
 		dbFile, err := utils.CreateFile(userCacheDBPath)
@@ -355,14 +359,15 @@ func handleGmailGetThread(c echo.Context) error {
 	return c.JSON(http.StatusOK, msg)
 }
 
-// Fetches message from Gmail by given ID as a parameter and writes it into SQLite Database in Storj.
+// Fetches message from Gmail by given ID as a parameter and writes it into SQLite Database in Satellite.
 // If there's no database yet - creates one.
-func handleGmailMessageToStorj(c echo.Context) error {
+func handleGmailMessageToSatellite(c echo.Context) error {
 	id := c.Param("ID")
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	ctx := c.Request().Context()
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
@@ -380,116 +385,23 @@ func handleGmailMessageToStorj(c echo.Context) error {
 			})
 		}
 	}
-	msg, err := GmailClient.GetMessage(id)
+	msg, err := GmailClient.GetMessageDirect(id)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
 
-	msgToSave := storage.GmailMessageSQL{
-		ID:      msg.ID,
-		Date:    msg.Date,
-		From:    msg.From,
-		To:      msg.To,
-		Subject: msg.Subject,
-		Body:    msg.Body,
-	}
-
-	// SAVE ATTACHMENTS TO THE STORJ BUCKET AND WRITE THEIR NAMES TO STRUCT
-
-	if len(msg.Attachments) > 0 {
-		for _, att := range msg.Attachments {
-			err = storj.UploadObject(context.Background(), accesGrant, "gmail", att.FileName, att.Data)
-			if err != nil {
-				return c.JSON(http.StatusForbidden, map[string]interface{}{
-					"error": err.Error(),
-				})
-			}
-			msgToSave.Attachments = msgToSave.Attachments + "|" + att.FileName
-		}
-	}
-
-	// CHECK IF EMAIL DATABASE ALREADY EXISTS AND DOWNLOAD IT, IF NOT - CREATE NEW ONE
-
-	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
-	defer os.Remove(userCacheDBPath)
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "gmail", "gmails.db")
-	// Copy file from storj to local cache if everything's fine.
-	// Skip error check, if there's error - we will check that and create new file
-	if err == nil {
-		dbFile, err := utils.CreateFile(userCacheDBPath)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-		_, err = dbFile.Write(byteDB)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-	} else {
-		if strings.Contains(err.Error(), "object not found") {
-			slog.Warn("gmail db not found")
-			dbFile, err := utils.CreateFile(userCacheDBPath)
-			if err != nil {
-				return c.JSON(http.StatusForbidden, map[string]interface{}{
-					"error": err.Error(),
-				})
-			}
-			_, err = dbFile.Write(byteDB)
-			if err != nil {
-				return c.JSON(http.StatusForbidden, map[string]interface{}{
-					"error": err.Error(),
-				})
-			}
-		} else {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-	}
-
-	db, err := storage.ConnectToEmailDB(userCacheDBPath)
+	b, err := json.Marshal(msg)
 	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
 
-	// WRITE ALL EMAILS TO THE DATABASE LOCALLY
-
-	err = db.WriteEmailToDB(&msgToSave)
+	err = satellite.UploadObject(ctx, accesGrant, "gmail", utils.GenerateTitleFromGmailMessage(msg), b)
 	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
-
-	// DELETE OLD DB COPY FROM STORJ UPLOAD UP TO DATE DB FILE BACK TO STORJ AND DELETE IT FROM LOCAL CACHE
-
-	// get db file data
-	dbByte, err := os.ReadFile(userCacheDBPath)
-	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
-
-	// delete old db copy from storj
-	err = storj.DeleteObject(context.Background(), accesGrant, "gmail", "gmails.db")
-	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
-
-	// upload file to storj
-	err = storj.UploadObject(context.Background(), accesGrant, "gmail", "gmails.db", dbByte)
-	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
@@ -497,221 +409,197 @@ func handleGmailMessageToStorj(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]interface{}{"message": "Email was successfully uploaded"})
 }
 
-func handleAllGmailMessagesToStorj(c echo.Context) error {
+// func handleAllGmailMessagesToSatellite(c echo.Context) error {
 
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+// 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
+// 	if accesGrant == "" {
+// 		return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 			"error": "access token not found",
+// 		})
+// 	}
+
+// 	// CHECK IF EMAIL DATABASE ALREADY EXISTS AND DOWNLOAD IT, IF NOT - CREATE NEW ONE
+// 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
+// 	defer os.Remove(userCacheDBPath)
+// 	byteDB, err := satellite.DownloadObject(context.Background(), accesGrant, satellite.ReserveBucket_Gmail, "gmails.db")
+// 	// Copy file from SATELLITE to local cache if everything's fine.
+// 	// Skip error check, if there's error - we will check that and create new file
+// 	if err == nil {
+// 		dbFile, err := utils.CreateFile(userCacheDBPath)
+// 		if err != nil {
+// 			return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 				"error": err.Error(),
+// 			})
+// 		}
+// 		_, err = dbFile.Write(byteDB)
+// 		if err != nil {
+// 			return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 				"error": err.Error(),
+// 			})
+// 		}
+// 	} else {
+// 		if strings.Contains(err.Error(), "object not found") {
+// 			slog.Warn("gmail db not found")
+// 			dbFile, err := utils.CreateFile(userCacheDBPath)
+// 			if err != nil {
+// 				return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 					"error": err.Error(),
+// 				})
+// 			}
+// 			_, err = dbFile.Write(byteDB)
+// 			if err != nil {
+// 				return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 					"error": err.Error(),
+// 				})
+// 			}
+// 		} else {
+// 			return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 				"error": err.Error(),
+// 			})
+// 		}
+// 	}
+
+// 	db, err := storage.ConnectToEmailDB(userCacheDBPath)
+// 	if err != nil {
+// 		return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 			"error": err.Error(),
+// 		})
+// 	}
+// 	// FETCH THE EMAIL TO GOLANG STRUCT
+
+// 	GmailClient, err := google.NewGmailClient(c)
+// 	if err != nil {
+// 		if err.Error() == "token error" {
+// 			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+// 				"error": "token expired",
+// 			})
+// 		} else {
+// 			return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 				"error": err.Error(),
+// 			})
+// 		}
+// 	}
+// 	var allMessages []*gmail.Message
+// 	var nextPageToken string
+// 	for {
+// 		msgs, err := GmailClient.GetUserMessagesIDs(nextPageToken)
+// 		if err != nil {
+// 			return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 				"error": err.Error(),
+// 			})
+// 		}
+
+// 		b, _ := json.Marshal(msgs)
+// 		fmt.Println("messages from gmail api: ", string(b))
+
+// 		allMessages = append(allMessages, msgs.Messages...)
+// 		nextPageToken = msgs.NextPageToken
+
+// 		if nextPageToken == "" {
+// 			break
+// 		}
+// 	}
+
+// 	g, ctx := errgroup.WithContext(c.Request().Context())
+// 	g.SetLimit(10)
+
+// 	processedIDs, failedIDs := utils.NewLockedArray(), utils.NewLockedArray()
+// 	for _, message := range allMessages {
+// 		func(message *gmail.Message) {
+// 			g.Go(func() error {
+// 				msg, err := GmailClient.GetMessage(message.Id)
+// 				if err != nil {
+// 					failedIDs.Add(message.Id)
+// 					return nil
+// 				}
+
+// 				msgToSave := storage.GmailMessageSQL{
+// 					ID:      msg.ID,
+// 					Date:    msg.Date,
+// 					From:    msg.From,
+// 					To:      msg.To,
+// 					Subject: msg.Subject,
+// 					Body:    msg.Body,
+// 				}
+
+// 				// SAVE ATTACHMENTS TO THE SATELLITE BUCKET AND WRITE THEIR NAMES TO STRUCT
+
+// 				if len(msg.Attachments) > 0 {
+// 					for _, att := range msg.Attachments {
+// 						err = satellite.UploadObject(ctx, accesGrant, "gmail", att.FileName, att.Data)
+// 						if err != nil {
+// 							failedIDs.Add(message.Id)
+// 							return nil
+// 						}
+// 						msgToSave.Attachments = msgToSave.Attachments + "|" + att.FileName
+// 					}
+// 				}
+
+// 				// WRITE ALL EMAILS TO THE DATABASE LOCALLY
+
+// 				err = db.WriteEmailToDB(&msgToSave)
+// 				if err != nil {
+// 					if !strings.Contains(err.Error(), "UNIQUE constraint failed") {
+// 						failedIDs.Add(message.Id)
+// 						return nil
+// 					}
+// 				}
+// 				processedIDs.Add(message.Id)
+// 				return nil
+// 			})
+// 		}(message)
+// 	}
+
+// 	if err := g.Wait(); err != nil {
+// 		return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 			"error":         err.Error(),
+// 			"failed_ids":    failedIDs.Get(),
+// 			"processed_ids": processedIDs.Get(),
+// 		})
+// 	}
+
+// 	// DELETE OLD DB COPY FROM SATELLITE UPLOAD UP TO DATE DB FILE BACK TO SATELLITE AND DELETE IT FROM LOCAL CACHE
+
+// 	// get db file data
+// 	dbByte, err := os.ReadFile(userCacheDBPath)
+// 	if err != nil {
+// 		return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 			"error": err.Error(),
+// 		})
+// 	}
+
+// 	// delete old db copy from SATELLITE
+// 	err = satellite.DeleteObject(context.Background(), accesGrant, "gmail", "gmails.db")
+// 	if err != nil {
+// 		return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 			"error": err.Error(),
+// 		})
+// 	}
+
+// 	// upload file to SATELLITE
+// 	err = satellite.UploadObject(context.Background(), accesGrant, "gmail", "gmails.db", dbByte)
+// 	if err != nil {
+// 		return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 			"error": err.Error(),
+// 		})
+// 	}
+
+// 	return c.JSON(http.StatusOK, map[string]interface{}{
+// 		"message":       "all items were successfully uploaded from gmail to Satellite",
+// 		"failed_ids":    failedIDs.Get(),
+// 		"processed_ids": processedIDs.Get(),
+// 	})
+// }
+
+func handleListGmailMessagesToSatellite(c echo.Context) error {
+
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
-	// CHECK IF EMAIL DATABASE ALREADY EXISTS AND DOWNLOAD IT, IF NOT - CREATE NEW ONE
-	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
-	defer os.Remove(userCacheDBPath)
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "gmail", "gmails.db")
-	// Copy file from storj to local cache if everything's fine.
-	// Skip error check, if there's error - we will check that and create new file
-	if err == nil {
-		dbFile, err := utils.CreateFile(userCacheDBPath)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-		_, err = dbFile.Write(byteDB)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-	} else {
-		if strings.Contains(err.Error(), "object not found") {
-			slog.Warn("gmail db not found")
-			dbFile, err := utils.CreateFile(userCacheDBPath)
-			if err != nil {
-				return c.JSON(http.StatusForbidden, map[string]interface{}{
-					"error": err.Error(),
-				})
-			}
-			_, err = dbFile.Write(byteDB)
-			if err != nil {
-				return c.JSON(http.StatusForbidden, map[string]interface{}{
-					"error": err.Error(),
-				})
-			}
-		} else {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-	}
-
-	db, err := storage.ConnectToEmailDB(userCacheDBPath)
-	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
-	// FETCH THE EMAIL TO GOLANG STRUCT
-
-	GmailClient, err := google.NewGmailClient(c)
-	if err != nil {
-		if err.Error() == "token error" {
-			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-				"error": "token expired",
-			})
-		} else {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-	}
-	var allMessages []*gmail.Message
-	var nextPageToken string
-	for {
-		msgs, err := GmailClient.GetUserMessagesIDs(nextPageToken)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-
-		allMessages = append(allMessages, msgs.Messages...)
-		nextPageToken = msgs.NextPageToken
-
-		if nextPageToken == "" {
-			break
-		}
-	}
-
-	for _, message := range allMessages {
-		msg, err := GmailClient.GetMessage(message.Id)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-
-		msgToSave := storage.GmailMessageSQL{
-			ID:      msg.ID,
-			Date:    msg.Date,
-			From:    msg.From,
-			To:      msg.To,
-			Subject: msg.Subject,
-			Body:    msg.Body,
-		}
-
-		// SAVE ATTACHMENTS TO THE STORJ BUCKET AND WRITE THEIR NAMES TO STRUCT
-
-		if len(msg.Attachments) > 0 {
-			for _, att := range msg.Attachments {
-				err = storj.UploadObject(context.Background(), accesGrant, "gmail", att.FileName, att.Data)
-				if err != nil {
-					return c.JSON(http.StatusForbidden, map[string]interface{}{
-						"error": err.Error(),
-					})
-				}
-				msgToSave.Attachments = msgToSave.Attachments + "|" + att.FileName
-			}
-		}
-
-		// WRITE ALL EMAILS TO THE DATABASE LOCALLY
-
-		err = db.WriteEmailToDB(&msgToSave)
-		if err != nil {
-			if !strings.Contains(err.Error(), "UNIQUE constraint failed") {
-				return c.JSON(http.StatusForbidden, map[string]interface{}{
-					"error": err.Error(),
-				})
-			}
-		}
-	}
-	// DELETE OLD DB COPY FROM STORJ UPLOAD UP TO DATE DB FILE BACK TO STORJ AND DELETE IT FROM LOCAL CACHE
-
-	// get db file data
-	dbByte, err := os.ReadFile(userCacheDBPath)
-	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
-
-	// delete old db copy from storj
-	err = storj.DeleteObject(context.Background(), accesGrant, "gmail", "gmails.db")
-	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
-
-	// upload file to storj
-	err = storj.UploadObject(context.Background(), accesGrant, "gmail", "gmails.db", dbByte)
-	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
-
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": "Emails were successfully uploaded"})
-}
-
-func handleListGmailMessagesToStorj(c echo.Context) error {
-
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
-	if accesGrant == "" {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
-		})
-	}
-
-	// CHECK IF EMAIL DATABASE ALREADY EXISTS AND DOWNLOAD IT, IF NOT - CREATE NEW ONE
-	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
-	defer os.Remove(userCacheDBPath)
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "gmail", "gmails.db")
-	// Copy file from storj to local cache if everything's fine.
-	// Skip error check, if there's error - we will check that and create new file
-	if err == nil {
-		dbFile, err := utils.CreateFile(userCacheDBPath)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-		_, err = dbFile.Write(byteDB)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-	} else {
-		if strings.Contains(err.Error(), "object not found") {
-			slog.Warn("gmail db not found")
-			dbFile, err := utils.CreateFile(userCacheDBPath)
-			if err != nil {
-				return c.JSON(http.StatusForbidden, map[string]interface{}{
-					"error": err.Error(),
-				})
-			}
-			_, err = dbFile.Write(byteDB)
-			if err != nil {
-				return c.JSON(http.StatusForbidden, map[string]interface{}{
-					"error": err.Error(),
-				})
-			}
-		} else {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-	}
-
-	db, err := storage.ConnectToEmailDB(userCacheDBPath)
-	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
 	// FETCH THE EMAIL TO GOLANG STRUCT
 
 	GmailClient, err := google.NewGmailClient(c)
@@ -740,91 +628,79 @@ func handleListGmailMessagesToStorj(c echo.Context) error {
 		allIDs = strings.Split(formIDs, ",")
 	}
 
+	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
+	if userDetails.Email == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "user email not found, please check access handling",
+		})
+	}
+
+	g, ctx := errgroup.WithContext(c.Request().Context())
+	g.SetLimit(10)
+
+	processedIDs, failedIDs := utils.NewLockedArray(), utils.NewLockedArray()
 	for _, id := range allIDs {
-		msg, err := GmailClient.GetMessage(id)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-
-		msgToSave := storage.GmailMessageSQL{
-			ID:      msg.ID,
-			Date:    msg.Date,
-			From:    msg.From,
-			To:      msg.To,
-			Subject: msg.Subject,
-			Body:    msg.Body,
-		}
-
-		// SAVE ATTACHMENTS TO THE STORJ BUCKET AND WRITE THEIR NAMES TO STRUCT
-
-		if len(msg.Attachments) > 0 {
-			for _, att := range msg.Attachments {
-				err = storj.UploadObject(context.Background(), accesGrant, "gmail", att.FileName, att.Data)
+		func(id string) {
+			g.Go(func() error {
+				msg, err := GmailClient.GetMessageDirect(id)
 				if err != nil {
-					return c.JSON(http.StatusForbidden, map[string]interface{}{
-						"error": err.Error(),
-					})
+					failedIDs.Add(id)
+					return nil
 				}
-				msgToSave.Attachments = msgToSave.Attachments + "|" + att.FileName
-			}
-		}
 
-		// WRITE ALL EMAILS TO THE DATABASE LOCALLY
+				b, err := json.Marshal(msg)
+				if err != nil {
+					failedIDs.Add(id)
+					return nil
+				}
 
-		err = db.WriteEmailToDB(&msgToSave)
-		if err != nil {
-			// This means that message already exist. We just it and go to the next
-			if !strings.Contains(err.Error(), "UNIQUE constraint failed") {
-				return c.JSON(http.StatusForbidden, map[string]interface{}{
-					"error": err.Error(),
-				})
-			}
-		}
+				messagePath := userDetails.Email + "/" + utils.GenerateTitleFromGmailMessage(msg)
+
+				err = satellite.UploadObject(ctx, accesGrant, "gmail", messagePath, b)
+				if err != nil {
+					failedIDs.Add(id)
+					return nil
+				}
+
+				processedIDs.Add(id)
+				return nil
+			})
+		}(id)
 	}
-	// DELETE OLD DB COPY FROM STORJ UPLOAD UP TO DATE DB FILE BACK TO STORJ AND DELETE IT FROM LOCAL CACHE
-
-	// get db file data
-	dbByte, err := os.ReadFile(userCacheDBPath)
-	if err != nil {
+	if err := g.Wait(); err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
+			"error":         err.Error(),
+			"failed_ids":    failedIDs.Get(),
+			"processed_ids": processedIDs.Get(),
 		})
 	}
 
-	// delete old db copy from storj
-	err = storj.DeleteObject(context.Background(), accesGrant, "gmail", "gmails.db")
-	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
-
-	// upload file to storj
-	err = storj.UploadObject(context.Background(), accesGrant, "gmail", "gmails.db", dbByte)
-	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
-
-	return c.JSON(http.StatusOK, map[string]interface{}{"message": "Emails were successfully uploaded"})
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message":       "all mails were successfully uploaded from Google mail to Satellite",
+		"failed_ids":    failedIDs.Get(),
+		"processed_ids": processedIDs.Get(),
+	})
 }
 
-func handleGetGmailDBFromStorj(c echo.Context) error {
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+func handleGetGmailDBFromSatellite(c echo.Context) error {
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
-	// Download the SQLite database file from Storj
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "gmail", "gmails.db")
+	// Download the SQLite database file from SATELLITE
+	byteDB, err := satellite.DownloadObject(context.Background(), accesGrant, satellite.ReserveBucket_Gmail, "gmails.db")
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"message": "no emails saved in Storj database",
+			"message": "no emails saved in satellite",
 			"error":   err.Error(),
 		})
 	}
@@ -892,78 +768,37 @@ func handleGmailGetThreadsIDsControlled(c echo.Context) error {
 
 	var threads []any
 
-	res, err := GmailClient.GetUserMessagesControlled(nextPageToken, numInt)
+	res, err := GmailClient.GetUserMessagesControlled(nextPageToken, "", numInt)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
 	//threads = append(threads, res.Messages...)
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
-	// CHECK IF EMAIL DATABASE ALREADY EXISTS AND DOWNLOAD IT, IF NOT - CREATE NEW ONE
-	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
-	defer os.Remove(userCacheDBPath)
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "gmail", "gmails.db")
-	// Copy file from storj to local cache if everything's fine.
-	// Skip error check, if there's error - we will check that and create new file
-	if err == nil {
-		dbFile, err := utils.CreateFile(userCacheDBPath)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-		_, err = dbFile.Write(byteDB)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-	} else {
-		if strings.Contains(err.Error(), "object not found") {
-			slog.Warn("gmail db not found")
-			dbFile, err := utils.CreateFile(userCacheDBPath)
-			if err != nil {
-				return c.JSON(http.StatusForbidden, map[string]interface{}{
-					"error": err.Error(),
-				})
-			}
-			_, err = dbFile.Write(byteDB)
-			if err != nil {
-				return c.JSON(http.StatusForbidden, map[string]interface{}{
-					"error": err.Error(),
-				})
-			}
-		} else {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-	}
-
-	db, err := storage.ConnectToEmailDB(userCacheDBPath)
+	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
 
-	messages, err := db.GetAllEmailsFromDB()
-	if err != nil {
+	emailListFromBucket, err := satellite.ListObjectsWithPrefix(context.Background(),
+		accesGrant, satellite.ReserveBucket_Gmail, userDetails.Email+"/")
+	if err != nil && !strings.Contains(err.Error(), "object not found") {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
+
 	for _, message := range res.Messages {
-		_, synced := slices.BinarySearchFunc(messages, message.Id, func(a *storage.GmailMessageSQL, b string) int {
-			return cmp.Compare(a.ID, b)
-		})
+		_, synced := emailListFromBucket[userDetails.Email+"/"+utils.GenerateTitleFromGmailMessage(message)]
 		threads = append(threads, MessageListJSON{Message: *message, Synced: synced})
 	}
 	nextPageToken = res.NextPageToken
@@ -971,105 +806,215 @@ func handleGmailGetThreadsIDsControlled(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{"messages": threads, "nextPageToken": nextPageToken})
 }
 
-// Fetches user messages, returns their ID's and threat's IDs.
-func handleGmailGetMessagesUsingWorkers(c echo.Context) error {
+// // Fetches user messages, returns their ID's and threat's IDs.
+// func handleGmailGetMessagesUsingWorkers(c echo.Context) error {
 
-	accesGrant := c.Request().Header.Get("STORJ_ACCESS_TOKEN")
-	if accesGrant == "" {
+// 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
+// 	if accesGrant == "" {
+// 		return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 			"error": "access token not found",
+// 		})
+// 	}
+
+// 	// CHECK IF EMAIL DATABASE ALREADY EXISTS AND DOWNLOAD IT, IF NOT - CREATE NEW ONE
+// 	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
+// 	defer os.Remove(userCacheDBPath)
+// 	byteDB, err := satellite.DownloadObject(context.Background(), accesGrant, satellite.ReserveBucket_Gmail, "gmails.db")
+// 	// Copy file from SATELLITE to local cache if everything's fine.
+// 	// Skip error check, if there's error - we will check that and create new file
+// 	if err == nil {
+// 		dbFile, err := utils.CreateFile(userCacheDBPath)
+// 		if err != nil {
+// 			return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 				"error": err.Error(),
+// 			})
+// 		}
+// 		_, err = dbFile.Write(byteDB)
+// 		if err != nil {
+// 			return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 				"error": err.Error(),
+// 			})
+// 		}
+// 	} else {
+// 		if strings.Contains(err.Error(), "object not found") {
+// 			slog.Warn("gmail db not found")
+// 			dbFile, err := utils.CreateFile(userCacheDBPath)
+// 			if err != nil {
+// 				return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 					"error": err.Error(),
+// 				})
+// 			}
+// 			_, err = dbFile.Write(byteDB)
+// 			if err != nil {
+// 				return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 					"error": err.Error(),
+// 				})
+// 			}
+// 		} else {
+// 			return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 				"error": err.Error(),
+// 			})
+// 		}
+// 	}
+
+// 	db, err := storage.ConnectToEmailDB(userCacheDBPath)
+// 	if err != nil {
+// 		return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 			"error": err.Error(),
+// 		})
+// 	}
+
+// 	messages, err := db.GetAllEmailsFromDB()
+// 	if err != nil {
+// 		return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 			"error": err.Error(),
+// 		})
+// 	}
+
+// 	GmailClient, err := google.NewGmailClient(c)
+// 	if err != nil {
+// 		if err.Error() == "token error" {
+// 			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+// 				"error": "token expired",
+// 			})
+// 		} else {
+// 			return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 				"error": err.Error(),
+// 			})
+// 		}
+// 	}
+
+// 	var allMessages []MessageListJSON
+// 	var nextPageToken string
+// 	for {
+// 		msgs, err := GmailClient.GetUserMessagesUsingWorkers(nextPageToken, 25)
+// 		if err != nil {
+// 			return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 				"error": err.Error(),
+// 			})
+// 		}
+// 		for _, message := range msgs.Messages {
+// 			_, synced := slices.BinarySearchFunc(messages, message.Id, func(a *storage.GmailMessageSQL, b string) int {
+// 				return cmp.Compare(a.ID, b)
+// 			})
+// 			allMessages = append(allMessages, MessageListJSON{Message: *message, Synced: synced})
+// 		}
+// 		//allMessages = append(allMessages, msgs.Messages...)
+// 		nextPageToken = msgs.NextPageToken
+
+// 		if nextPageToken == "" {
+// 			break
+// 		}
+// 	}
+// 	return c.JSON(http.StatusOK, allMessages)
+// }
+
+func handleGmailDownloadAndInsert(c echo.Context) error {
+	// Get access token from header
+	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accessGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "storj access token is missing",
+			"error": "access token not found",
 		})
 	}
 
-	// CHECK IF EMAIL DATABASE ALREADY EXISTS AND DOWNLOAD IT, IF NOT - CREATE NEW ONE
-	userCacheDBPath := "./cache/" + utils.CreateUserTempCacheFolder() + "/gmails.db"
-	defer os.Remove(userCacheDBPath)
-	byteDB, err := storj.DownloadObject(context.Background(), accesGrant, "gmail", "gmails.db")
-	// Copy file from storj to local cache if everything's fine.
-	// Skip error check, if there's error - we will check that and create new file
-	if err == nil {
-		dbFile, err := utils.CreateFile(userCacheDBPath)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-		_, err = dbFile.Write(byteDB)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
+	var allIDs []string
+	if strings.Contains(c.Request().Header.Get(echo.HeaderContentType), echo.MIMEApplicationJSON) {
+		// Decode JSON array from request body
+		if err := json.NewDecoder(c.Request().Body).Decode(&allIDs); err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"error": "invalid JSON format",
 			})
 		}
 	} else {
-		if strings.Contains(err.Error(), "object not found") {
-			slog.Warn("gmail db not found")
-			dbFile, err := utils.CreateFile(userCacheDBPath)
-			if err != nil {
-				return c.JSON(http.StatusForbidden, map[string]interface{}{
-					"error": err.Error(),
-				})
-			}
-			_, err = dbFile.Write(byteDB)
-			if err != nil {
-				return c.JSON(http.StatusForbidden, map[string]interface{}{
-					"error": err.Error(),
-				})
-			}
-		} else {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
+		// Handle form data
+		formIDs := c.FormValue("ids")
+		allIDs = strings.Split(formIDs, ",")
+	}
+
+	for i := range allIDs {
+		allIDs[i] = strings.TrimSpace(allIDs[i])
+		decodedID, err := base64.StdEncoding.DecodeString(allIDs[i])
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"error": "invalid base64 format",
 			})
 		}
+		allIDs[i] = string(decodedID)
 	}
 
-	db, err := storage.ConnectToEmailDB(userCacheDBPath)
-	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
+	// Validate request
+	if len(allIDs) == 0 || allIDs[0] == "" {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"error": "no keys provided",
+		})
+	}
+	if len(allIDs) > 10 {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"error": "maximum 10 keys allowed",
 		})
 	}
 
-	messages, err := db.GetAllEmailsFromDB()
-	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
-
-	GmailClient, err := google.NewGmailClient(c)
+	// Get Gmail client
+	gmailClient, err := google.NewGmailClient(c)
 	if err != nil {
 		if err.Error() == "token error" {
 			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
 				"error": "token expired",
 			})
-		} else {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
 		}
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
-	var allMessages []MessageListJSON
-	var nextPageToken string
-	for {
-		msgs, err := GmailClient.GetUserMessagesUsingWorkers(nextPageToken, 25)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-		for _, message := range msgs.Messages {
-			_, synced := slices.BinarySearchFunc(messages, message.Id, func(a *storage.GmailMessageSQL, b string) int {
-				return cmp.Compare(a.ID, b)
-			})
-			allMessages = append(allMessages, MessageListJSON{Message: *message, Synced: synced})
-		}
-		//allMessages = append(allMessages, msgs.Messages...)
-		nextPageToken = msgs.NextPageToken
+	g, ctx := errgroup.WithContext(c.Request().Context())
+	g.SetLimit(10)
 
-		if nextPageToken == "" {
-			break
+	processedIDs, failedIDs := utils.NewLockedArray(), utils.NewLockedArray()
+
+	for _, key := range allIDs {
+		key := key
+		if key == "" {
+			continue
 		}
+		g.Go(func() error {
+			// Download file from Satellite
+			data, err := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Gmail, key)
+			if err != nil {
+				failedIDs.Add(key)
+				return nil
+			}
+
+			// Parse the email data and insert into Gmail
+			var gmailMsg gmail.Message
+			if err := json.Unmarshal(data, &gmailMsg); err != nil {
+				failedIDs.Add(key)
+				return nil
+			}
+
+			// Insert message into Gmail
+			if err := gmailClient.InsertMessage(&gmailMsg); err != nil {
+				fmt.Println(err)
+				failedIDs.Add(key)
+			} else {
+				processedIDs.Add(key)
+			}
+			return nil
+		})
 	}
-	return c.JSON(http.StatusOK, allMessages)
+
+	if err := g.Wait(); err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error":         err.Error(),
+			"failed_ids":    failedIDs.Get(),
+			"processed_ids": processedIDs.Get(),
+		})
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message":       "all gmail messages processed",
+		"failed_ids":    failedIDs.Get(),
+		"processed_ids": processedIDs.Get(),
+	})
 }

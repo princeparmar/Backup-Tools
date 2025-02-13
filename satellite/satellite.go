@@ -1,8 +1,9 @@
-package storj
+package satellite
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,42 +12,69 @@ import (
 	"storj.io/uplink"
 )
 
-// Authenticates app with your Storj accout.
-func HandleStorjAuthentication(c echo.Context) error {
-	storjAccessToken := c.FormValue("storj")
+const (
+	ReserveBucket_Gmail      = "gmail"
+	ReserveBucket_Drive      = "google-drive"
+	ReserveBucket_Cloud      = "google-cloud"
+	ReserveBucket_Photos     = "google-photos"
+	ReserveBucket_Dropbox    = "dropbox"
+	ReserveBucket_S3         = "aws-s3"
+	ReserveBucket_Github     = "github"
+	ReserveBucket_Shopify    = "shopify"
+	RestoreBucket_Quickbooks = "quickbooks"
+)
+
+var StorxSatelliteService string
+
+// Authenticates app with your satellite accout.
+func HandleSatelliteAuthentication(c echo.Context) error {
+	accessToken := c.FormValue("satellite")
 	c.SetCookie(&http.Cookie{
-		Name:  "storj_access_token",
-		Value: storjAccessToken,
+		Name:  "access_token",
+		Value: accessToken,
 	})
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message": "storj authentication was successful",
+		"message": "authentication was successful",
 	})
 }
 
-func UploadObject(ctx context.Context, accessGrant, bucketName, objectKey string, data []byte) error {
+func GetUploader(ctx context.Context, accessGrant, bucketName, objectKey string) (*uplink.Upload, error) {
 	// Parse the Access Grant.
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
-		return fmt.Errorf("could not parse access grant: %v", err)
+		return nil, fmt.Errorf("could not parse access grant: %v", err)
 	}
 
 	// Open up the Project we will be working with.
 	project, err := uplink.OpenProject(ctx, access)
 	if err != nil {
-		return fmt.Errorf("could not open project: %v", err)
+		return nil, fmt.Errorf("could not open project: %v", err)
 	}
 	defer project.Close()
 
 	// Ensure the desired Bucket within the Project is created.
 	_, err = project.EnsureBucket(ctx, bucketName)
 	if err != nil {
-		project.CreateBucket(ctx, bucketName)
+		_, err := project.CreateBucket(ctx, bucketName)
+		if err != nil {
+			return nil, fmt.Errorf("could not create bucket: %v", err)
+		}
 	}
 
+	fmt.Println("Uploading object to bucket:", bucketName, "with key:", objectKey)
 	// Intitiate the upload of our Object to the specified bucket and key.
 	upload, err := project.UploadObject(ctx, bucketName, objectKey, nil)
 	if err != nil {
-		return fmt.Errorf("could not initiate upload: %v", err)
+		return nil, fmt.Errorf("could not initiate upload: %v", err)
+	}
+
+	return upload, nil
+}
+
+func UploadObject(ctx context.Context, accessGrant, bucketName, objectKey string, data []byte) error {
+	upload, err := GetUploader(ctx, accessGrant, bucketName, objectKey)
+	if err != nil {
+		return err
 	}
 
 	// Copy the data to the upload.
@@ -100,6 +128,10 @@ func DownloadObject(ctx context.Context, accessGrant, bucketName, objectKey stri
 }
 
 func ListObjects(ctx context.Context, accessGrant, bucketName string) (map[string]bool, error) {
+	return ListObjectsWithPrefix(ctx, accessGrant, bucketName, "")
+}
+
+func ListObjectsWithPrefix(ctx context.Context, accessGrant, bucketName, prefix string) (map[string]bool, error) {
 	// Parse the Access Grant.
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
@@ -118,7 +150,9 @@ func ListObjects(ctx context.Context, accessGrant, bucketName string) (map[strin
 	if err != nil {
 		return nil, err
 	}
-	listIter := project.ListObjects(ctx, bucketName, nil)
+	listIter := project.ListObjects(ctx, bucketName, &uplink.ListObjectsOptions{
+		Prefix: prefix,
+	})
 	/*if err != nil {
 		return nil, fmt.Errorf("could not open object: %v", err)
 	}*/
@@ -269,4 +303,45 @@ func ListObjectsRecurisive(ctx context.Context, accessGrant, bucketName string) 
 	}
 
 	return objects, nil
+}
+
+func GetUserdetails(token string) (string, error) {
+
+	url := StorxSatelliteService + "/api/v0/auth/account"
+
+	client := &http.Client{}
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+
+	if err != nil {
+		return "", err
+	}
+	req.Header.Add("accept", "application/json")
+	req.Header.Add("cookie", "_tokenKey="+token)
+
+	res, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return "", err
+	}
+
+	var userDetailResponse struct {
+		ID    string `json:"id"`
+		Error string `json:"error"`
+	}
+
+	err = json.Unmarshal(body, &userDetailResponse)
+	if err != nil {
+		return "", err
+	}
+
+	if userDetailResponse.Error != "" {
+		return "", fmt.Errorf(userDetailResponse.Error)
+	}
+
+	return userDetailResponse.ID, nil
 }

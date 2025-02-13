@@ -1,13 +1,18 @@
 package google
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"log"
 	"log/slog"
-	"storj-integrations/utils"
+	"mime/quotedprintable"
 	"strings"
 	"sync"
+
+	"github.com/StorX2-0/Backup-Tools/storage"
+	"github.com/StorX2-0/Backup-Tools/utils"
 
 	"github.com/labstack/echo/v4"
 	"google.golang.org/api/gmail/v1"
@@ -52,7 +57,22 @@ type Attachment struct {
 }
 
 func NewGmailClient(c echo.Context) (*GmailClient, error) {
-	client, err := client(c)
+	database := c.Get(dbContextKey).(*storage.PosgresStore)
+
+	googleToken, err := GetGoogleTokenFromJWT(c)
+	if err != nil {
+		return nil, fmt.Errorf("unable to retrieve google-auth token from JWT: %v", err)
+	}
+	token, err := database.ReadGoogleAuthToken(googleToken)
+	if err != nil {
+		return nil, fmt.Errorf("unable to retrieve google-auth token from database: %v", err)
+	}
+
+	return NewGmailClientUsingToken(token)
+}
+
+func NewGmailClientUsingToken(token string) (*GmailClient, error) {
+	client, err := clientUsingToken(token)
 	if err != nil {
 		return nil, err
 	}
@@ -89,6 +109,22 @@ func (client *GmailClient) GetUserThreads(nextPageToken string) (*ThreadsRespons
 		ts = append(ts, t)
 	}
 	return &ThreadsResponse{threads.NextPageToken, int(threads.ResultSizeEstimate), ts}, nil
+}
+
+// InsertMessage inserts a message into Gmail
+func (client *GmailClient) InsertMessage(message *gmail.Message) error {
+	raw, err := createRawMessage(message)
+	if err != nil {
+		return err
+	}
+
+	msg := &gmail.Message{
+		Raw:      raw,
+		LabelIds: message.LabelIds,
+	}
+
+	_, err = client.Users.Messages.Import("me", msg).Do()
+	return err
 }
 
 func (client *GmailClient) GetUserThreadsIDs(nextPageToken string) (*gmail.ListThreadsResponse, error) {
@@ -160,8 +196,47 @@ func (client *GmailClient) GetUserMessagesIDs(nextPageToken string) (*gmail.List
 
 	return res, nil
 }
-func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
+
+func (client *GmailClient) GetMessageDirect(msgID string) (*gmail.Message, error) {
 	msg, err := client.Users.Messages.Get("me", msgID).Format("full").Do()
+	if err != nil {
+		return nil, err
+	}
+
+	err = client.updateAttachment(msgID, msg.Payload)
+	if err != nil {
+		return nil, err
+	}
+
+	return msg, nil
+}
+
+func (client *GmailClient) updateAttachment(msgID string, part *gmail.MessagePart) error {
+
+	if part.Body != nil && part.Body.AttachmentId != "" {
+		p, err := client.GetAttachment(msgID, part.Body.AttachmentId)
+		if err != nil {
+			return err
+		}
+
+		p.Data = strings.ReplaceAll(p.Data, "_", "/")
+		p.Data = strings.ReplaceAll(p.Data, "-", "+")
+
+		part.Body = p
+	}
+
+	for _, p := range part.Parts {
+		err := client.updateAttachment(msgID, p)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
+	msg, err := client.GetMessageDirect(msgID)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +283,7 @@ func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
 			for _, subpart := range part.Parts {
 				if subpart.MimeType == "text/plain" {
 					// Body data is in Base64 format.
-					data, err := base64.StdEncoding.DecodeString(subpart.Body.Data)
+					data, err := base64.URLEncoding.DecodeString(subpart.Body.Data)
 					if err != nil {
 						GmailMSG.Body = subpart.Body.Data
 					} else {
@@ -225,7 +300,7 @@ func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
 						if subsubpart.MimeType == "text/plain" {
 							if strings.HasPrefix(subpart.Body.Data, "Content-Transfer-Encoding: base64") {
 								// Body data is in Base64 format.
-								data, err := base64.StdEncoding.DecodeString(subpart.Body.Data[28:])
+								data, err := base64.URLEncoding.DecodeString(subpart.Body.Data[28:])
 								if err != nil {
 									if strings.Contains(err.Error(), "illegal base64 data at input byte 383") {
 										slog.Warn("Unable to decode message body: ", "error", err, "WARNING", "using the raw body")
@@ -265,23 +340,36 @@ func (client *GmailClient) GetThread(threadID string) (*gmail.Thread, error) {
 	return client.Users.Threads.Get("me", threadID).Format("full").Do()
 }
 
-func (client *GmailClient) GetUserMessagesControlled(nextPageToken string, num int64) (*MessagesResponse, error) {
+func (client *GmailClient) GetAttachment(msgID, attachmentID string) (*gmail.MessagePartBody, error) {
+	msg, err := client.Users.Messages.Attachments.Get("me", msgID, attachmentID).Do()
+	if err != nil {
+		return nil, err
+	}
+
+	return msg, nil
+}
+
+func (client *GmailClient) GetUserMessagesControlled(nextPageToken, label string, num int64) (*MessagesResponse, error) {
 	var msgs MessagesResponse
 	var err error
 	var messages []*gmail.Message
 	var res *gmail.ListMessagesResponse
-	// Checks is there is page token passed to func.
-	if nextPageToken == "" {
-		res, err = client.Users.Messages.List("me").MaxResults(num).Do()
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		res, err = client.Users.Messages.List("me").MaxResults(num).PageToken(nextPageToken).Do()
-		if err != nil {
-			return nil, err
-		}
+
+	// order by oldest first
+	req := client.Users.Messages.List("me").MaxResults(num)
+	if nextPageToken != "" {
+		req.PageToken(nextPageToken)
 	}
+
+	if label != "" {
+		req.LabelIds(label)
+	}
+
+	res, err = req.Do()
+	if err != nil {
+		return nil, err
+	}
+
 	for _, msg := range res.Messages {
 		message, err := client.Users.Messages.Get("me", msg.Id).Do()
 		if err != nil {
@@ -358,4 +446,87 @@ func (client *GmailClient) GetUserMessagesUsingWorkers(nextPageToken string, wor
 	msgs.Messages = messages
 	msgs.NextPageToken = res.NextPageToken
 	return &msgs, nil
+}
+
+func createRawMessage(gmailMsg *gmail.Message) (string, error) {
+	var rawMessage string
+
+	err := createMessagePart(&rawMessage, gmailMsg.Payload)
+	if err != nil {
+		return "", err
+	}
+
+	// Base64 encode the entire message
+
+	raw := base64.URLEncoding.EncodeToString([]byte(rawMessage))
+	return raw, nil
+}
+
+func createMessagePart(rawMessage *string, part *gmail.MessagePart) error {
+
+	var boundary string
+	var contentTransferEncoding string
+	for _, header := range part.Headers {
+		*rawMessage += fmt.Sprintf("%s: %s\n", header.Name, header.Value)
+
+		if header.Name == "Content-Type" && strings.Contains(header.Value, "boundary=") {
+			boundary = "--" +
+				strings.Trim(strings.TrimSpace(strings.Split(header.Value, "boundary=")[1]), "\"")
+		}
+
+		if header.Name == "Content-Transfer-Encoding" {
+			contentTransferEncoding = header.Value
+		}
+	}
+
+	*rawMessage += "\n"
+
+	if part.Body != nil && part.Body.Data != "" {
+		if contentTransferEncoding == "base64" {
+			*rawMessage += part.Body.Data
+		} else if contentTransferEncoding == "quoted-printable" {
+			data, err := base64.URLEncoding.DecodeString(part.Body.Data)
+			if err != nil {
+				return err
+			}
+
+			var buf bytes.Buffer
+			writer := quotedprintable.NewWriter(&buf)
+
+			_, err = writer.Write(data)
+			if err != nil {
+				return err
+			}
+
+			err = writer.Close()
+			if err != nil {
+				return err
+			}
+
+			*rawMessage += buf.String()
+		} else {
+			data, err := base64.URLEncoding.DecodeString(part.Body.Data)
+			if err != nil {
+				return err
+			}
+
+			*rawMessage += string(data)
+		}
+	}
+
+	*rawMessage += "\n"
+
+	for _, subpart := range part.Parts {
+		*rawMessage += boundary + "\n"
+		err := createMessagePart(rawMessage, subpart)
+		if err != nil {
+			return err
+		}
+	}
+
+	if boundary != "" {
+		*rawMessage += boundary + "--" + "\n"
+	}
+
+	return nil
 }

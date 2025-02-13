@@ -1,9 +1,10 @@
 package shopify
 
 import (
+	"context"
 	"os"
 
-	goshopify "github.com/bold-commerce/go-shopify"
+	goshopify "github.com/bold-commerce/go-shopify/v4"
 )
 
 type ShopifyApp struct {
@@ -28,15 +29,15 @@ type ShopifyClient struct {
 	*goshopify.Client
 }
 
-func CreateClient(token string, shopname string) *ShopifyClient {
+func CreateClient(token string, shopname string) (*ShopifyClient, error) {
 	// Create a new API client
-	client := goshopify.NewClient(ShopifyInitApp.App, shopname, token)
+	client, err := goshopify.NewClient(ShopifyInitApp.App, shopname, token)
 
-	return &ShopifyClient{Client: client}
+	return &ShopifyClient{Client: client}, err
 }
 
 func (client *ShopifyClient) GetProducts() ([]goshopify.Product, error) {
-	products, err := client.Product.List(goshopify.ProductOption{})
+	products, err := client.Product.List(context.Background(), goshopify.ProductOption{})
 	if err != nil {
 		return nil, err
 	}
@@ -44,7 +45,7 @@ func (client *ShopifyClient) GetProducts() ([]goshopify.Product, error) {
 }
 
 func (client *ShopifyClient) GetCustomers() ([]goshopify.Customer, error) {
-	customers, err := client.Customer.List(goshopify.CustomerSearchOptions{})
+	customers, err := client.Customer.List(context.Background(), goshopify.CustomerSearchOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +53,7 @@ func (client *ShopifyClient) GetCustomers() ([]goshopify.Customer, error) {
 }
 
 func (client *ShopifyClient) GetOrders() ([]goshopify.Order, error) {
-	orders, err := client.Order.List(goshopify.OrderListOptions{})
+	orders, err := client.Order.List(context.Background(), goshopify.OrderListOptions{})
 	if err != nil {
 		return nil, err
 	}

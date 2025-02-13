@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"google.golang.org/api/gmail/v1"
 )
 
 type lockedArray struct {
@@ -48,6 +50,16 @@ func RandStringRunes(n int) string {
 		b[i] = letterRunes[rand.Intn(len(letterRunes))]
 	}
 	return string(b)
+}
+
+func Contains(ar []string, b string) bool {
+	for _, a := range ar {
+		if a == b {
+			return true
+		}
+	}
+
+	return false
 }
 
 // DownloadFile will download a url to a local file. It's efficient because it will
@@ -104,6 +116,26 @@ func CreateUserTempCacheFolder() string {
 // GetEnvWithKey : get env value
 func GetEnvWithKey(key string) string {
 	return os.Getenv(key)
+}
+
+func GenerateTitleFromGmailMessage(msg *gmail.Message) string {
+	var from, subject string
+
+	for _, v := range msg.Payload.Headers {
+		switch v.Name {
+		case "From":
+			res, ok := GetStringInBetweenTwoString(v.Value, "\u003c", "\u003e")
+			if ok {
+				from = res
+			} else {
+				from = v.Value
+			}
+		case "Subject":
+			subject = v.Value
+		}
+	}
+	title := fmt.Sprintf("%s - %s - %s.gmail", from, subject, msg.Id)
+	return strings.ReplaceAll(title, "/", "_")
 }
 
 func Unzip(src, dest string) error {
@@ -165,4 +197,11 @@ func CreateFile(filePath string) (*os.File, error) {
 		return nil, fmt.Errorf("failed to create file: %v", err)
 	}
 	return file, nil
+}
+
+func MaskString(s string) string {
+	if len(s) < 4 {
+		return s
+	}
+	return "****************************************************" + s[len(s)-4:]
 }
