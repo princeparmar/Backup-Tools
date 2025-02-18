@@ -92,22 +92,10 @@ func StartServer(db *storage.PosgresStore, address string) {
 	google.POST("/all-photos-from-album-to-satellite", handleSendAllFilesFromGooglePhotosToSatellite)
 	google.POST("/list-photos-to-satellite", handleSendListFilesFromGooglePhotosToSatellite)
 
-	// Gmail
-	google.GET("/gmail-list-threads", handleGmailGetThreads)
-	google.GET("/gmail-list-messages", handleGmailGetMessages)
-	// google.GET("/gmail-list-messages-using-workers", handleGmailGetMessagesUsingWorkers)
-	google.GET("/gmail-list-messages-ids", handleGmailGetMessagesIDs)
-	google.GET("/gmail-list-threads-ids", handleGmailGetThreadsIDs)
-	google.GET("/gmail-get-message/:ID", handleGmailGetMessage)
-	google.GET("/gmail-get-thread/:ID", handleGmailGetThread)
 	// In the existing google group routes section
-	google.POST("/gmail/insert-mail", handleGmailDownloadAndInsert)
-
-	// google.POST("/all-gmail-to-satellite", handleAllGmailMessagesToSatellite)
-	google.POST("/gmail-list-to-satellite", handleListGmailMessagesToSatellite)
-	google.POST("/gmail-message-to-satellite/:ID", handleGmailMessageToSatellite)
-	google.GET("/get-gmail-db-from-satellite", handleGetGmailDBFromSatellite)
-	google.GET("/query-messages", handleGmailGetThreadsIDsControlled)
+	google.POST("/gmail/insert-mail", handleGmailDownloadAndInsert)             // used by desktop app to sync emails to satellite.
+	google.POST("/gmail-list-to-satellite", handleListGmailMessagesToSatellite) // used by desktop app to sync emails to satellite.
+	google.GET("/query-messages", handleGmailGetThreadsIDsControlled)           // used by desktop app to show email list on backup tools UI.
 
 	// Google Cloud Storage
 	google.GET("/storage-list-buckets/:projectName", handleStorageListBuckets)
