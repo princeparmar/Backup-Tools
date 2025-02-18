@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"google.golang.org/api/gmail/v1"
 )
 
@@ -136,6 +137,10 @@ func GenerateTitleFromGmailMessage(msg *gmail.Message) string {
 	}
 	title := fmt.Sprintf("%s - %s - %s.gmail", from, subject, msg.Id)
 	return strings.ReplaceAll(title, "/", "_")
+}
+
+func GenerateTitleFromOutlookMessage(msg *outlook.OutlookMinimalMessage) string {
+	return fmt.Sprintf("%s - %s - %s.outlook", msg.From, msg.Subject, msg.ID)
 }
 
 func Unzip(src, dest string) error {

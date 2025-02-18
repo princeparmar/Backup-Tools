@@ -138,6 +138,7 @@ func StartServer(db *storage.PosgresStore, address string) {
 	office365 := e.Group("/office365")
 	office365.GET("/get-outlook-messages", handleOutlookGetMessages)
 	office365.GET("/get-outlook-message/:id", handleOutlookGetMessageById)
+	office365.GET("/outlook-messages-to-satellite", handleListOutlookMessagesToSatellite)
 	// AWS S3
 	aws := e.Group("/aws")
 	aws.GET("/list-files-in-bucket/:bucketName", handleListAWSs3BucketFiles)

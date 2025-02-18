@@ -14,6 +14,7 @@ import (
 
 const (
 	ReserveBucket_Gmail      = "gmail"
+	ReserveBucket_Outlook    = "outlook"
 	ReserveBucket_Drive      = "google-drive"
 	ReserveBucket_Cloud      = "google-cloud"
 	ReserveBucket_Photos     = "google-photos"

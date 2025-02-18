@@ -6,21 +6,59 @@ import (
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 )
 
+type OutlookMinimalMessage struct {
+	ID               string `json:"id"`
+	Subject          string `json:"subject"`
+	From             string `json:"from"`
+	ReceivedDateTime string `json:"received_datetime"`
+}
+
+func NewOutlookMinimalMessage(message models.Messageable) *OutlookMinimalMessage {
+	if message == nil {
+		return nil
+	}
+
+	return &OutlookMinimalMessage{
+		ID:               stringValue(message.GetId()),
+		Subject:          stringValue(message.GetSubject()),
+		From:             stringValue(message.GetFrom().GetEmailAddress().GetAddress()),
+		ReceivedDateTime: timeValue(message.GetReceivedDateTime()),
+	}
+}
+
+type OutlookUser struct {
+	ID                string `json:"id"`
+	DisplayName       string `json:"display_name"`
+	Mail              string `json:"mail"`
+	UserPrincipalName string `json:"user_principal_name"`
+}
+
+func NewOutlookUser(user models.Userable) *OutlookUser {
+	if user == nil {
+		return nil
+	}
+
+	return &OutlookUser{
+		ID:                stringValue(user.GetId()),
+		DisplayName:       stringValue(user.GetDisplayName()),
+		Mail:              stringValue(user.GetMail()),
+		UserPrincipalName: stringValue(user.GetUserPrincipalName()),
+	}
+}
+
 type OutlookMessage struct {
-	ID               string               `json:"id"`
-	Subject          string               `json:"subject"`
-	Body             string               `json:"body"`
-	From             string               `json:"from"`
-	ToRecipients     []string             `json:"to_recipients"`
-	CcRecipients     []string             `json:"cc_recipients"`
-	BccRecipients    []string             `json:"bcc_recipients"`
-	ReceivedDateTime string               `json:"received_datetime"`
-	SentDateTime     string               `json:"sent_datetime"`
-	HasAttachments   bool                 `json:"has_attachments"`
-	Attachments      []*OutlookAttachment `json:"attachments"`
-	IsRead           bool                 `json:"is_read"`
-	Categories       []string             `json:"categories"`
-	Importance       string               `json:"importance"`
+	OutlookMinimalMessage
+
+	Body           string               `json:"body"`
+	ToRecipients   []string             `json:"to_recipients"`
+	CcRecipients   []string             `json:"cc_recipients"`
+	BccRecipients  []string             `json:"bcc_recipients"`
+	SentDateTime   string               `json:"sent_datetime"`
+	HasAttachments bool                 `json:"has_attachments"`
+	Attachments    []*OutlookAttachment `json:"attachments"`
+	IsRead         bool                 `json:"is_read"`
+	Categories     []string             `json:"categories"`
+	Importance     string               `json:"importance"`
 }
 
 type OutlookAttachment struct {
@@ -70,14 +108,17 @@ func NewOutlookMessage(message models.Messageable) *OutlookMessage {
 	}
 
 	msg := &OutlookMessage{
-		ID:               stringValue(message.GetId()),
-		Subject:          stringValue(message.GetSubject()),
-		Body:             stringValue(message.GetBody().GetContent()),
-		HasAttachments:   boolValue(message.GetHasAttachments()),
-		IsRead:           boolValue(message.GetIsRead()),
-		Importance:       importance,
-		ReceivedDateTime: timeValue(message.GetReceivedDateTime()),
-		SentDateTime:     timeValue(message.GetSentDateTime()),
+		OutlookMinimalMessage: OutlookMinimalMessage{
+			ID:               stringValue(message.GetId()),
+			Subject:          stringValue(message.GetSubject()),
+			From:             stringValue(message.GetFrom().GetEmailAddress().GetAddress()),
+			ReceivedDateTime: timeValue(message.GetReceivedDateTime()),
+		},
+		Body:           stringValue(message.GetBody().GetContent()),
+		HasAttachments: boolValue(message.GetHasAttachments()),
+		IsRead:         boolValue(message.GetIsRead()),
+		Importance:     importance,
+		SentDateTime:   timeValue(message.GetSentDateTime()),
 	}
 
 	// Set From address

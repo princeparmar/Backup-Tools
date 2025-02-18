@@ -2,6 +2,7 @@ package outlook
 
 import (
 	"context"
+	"errors"
 
 	abs "github.com/microsoft/kiota-abstractions-go"
 	msgraph "github.com/microsoftgraph/msgraph-sdk-go"
@@ -33,8 +34,22 @@ func NewOutlookClientUsingToken(accessToken string) (*OutlookClient, error) {
 	return &OutlookClient{client}, nil
 }
 
+func (client *OutlookClient) GetCurrentUser() (*OutlookUser, error) {
+	user, err := client.Me().Get(context.Background(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	u := NewOutlookUser(user)
+	if u == nil || u.ID == "" || u.Mail == "" {
+		return nil, errors.New("user is nil")
+	}
+
+	return u, nil
+}
+
 // GetUserMessages retrieves messages from Outlook with pagination support
-func (client *OutlookClient) GetUserMessages(skip, limit int32) ([]*OutlookMessage, error) {
+func (client *OutlookClient) GetUserMessages(skip, limit int32) ([]*OutlookMinimalMessage, error) {
 	requestBuilder := client.Me().Messages()
 
 	if limit > 100 || limit < 1 {
@@ -49,8 +64,7 @@ func (client *OutlookClient) GetUserMessages(skip, limit int32) ([]*OutlookMessa
 	query := users.ItemMessagesRequestBuilderGetQueryParameters{
 		Top:    int32Ptr(limit),
 		Skip:   int32Ptr(skip),
-		Select: []string{"id", "subject", "body", "from", "toRecipients", "receivedDateTime", "hasAttachments"},
-		Expand: []string{"attachments"}, // Include attachments
+		Select: []string{"id", "subject", "from", "receivedDateTime"},
 	}
 
 	configuration := users.ItemMessagesRequestBuilderGetRequestConfiguration{
@@ -62,9 +76,9 @@ func (client *OutlookClient) GetUserMessages(skip, limit int32) ([]*OutlookMessa
 		return nil, err
 	}
 
-	outlookMessages := make([]*OutlookMessage, 0)
+	outlookMessages := make([]*OutlookMinimalMessage, 0)
 	for _, message := range result.GetValue() {
-		outlookMessages = append(outlookMessages, NewOutlookMessage(message))
+		outlookMessages = append(outlookMessages, NewOutlookMinimalMessage(message))
 	}
 
 	return outlookMessages, nil
