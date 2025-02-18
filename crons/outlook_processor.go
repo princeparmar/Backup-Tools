@@ -68,7 +68,7 @@ func (o *outlookProcessor) Run(input ProcessorInput) error {
 	emptyLoopCount := 0
 
 	for {
-		messages, err := outlookClient.GetUserMessages(int32(input.Job.TaskMemory.OutlookSkipCount), int32(OutlookLimit))
+		messages, err := outlookClient.GetMessageWithDetail(int32(input.Job.TaskMemory.OutlookSkipCount), int32(OutlookLimit))
 		if err != nil {
 			return err
 		}
@@ -84,7 +84,7 @@ func (o *outlookProcessor) Run(input ProcessorInput) error {
 				return err
 			}
 
-			messagePath := userDetails.Mail + "/" + utils.GenerateTitleFromOutlookMessage(message)
+			messagePath := userDetails.Mail + "/" + utils.GenerateTitleFromOutlookMessage(&message.OutlookMinimalMessage)
 			_, synced := emailListFromBucket[messagePath]
 			if synced {
 				continue

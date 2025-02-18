@@ -84,6 +84,37 @@ func (client *OutlookClient) GetUserMessages(skip, limit int32) ([]*OutlookMinim
 	return outlookMessages, nil
 }
 
+func (client *OutlookClient) GetMessageWithDetail(skip, limit int32) ([]*OutlookMessage, error) {
+	requestBuilder := client.Me().Messages()
+
+	if limit > 100 || limit < 1 {
+		limit = 100
+	}
+
+	query := users.ItemMessagesRequestBuilderGetQueryParameters{
+		Top:    int32Ptr(limit),
+		Skip:   int32Ptr(skip),
+		Select: []string{"subject", "body", "from", "toRecipients", "receivedDateTime", "ccRecipients", "bccRecipients", "attachments"},
+		Expand: []string{"attachments"},
+	}
+
+	configuration := users.ItemMessagesRequestBuilderGetRequestConfiguration{
+		QueryParameters: &query,
+	}
+
+	result, err := requestBuilder.Get(context.Background(), &configuration)
+	if err != nil {
+		return nil, err
+	}
+
+	outlookMessages := make([]*OutlookMessage, 0)
+	for _, message := range result.GetValue() {
+		outlookMessages = append(outlookMessages, NewOutlookMessage(message))
+	}
+
+	return outlookMessages, nil
+}
+
 func (client *OutlookClient) GetMessage(msgID string) (*OutlookMessage, error) {
 	msg, err := client.Me().Messages().ByMessageId(msgID).Get(context.Background(), &users.ItemMessagesMessageItemRequestBuilderGetRequestConfiguration{
 		QueryParameters: &users.ItemMessagesMessageItemRequestBuilderGetQueryParameters{
