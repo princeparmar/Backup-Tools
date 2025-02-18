@@ -28,7 +28,12 @@ func (o *outlookProcessor) Run(input ProcessorInput) error {
 		return fmt.Errorf("refresh token not found")
 	}
 
-	outlookClient, err := outlook.NewOutlookClientUsingToken(refreshToken)
+	token, err := outlook.AuthTokenUsingRefreshToken(refreshToken)
+	if err != nil {
+		return fmt.Errorf("error while getting token from refresh token: %s", err)
+	}
+
+	outlookClient, err := outlook.NewOutlookClientUsingToken(token)
 	if err != nil {
 		return fmt.Errorf("error while creating outlook client: %s", err)
 	}
