@@ -36,6 +36,7 @@ func StartServer(db *storage.PosgresStore, address string) {
 	job.GET("/", handleAutomaticSyncListForUser)
 	job.GET("/:job_id", handleAutomaticSyncDetails)
 	job.POST("/gmail", handleAutomaticSyncCreateGmail)
+	job.POST("/outlook", handleAutomaticSyncCreateOutlook)
 	job.POST("/database/:method", handleAutomaticSyncCreateDatabase)
 	job.PUT("/:job_id", handleAutomaticBackupUpdate)
 	job.DELETE("/:job_id", handleAutomaticSyncDelete)

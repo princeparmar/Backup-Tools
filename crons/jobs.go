@@ -22,6 +22,7 @@ type Processor interface {
 
 var m = map[string]Processor{
 	"gmail":         NewGmailProcessor(),
+	"outlook":       NewOutlookProcessor(),
 	"psql_database": NewPsqlDatabaseProcessor(),
 }
 

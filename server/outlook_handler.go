@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -29,16 +28,12 @@ func handleOutlookGetMessages(c echo.Context) error {
 		})
 	}
 
-	fmt.Println("accessGrant", accessGrant)
-
 	accessToken := c.Request().Header.Get("Authorization")
 	if accessToken == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": "access token not found",
 		})
 	}
-
-	fmt.Println("accessToken", accessToken)
 
 	skip, _ := strconv.Atoi(c.QueryParam("offset"))
 	limit, _ := strconv.Atoi(c.QueryParam("limit"))
@@ -50,8 +45,6 @@ func handleOutlookGetMessages(c echo.Context) error {
 		})
 	}
 
-	fmt.Println("created client")
-
 	messages, err := client.GetUserMessages(int32(skip), int32(limit))
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
@@ -59,16 +52,12 @@ func handleOutlookGetMessages(c echo.Context) error {
 		})
 	}
 
-	fmt.Println("got messages")
-
 	userDetails, err := client.GetCurrentUser()
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
-
-	fmt.Println("got user details")
 
 	emailListFromBucket, err := satellite.ListObjectsWithPrefix(context.Background(),
 		accessGrant, satellite.ReserveBucket_Outlook, userDetails.Mail+"/")
@@ -78,15 +67,11 @@ func handleOutlookGetMessages(c echo.Context) error {
 		})
 	}
 
-	fmt.Println("got email list from bucket")
-
 	outlookMessages := make([]*OutlookMessageListJSON, 0, len(messages))
 	for _, message := range messages {
 		_, synced := emailListFromBucket[userDetails.Mail+"/"+utils.GenerateTitleFromOutlookMessage(message)]
 		outlookMessages = append(outlookMessages, &OutlookMessageListJSON{OutlookMinimalMessage: *message, Synced: synced})
 	}
-
-	fmt.Println("got outlook messages")
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"messages": outlookMessages,
