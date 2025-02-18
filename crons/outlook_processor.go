@@ -61,12 +61,10 @@ func (o *outlookProcessor) Run(input ProcessorInput) error {
 		return err
 	}
 
-	skipCount := input.Job.TaskMemory.OutlookSkipCount
-	limit := input.Job.TaskMemory.OutlookLimit
 	emptyLoopCount := 0
 
 	for {
-		messages, err := outlookClient.GetUserMessages(int32(skipCount), int32(limit))
+		messages, err := outlookClient.GetUserMessages(int32(input.Job.TaskMemory.OutlookSkipCount), int32(input.Job.TaskMemory.OutlookLimit))
 		if err != nil {
 			return err
 		}
@@ -105,8 +103,8 @@ func (o *outlookProcessor) Run(input ProcessorInput) error {
 				continue
 			}
 
-			input.Job.TaskMemory.OutlookSkipCount += limit
 			emptyLoopCount = 0
+			input.Job.TaskMemory.OutlookSyncCount++
 		}
 
 		if !syncedData {
@@ -119,8 +117,8 @@ func (o *outlookProcessor) Run(input ProcessorInput) error {
 			break
 		}
 
-		input.Job.TaskMemory.OutlookSkipCount += limit
-		if len(messages) < int(limit) {
+		input.Job.TaskMemory.OutlookSkipCount += input.Job.TaskMemory.OutlookLimit
+		if len(messages) < int(input.Job.TaskMemory.OutlookLimit) {
 			// If we get fewer messages than the limit, we've reached the end
 			input.Job.TaskMemory.OutlookSkipCount = 0
 			break

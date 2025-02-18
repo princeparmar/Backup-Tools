@@ -128,6 +128,7 @@ type TaskMemory struct {
 	GmailNextToken *string `json:"gmail_next_token"`
 	GmailSyncCount uint    `json:"gmail_sync_count"`
 
+	OutlookSyncCount uint `json:"outlook_sync_count"`
 	OutlookSkipCount uint `json:"outlook_skip_count"`
 	OutlookLimit     uint `json:"outlook_limit"`
 }
