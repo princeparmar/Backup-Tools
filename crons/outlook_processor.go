@@ -61,6 +61,10 @@ func (o *outlookProcessor) Run(input ProcessorInput) error {
 		return err
 	}
 
+	if input.Job.TaskMemory.OutlookLimit == 0 {
+		input.Job.TaskMemory.OutlookLimit = 100
+	}
+
 	emptyLoopCount := 0
 
 	for {
