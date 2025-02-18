@@ -87,7 +87,7 @@ func (client *OutlookClient) GetUserMessages(skip, limit int32) ([]*OutlookMinim
 func (client *OutlookClient) GetMessage(msgID string) (*OutlookMessage, error) {
 	msg, err := client.Me().Messages().ByMessageId(msgID).Get(context.Background(), &users.ItemMessagesMessageItemRequestBuilderGetRequestConfiguration{
 		QueryParameters: &users.ItemMessagesMessageItemRequestBuilderGetQueryParameters{
-			Select: []string{"subject", "body", "from", "toRecipients", "ccRecipients", "bccRecipients", "attachments"},
+			Select: []string{"subject", "body", "from", "toRecipients", "receivedDateTime", "ccRecipients", "bccRecipients", "attachments"},
 			Expand: []string{"attachments"},
 		},
 	})
