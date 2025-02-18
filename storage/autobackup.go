@@ -130,7 +130,6 @@ type TaskMemory struct {
 
 	OutlookSyncCount uint `json:"outlook_sync_count"`
 	OutlookSkipCount uint `json:"outlook_skip_count"`
-	OutlookLimit     uint `json:"outlook_limit"`
 }
 
 // Scan implements the sql.Scanner interface

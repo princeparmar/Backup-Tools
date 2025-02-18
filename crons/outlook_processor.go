@@ -11,6 +11,10 @@ import (
 	"github.com/StorX2-0/Backup-Tools/utils"
 )
 
+const (
+	OutlookLimit = 100
+)
+
 type outlookProcessor struct{}
 
 func NewOutlookProcessor() *outlookProcessor {
@@ -61,14 +65,10 @@ func (o *outlookProcessor) Run(input ProcessorInput) error {
 		return err
 	}
 
-	if input.Job.TaskMemory.OutlookLimit == 0 {
-		input.Job.TaskMemory.OutlookLimit = 100
-	}
-
 	emptyLoopCount := 0
 
 	for {
-		messages, err := outlookClient.GetUserMessages(int32(input.Job.TaskMemory.OutlookSkipCount), int32(input.Job.TaskMemory.OutlookLimit))
+		messages, err := outlookClient.GetUserMessages(int32(input.Job.TaskMemory.OutlookSkipCount), int32(OutlookLimit))
 		if err != nil {
 			return err
 		}
@@ -121,8 +121,8 @@ func (o *outlookProcessor) Run(input ProcessorInput) error {
 			break
 		}
 
-		input.Job.TaskMemory.OutlookSkipCount += input.Job.TaskMemory.OutlookLimit
-		if len(messages) < int(input.Job.TaskMemory.OutlookLimit) {
+		input.Job.TaskMemory.OutlookSkipCount += OutlookLimit
+		if len(messages) < OutlookLimit {
 			// If we get fewer messages than the limit, we've reached the end
 			input.Job.TaskMemory.OutlookSkipCount = 0
 			break
