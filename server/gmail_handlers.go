@@ -17,9 +17,9 @@ import (
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/StorX2-0/Backup-Tools/utils"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/labstack/echo/v4"
-	"golang.org/x/sync/errgroup"
 	"google.golang.org/api/gmail/v1"
 )
 

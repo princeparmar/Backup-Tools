@@ -146,6 +146,10 @@ func StartServer(db *storage.PosgresStore, address string) {
 	dropbox.GET("/file-to-satellite/:filePath", handleDropboxToSatellite)
 	dropbox.GET("/file-from-satellite/:filePath", handleSatelliteToDropbox)
 
+	// office 365
+	office365 := e.Group("/office365")
+	office365.GET("/get-outlook-messages", handleOutlookGetMessages)
+	office365.GET("/get-outlook-message/:id", handleOutlookGetMessageById)
 	// AWS S3
 	aws := e.Group("/aws")
 	aws.GET("/list-files-in-bucket/:bucketName", handleListAWSs3BucketFiles)
