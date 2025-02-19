@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -310,6 +311,7 @@ func handleOutlookDownloadAndInsert(c echo.Context) error {
 			// Insert message into Outlook
 			_, err = client.InsertMessage(&outlookMsg)
 			if err != nil {
+				fmt.Println("error inserting message: ", err)
 				failedIDs.Add(key)
 			} else {
 				processedIDs.Add(key)
