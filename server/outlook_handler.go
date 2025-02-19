@@ -320,6 +320,11 @@ func handleOutlookDownloadAndInsert(c echo.Context) error {
 		})
 	}
 
+	message := "all outlook messages processed"
+	if failedIDs.Get() != nil {
+		message = "some outlook messages were not processed"
+	}
+
 	if err := g.Wait(); err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error":         err.Error(),
@@ -329,7 +334,7 @@ func handleOutlookDownloadAndInsert(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":       "all outlook messages processed",
+		"message":       message,
 		"failed_ids":    failedIDs.Get(),
 		"processed_ids": processedIDs.Get(),
 	})
