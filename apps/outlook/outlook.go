@@ -3,9 +3,11 @@ package outlook
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	abs "github.com/microsoft/kiota-abstractions-go"
 	msgraph "github.com/microsoftgraph/msgraph-sdk-go"
+	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/users"
 )
 
@@ -141,4 +143,77 @@ func (client *OutlookClient) GetAttachment(msgID string, attID string) (*Outlook
 // Helper function to create int32 pointer
 func int32Ptr(i int32) *int32 {
 	return &i
+}
+
+// InsertMessage inserts a message into Outlook
+func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Messageable, error) {
+	// Create message request body
+	messageRequest := models.NewMessage()
+	messageRequest.SetSubject(stringPointer(message.Subject))
+
+	// Set body content
+	body := models.NewItemBody()
+	body.SetContent(stringPointer(message.Body))
+	// body.SetContentType(message.BodyType)
+	messageRequest.SetBody(body)
+
+	// Set sender
+	if message.From != "" {
+		from := models.NewRecipient()
+		emailAddress := models.NewEmailAddress()
+		emailAddress.SetAddress(stringPointer(message.From))
+		from.SetEmailAddress(emailAddress)
+		messageRequest.SetFrom(from)
+	}
+
+	// Set recipients
+	if len(message.ToRecipients) > 0 {
+		toRecipients := make([]models.Recipientable, 0, len(message.ToRecipients))
+		for _, addr := range message.ToRecipients {
+			recipient := models.NewRecipient()
+			emailAddress := models.NewEmailAddress()
+			emailAddress.SetAddress(stringPointer(addr))
+			recipient.SetEmailAddress(emailAddress)
+			toRecipients = append(toRecipients, recipient)
+		}
+		messageRequest.SetToRecipients(toRecipients)
+	}
+
+	// Set CC recipients
+	if len(message.CcRecipients) > 0 {
+		ccRecipients := make([]models.Recipientable, 0, len(message.CcRecipients))
+		for _, addr := range message.CcRecipients {
+			recipient := models.NewRecipient()
+			emailAddress := models.NewEmailAddress()
+			emailAddress.SetAddress(stringPointer(addr))
+			recipient.SetEmailAddress(emailAddress)
+			ccRecipients = append(ccRecipients, recipient)
+		}
+		messageRequest.SetCcRecipients(ccRecipients)
+	}
+
+	attachments := make([]models.Attachmentable, 0)
+	// Add attachments if present
+	if len(message.Attachments) > 0 {
+		for _, attachment := range message.Attachments {
+			attachmentRequest := models.NewAttachment()
+			attachmentRequest.SetName(stringPointer(attachment.Name))
+			attachmentRequest.SetContentType(stringPointer(attachment.ContentType))
+
+			if attachment.Data != nil {
+
+			}
+
+			attachments = append(attachments, attachmentRequest)
+		}
+	}
+	messageRequest.SetAttachments(attachments)
+
+	// Create the message in drafts
+	createdMessage, err := client.Me().Messages().Post(context.Background(), messageRequest, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error creating message: %v", err)
+	}
+
+	return createdMessage, nil
 }

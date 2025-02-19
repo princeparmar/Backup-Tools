@@ -219,3 +219,103 @@ func handleListOutlookMessagesToSatellite(c echo.Context) error {
 		"processed_ids": processedIDs.Get(),
 	})
 }
+
+func handleOutlookDownloadAndInsert(c echo.Context) error {
+	// Get access token from header
+	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accessGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "access token not found",
+		})
+	}
+
+	accessToken := c.Request().Header.Get("Authorization")
+	if accessToken == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "access token not found",
+		})
+	}
+
+	// Parse message keys from request
+	var allIDs []string
+	if strings.Contains(c.Request().Header.Get(echo.HeaderContentType), echo.MIMEApplicationJSON) {
+		if err := json.NewDecoder(c.Request().Body).Decode(&allIDs); err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"error": "invalid JSON format",
+			})
+		}
+	} else {
+		formIDs := c.FormValue("ids")
+		allIDs = strings.Split(formIDs, ",")
+	}
+
+	// Validate request
+	if len(allIDs) == 0 || allIDs[0] == "" {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"error": "no keys provided",
+		})
+	}
+	if len(allIDs) > 10 {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"error": "maximum 10 keys allowed",
+		})
+	}
+
+	// Create Outlook client
+	client, err := outlook.NewOutlookClientUsingToken(accessToken)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
+	g, ctx := errgroup.WithContext(c.Request().Context())
+	g.SetLimit(10)
+
+	processedIDs, failedIDs := utils.NewLockedArray(), utils.NewLockedArray()
+
+	for _, key := range allIDs {
+		key := key
+		if key == "" {
+			continue
+		}
+		g.Go(func() error {
+			// Download file from Satellite
+			data, err := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Outlook, key)
+			if err != nil {
+				failedIDs.Add(key)
+				return nil
+			}
+
+			// Parse the email data
+			var outlookMsg outlook.OutlookMessage
+			if err := json.Unmarshal(data, &outlookMsg); err != nil {
+				failedIDs.Add(key)
+				return nil
+			}
+
+			// Insert message into Outlook
+			_, err = client.InsertMessage(&outlookMsg)
+			if err != nil {
+				failedIDs.Add(key)
+			} else {
+				processedIDs.Add(key)
+			}
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error":         err.Error(),
+			"failed_ids":    failedIDs.Get(),
+			"processed_ids": processedIDs.Get(),
+		})
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message":       "all outlook messages processed",
+		"failed_ids":    failedIDs.Get(),
+		"processed_ids": processedIDs.Get(),
+	})
+}
