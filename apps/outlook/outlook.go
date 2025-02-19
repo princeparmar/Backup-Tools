@@ -196,15 +196,14 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 	// Add attachments if present
 	if len(message.Attachments) > 0 {
 		for _, attachment := range message.Attachments {
-			attachmentRequest := models.NewAttachment()
-			attachmentRequest.SetName(stringPointer(attachment.Name))
-			attachmentRequest.SetContentType(stringPointer(attachment.ContentType))
+			odataType := "#microsoft.graph.fileAttachment"
+			fileAttachment := models.NewFileAttachment()
+			fileAttachment.SetName(&attachment.Name)
+			fileAttachment.SetContentType(&attachment.ContentType)
+			fileAttachment.SetOdataType(&odataType)
+			fileAttachment.SetContentBytes(attachment.Data)
 
-			if attachment.Data != nil {
-
-			}
-
-			attachments = append(attachments, attachmentRequest)
+			attachments = append(attachments, fileAttachment)
 		}
 	}
 	messageRequest.SetAttachments(attachments)
