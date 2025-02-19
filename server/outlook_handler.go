@@ -297,6 +297,7 @@ func handleOutlookDownloadAndInsert(c echo.Context) error {
 			// Download file from Satellite
 			data, err := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Outlook, key)
 			if err != nil {
+				fmt.Println("error downloading message: ", err)
 				failedIDs.Add(key)
 				return nil
 			}
@@ -304,6 +305,7 @@ func handleOutlookDownloadAndInsert(c echo.Context) error {
 			// Parse the email data
 			var outlookMsg outlook.OutlookMessage
 			if err := json.Unmarshal(data, &outlookMsg); err != nil {
+				fmt.Println("error unmarshalling message: ", err)
 				failedIDs.Add(key)
 				return nil
 			}
