@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -249,6 +250,17 @@ func handleOutlookDownloadAndInsert(c echo.Context) error {
 		allIDs = strings.Split(formIDs, ",")
 	}
 
+	for i := range allIDs {
+		allIDs[i] = strings.TrimSpace(allIDs[i])
+		decodedID, err := base64.StdEncoding.DecodeString(allIDs[i])
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"error": "invalid base64 format",
+			})
+		}
+		allIDs[i] = string(decodedID)
+	}
+
 	// Validate request
 	if len(allIDs) == 0 || allIDs[0] == "" {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -279,6 +291,7 @@ func handleOutlookDownloadAndInsert(c echo.Context) error {
 		if key == "" {
 			continue
 		}
+
 		g.Go(func() error {
 			// Download file from Satellite
 			data, err := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Outlook, key)
