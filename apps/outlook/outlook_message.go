@@ -49,16 +49,18 @@ func NewOutlookUser(user models.Userable) *OutlookUser {
 type OutlookMessage struct {
 	OutlookMinimalMessage
 
-	Body           string               `json:"body"`
-	ToRecipients   []string             `json:"to_recipients"`
-	CcRecipients   []string             `json:"cc_recipients"`
-	BccRecipients  []string             `json:"bcc_recipients"`
-	SentDateTime   string               `json:"sent_datetime"`
-	HasAttachments bool                 `json:"has_attachments"`
-	Attachments    []*OutlookAttachment `json:"attachments"`
-	IsRead         bool                 `json:"is_read"`
-	Categories     []string             `json:"categories"`
-	Importance     string               `json:"importance"`
+	Body                   string               `json:"body"`
+	ToRecipients           []string             `json:"to_recipients"`
+	CcRecipients           []string             `json:"cc_recipients"`
+	BccRecipients          []string             `json:"bcc_recipients"`
+	SentDateTime           string               `json:"sent_datetime"`
+	HasAttachments         bool                 `json:"has_attachments"`
+	Attachments            []*OutlookAttachment `json:"attachments"`
+	IsRead                 bool                 `json:"is_read"`
+	Categories             []string             `json:"categories"`
+	Importance             string               `json:"importance"`
+	InternetMessageID      string               `json:"internet_message_id"`
+	InternetMessageHeaders map[string]string    `json:"internet_message_headers"`
 }
 
 type OutlookAttachment struct {
@@ -107,6 +109,11 @@ func NewOutlookMessage(message models.Messageable) *OutlookMessage {
 		importance = i.String()
 	}
 
+	internetMessageHeaders := make(map[string]string)
+	for _, header := range message.GetInternetMessageHeaders() {
+		internetMessageHeaders[stringValue(header.GetName())] = stringValue(header.GetValue())
+	}
+
 	msg := &OutlookMessage{
 		OutlookMinimalMessage: OutlookMinimalMessage{
 			ID:               stringValue(message.GetId()),
@@ -114,11 +121,13 @@ func NewOutlookMessage(message models.Messageable) *OutlookMessage {
 			From:             stringValue(message.GetFrom().GetEmailAddress().GetAddress()),
 			ReceivedDateTime: timeValue(message.GetReceivedDateTime()),
 		},
-		Body:           stringValue(message.GetBody().GetContent()),
-		HasAttachments: boolValue(message.GetHasAttachments()),
-		IsRead:         boolValue(message.GetIsRead()),
-		Importance:     importance,
-		SentDateTime:   timeValue(message.GetSentDateTime()),
+		Body:                   stringValue(message.GetBody().GetContent()),
+		HasAttachments:         boolValue(message.GetHasAttachments()),
+		IsRead:                 boolValue(message.GetIsRead()),
+		Importance:             importance,
+		InternetMessageID:      stringValue(message.GetInternetMessageId()),
+		InternetMessageHeaders: internetMessageHeaders,
+		SentDateTime:           timeValue(message.GetSentDateTime()),
 	}
 
 	// Set From address

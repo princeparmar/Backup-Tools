@@ -120,7 +120,7 @@ func (client *OutlookClient) GetMessageWithDetail(skip, limit int32) ([]*Outlook
 func (client *OutlookClient) GetMessage(msgID string) (*OutlookMessage, error) {
 	msg, err := client.Me().Messages().ByMessageId(msgID).Get(context.Background(), &users.ItemMessagesMessageItemRequestBuilderGetRequestConfiguration{
 		QueryParameters: &users.ItemMessagesMessageItemRequestBuilderGetQueryParameters{
-			Select: []string{"subject", "body", "from", "toRecipients", "receivedDateTime", "ccRecipients", "bccRecipients", "attachments"},
+			Select: []string{"subject", "body", "from", "toRecipients", "receivedDateTime", "ccRecipients", "bccRecipients", "attachments", "internetMessageHeaders", "internetMessageId"},
 			Expand: []string{"attachments"},
 		},
 	})
@@ -156,6 +156,16 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 	body.SetContent(stringPointer(message.Body))
 	// body.SetContentType(message.BodyType)
 	messageRequest.SetBody(body)
+
+	internetMessageHeaders := make([]models.InternetMessageHeaderable, 0)
+	for k, v := range message.InternetMessageHeaders {
+		internetMessageHeader := models.NewInternetMessageHeader()
+		internetMessageHeader.SetName(stringPointer(k))
+		internetMessageHeader.SetValue(stringPointer(v))
+		internetMessageHeaders = append(internetMessageHeaders, internetMessageHeader)
+	}
+	messageRequest.SetInternetMessageHeaders(internetMessageHeaders)
+	messageRequest.SetInternetMessageId(stringPointer(message.InternetMessageID))
 
 	// Set sender
 	if message.From != "" {
