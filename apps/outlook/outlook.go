@@ -158,7 +158,7 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 	body.SetOdataType(message.ODataType)
 	messageRequest.SetBody(body)
 
-	internetMessageHeaders := make([]models.InternetMessageHeaderable, 0)
+	internetMessageHeaders := make([]models.InternetMessageHeaderable, 0, len(message.InternetMessageHeaders))
 	for k, v := range message.InternetMessageHeaders {
 		internetMessageHeader := models.NewInternetMessageHeader()
 		internetMessageHeader.SetName(stringPointer(k))
@@ -213,11 +213,10 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 	// Add attachments if present
 	if len(message.Attachments) > 0 {
 		for _, attachment := range message.Attachments {
-			odataType := "#microsoft.graph.fileAttachment"
 			fileAttachment := models.NewFileAttachment()
 			fileAttachment.SetName(&attachment.Name)
-			fileAttachment.SetContentType(&attachment.ContentType)
-			fileAttachment.SetOdataType(&odataType)
+			fileAttachment.SetContentType(attachment.ContentType)
+			fileAttachment.SetOdataType(attachment.ODataType)
 			fileAttachment.SetContentBytes(attachment.Data)
 
 			attachments = append(attachments, fileAttachment)

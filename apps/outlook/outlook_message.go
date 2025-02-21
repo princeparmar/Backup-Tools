@@ -69,7 +69,8 @@ type OutlookAttachment struct {
 	ID             string                 `json:"id"`
 	ContentID      string                 `json:"content_id"`
 	Name           string                 `json:"name"`
-	ContentType    string                 `json:"content_type"`
+	ContentType    *string                `json:"content_type"`
+	ODataType      *string                `json:"odata_type"`
 	Size           int64                  `json:"size"`
 	Data           []byte                 `json:"data"`
 	IsInline       bool                   `json:"is_inline"`
@@ -84,7 +85,8 @@ func NewOutlookAttachment(attachment models.Attachmentable) *OutlookAttachment {
 	out := &OutlookAttachment{
 		ID:             stringValue(attachment.GetId()),
 		Name:           stringValue(attachment.GetName()),
-		ContentType:    stringValue(attachment.GetContentType()),
+		ContentType:    attachment.GetContentType(),
+		ODataType:      attachment.GetOdataType(),
 		Size:           int64Value(attachment.GetSize()),
 		IsInline:       boolValue(attachment.GetIsInline()),
 		AdditionalData: attachment.GetAdditionalData(),
