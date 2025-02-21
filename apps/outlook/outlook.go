@@ -154,7 +154,8 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 	// Set body content
 	body := models.NewItemBody()
 	body.SetContent(stringPointer(message.Body))
-	// body.SetContentType(message.BodyType)
+	body.SetContentType(message.ContentType)
+	body.SetOdataType(message.ODataType)
 	messageRequest.SetBody(body)
 
 	internetMessageHeaders := make([]models.InternetMessageHeaderable, 0)

@@ -50,6 +50,8 @@ type OutlookMessage struct {
 	OutlookMinimalMessage
 
 	Body                   string               `json:"body"`
+	ContentType            *models.BodyType     `json:"content_type"`
+	ODataType              *string              `json:"odata_type"`
 	ToRecipients           []string             `json:"to_recipients"`
 	CcRecipients           []string             `json:"cc_recipients"`
 	BccRecipients          []string             `json:"bcc_recipients"`
@@ -122,6 +124,8 @@ func NewOutlookMessage(message models.Messageable) *OutlookMessage {
 			ReceivedDateTime: timeValue(message.GetReceivedDateTime()),
 		},
 		Body:                   stringValue(message.GetBody().GetContent()),
+		ContentType:            message.GetBody().GetContentType(),
+		ODataType:              message.GetBody().GetOdataType(),
 		HasAttachments:         boolValue(message.GetHasAttachments()),
 		IsRead:                 boolValue(message.GetIsRead()),
 		Importance:             importance,
