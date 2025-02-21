@@ -214,5 +214,15 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 		return nil, fmt.Errorf("error creating message: %v", err)
 	}
 
+	// Move the message to inbox to make it appear as received
+	req := users.NewItemMailFoldersItemMovePostRequestBody()
+	req.SetDestinationId(stringPointer("inbox"))
+
+	_, err = client.Me().Messages().ByMessageId(*createdMessage.GetId()).
+		Move().Post(context.Background(), req, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error moving message to inbox: %v", err)
+	}
+
 	return createdMessage, nil
 }
