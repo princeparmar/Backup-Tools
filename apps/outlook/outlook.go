@@ -163,17 +163,17 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 	}
 	messageRequest.SetBody(body)
 
-	internetMessageHeaders := make([]models.InternetMessageHeaderable, 0, len(message.InternetMessageHeaders))
-	for k, v := range message.InternetMessageHeaders {
-		internetMessageHeader := models.NewInternetMessageHeader()
-		internetMessageHeader.SetName(stringPointer(k))
-		internetMessageHeader.SetValue(stringPointer(v))
-		internetMessageHeaders = append(internetMessageHeaders, internetMessageHeader)
-	}
+	// internetMessageHeaders := make([]models.InternetMessageHeaderable, 0, len(message.InternetMessageHeaders))
+	// for k, v := range message.InternetMessageHeaders {
+	// 	internetMessageHeader := models.NewInternetMessageHeader()
+	// 	internetMessageHeader.SetName(stringPointer(k))
+	// 	internetMessageHeader.SetValue(stringPointer(v))
+	// 	internetMessageHeaders = append(internetMessageHeaders, internetMessageHeader)
+	// }
 
-	if len(internetMessageHeaders) > 0 {
-		messageRequest.SetInternetMessageHeaders(internetMessageHeaders)
-	}
+	// if len(internetMessageHeaders) > 0 {
+	// 	messageRequest.SetInternetMessageHeaders(internetMessageHeaders)
+	// }
 
 	if message.InternetMessageID != "" {
 		messageRequest.SetInternetMessageId(stringPointer(message.InternetMessageID))
