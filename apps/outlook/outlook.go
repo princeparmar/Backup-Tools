@@ -158,6 +158,12 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 	body.SetContentType(message.ContentType)
 	if message.ODataType != nil {
 		body.SetOdataType(message.ODataType)
+	} else if message.ContentType != nil {
+		if *message.ContentType == models.TEXT_BODYTYPE {
+			body.SetOdataType(stringPointer("#microsoft.graph.textBody"))
+		} else {
+			body.SetOdataType(stringPointer("#microsoft.graph.htmlBody"))
+		}
 	} else {
 		body.SetOdataType(stringPointer("#microsoft.graph.textBody"))
 	}
