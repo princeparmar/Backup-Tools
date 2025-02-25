@@ -121,7 +121,7 @@ func (client *OutlookClient) GetMessage(msgID string) (*OutlookMessage, error) {
 	msg, err := client.Me().Messages().ByMessageId(msgID).Get(context.Background(), &users.ItemMessagesMessageItemRequestBuilderGetRequestConfiguration{
 		QueryParameters: &users.ItemMessagesMessageItemRequestBuilderGetQueryParameters{
 			Select: []string{"subject", "body", "from", "toRecipients", "receivedDateTime", "ccRecipients", "bccRecipients",
-				"attachments", "internetMessageHeaders", "internetMessageId", "@odata.type"},
+				"attachments", "internetMessageHeaders", "internetMessageId"},
 			Expand: []string{"attachments"},
 		},
 	})
@@ -156,7 +156,11 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 	body := models.NewItemBody()
 	body.SetContent(stringPointer(message.Body))
 	body.SetContentType(message.ContentType)
-	body.SetOdataType(message.ODataType)
+	if message.ODataType != nil {
+		body.SetOdataType(message.ODataType)
+	} else {
+		body.SetOdataType(stringPointer("#microsoft.graph.textBody"))
+	}
 	messageRequest.SetBody(body)
 
 	internetMessageHeaders := make([]models.InternetMessageHeaderable, 0, len(message.InternetMessageHeaders))
@@ -217,7 +221,12 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 			fileAttachment := models.NewFileAttachment()
 			fileAttachment.SetName(&attachment.Name)
 			fileAttachment.SetContentType(attachment.ContentType)
-			fileAttachment.SetOdataType(attachment.ODataType)
+			if attachment.ODataType != nil {
+				fileAttachment.SetOdataType(attachment.ODataType)
+			} else {
+				fileAttachment.SetOdataType(stringPointer("#microsoft.graph.fileAttachment"))
+			}
+
 			fileAttachment.SetContentBytes(attachment.Data)
 
 			attachments = append(attachments, fileAttachment)
