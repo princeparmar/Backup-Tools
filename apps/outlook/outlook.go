@@ -171,13 +171,13 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 		internetMessageHeaders = append(internetMessageHeaders, internetMessageHeader)
 	}
 
-	// if len(internetMessageHeaders) > 0 {
-	// 	messageRequest.SetInternetMessageHeaders(internetMessageHeaders)
-	// }
+	if len(internetMessageHeaders) > 0 {
+		messageRequest.SetInternetMessageHeaders(internetMessageHeaders)
+	}
 
-	// if message.InternetMessageID != "" {
-	// 	messageRequest.SetInternetMessageId(stringPointer(message.InternetMessageID))
-	// }
+	if message.InternetMessageID != "" {
+		messageRequest.SetInternetMessageId(stringPointer(message.InternetMessageID))
+	}
 
 	// Set sender
 	if message.From != "" {
