@@ -224,6 +224,28 @@ func AuthRequestChecker(c echo.Context) bool {
 	}
 }
 
+func GetRefreshTokenFromCodeForEmail(code string) (*oauth2.Token, error) {
+	b, err := os.ReadFile("credentials.json")
+	if err != nil {
+		log.Printf("Unable to read client secret file: %v", err)
+	}
+
+	// get refresh token from code
+	scopes := []string{gmail.GmailReadonlyScope, gmail.GmailInsertScope}
+	scopes = append(scopes, rm.DefaultAuthScopes()...)
+	config, err := google.ConfigFromJSON(b, scopes...)
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse client secret file to config: %v", err)
+	}
+
+	tok, err := config.Exchange(context.TODO(), code)
+	if err != nil {
+		return nil, err
+	}
+
+	return tok, nil
+}
+
 func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 	type credentials struct {
 		ClientID     string `json:"client_id"`

@@ -95,7 +95,7 @@ func handleAutomaticSyncCreateGmail(c echo.Context) error {
 	}
 
 	var reqBody struct {
-		RefreshToken string `json:"refresh_token"`
+		Code string `json:"code"`
 	}
 
 	if err := c.Bind(&reqBody); err != nil {
@@ -105,13 +105,13 @@ func handleAutomaticSyncCreateGmail(c echo.Context) error {
 		})
 	}
 
-	if reqBody.RefreshToken == "" {
+	if reqBody.Code == "" {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"message": "Refresh Token Required",
 		})
 	}
 
-	authToken, err := google.AuthTokenUsingRefreshToken(reqBody.RefreshToken)
+	tok, err := google.GetRefreshTokenFromCodeForEmail(reqBody.Code)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"message": "Invalid Refresh Token. Not able to generate auth token from refresh token",
@@ -120,7 +120,7 @@ func handleAutomaticSyncCreateGmail(c echo.Context) error {
 	}
 
 	// Get User Email
-	userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(authToken)
+	userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(tok.AccessToken)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"message": "Invalid Refresh Token. May be it is expired or invalid",
@@ -137,7 +137,7 @@ func handleAutomaticSyncCreateGmail(c echo.Context) error {
 
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
 	data, err := database.CreateCronJobForUser(userID, userDetails.Email, "gmail", map[string]interface{}{
-		"refresh_token": reqBody.RefreshToken,
+		"refresh_token": tok.RefreshToken,
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate key value") {
@@ -342,6 +342,8 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 		Interval *string `json:"interval"`
 		On       *string `json:"on"`
 
+		Code *string `json:"code"`
+
 		RefreshToken *string `json:"refresh_token"`
 
 		DatabaseConnection *DatabaseConnection `json:"database_connection"`
@@ -378,14 +380,14 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 		updateRequest["on"] = *reqBody.On
 	}
 
-	if reqBody.RefreshToken != nil {
+	if reqBody.Code != nil {
 		if job.Method != "gmail" {
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
 				"message": "Invalid Request",
 				"error":   "refresh token is not allowed for this method",
 			})
 		}
-		authToken, err := google.AuthTokenUsingRefreshToken(*reqBody.RefreshToken)
+		tok, err := google.GetRefreshTokenFromCodeForEmail(*reqBody.Code)
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
 				"message": "Invalid Request",
@@ -394,7 +396,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 		}
 
 		// Get User Email
-		userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(authToken)
+		userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(tok.AccessToken)
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
 				"message": "Invalid Request",
@@ -416,7 +418,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 			})
 		}
 		updateRequest["input_data"] = map[string]interface{}{
-			"refresh_token": *reqBody.RefreshToken,
+			"refresh_token": tok.RefreshToken,
 		}
 	} else if reqBody.DatabaseConnection != nil {
 		if job.Method != "database" {
@@ -432,6 +434,50 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 			"username":      reqBody.DatabaseConnection.Username,
 			"password":      reqBody.DatabaseConnection.Password,
 			"database_name": reqBody.DatabaseConnection.DatabaseName,
+		}
+	} else if reqBody.RefreshToken != nil {
+		if job.Method != "outlook" {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Request",
+				"error":   "refresh token is not allowed for this method",
+			})
+		}
+
+		// Get new access token using refresh token
+		authToken, err := outlook.AuthTokenUsingRefreshToken(*reqBody.RefreshToken)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Refresh Token. Not able to generate auth token from refresh token",
+				"error":   err.Error(),
+			})
+		}
+
+		// Create Outlook client and get user details
+		client, err := outlook.NewOutlookClientUsingToken(authToken)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Refresh Token. May be it is expired or invalid",
+				"error":   err.Error(),
+			})
+		}
+
+		userDetails, err := client.GetCurrentUser()
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Refresh Token. May be it is expired or invalid",
+				"error":   err.Error(),
+			})
+		}
+
+		if userDetails.Mail == "" {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Refresh Token. May be it is expired or invalid",
+				"error":   "getting empty email id from outlook token",
+			})
+		}
+
+		updateRequest["input_data"] = map[string]interface{}{
+			"refresh_token": *reqBody.RefreshToken,
 		}
 	}
 
