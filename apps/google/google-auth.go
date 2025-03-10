@@ -231,9 +231,7 @@ func GetRefreshTokenFromCodeForEmail(code string) (*oauth2.Token, error) {
 	}
 
 	// get refresh token from code
-	scopes := []string{gmail.GmailReadonlyScope, gmail.GmailInsertScope}
-	scopes = append(scopes, rm.DefaultAuthScopes()...)
-	config, err := google.ConfigFromJSON(b, scopes...)
+	config, err := google.ConfigFromJSON(b, gmail.GmailReadonlyScope, "https://www.googleapis.com/auth/userinfo.email")
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse client secret file to config: %v", err)
 	}

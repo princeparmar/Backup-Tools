@@ -107,14 +107,14 @@ func handleAutomaticSyncCreateGmail(c echo.Context) error {
 
 	if reqBody.Code == "" {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "Refresh Token Required",
+			"message": "Code is required",
 		})
 	}
 
 	tok, err := google.GetRefreshTokenFromCodeForEmail(reqBody.Code)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "Invalid Refresh Token. Not able to generate auth token from refresh token",
+			"message": "Invalid Code. Not able to generate auth token from code",
 			"error":   err.Error(),
 		})
 	}
@@ -123,14 +123,14 @@ func handleAutomaticSyncCreateGmail(c echo.Context) error {
 	userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(tok.AccessToken)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "Invalid Refresh Token. May be it is expired or invalid",
+			"message": "Invalid Code. May be it is expired or invalid",
 			"error":   err.Error(),
 		})
 	}
 
 	if userDetails.Email == "" {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "Invalid Refresh Token. May be it is expired or invalid",
+			"message": "Invalid Code. May be it is expired or invalid",
 			"error":   "getting empty email id from google token",
 		})
 	}
