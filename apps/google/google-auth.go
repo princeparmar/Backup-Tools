@@ -239,6 +239,7 @@ func GetRefreshTokenFromCodeForEmail(code string) (*oauth2.Token, error) {
 	}
 
 	fmt.Println("config", config)
+	config.RedirectURL = "http://localhost:10002"
 
 	tok, err := config.Exchange(context.TODO(), code)
 	if err != nil {
