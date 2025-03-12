@@ -230,23 +230,16 @@ func GetRefreshTokenFromCodeForEmail(code string) (*oauth2.Token, error) {
 		log.Printf("Unable to read client secret file: %v", err)
 	}
 
-	fmt.Println("code", code)
-
 	// get refresh token from code
 	config, err := google.ConfigFromJSON(b, gmail.GmailReadonlyScope, "https://www.googleapis.com/auth/userinfo.email")
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse client secret file to config: %v", err)
 	}
 
-	fmt.Println("config", config)
-	config.RedirectURL = "http://localhost:10002"
-
 	tok, err := config.Exchange(context.TODO(), code)
 	if err != nil {
 		return nil, err
 	}
-
-	fmt.Println("tok", tok)
 
 	return tok, nil
 }

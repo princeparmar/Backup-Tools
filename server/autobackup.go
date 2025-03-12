@@ -1,7 +1,6 @@
 package server
 
 import (
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -111,8 +110,6 @@ func handleAutomaticSyncCreateGmail(c echo.Context) error {
 			"message": "Code is required",
 		})
 	}
-
-	fmt.Println("reqBody.Code", reqBody.Code)
 
 	tok, err := google.GetRefreshTokenFromCodeForEmail(reqBody.Code)
 	if err != nil {
