@@ -52,7 +52,7 @@ func GetUploader(ctx context.Context, accessGrant, bucketName, objectKey string)
 		return nil, fmt.Errorf("could not parse access grant: %v", err)
 	}
 	fmt.Println("testAccessParse", testAccessParse.SatelliteAddress)
-	fmt.Println("access", testAccessParse.APIKey)
+	fmt.Println("access", testAccessParse.APIKey.Serialize())
 	fmt.Println("encAccess", testAccessParse.EncAccess)
 
 	// Open up the Project we will be working with.
