@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/labstack/echo/v4"
+	"storj.io/common/grant"
 	"storj.io/uplink"
 )
 
@@ -45,6 +46,14 @@ func GetUploader(ctx context.Context, accessGrant, bucketName, objectKey string)
 	if err != nil {
 		return nil, fmt.Errorf("could not parse access grant: %v", err)
 	}
+
+	testAccessParse, err := grant.ParseAccess(accessGrant)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse access grant: %v", err)
+	}
+	fmt.Println("testAccessParse", testAccessParse.SatelliteAddress)
+	fmt.Println("access", testAccessParse.APIKey)
+	fmt.Println("encAccess", testAccessParse.EncAccess)
 
 	// Open up the Project we will be working with.
 	project, err := uplink.OpenProject(ctx, access)
