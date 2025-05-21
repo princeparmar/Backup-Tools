@@ -96,6 +96,7 @@ func handleListGmailMessagesToSatellite(c echo.Context) error {
 
 				err = satellite.UploadObject(ctx, accesGrant, "gmail", messagePath, b)
 				if err != nil {
+					fmt.Println("error uploading to satellite", err)
 					failedIDs.Add(id)
 					return nil
 				}
