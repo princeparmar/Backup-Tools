@@ -125,10 +125,15 @@ func client(c echo.Context) (*http.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to retrieve google-auth token from JWT: %v", err)
 	}
+
+	fmt.Println("processing google token" + googleToken)
+
 	tok, err := database.ReadGoogleAuthToken(googleToken)
 	if err != nil {
 		return nil, echo.NewHTTPError(http.StatusUnauthorized, "user is not authorized")
 	}
+
+	fmt.Println("processing access token" + tok)
 	client := config.Client(context.Background(), &oauth2.Token{
 		AccessToken: tok,
 	})
