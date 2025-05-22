@@ -16,6 +16,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/StorX2-0/Backup-Tools/utils"
+	"github.com/gphotosuploader/googlemirror/api/photoslibrary/v1"
 
 	"github.com/labstack/echo/v4"
 	"golang.org/x/oauth2"
@@ -117,7 +118,8 @@ func client(c echo.Context) (*http.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to read client secret file: %v", err)
 	}
-	config, err := google.ConfigFromJSON(b, drive.DriveScope, gs.CloudPlatformScope, gs.DevstorageFullControlScope, gs.DevstorageReadWriteScope, gs.CloudPlatformReadOnlyScope)
+	config, err := google.ConfigFromJSON(b, drive.DriveScope, gs.CloudPlatformScope, gs.DevstorageFullControlScope, gs.DevstorageReadWriteScope, gs.CloudPlatformReadOnlyScope,
+		photoslibrary.PhotoslibraryReadonlyScope)
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse client secret file to config: %v", err)
 	}
