@@ -118,8 +118,7 @@ func client(c echo.Context) (*http.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to read client secret file: %v", err)
 	}
-	config, err := google.ConfigFromJSON(b, drive.DriveScope, gs.CloudPlatformScope, gs.DevstorageFullControlScope, gs.DevstorageReadWriteScope, gs.CloudPlatformReadOnlyScope,
-		photoslibrary.PhotoslibraryReadonlyScope)
+	config, err := google.ConfigFromJSON(b, photoslibrary.PhotoslibraryReadonlyScope)
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse client secret file to config: %v", err)
 	}
