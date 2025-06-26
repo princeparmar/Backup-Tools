@@ -180,7 +180,7 @@ func Autentificateg(c echo.Context) error {
 	if err != nil {
 		log.Printf("Unable to read client secret file: %v", err)
 	}
-	scopes := []string{drive.DriveScope, photoslibrary.PhotoslibraryScope, gmail.MailGoogleComScope, gs.CloudPlatformScope, gs.CloudPlatformReadOnlyScope, gs.DevstorageFullControlScope, gs.DevstorageReadWriteScope}
+	scopes := []string{drive.DriveScope, photoslibrary.PhotoslibraryScope, gmail.MailGoogleComScope, gs.DevstorageFullControlScope, gs.DevstorageReadWriteScope}
 	scopes = append(scopes, rm.DefaultAuthScopes()...)
 	config, err := google.ConfigFromJSON(b, scopes...)
 	if err != nil {
