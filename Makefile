@@ -23,9 +23,15 @@ test:
 	$(GO) test ./...
 
 # Build for multiple platforms
-build-all:
+build-all: build-linux build-darwin build-windows
+
+build-linux:
 	GOOS=linux GOARCH=amd64 $(GO) build -o $(BINARY_NAME)-linux-amd64 $(MAIN_FILE)
+
+build-darwin:
 	GOOS=darwin GOARCH=amd64 $(GO) build -o $(BINARY_NAME)-darwin-amd64 $(MAIN_FILE)
+
+build-windows:
 	GOOS=windows GOARCH=amd64 $(GO) build -o $(BINARY_NAME)-windows-amd64.exe $(MAIN_FILE)
 
 .PHONY: build run clean test build-all
