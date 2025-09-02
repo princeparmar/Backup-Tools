@@ -137,6 +137,26 @@ func handleGmailGetThreadsIDsControlled(c echo.Context) error {
 		numInt = 500
 	}
 	nextPageToken := c.QueryParam("nextPageToken")
+
+	// Parse filter parameters from query params
+	filter := &google.GmailFilter{
+		From:      c.QueryParam("from"),
+		To:        c.QueryParam("to"),
+		Subject:   c.QueryParam("subject"),
+		After:     c.QueryParam("after"),
+		Before:    c.QueryParam("before"),
+		NewerThan: c.QueryParam("newerThan"),
+		OlderThan: c.QueryParam("olderThan"),
+		Query:     c.QueryParam("query"),
+	}
+
+	// Parse hasAttachment boolean
+	if hasAttachment := c.QueryParam("hasAttachment"); hasAttachment != "" {
+		if hasAttachment == "true" {
+			filter.HasAttachment = true
+		}
+	}
+
 	GmailClient, err := google.NewGmailClient(c)
 	if err != nil {
 		if err.Error() == "token error" {
@@ -152,7 +172,7 @@ func handleGmailGetThreadsIDsControlled(c echo.Context) error {
 
 	var threads []any
 
-	res, err := GmailClient.GetUserMessagesControlled(nextPageToken, "", numInt)
+	res, err := GmailClient.GetUserMessagesControlled(nextPageToken, "", numInt, filter)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),

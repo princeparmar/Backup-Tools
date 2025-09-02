@@ -39,6 +39,19 @@ type MessagesResponse struct {
 	ResultSizeEstimate int              `json:"resultSizeEstimate"`
 }
 
+// GmailFilter represents filter parameters for Gmail message queries
+type GmailFilter struct {
+	From          string `json:"from,omitempty"`          // Filter by sender email
+	To            string `json:"to,omitempty"`            // Filter by recipient email
+	Subject       string `json:"subject,omitempty"`       // Filter by subject
+	HasAttachment bool   `json:"hasAttachment,omitempty"` // Filter messages with attachments
+	After         string `json:"after,omitempty"`         // Filter messages after date (YYYY/MM/DD)
+	Before        string `json:"before,omitempty"`        // Filter messages before date (YYYY/MM/DD)
+	NewerThan     string `json:"newerThan,omitempty"`     // Filter messages newer than (e.g., "1d", "1w", "1m")
+	OlderThan     string `json:"olderThan,omitempty"`     // Filter messages older than (e.g., "1d", "1w", "1m")
+	Query         string `json:"query,omitempty"`         // Raw Gmail search query
+}
+
 // Change in SQLite too if changing smth here
 type GmailMessage struct {
 	ID          string        `json:"message_id"`
@@ -349,7 +362,53 @@ func (client *GmailClient) GetAttachment(msgID, attachmentID string) (*gmail.Mes
 	return msg, nil
 }
 
-func (client *GmailClient) GetUserMessagesControlled(nextPageToken, label string, num int64) (*MessagesResponse, error) {
+// buildGmailQuery constructs a Gmail search query string from filter parameters
+func (filter *GmailFilter) buildGmailQuery() string {
+	var queryParts []string
+
+	// If a raw query is provided, use it directly
+	if filter.Query != "" {
+		return filter.Query
+	}
+
+	// Build query from individual filter parameters
+	if filter.From != "" {
+		queryParts = append(queryParts, fmt.Sprintf("from:%s", filter.From))
+	}
+
+	if filter.To != "" {
+		queryParts = append(queryParts, fmt.Sprintf("to:%s", filter.To))
+	}
+
+	if filter.Subject != "" {
+		queryParts = append(queryParts, fmt.Sprintf("subject:%s", filter.Subject))
+	}
+
+	if filter.HasAttachment {
+		queryParts = append(queryParts, "has:attachment")
+	}
+
+	if filter.After != "" {
+		queryParts = append(queryParts, fmt.Sprintf("after:%s", filter.After))
+	}
+
+	if filter.Before != "" {
+		queryParts = append(queryParts, fmt.Sprintf("before:%s", filter.Before))
+	}
+
+	if filter.NewerThan != "" {
+		queryParts = append(queryParts, fmt.Sprintf("newer_than:%s", filter.NewerThan))
+	}
+
+	if filter.OlderThan != "" {
+		queryParts = append(queryParts, fmt.Sprintf("older_than:%s", filter.OlderThan))
+	}
+
+	// Join all query parts with spaces
+	return strings.Join(queryParts, " ")
+}
+
+func (client *GmailClient) GetUserMessagesControlled(nextPageToken, label string, num int64, filter *GmailFilter) (*MessagesResponse, error) {
 	var msgs MessagesResponse
 	var err error
 	var messages []*gmail.Message
@@ -363,6 +422,14 @@ func (client *GmailClient) GetUserMessagesControlled(nextPageToken, label string
 
 	if label != "" {
 		req.LabelIds(label)
+	}
+
+	// Apply query filter if provided
+	if filter != nil {
+		query := filter.buildGmailQuery()
+		if query != "" {
+			req.Q(query)
+		}
 	}
 
 	res, err = req.Do()
