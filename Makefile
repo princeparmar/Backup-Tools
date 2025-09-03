@@ -28,4 +28,8 @@ build-all:
 	GOOS=darwin GOARCH=amd64 $(GO) build -o $(BINARY_NAME)-darwin-amd64 $(MAIN_FILE)
 	GOOS=windows GOARCH=amd64 $(GO) build -o $(BINARY_NAME)-windows-amd64.exe $(MAIN_FILE)
 
-.PHONY: build run clean test build-all
+# Build for Windows only
+build-windows:
+	GOOS=windows GOARCH=amd64 $(GO) build -o $(BINARY_NAME)-windows-amd64.exe $(MAIN_FILE)
+
+.PHONY: build run clean test build-all build-windows
