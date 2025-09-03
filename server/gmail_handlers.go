@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -21,6 +22,23 @@ import (
 type MessageListJSON struct {
 	gmail.Message
 	Synced bool `json:"synced"`
+}
+
+// decodeURLFilter decodes a URL-encoded JSON filter parameter and returns a GmailFilter
+func DecodeURLFilter(urlEncodedFilter string) (*google.GmailFilter, error) {
+	// URL decode the filter string
+	decodedFilter, err := url.QueryUnescape(urlEncodedFilter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to URL decode filter: %v", err)
+	}
+
+	// Parse the JSON string into GmailFilter struct
+	var filter google.GmailFilter
+	if err := json.Unmarshal([]byte(decodedFilter), &filter); err != nil {
+		return nil, fmt.Errorf("failed to parse filter JSON: %v", err)
+	}
+
+	return &filter, nil
 }
 
 func handleListGmailMessagesToSatellite(c echo.Context) error {
@@ -138,23 +156,16 @@ func handleGmailGetThreadsIDsControlled(c echo.Context) error {
 	}
 	nextPageToken := c.QueryParam("nextPageToken")
 
-	// Parse filter parameters from query params
-	filter := &google.GmailFilter{
-		From:      c.QueryParam("from"),
-		To:        c.QueryParam("to"),
-		Subject:   c.QueryParam("subject"),
-		After:     c.QueryParam("after"),
-		Before:    c.QueryParam("before"),
-		NewerThan: c.QueryParam("newerThan"),
-		OlderThan: c.QueryParam("olderThan"),
-		Query:     c.QueryParam("query"),
-	}
-
-	// Parse hasAttachment boolean
-	if hasAttachment := c.QueryParam("hasAttachment"); hasAttachment != "" {
-		if hasAttachment == "true" {
-			filter.HasAttachment = true
+	// Parse filter from JWT-encoded query parameter
+	var filter *google.GmailFilter
+	if filterParam := c.QueryParam("filter"); filterParam != "" {
+		decodedFilter, err := DecodeURLFilter(filterParam)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"error": "invalid filter parameter: " + err.Error(),
+			})
 		}
+		filter = decodedFilter
 	}
 
 	GmailClient, err := google.NewGmailClient(c)
