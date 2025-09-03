@@ -30,6 +30,9 @@ type AlbumsJSON struct {
 }
 
 // Shows list of user's Google Photos albums.
+// Supports date range filtering via 'date_range' query parameter:
+// - today, yesterday, last_7_days, last_30_days, this_year, last_year
+// - Custom dates: "2024-01-01" or "2024-01-01,2024-12-31"
 func handleListGPhotosAlbums(c echo.Context) error {
 	client, err := google.NewGPhotosClient(c)
 	if err != nil {
@@ -43,7 +46,18 @@ func handleListGPhotosAlbums(c echo.Context) error {
 			})
 		}
 	}
-	albs, err := client.ListAlbums(c)
+
+	// Use date filtering if date_range parameter is provided
+	dateRange := c.QueryParam("date_range")
+	var albs []albums.Album
+
+	var dateRangePtr *string
+	if dateRange != "" {
+		dateRangePtr = &dateRange
+	}
+
+	albs, err = client.ListAlbums(c, dateRangePtr)
+
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -69,6 +83,9 @@ type PhotosJSON struct {
 }
 
 // Shows list of user's Google Photos items in given album.
+// Supports filtering via query parameters:
+// - date_range: Filter by creation date (today, last_7_days, last_30_days, this_year, last_year, custom_date_range)
+// - media_type: Filter by media type (all, photos, videos)
 func handleListPhotosInAlbum(c echo.Context) error {
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
@@ -99,7 +116,24 @@ func handleListPhotosInAlbum(c echo.Context) error {
 		})
 	}
 
-	files, err := client.ListFilesFromAlbum(c.Request().Context(), id)
+	// Check if any filters are provided
+	dateRange := c.QueryParam("date_range")
+	mediaType := c.QueryParam("media_type")
+
+	var filters *google.PhotosFilters
+	if dateRange != "" || mediaType != "" {
+		// Create filters struct
+		filters = &google.PhotosFilters{}
+		if dateRange != "" {
+			filters.DateRange = dateRange
+		}
+		if mediaType != "" {
+			filters.MediaType = mediaType
+		}
+	}
+
+	files, err := client.ListFilesFromAlbum(c.Request().Context(), id, filters)
+
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -160,7 +194,7 @@ func handleListAllPhotos(c echo.Context) error {
 			})
 		}
 	}
-	albs, err := client.ListAlbums(c)
+	albs, err := client.ListAlbums(c, nil)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -181,7 +215,7 @@ func handleListAllPhotos(c echo.Context) error {
 	for _, alb := range albs {
 		func(alb albums.Album) { // added this function to avoid closure issue https://stackoverflow.com/questions/26692844/captured-closure-for-loop-variable-in-go
 			g.Go(func() error {
-				files, err := client.ListFilesFromAlbum(ctx, alb.ID)
+				files, err := client.ListFilesFromAlbum(ctx, alb.ID, nil)
 				if err != nil {
 					return err
 				}
@@ -379,7 +413,7 @@ func handleSendAllFilesFromGooglePhotosToSatellite(c echo.Context) error {
 			})
 		}
 	}
-	files, err := client.ListFilesFromAlbum(c.Request().Context(), id)
+	files, err := client.ListFilesFromAlbum(c.Request().Context(), id, nil)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),

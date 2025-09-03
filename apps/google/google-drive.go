@@ -12,6 +12,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
@@ -472,6 +473,133 @@ func getFolderNameByID(srv *drive.Service, folderID string) (string, error) {
 	return r.Files[0].Id, nil
 }
 
+// buildFileTypeQuery builds a Google Drive query string based on file type filter
+func buildFileTypeQuery(fileType string) string {
+	switch strings.ToLower(fileType) {
+	case "documents", "docs":
+		return " and (mimeType = 'application/vnd.google-apps.document' or mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' or mimeType = 'application/msword' or mimeType = 'application/vnd.oasis.opendocument.text' or mimeType = 'application/rtf' or mimeType = 'text/plain')"
+
+	case "spreadsheets", "sheets":
+		return " and (mimeType = 'application/vnd.google-apps.spreadsheet' or mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or mimeType = 'application/vnd.ms-excel' or mimeType = 'application/vnd.oasis.opendocument.spreadsheet' or mimeType = 'text/csv')"
+
+	case "presentations", "slides":
+		return " and (mimeType = 'application/vnd.google-apps.presentation' or mimeType = 'application/vnd.openxmlformats-officedocument.presentationml.presentation' or mimeType = 'application/vnd.ms-powerpoint' or mimeType = 'application/vnd.oasis.opendocument.presentation')"
+
+	case "images", "photos":
+		return " and (mimeType contains 'image/' or mimeType = 'image/jpeg' or mimeType = 'image/png' or mimeType = 'image/gif' or mimeType = 'image/bmp' or mimeType = 'image/tiff' or mimeType = 'image/svg+xml' or mimeType = 'image/webp')"
+
+	case "videos":
+		return " and (mimeType contains 'video/' or mimeType = 'video/webm' or mimeType = 'video/mp4' or mimeType = 'video/3gpp' or mimeType = 'video/quicktime' or mimeType = 'video/x-msvideo' or mimeType = 'video/mpeg' or mimeType = 'video/x-ms-wmv' or mimeType = 'video/x-flv' or mimeType = 'video/ogg')"
+
+	case "audio":
+		return " and (mimeType contains 'audio/' or mimeType = 'audio/mpeg' or mimeType = 'audio/mp4' or mimeType = 'audio/wav' or mimeType = 'audio/ogg' or mimeType = 'audio/opus')"
+
+	case "pdfs", "pdf":
+		return " and mimeType = 'application/pdf'"
+
+	case "archives", "zip":
+		return " and (mimeType = 'application/zip' or mimeType = 'application/x-rar-compressed' or mimeType = 'application/x-tar' or mimeType = 'application/gzip')"
+
+	case "code", "scripts":
+		return " and (mimeType = 'text/css' or mimeType = 'text/html' or mimeType = 'text/php' or mimeType = 'text/x-c' or mimeType = 'text/x-c++' or mimeType = 'text/x-h' or mimeType = 'text/javascript' or mimeType = 'text/x-java-source' or mimeType = 'text/x-python' or mimeType = 'text/x-sql' or mimeType = 'text/xml' or mimeType = 'application/json')"
+
+	case "drawings":
+		return " and mimeType = 'application/vnd.google-apps.drawing'"
+
+	case "forms":
+		return " and mimeType = 'application/vnd.google-apps.form'"
+
+	case "sites":
+		return " and mimeType = 'application/vnd.google-apps.site'"
+
+	case "scripts_apps":
+		return " and mimeType = 'application/vnd.google-apps.script'"
+
+	case "jams":
+		return " and mimeType = 'application/vnd.google-apps.jam'"
+
+	default:
+		return ""
+	}
+}
+
+// buildOwnerQuery builds a Google Drive query string based on owner filter
+func buildOwnerQuery(owner string) string {
+	switch strings.ToLower(owner) {
+	case "me", "myself":
+		return " and owners contains 'me'"
+	case "others", "not me":
+		return " and not owners contains 'me'"
+	default:
+		// If owner is an email address or specific user identifier
+		return " and owners contains '" + owner + "'"
+	}
+}
+
+// buildDateModifiedQuery builds a Google Drive query string based on date modified filter
+func buildDateModifiedQuery(dateModified string) string {
+	switch strings.ToLower(dateModified) {
+	case "today":
+		return " and modifiedTime > '" + getTodayStart() + "'"
+	case "yesterday":
+		return " and modifiedTime > '" + getYesterdayStart() + "' and modifiedTime < '" + getTodayStart() + "'"
+	case "last_7_days", "last7days", "7days":
+		return " and modifiedTime > '" + getDaysAgoStart(7) + "'"
+	case "last_30_days", "last30days", "30days":
+		return " and modifiedTime > '" + getDaysAgoStart(30) + "'"
+	case "this_year", "thisyear":
+		return " and modifiedTime > '" + getYearStart() + "'"
+	case "last_year", "lastyear":
+		return " and modifiedTime > '" + getLastYearStart() + "' and modifiedTime < '" + getYearStart() + "'"
+	default:
+		// For custom date ranges, expect format like "2024-01-01" or "2024-01-01,2024-12-31"
+		return buildCustomDateQuery(dateModified)
+	}
+}
+
+// Helper functions for date calculations
+func getTodayStart() string {
+	now := time.Now()
+	return now.Format("2006-01-02T00:00:00.000Z")
+}
+
+func getYesterdayStart() string {
+	yesterday := time.Now().AddDate(0, 0, -1)
+	return yesterday.Format("2006-01-02T00:00:00.000Z")
+}
+
+func getDaysAgoStart(days int) string {
+	date := time.Now().AddDate(0, 0, -days)
+	return date.Format("2006-01-02T00:00:00.000Z")
+}
+
+func getYearStart() string {
+	now := time.Now()
+	yearStart := time.Date(now.Year(), 1, 1, 0, 0, 0, 0, now.Location())
+	return yearStart.Format("2006-01-02T00:00:00.000Z")
+}
+
+func getLastYearStart() string {
+	now := time.Now()
+	lastYearStart := time.Date(now.Year()-1, 1, 1, 0, 0, 0, 0, now.Location())
+	return lastYearStart.Format("2006-01-02T00:00:00.000Z")
+}
+
+func buildCustomDateQuery(dateRange string) string {
+	// Handle custom date ranges like "2024-01-01" or "2024-01-01,2024-12-31"
+	dates := strings.Split(dateRange, ",")
+	if len(dates) == 1 {
+		// Single date - files modified on or after this date
+		return " and modifiedTime > '" + dates[0] + "T00:00:00.000Z'"
+	} else if len(dates) == 2 {
+		// Date range - files modified between these dates
+		startDate := strings.TrimSpace(dates[0]) + "T00:00:00.000Z"
+		endDate := strings.TrimSpace(dates[1]) + "T23:59:59.999Z"
+		return " and modifiedTime > '" + startDate + "' and modifiedTime < '" + endDate + "'"
+	}
+	return ""
+}
+
 // This function gets files only in root. It does not list files in folders
 func GetFileNamesInRoot(c echo.Context) ([]*FilesJSON, error) {
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
@@ -500,6 +628,10 @@ func GetFileNamesInRoot(c echo.Context) ([]*FilesJSON, error) {
 
 	folderOnly := c.QueryParam("folder_only")
 	filesOnly := c.QueryParam("files_only")
+	fileType := c.QueryParam("file_type")
+	owner := c.QueryParam("owner")
+	dateModified := c.QueryParam("date_modified")
+
 	// Query to list files not in any folders
 	query := "'root' in parents"
 
@@ -507,6 +639,19 @@ func GetFileNamesInRoot(c echo.Context) ([]*FilesJSON, error) {
 		query += " and mimeType = 'application/vnd.google-apps.folder'"
 	} else if filesOnly == "true" {
 		query += " and mimeType != 'application/vnd.google-apps.folder'"
+	} else if fileType != "" {
+		// Add file type filtering based on MIME types
+		query += buildFileTypeQuery(fileType)
+	}
+
+	// Add owner filtering
+	if owner != "" {
+		query += buildOwnerQuery(owner)
+	}
+
+	// Add date modified filtering
+	if dateModified != "" {
+		query += buildDateModifiedQuery(dateModified)
 	}
 
 	// Loop to handle pagination
