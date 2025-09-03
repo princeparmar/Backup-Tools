@@ -2,7 +2,9 @@ package google
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -21,6 +23,23 @@ type GPotosClient struct {
 type PhotosFilters struct {
 	DateRange string `json:"date_range"` // Date range filter (today, last_7_days, etc.)
 	MediaType string `json:"media_type"` // Media type filter (photos, videos, all)
+}
+
+// DecodeURLPhotosFilter decodes a URL-encoded JSON filter parameter and returns a PhotosFilters
+func DecodeURLPhotosFilter(urlEncodedFilter string) (*PhotosFilters, error) {
+	// URL decode the filter string
+	decodedFilter, err := url.QueryUnescape(urlEncodedFilter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to URL decode filter: %v", err)
+	}
+
+	// Parse the JSON string into PhotosFilters struct
+	var filter PhotosFilters
+	if err := json.Unmarshal([]byte(decodedFilter), &filter); err != nil {
+		return nil, fmt.Errorf("failed to parse filter JSON: %v", err)
+	}
+
+	return &filter, nil
 }
 
 // HasFilters returns true if any filters are set
@@ -48,19 +67,24 @@ func NewGPhotosClient(c echo.Context) (*GPotosClient, error) {
 
 // Function returns all the albums that connected to user google account.
 // Optional dateRange parameter can be provided to filter albums by their media items' creation dates.
-func (gpclient *GPotosClient) ListAlbums(c echo.Context, dateRange *string) ([]albums.Album, error) {
+func (gpclient *GPotosClient) ListAlbums(c echo.Context, filters *PhotosFilters) ([]albums.Album, error) {
 	allAlbums, err := gpclient.Albums.List(context.Background())
 	if err != nil {
 		return nil, err
 	}
 
-	// If no date filter is provided, return all albums
-	if dateRange == nil || *dateRange == "" {
+	// If no filter is provided, return all albums
+	if filters == nil || filters.IsEmpty() {
+		return allAlbums, nil
+	}
+
+	// If only media type filter is provided (no date range), return all albums
+	if filters.DateRange == "" {
 		return allAlbums, nil
 	}
 
 	// Parse date range
-	startDate, endDate, err := parseDateRange(*dateRange)
+	startDate, endDate, err := parseDateRange(filters.DateRange)
 	if err != nil {
 		return nil, err
 	}

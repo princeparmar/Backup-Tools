@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"slices"
@@ -473,6 +475,33 @@ func getFolderNameByID(srv *drive.Service, folderID string) (string, error) {
 	return r.Files[0].Id, nil
 }
 
+// GoogleDriveFilter represents filter parameters for Google Drive file queries
+type GoogleDriveFilter struct {
+	FolderOnly   bool   `json:"folderOnly,omitempty"`   // Filter only folders
+	FilesOnly    bool   `json:"filesOnly,omitempty"`    // Filter only files (not folders)
+	FileType     string `json:"fileType,omitempty"`     // Filter by file type (documents, images, etc.)
+	Owner        string `json:"owner,omitempty"`        // Filter by owner
+	DateModified string `json:"dateModified,omitempty"` // Filter by date modified
+	Query        string `json:"query,omitempty"`        // Raw Google Drive search query
+}
+
+// DecodeURLDriveFilter decodes a URL-encoded JSON filter parameter and returns a GoogleDriveFilter
+func DecodeURLDriveFilter(urlEncodedFilter string) (*GoogleDriveFilter, error) {
+	// URL decode the filter string
+	decodedFilter, err := url.QueryUnescape(urlEncodedFilter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to URL decode filter: %v", err)
+	}
+
+	// Parse the JSON string into GoogleDriveFilter struct
+	var filter GoogleDriveFilter
+	if err := json.Unmarshal([]byte(decodedFilter), &filter); err != nil {
+		return nil, fmt.Errorf("failed to parse filter JSON: %v", err)
+	}
+
+	return &filter, nil
+}
+
 // buildFileTypeQuery builds a Google Drive query string based on file type filter
 func buildFileTypeQuery(fileType string) string {
 	switch strings.ToLower(fileType) {
@@ -626,32 +655,45 @@ func GetFileNamesInRoot(c echo.Context) ([]*FilesJSON, error) {
 
 	var fileResp []*FilesJSON
 
-	folderOnly := c.QueryParam("folder_only")
-	filesOnly := c.QueryParam("files_only")
-	fileType := c.QueryParam("file_type")
-	owner := c.QueryParam("owner")
-	dateModified := c.QueryParam("date_modified")
+	// Parse filter from URL-encoded query parameter
+	var filter *GoogleDriveFilter
+	if filterParam := c.QueryParam("filter"); filterParam != "" {
+		decodedFilter, err := DecodeURLDriveFilter(filterParam)
+		if err != nil {
+			return nil, fmt.Errorf("invalid filter parameter: %v", err)
+		}
+		filter = decodedFilter
+	}
 
 	// Query to list files not in any folders
 	query := "'root' in parents"
 
-	if folderOnly == "true" {
-		query += " and mimeType = 'application/vnd.google-apps.folder'"
-	} else if filesOnly == "true" {
-		query += " and mimeType != 'application/vnd.google-apps.folder'"
-	} else if fileType != "" {
-		// Add file type filtering based on MIME types
-		query += buildFileTypeQuery(fileType)
-	}
+	// Apply filter if provided
+	if filter != nil {
+		// If a raw query is provided, use it directly
+		if filter.Query != "" {
+			query = filter.Query
+		} else {
+			// Build query from individual filter parameters
+			if filter.FolderOnly {
+				query += " and mimeType = 'application/vnd.google-apps.folder'"
+			} else if filter.FilesOnly {
+				query += " and mimeType != 'application/vnd.google-apps.folder'"
+			} else if filter.FileType != "" {
+				// Add file type filtering based on MIME types
+				query += buildFileTypeQuery(filter.FileType)
+			}
 
-	// Add owner filtering
-	if owner != "" {
-		query += buildOwnerQuery(owner)
-	}
+			// Add owner filtering
+			if filter.Owner != "" {
+				query += buildOwnerQuery(filter.Owner)
+			}
 
-	// Add date modified filtering
-	if dateModified != "" {
-		query += buildDateModifiedQuery(dateModified)
+			// Add date modified filtering
+			if filter.DateModified != "" {
+				query += buildDateModifiedQuery(filter.DateModified)
+			}
+		}
 	}
 
 	// Loop to handle pagination

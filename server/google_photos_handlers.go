@@ -48,15 +48,19 @@ func handleListGPhotosAlbums(c echo.Context) error {
 	}
 
 	// Use date filtering if date_range parameter is provided
-	dateRange := c.QueryParam("date_range")
+	filterParam := c.QueryParam("filter")
+	var filter *google.PhotosFilters
+	if filterParam != "" {
+		filter, err = google.DecodeURLPhotosFilter(filterParam)
+		if err != nil {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+	}
 	var albs []albums.Album
 
-	var dateRangePtr *string
-	if dateRange != "" {
-		dateRangePtr = &dateRange
-	}
-
-	albs, err = client.ListAlbums(c, dateRangePtr)
+	albs, err = client.ListAlbums(c, filter)
 
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -117,18 +121,23 @@ func handleListPhotosInAlbum(c echo.Context) error {
 	}
 
 	// Check if any filters are provided
-	dateRange := c.QueryParam("date_range")
-	mediaType := c.QueryParam("media_type")
+	filterParam := c.QueryParam("filter")
 
 	var filters *google.PhotosFilters
-	if dateRange != "" || mediaType != "" {
-		// Create filters struct
-		filters = &google.PhotosFilters{}
-		if dateRange != "" {
-			filters.DateRange = dateRange
+	if filterParam != "" {
+		filters, err = google.DecodeURLPhotosFilter(filterParam)
+		if err != nil {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
-		if mediaType != "" {
-			filters.MediaType = mediaType
+	}
+	if filters != nil {
+		if filters.DateRange != "" {
+			filters.DateRange = filterParam
+		}
+		if filters.MediaType != "" {
+			filters.MediaType = filterParam
 		}
 	}
 
