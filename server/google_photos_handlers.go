@@ -132,14 +132,8 @@ func handleListPhotosInAlbum(c echo.Context) error {
 			})
 		}
 	}
-	if filters != nil {
-		if filters.DateRange != "" {
-			filters.DateRange = filterParam
-		}
-		if filters.MediaType != "" {
-			filters.MediaType = filterParam
-		}
-	}
+	// Filters are already properly parsed by DecodeURLPhotosFilter
+	// No need to overwrite them with the raw filterParam
 
 	files, err := client.ListFilesFromAlbum(c.Request().Context(), id, filters)
 
