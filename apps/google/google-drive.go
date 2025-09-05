@@ -31,14 +31,67 @@ import (
 )
 
 type FilesJSON struct {
-	Name              string `json:"file_name"`
-	ID                string `json:"file_id"`
-	MimeType          string `json:"mime_type"`
-	Synced            bool   `json:"synced"`
-	Size              int64  `json:"size"`
-	FullFileExtension string `json:"full_file_extension"`
-	FileExtension     string `json:"file_extension"`
-	Path              string `json:"path"`
+	Name              string    `json:"file_name"`
+	ID                string    `json:"file_id"`
+	MimeType          string    `json:"mime_type"`
+	Synced            bool      `json:"synced"`
+	Size              int64     `json:"size"`
+	FullFileExtension string    `json:"full_file_extension"`
+	FileExtension     string    `json:"file_extension"`
+	Path              string    `json:"path"`
+	CreatedAt         time.Time `json:"created_at"`
+}
+
+// createFilesJSON creates a FilesJSON object from a Google Drive file
+func createFilesJSON(file *drive.File, synced bool, path string) *FilesJSON {
+	// Parse created time
+	var createdAt time.Time
+	if file.CreatedTime != "" {
+		createdAt, _ = time.Parse(time.RFC3339, file.CreatedTime)
+	}
+
+	// Handle size for different file types
+	size := file.Size
+
+	// Check if it's a Google Apps file (all have no physical size)
+	googleAppsMimeTypes := []string{
+		"application/vnd.google-apps.document",     // Google Docs
+		"application/vnd.google-apps.spreadsheet",  // Google Sheets
+		"application/vnd.google-apps.presentation", // Google Slides
+		"application/vnd.google-apps.form",         // Google Forms
+		"application/vnd.google-apps.drawing",      // Google Drawings
+		"application/vnd.google-apps.map",          // Google My Maps
+		"application/vnd.google-apps.site",         // Google Sites
+		"application/vnd.google-apps.script",       // Google Apps Script
+	}
+
+	isGoogleApp := false
+	for _, mimeType := range googleAppsMimeTypes {
+		if file.MimeType == mimeType {
+			isGoogleApp = true
+			break
+		}
+	}
+
+	if isGoogleApp {
+		// For Google Apps files, they don't have a physical size in Drive API
+		// Set to -1 to indicate it's a Google Apps file
+		size = -1
+	}
+	// For regular files, if size is 0, it means the file is actually 0 bytes
+	// This is different from Google Apps files which have no size concept
+
+	return &FilesJSON{
+		Name:              file.Name,
+		ID:                file.Id,
+		MimeType:          file.MimeType,
+		Path:              path,
+		Size:              size,
+		FullFileExtension: file.FullFileExtension,
+		FileExtension:     file.FileExtension,
+		CreatedAt:         createdAt,
+		Synced:            synced,
+	}
 }
 
 // GetFileNames retrieves all file names and their IDs from Google Drive
@@ -58,7 +111,7 @@ func GetFileNames(c echo.Context) ([]*FilesJSON, error) {
 	// Loop to handle pagination
 	pageToken := ""
 	for {
-		r, err := srv.Files.List().PageToken(pageToken).Do()
+		r, err := srv.Files.List().Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").PageToken(pageToken).Do()
 		if err != nil {
 			return nil, fmt.Errorf("failed to retrieve files: %v", err)
 		}
@@ -66,15 +119,7 @@ func GetFileNames(c echo.Context) ([]*FilesJSON, error) {
 		// Append files to response
 		for _, i := range r.Files {
 			pathH, _ := GetFolderPathByID(context.Background(), srv, i.Id)
-			fileResp = append(fileResp, &FilesJSON{
-				Name:              i.Name,
-				ID:                i.Id,
-				MimeType:          i.MimeType,
-				Path:              pathH,
-				Size:              i.Size,
-				FullFileExtension: i.FullFileExtension,
-				FileExtension:     i.FileExtension,
-			})
+			fileResp = append(fileResp, createFilesJSON(i, false, pathH))
 		}
 
 		// Check if there's another page
@@ -277,7 +322,7 @@ func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
 		return cmp.Compare(a.Key, b.Key)
 	})
 	// List all files within the folder
-	r, err := srv.Files.List().Q(fmt.Sprintf("'%s' in parents", folderID)).Do()
+	r, err := srv.Files.List().Q(fmt.Sprintf("'%s' in parents", folderID)).Fields("files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").Do()
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve files: %v", err)
 	}
@@ -300,13 +345,7 @@ func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
 			_, synced := slices.BinarySearchFunc(o, path.Join(folderName, i.Name), func(a uplink.Object, b string) int {
 				return cmp.Compare(a.Key, b)
 			})
-			files = append(files, &FilesJSON{
-				Name:     i.Name,
-				ID:       i.Id,
-				MimeType: i.MimeType,
-				Size:     i.Size,
-				Synced:   synced,
-			})
+			files = append(files, createFilesJSON(i, synced, ""))
 		} else {
 			_, synced := slices.BinarySearchFunc(o, path.Join(folderName, i.Name)+"/", func(a uplink.Object, b string) int {
 				return cmp.Compare(a.Key, b)
@@ -319,13 +358,7 @@ func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
 				}
 			}
 
-			files = append(files, &FilesJSON{
-				Name:     i.Name,
-				ID:       i.Id,
-				MimeType: i.MimeType,
-				Size:     i.Size,
-				Synced:   synced,
-			})
+			files = append(files, createFilesJSON(i, synced, ""))
 		}
 	}
 
@@ -361,7 +394,7 @@ func GetFilesInFolderByID(c echo.Context, folderID string) ([]*FilesJSON, error)
 		return cmp.Compare(a.Key, b.Key)
 	})
 	// List all files within the folder
-	r, err := srv.Files.List().Q(fmt.Sprintf("'%s' in parents", folderID)).Do()
+	r, err := srv.Files.List().Q(fmt.Sprintf("'%s' in parents", folderID)).Fields("files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").Do()
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve files: %v", err)
 	}
@@ -385,13 +418,7 @@ func GetFilesInFolderByID(c echo.Context, folderID string) ([]*FilesJSON, error)
 			_, synced := slices.BinarySearchFunc(o, path.Join(folderName, i.Name), func(a uplink.Object, b string) int {
 				return cmp.Compare(a.Key, b)
 			})
-			files = append(files, &FilesJSON{
-				Name:     i.Name,
-				ID:       i.Id,
-				MimeType: i.MimeType,
-				Size:     i.Size,
-				Synced:   synced,
-			})
+			files = append(files, createFilesJSON(i, synced, ""))
 		} else {
 			fmt.Println(path.Join(folderName, i.Name))
 			_, synced := slices.BinarySearchFunc(o, path.Join(folderName, i.Name)+"/", func(a uplink.Object, b string) int {
@@ -405,13 +432,7 @@ func GetFilesInFolderByID(c echo.Context, folderID string) ([]*FilesJSON, error)
 				}
 			}
 
-			files = append(files, &FilesJSON{
-				Name:     i.Name,
-				ID:       i.Id,
-				MimeType: i.MimeType,
-				Size:     i.Size,
-				Synced:   synced,
-			})
+			files = append(files, createFilesJSON(i, synced, ""))
 		}
 	}
 
@@ -435,17 +456,14 @@ func GetFolderNameAndFilesInFolderByID(c echo.Context, folderID string) (string,
 		return "", nil, fmt.Errorf("failed to get folder name: %v", err)
 	}
 	// List all files within the folder
-	r, err := srv.Files.List().Q(fmt.Sprintf("'%s' in parents", folderID)).Do()
+	r, err := srv.Files.List().Q(fmt.Sprintf("'%s' in parents", folderID)).Fields("files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").Do()
 	if err != nil {
 		return folderName, nil, fmt.Errorf("failed to retrieve files: %v", err)
 	}
 
 	var files []*FilesJSON
 	for _, f := range r.Files {
-		files = append(files, &FilesJSON{
-			Name: f.Name,
-			ID:   f.Id,
-		})
+		files = append(files, createFilesJSON(f, false, ""))
 	}
 
 	return folderName, files, nil
@@ -699,7 +717,7 @@ func GetFileNamesInRoot(c echo.Context) ([]*FilesJSON, error) {
 	// Loop to handle pagination
 	pageToken := ""
 	for {
-		r, err := srv.Files.List().Q(query).PageToken(pageToken).Do()
+		r, err := srv.Files.List().Q(query).Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").PageToken(pageToken).Do()
 		if err != nil {
 			return nil, fmt.Errorf("failed to retrieve files: %v", err)
 		}
@@ -723,15 +741,7 @@ func GetFileNamesInRoot(c echo.Context) ([]*FilesJSON, error) {
 				_, synced := slices.BinarySearchFunc(o, i.Name, func(a uplink.Object, b string) int {
 					return cmp.Compare(a.Key, b)
 				})
-				fileResp = append(fileResp, &FilesJSON{
-					Name:              i.Name,
-					ID:                i.Id,
-					MimeType:          i.MimeType,
-					Size:              i.Size,
-					Synced:            synced,
-					FullFileExtension: i.FullFileExtension,
-					FileExtension:     i.FileExtension,
-				})
+				fileResp = append(fileResp, createFilesJSON(i, synced, ""))
 			} else {
 				// Checked if the folder exist
 				_, synced := slices.BinarySearchFunc(o, i.Name+"/", func(a uplink.Object, b string) int {
@@ -744,12 +754,7 @@ func GetFileNamesInRoot(c echo.Context) ([]*FilesJSON, error) {
 						synced = v.Synced
 					}
 				}
-				fileResp = append(fileResp, &FilesJSON{
-					Name:     i.Name,
-					ID:       i.Id,
-					MimeType: i.MimeType,
-					Synced:   synced,
-				})
+				fileResp = append(fileResp, createFilesJSON(i, synced, ""))
 			}
 		}
 
@@ -793,7 +798,7 @@ func GetSharedFiles(c echo.Context) ([]*FilesJSON, error) {
 	// Loop to handle pagination
 	pageToken := ""
 	for {
-		r, err := srv.Files.List().Q(query).PageToken(pageToken).Do()
+		r, err := srv.Files.List().Q(query).Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").PageToken(pageToken).Do()
 		if err != nil {
 			return nil, fmt.Errorf("failed to retrieve shared files: %v", err)
 		}
@@ -816,13 +821,7 @@ func GetSharedFiles(c echo.Context) ([]*FilesJSON, error) {
 				_, synced := slices.BinarySearchFunc(o, path.Join("shared with me", i.Name), func(a uplink.Object, b string) int {
 					return cmp.Compare(a.Key, b)
 				})
-				files = append(files, &FilesJSON{
-					Name:     i.Name,
-					ID:       i.Id,
-					MimeType: i.MimeType,
-					Size:     i.Size,
-					Synced:   synced,
-				})
+				files = append(files, createFilesJSON(i, synced, ""))
 			} else {
 				_, synced := slices.BinarySearchFunc(o, path.Join("shared with me", i.Name)+"/", func(a uplink.Object, b string) int {
 					return cmp.Compare(a.Key, b)
@@ -835,13 +834,7 @@ func GetSharedFiles(c echo.Context) ([]*FilesJSON, error) {
 					}
 				}
 
-				files = append(files, &FilesJSON{
-					Name:     i.Name,
-					ID:       i.Id,
-					MimeType: i.MimeType,
-					Size:     i.Size,
-					Synced:   synced,
-				})
+				files = append(files, createFilesJSON(i, synced, ""))
 			}
 		}
 
