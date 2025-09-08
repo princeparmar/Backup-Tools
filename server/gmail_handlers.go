@@ -96,6 +96,12 @@ func handleListGmailMessagesToSatellite(c echo.Context) error {
 
 	processedIDs, failedIDs := utils.NewLockedArray(), utils.NewLockedArray()
 	for _, id := range allIDs {
+		// Skip empty or whitespace-only IDs
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+
 		func(id string) {
 			g.Go(func() error {
 				msg, err := GmailClient.GetMessageDirect(id)
