@@ -47,20 +47,10 @@ func handleListGPhotosAlbums(c echo.Context) error {
 		}
 	}
 
-	// Use date filtering if date_range parameter is provided
-	filterParam := c.QueryParam("filter")
-	var filter *google.PhotosFilters
-	if filterParam != "" {
-		filter, err = google.DecodeURLPhotosFilter(filterParam)
-		if err != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-	}
+	// Google Photos API doesn't support album filtering directly
+	// Return all albums and let the client handle any filtering they need
 	var albs []albums.Album
-
-	albs, err = client.ListAlbums(c, filter)
+	albs, err = client.ListAlbums(c)
 
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -197,7 +187,7 @@ func handleListAllPhotos(c echo.Context) error {
 			})
 		}
 	}
-	albs, err := client.ListAlbums(c, nil)
+	albs, err := client.ListAlbums(c)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),

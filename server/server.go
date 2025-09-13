@@ -128,6 +128,8 @@ func StartServer(db *storage.PosgresStore, address string) {
 
 	google.GET("/cloud/list-projects", handleStorageListProjects)
 	google.GET("/cloud/list-organizations", handleStorageListOrganizations)
+	//create api to delete user
+	google.DELETE("/cloud/delete-user", handleDeleteUser)
 
 	// Dropbox
 	dropbox := e.Group("/dropbox")

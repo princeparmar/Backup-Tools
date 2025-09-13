@@ -67,60 +67,15 @@ func NewGPhotosClient(c echo.Context) (*GPotosClient, error) {
 
 // Function returns all the albums that connected to user google account.
 // Optional dateRange parameter can be provided to filter albums by their media items' creation dates.
-func (gpclient *GPotosClient) ListAlbums(c echo.Context, filters *PhotosFilters) ([]albums.Album, error) {
+func (gpclient *GPotosClient) ListAlbums(c echo.Context) ([]albums.Album, error) {
 	allAlbums, err := gpclient.Albums.List(context.Background())
 	if err != nil {
 		return nil, err
 	}
 
-	// If no filter is provided, return all albums
-	if filters == nil || filters.IsEmpty() {
-		return allAlbums, nil
-	}
-
-	// If only media type filter is provided (no date range), return all albums
-	if filters.DateRange == "" {
-		return allAlbums, nil
-	}
-
-	// Parse date range
-	startDate, endDate, err := parseDateRange(filters.DateRange)
-	if err != nil {
-		return nil, err
-	}
-
-	// Filter albums based on their media items' creation dates
-	var filteredAlbums []albums.Album
-	for _, album := range allAlbums {
-		// Get media items from this album
-		mediaItems, err := gpclient.MediaItems.ListByAlbum(context.Background(), album.ID)
-		if err != nil {
-			continue // Skip albums we can't access
-		}
-
-		// Check if any media item in the album falls within the date range
-		hasMatchingItems := false
-		for _, item := range mediaItems {
-			if item.MediaMetadata.CreationTime != "" {
-				creationTime, err := time.Parse(time.RFC3339, item.MediaMetadata.CreationTime)
-				if err != nil {
-					continue
-				}
-
-				if (startDate.IsZero() || !creationTime.Before(startDate)) &&
-					(endDate.IsZero() || !creationTime.After(endDate)) {
-					hasMatchingItems = true
-					break
-				}
-			}
-		}
-
-		if hasMatchingItems {
-			filteredAlbums = append(filteredAlbums, album)
-		}
-	}
-
-	return filteredAlbums, nil
+	// Google Photos API doesn't support album filtering directly
+	// Return all albums and let the client handle any filtering they need
+	return allAlbums, nil
 }
 
 // Func takes file and uploads into the given album in Google Photos.
