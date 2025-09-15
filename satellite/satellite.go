@@ -3,10 +3,16 @@ package satellite
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 
 	"github.com/labstack/echo/v4"
 	"storj.io/common/grant"
@@ -354,4 +360,133 @@ func GetUserdetails(token string) (string, error) {
 	}
 
 	return userDetailResponse.ID, nil
+}
+
+// encryptData encrypts the given data using AES-256-GCM with the provided key
+func encryptData(data []byte, key string) (string, error) {
+	// Create a hash of the key to ensure it's 32 bytes
+	hasher := sha256.New()
+	hasher.Write([]byte(key))
+	keyBytes := hasher.Sum(nil)
+
+	// Create AES cipher
+	block, err := aes.NewCipher(keyBytes)
+	if err != nil {
+		return "", fmt.Errorf("failed to create cipher: %v", err)
+	}
+
+	// Create GCM mode
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("failed to create GCM: %v", err)
+	}
+
+	// Generate random nonce
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", fmt.Errorf("failed to generate nonce: %v", err)
+	}
+
+	// Encrypt the data
+	ciphertext := gcm.Seal(nonce, nonce, data, nil)
+
+	// Encode to base64
+	return base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+// BackupFailureRequest represents the structure of the backup failure notification
+type BackupFailureRequest struct {
+	Email  string `json:"email"`
+	Error  string `json:"error"`
+	Method string `json:"method"`
+}
+
+func SendEmailForBackupFailure(ctx context.Context, email, errorMsg, method string) error {
+	emailapikey := os.Getenv("EMAIL_API_KEY")
+	if emailapikey == "" {
+		return fmt.Errorf("EMAIL_API_KEY environment variable is not set")
+	}
+
+	// Create the request data
+	requestData := BackupFailureRequest{
+		Email:  email,
+		Error:  errorMsg,
+		Method: method,
+	}
+
+	// Convert to JSON
+	jsonData, err := json.Marshal(requestData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request data: %v", err)
+	}
+
+	// Encrypt the JSON data using the email API key
+	encryptedData, err := encryptData(jsonData, emailapikey)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt data: %v", err)
+	}
+
+	// Create the request payload
+	payload := map[string]string{
+		"token": encryptedData,
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal payload: %v", err)
+	}
+
+	// Set the URL for sending backup failure notifications
+	url := StorxSatelliteService + "/api/v0/backup-failure"
+
+	// Create HTTP client and request
+	client := &http.Client{}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %v", err)
+	}
+
+	// Set headers
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	// Send the request
+	res, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %v", err)
+	}
+	defer res.Body.Close()
+
+	// Read response body
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %v", err)
+	}
+
+	// Check if the request was successful
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return fmt.Errorf("request failed with status %d: %s", res.StatusCode, string(body))
+	}
+
+	// Parse response
+	var response struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+		Error   string `json:"error"`
+	}
+
+	err = json.Unmarshal(body, &response)
+	if err != nil {
+		return fmt.Errorf("failed to parse response: %v", err)
+	}
+
+	if response.Error != "" {
+		return fmt.Errorf("server error: %s", response.Error)
+	}
+
+	if !response.Success {
+		return fmt.Errorf("request was not successful: %s", response.Message)
+	}
+
+	return nil
 }

@@ -1,10 +1,12 @@
 package crons
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/robfig/cron/v3"
 )
@@ -193,16 +195,35 @@ func (a *AutosyncManager) processTask(task *storage.TaskListingDB, job *storage.
 }
 
 func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *storage.CronJobListingDB, err error) error {
+	// Helper function to send email notification
+	sendEmailNotification := func(userEmail, errorMsg, method string) {
+		if userEmail != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			go func() {
+				emailErr := satellite.SendEmailForBackupFailure(ctx, userEmail, errorMsg, method)
+				if emailErr != nil {
+					fmt.Printf("Failed to send backup failure email to %s: %v\n", userEmail, emailErr)
+				} else {
+					fmt.Printf("Backup failure email sent successfully to %s\n", userEmail)
+				}
+			}()
+		}
+	}
+
+	// Set initial status for success case
 	task.Status = storage.TaskStatusSuccess
 	task.Execution = uint64(time.Since(*task.StartTime).Seconds())
 	job.Message = "Automatic backup completed successfully"
 	task.Message = "Automatic backup completed successfully"
 	job.MessageStatus = storage.JobMessageStatusInfo
 	job.LastRun = time.Now()
+
+	// Handle backup failure
 	if err != nil {
 		task.Status = storage.TaskStatusFailed
 		task.Message = err.Error()
-
 		job.Message = "Last Task Execution failed because of some error"
 		job.MessageStatus = storage.JobMessageStatusError
 
@@ -210,7 +231,6 @@ func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *sto
 			if task.RetryCount == storage.MaxRetryCount-1 {
 				job.InputData["refresh_token"] = ""
 				job.Active = false
-
 				job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
 				task.Message = "Google Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
 			} else {
@@ -226,14 +246,40 @@ func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *sto
 		task.RetryCount++
 	}
 
-	err = a.store.DB.Save(task).Error
-	if err != nil {
-		return err
+	// Save to database with transaction to ensure consistency
+	tx := a.store.DB.Begin()
+	if tx.Error != nil {
+		// If we can't start a transaction, send email about database error
+		sendEmailNotification(job.Name, fmt.Sprintf("Database transaction failed: %v", tx.Error), job.Method)
+		return fmt.Errorf("failed to start database transaction: %v", tx.Error)
 	}
 
-	err = a.store.DB.Save(job).Error
+	// Save task
+	if err := tx.Save(task).Error; err != nil {
+		tx.Rollback()
+		// Send email about database save failure
+		sendEmailNotification(job.Name, fmt.Sprintf("Failed to save task status to database: %v", err), job.Method)
+		return fmt.Errorf("failed to save task: %v", err)
+	}
+
+	// Save job
+	if err := tx.Save(job).Error; err != nil {
+		tx.Rollback()
+		// Send email about database save failure
+		sendEmailNotification(job.Name, fmt.Sprintf("Failed to save job status to database: %v", err), job.Method)
+		return fmt.Errorf("failed to save job: %v", err)
+	}
+
+	// Commit transaction
+	if err := tx.Commit().Error; err != nil {
+		// Send email about transaction commit failure
+		sendEmailNotification(job.Name, fmt.Sprintf("Failed to commit database transaction: %v", err), job.Method)
+		return fmt.Errorf("failed to commit transaction: %v", err)
+	}
+
+	// Send email notification for backup failure only after successful database save
 	if err != nil {
-		return err
+		sendEmailNotification(job.Name, err.Error(), job.Method)
 	}
 
 	return nil
