@@ -3,17 +3,15 @@ package satellite
 import (
 	"bytes"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strings"
+	"time"
 
+	"github.com/dgrijalva/jwt-go"
 	"github.com/labstack/echo/v4"
 	"storj.io/common/grant"
 	"storj.io/uplink"
@@ -362,39 +360,24 @@ func GetUserdetails(token string) (string, error) {
 	return userDetailResponse.ID, nil
 }
 
-// encryptData encrypts the given data using AES-256-GCM with the provided key
-func encryptData(data []byte, key string) (string, error) {
-	// Create a hash of the key to ensure it's 32 bytes
-	hasher := sha256.New()
-	hasher.Write([]byte(key))
-	keyBytes := hasher.Sum(nil)
+func createJWTToken(email, errorMsg, method, secretKey string) (string, error) {
+	claims := jwt.MapClaims{
+		"email":  email,
+		"error":  errorMsg,
+		"method": method,
+		"iat":    time.Now().Unix(),
+		"exp":    time.Now().Add(7 * time.Minute).Unix(),
+	}
 
-	// Create AES cipher
-	block, err := aes.NewCipher(keyBytes)
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString([]byte(secretKey))
 	if err != nil {
-		return "", fmt.Errorf("failed to create cipher: %v", err)
+		return "", fmt.Errorf("failed to sign token: %w", err)
 	}
 
-	// Create GCM mode
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("failed to create GCM: %v", err)
-	}
-
-	// Generate random nonce
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return "", fmt.Errorf("failed to generate nonce: %v", err)
-	}
-
-	// Encrypt the data
-	ciphertext := gcm.Seal(nonce, nonce, data, nil)
-
-	// Encode to base64
-	return base64.StdEncoding.EncodeToString(ciphertext), nil
+	return tokenString, nil
 }
 
-// BackupFailureRequest represents the structure of the backup failure notification
 type BackupFailureRequest struct {
 	Email  string `json:"email"`
 	Error  string `json:"error"`
@@ -402,82 +385,61 @@ type BackupFailureRequest struct {
 }
 
 func SendEmailForBackupFailure(ctx context.Context, email, errorMsg, method string) error {
+	fmt.Printf("🔧 SendEmailForBackupFailure called with email: %s, method: %s\n", email, method)
+
+	if StorxSatelliteService == "" {
+		return fmt.Errorf("STORX_SATELLITE_SERVICE environment variable is not set")
+	}
+
 	emailapikey := os.Getenv("EMAIL_API_KEY")
 	if emailapikey == "" {
 		return fmt.Errorf("EMAIL_API_KEY environment variable is not set")
 	}
 
-	// Create the request data
-	requestData := BackupFailureRequest{
-		Email:  email,
-		Error:  errorMsg,
-		Method: method,
-	}
-
-	// Convert to JSON
-	jsonData, err := json.Marshal(requestData)
+	jwtToken, err := createJWTToken(email, errorMsg, method, emailapikey)
 	if err != nil {
-		return fmt.Errorf("failed to marshal request data: %v", err)
+		return fmt.Errorf("failed to create JWT token: %w", err)
 	}
 
-	// Encrypt the JSON data using the email API key
-	encryptedData, err := encryptData(jsonData, emailapikey)
-	if err != nil {
-		return fmt.Errorf("failed to encrypt data: %v", err)
-	}
-
-	// Create the request payload
-	payload := map[string]string{
-		"token": encryptedData,
-	}
-
+	payload := map[string]string{"token": jwtToken}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("failed to marshal payload: %v", err)
+		return fmt.Errorf("failed to marshal payload: %w", err)
 	}
 
-	// Set the URL for sending backup failure notifications
-	url := StorxSatelliteService + "/api/v0/backup-failure"
+	url := strings.TrimSuffix(StorxSatelliteService, "/") + "/api/v0/auth/send-email"
 
-	// Create HTTP client and request
-	client := &http.Client{}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(payloadBytes))
 	if err != nil {
-		return fmt.Errorf("failed to create request: %v", err)
+		return fmt.Errorf("failed to create request: %w", err)
 	}
-
-	// Set headers
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	// Send the request
+	client := &http.Client{}
 	res, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to send request: %v", err)
+		return fmt.Errorf("failed to send request: %w", err)
 	}
 	defer res.Body.Close()
 
-	// Read response body
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read response: %v", err)
+		return fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Check if the request was successful
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		return fmt.Errorf("request failed with status %d: %s", res.StatusCode, string(body))
 	}
 
-	// Parse response
 	var response struct {
 		Success bool   `json:"success"`
 		Message string `json:"message"`
 		Error   string `json:"error"`
 	}
 
-	err = json.Unmarshal(body, &response)
-	if err != nil {
-		return fmt.Errorf("failed to parse response: %v", err)
+	if err := json.Unmarshal(body, &response); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
 	}
 
 	if response.Error != "" {
