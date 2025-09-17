@@ -25,10 +25,11 @@ type GPotosClient struct {
 }
 
 type PhotosFilters struct {
-	DateRange string `json:"date_range"`
-	MediaType string `json:"media_type"`
-	PageSize  int64  `json:"pageSize,omitempty"`
-	PageToken string `json:"pageToken,omitempty"`
+	DateRange      string `json:"date_range"`
+	MediaType      string `json:"media_type"`
+	PageSize       int64  `json:"pageSize,omitempty"`
+	PageToken      string `json:"pageToken,omitempty"`
+	ExcludeAppData bool   `json:"excludeAppData,omitempty"`
 }
 
 type PaginatedAlbumsResponse struct {
@@ -91,18 +92,38 @@ func NewGPhotosClient(c echo.Context) (*GPotosClient, error) {
 }
 
 func (gpclient *GPotosClient) ListAlbums(c echo.Context) (*PaginatedAlbumsResponse, error) {
-	excludeAppData := c.QueryParam("excludeAppData") == "true"
-	pageSize := parseIntWithLimits(c.QueryParam("pageSize"), 25, 1, 100)
-	pageToken := c.QueryParam("pageToken")
+	// Parse filter parameter
+	filterParam := c.QueryParam("filter")
+	var filters *PhotosFilters
+	var err error
 
+	if filterParam != "" {
+		filters, err = DecodeURLPhotosFilter(filterParam)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode URL photos filter: %w", err)
+		}
+	}
+
+	// Set defaults if no filters provided
+	if filters == nil {
+		filters = &PhotosFilters{
+			PageSize: 25,
+		}
+	}
+
+	// Ensure page size is within limits
+	pageSize := min(max(filters.PageSize, 1), 100)
+
+	// Build the API call
 	call := gpclient.Service.Albums.List().PageSize(pageSize)
-	if excludeAppData {
+	if filters.ExcludeAppData {
 		call = call.ExcludeNonAppCreatedData()
 	}
-	if pageToken != "" {
-		call = call.PageToken(pageToken)
+	if filters.PageToken != "" {
+		call = call.PageToken(filters.PageToken)
 	}
 
+	// Execute the API call
 	response, err := call.Do()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list albums: %w", err)
@@ -114,6 +135,21 @@ func (gpclient *GPotosClient) ListAlbums(c echo.Context) (*PaginatedAlbumsRespon
 		PageSize:      pageSize,
 		TotalAlbums:   int64(len(response.Albums)),
 	}, nil
+}
+
+// Helper functions for min/max
+func min(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func parseIntWithLimits(value string, defaultValue, min, max int64) int64 {
