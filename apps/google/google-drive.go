@@ -42,6 +42,14 @@ type FilesJSON struct {
 	CreatedAt         time.Time `json:"created_at"`
 }
 
+// PaginatedFilesResponse represents a paginated response for Google Drive files
+type PaginatedFilesResponse struct {
+	Files         []*FilesJSON `json:"files"`
+	NextPageToken string       `json:"nextPageToken,omitempty"`
+	PageSize      int64        `json:"pageSize"`
+	TotalFiles    int64        `json:"totalFiles"`
+}
+
 // createFilesJSON creates a FilesJSON object from a Google Drive file
 func createFilesJSON(file *drive.File, synced bool, path string) *FilesJSON {
 	// Parse created time
@@ -501,6 +509,8 @@ type GoogleDriveFilter struct {
 	Owner        string `json:"owner,omitempty"`        // Filter by owner
 	DateModified string `json:"dateModified,omitempty"` // Filter by date modified
 	Query        string `json:"query,omitempty"`        // Raw Google Drive search query
+	PageSize     int64  `json:"pageSize,omitempty"`     // Number of files per page (max 1000, default 100)
+	PageToken    string `json:"pageToken,omitempty"`    // Token for pagination (next page)
 }
 
 // DecodeURLDriveFilter decodes a URL-encoded JSON filter parameter and returns a GoogleDriveFilter
@@ -648,7 +658,7 @@ func buildCustomDateQuery(dateRange string) string {
 }
 
 // This function gets files only in root. It does not list files in folders
-func GetFileNamesInRoot(c echo.Context) ([]*FilesJSON, error) {
+func GetFileNamesInRoot(c echo.Context) (*PaginatedFilesResponse, error) {
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return nil, errors.New("access token not found")
@@ -714,58 +724,77 @@ func GetFileNamesInRoot(c echo.Context) ([]*FilesJSON, error) {
 		}
 	}
 
-	// Loop to handle pagination
+	// Set up pagination parameters
 	pageToken := ""
-	for {
-		r, err := srv.Files.List().Q(query).Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").PageToken(pageToken).Do()
-		if err != nil {
-			return nil, fmt.Errorf("failed to retrieve files: %v", err)
-		}
+	pageSize := int64(100) // Default page size
 
-		// Append files to response
-		for _, i := range r.Files {
-			//check if file is synced in storx
-			if i.MimeType != "application/vnd.google-apps.folder" {
-				switch i.MimeType {
-				case "application/vnd.google-apps.document":
-					i.Name += ".docx"
-				case "application/vnd.google-apps.spreadsheet":
-					i.Name += ".xlsx"
-				case "application/vnd.google-apps.presentation":
-					i.Name += ".pptx"
-				case "application/vnd.google-apps.site":
-
-				case "application/vnd.google-apps.script":
-					i.Name += ".json"
-				}
-				_, synced := slices.BinarySearchFunc(o, i.Name, func(a uplink.Object, b string) int {
-					return cmp.Compare(a.Key, b)
-				})
-				fileResp = append(fileResp, createFilesJSON(i, synced, ""))
-			} else {
-				// Checked if the folder exist
-				_, synced := slices.BinarySearchFunc(o, i.Name+"/", func(a uplink.Object, b string) int {
-					return cmp.Compare(a.Key, b)
-				})
-				if synced {
-					folderFiles, _ := GetFilesInFolderByID(c, i.Id)
-					//
-					for _, v := range folderFiles {
-						synced = v.Synced
-					}
-				}
-				fileResp = append(fileResp, createFilesJSON(i, synced, ""))
-			}
-		}
-
-		// Check if there's another page
-		pageToken = r.NextPageToken
-		if pageToken == "" {
-			break // No more pages
+	// Use custom page size if specified in filter
+	if filter != nil && filter.PageSize > 0 {
+		pageSize = filter.PageSize
+		// Ensure page size doesn't exceed Google's maximum
+		if pageSize > 1000 {
+			pageSize = 1000
 		}
 	}
 
-	return fileResp, nil
+	// Use custom page token if specified in filter
+	if filter != nil && filter.PageToken != "" {
+		pageToken = filter.PageToken
+	}
+
+	// Make single API call for this page
+	r, err := srv.Files.List().
+		Q(query).
+		Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").
+		PageToken(pageToken).
+		PageSize(pageSize).
+		Do()
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve files: %v", err)
+	}
+
+	// Process files from this page
+	for _, i := range r.Files {
+		//check if file is synced in storx
+		if i.MimeType != "application/vnd.google-apps.folder" {
+			switch i.MimeType {
+			case "application/vnd.google-apps.document":
+				i.Name += ".docx"
+			case "application/vnd.google-apps.spreadsheet":
+				i.Name += ".xlsx"
+			case "application/vnd.google-apps.presentation":
+				i.Name += ".pptx"
+			case "application/vnd.google-apps.site":
+
+			case "application/vnd.google-apps.script":
+				i.Name += ".json"
+			}
+			_, synced := slices.BinarySearchFunc(o, i.Name, func(a uplink.Object, b string) int {
+				return cmp.Compare(a.Key, b)
+			})
+			fileResp = append(fileResp, createFilesJSON(i, synced, ""))
+		} else {
+			// Checked if the folder exist
+			_, synced := slices.BinarySearchFunc(o, i.Name+"/", func(a uplink.Object, b string) int {
+				return cmp.Compare(a.Key, b)
+			})
+			if synced {
+				folderFiles, _ := GetFilesInFolderByID(c, i.Id)
+				//
+				for _, v := range folderFiles {
+					synced = v.Synced
+				}
+			}
+			fileResp = append(fileResp, createFilesJSON(i, synced, ""))
+		}
+	}
+
+	return &PaginatedFilesResponse{
+		Files:         fileResp,
+		NextPageToken: r.NextPageToken,
+		PageSize:      pageSize,
+		TotalFiles:    int64(len(fileResp)),
+	}, nil
 }
 
 func GetSharedFiles(c echo.Context) ([]*FilesJSON, error) {
