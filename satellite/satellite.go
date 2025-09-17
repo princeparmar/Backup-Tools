@@ -385,23 +385,30 @@ type BackupFailureRequest struct {
 }
 
 func SendEmailForBackupFailure(ctx context.Context, email, errorMsg, method string) error {
-	fmt.Printf("🔧 SendEmailForBackupFailure called with email: %s, method: %s\n", email, method)
+	// Create a new context with timeout (respect caller context)
+	emailCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 
 	if StorxSatelliteService == "" {
 		return fmt.Errorf("STORX_SATELLITE_SERVICE environment variable is not set")
 	}
 
-	emailapikey := os.Getenv("EMAIL_API_KEY")
-	if emailapikey == "" {
+	emailAPIKey := os.Getenv("EMAIL_API_KEY")
+	if emailAPIKey == "" {
 		return fmt.Errorf("EMAIL_API_KEY environment variable is not set")
 	}
 
-	jwtToken, err := createJWTToken(email, errorMsg, method, emailapikey)
+	jwtToken, err := createJWTToken(email, errorMsg, method, emailAPIKey)
 	if err != nil {
 		return fmt.Errorf("failed to create JWT token: %w", err)
 	}
 
-	payload := map[string]string{"token": jwtToken}
+	payload := struct {
+		Token string `json:"token"`
+	}{
+		Token: jwtToken,
+	}
+
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("failed to marshal payload: %w", err)
@@ -409,14 +416,14 @@ func SendEmailForBackupFailure(ctx context.Context, email, errorMsg, method stri
 
 	url := strings.TrimSuffix(StorxSatelliteService, "/") + "/api/v0/auth/send-email"
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(payloadBytes))
+	req, err := http.NewRequestWithContext(emailCtx, http.MethodPost, url, bytes.NewBuffer(payloadBytes))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: 30 * time.Second}
 	res, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)

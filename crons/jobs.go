@@ -195,23 +195,6 @@ func (a *AutosyncManager) processTask(task *storage.TaskListingDB, job *storage.
 }
 
 func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *storage.CronJobListingDB, err error) error {
-	// Helper function to send email notification
-	sendEmailNotification := func(userEmail, errorMsg, method string) {
-		if userEmail != "" {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-
-			go func() {
-				emailErr := satellite.SendEmailForBackupFailure(ctx, userEmail, errorMsg, method)
-				if emailErr != nil {
-					fmt.Printf("Failed to send backup failure email to %s: %v\n", userEmail, emailErr)
-				} else {
-					fmt.Printf("Backup failure email sent successfully to %s\n", userEmail)
-				}
-			}()
-		}
-	}
-
 	// Set initial status for success case
 	task.Status = storage.TaskStatusSuccess
 	task.Execution = uint64(time.Since(*task.StartTime).Seconds())
@@ -220,12 +203,14 @@ func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *sto
 	job.MessageStatus = storage.JobMessageStatusInfo
 	job.LastRun = time.Now()
 
-	// Handle backup failure
+	// If there's an error, update status and prepare to send email
 	if err != nil {
 		task.Status = storage.TaskStatusFailed
 		task.Message = err.Error()
 		job.Message = "Last Task Execution failed because of some error"
 		job.MessageStatus = storage.JobMessageStatusError
+
+		var emailMessage string = err.Error() // default
 
 		if strings.Contains(err.Error(), "googleapi: Error 401") {
 			if task.RetryCount == storage.MaxRetryCount-1 {
@@ -233,53 +218,35 @@ func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *sto
 				job.Active = false
 				job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
 				task.Message = "Google Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
+				emailMessage = "Google Credentials are invalid. Please update the credentials and reactivate the automatic backup"
 			} else {
 				job.Message = "Invalid google credentials. Retrying..."
 				task.Message = "Google Credentials are invalid. Retrying..."
+				emailMessage = "Google Credentials are invalid. Retrying..."
 			}
 		} else if strings.Contains(err.Error(), "uplink: permission") || strings.Contains(err.Error(), "uplink: invalid access") {
 			job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
 			job.StorxToken = ""
 			job.Active = false
 			task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
+			emailMessage = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
 		}
+
+		// Send the appropriate error message once
+		go satellite.SendEmailForBackupFailure(context.Background(), job.Name, emailMessage, job.Method)
+
 		task.RetryCount++
 	}
 
-	// Save to database with transaction to ensure consistency
-	tx := a.store.DB.Begin()
-	if tx.Error != nil {
-		// If we can't start a transaction, send email about database error
-		sendEmailNotification(job.Name, fmt.Sprintf("Database transaction failed: %v", tx.Error), job.Method)
-		return fmt.Errorf("failed to start database transaction: %v", tx.Error)
+	// Save task and job to DB
+	if err := a.store.DB.Save(task).Error; err != nil {
+		go satellite.SendEmailForBackupFailure(context.Background(), job.Name, fmt.Sprintf("Failed to save task status to database: %v", err), job.Method)
+		return err
 	}
 
-	// Save task
-	if err := tx.Save(task).Error; err != nil {
-		tx.Rollback()
-		// Send email about database save failure
-		sendEmailNotification(job.Name, fmt.Sprintf("Failed to save task status to database: %v", err), job.Method)
-		return fmt.Errorf("failed to save task: %v", err)
-	}
-
-	// Save job
-	if err := tx.Save(job).Error; err != nil {
-		tx.Rollback()
-		// Send email about database save failure
-		sendEmailNotification(job.Name, fmt.Sprintf("Failed to save job status to database: %v", err), job.Method)
-		return fmt.Errorf("failed to save job: %v", err)
-	}
-
-	// Commit transaction
-	if err := tx.Commit().Error; err != nil {
-		// Send email about transaction commit failure
-		sendEmailNotification(job.Name, fmt.Sprintf("Failed to commit database transaction: %v", err), job.Method)
-		return fmt.Errorf("failed to commit transaction: %v", err)
-	}
-
-	// Send email notification for backup failure only after successful database save
-	if err != nil {
-		sendEmailNotification(job.Name, err.Error(), job.Method)
+	if err := a.store.DB.Save(job).Error; err != nil {
+		go satellite.SendEmailForBackupFailure(context.Background(), job.Name, fmt.Sprintf("Failed to save job status to database: %v", err), job.Method)
+		return err
 	}
 
 	return nil
