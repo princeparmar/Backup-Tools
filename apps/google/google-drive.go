@@ -703,13 +703,17 @@ func GetFileNamesInRoot(c echo.Context) (*PaginatedFilesResponse, error) {
 			query = filter.Query
 		} else {
 			// Build query from individual filter parameters
-			if filter.FolderOnly {
-				query += " and mimeType = 'application/vnd.google-apps.folder'"
-			} else if filter.FilesOnly {
-				query += " and mimeType != 'application/vnd.google-apps.folder'"
-			} else if filter.FileType != "" {
+			// Validation: Don't execute filesOnly and folderOnly filters when file_type is specified
+			if filter.FileType != "" {
 				// Add file type filtering based on MIME types
 				query += buildFileTypeQuery(filter.FileType)
+			} else {
+				// Only apply folder/file filters when file_type is not specified
+				if filter.FolderOnly {
+					query += " and mimeType = 'application/vnd.google-apps.folder'"
+				} else if filter.FilesOnly {
+					query += " and mimeType != 'application/vnd.google-apps.folder'"
+				}
 			}
 
 			// Add owner filtering
