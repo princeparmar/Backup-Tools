@@ -27,23 +27,23 @@ type GPotosClient struct {
 type PhotosFilters struct {
 	DateRange      string `json:"date_range"`
 	MediaType      string `json:"media_type"`
-	PageSize       int64  `json:"pageSize,omitempty"`
-	PageToken      string `json:"pageToken,omitempty"`
-	ExcludeAppData bool   `json:"excludeAppData,omitempty"`
+	Limit          int64  `json:"limit,omitempty"`
+	PageToken      string `json:"page_token,omitempty"`
+	ExcludeAppData bool   `json:"exclude_app_data,omitempty"`
 }
 
 type PaginatedAlbumsResponse struct {
 	Albums        []albums.Album `json:"albums"`
-	NextPageToken string         `json:"nextPageToken,omitempty"`
-	PageSize      int64          `json:"pageSize"`
-	TotalAlbums   int64          `json:"totalAlbums"`
+	NextPageToken string         `json:"next_page_token,omitempty"`
+	Limit         int64          `json:"limit"`
+	TotalAlbums   int64          `json:"total_albums"`
 }
 
 type PaginatedMediaItemsResponse struct {
 	MediaItems    []media_items.MediaItem `json:"mediaItems"`
-	NextPageToken string                  `json:"nextPageToken,omitempty"`
-	PageSize      int64                   `json:"pageSize"`
-	TotalItems    int64                   `json:"totalItems"`
+	NextPageToken string                  `json:"next_page_token,omitempty"`
+	Limit         int64                   `json:"limit"`
+	TotalItems    int64                   `json:"total_items"`
 }
 
 func DecodeURLPhotosFilter(urlEncodedFilter string) (*PhotosFilters, error) {
@@ -107,15 +107,15 @@ func (gpclient *GPotosClient) ListAlbums(c echo.Context) (*PaginatedAlbumsRespon
 	// Set defaults if no filters provided
 	if filters == nil {
 		filters = &PhotosFilters{
-			PageSize: 25,
+			Limit: 25,
 		}
 	}
 
 	// Ensure page size is within limits
-	pageSize := min(max(filters.PageSize, 1), 100)
+	limit := min(max(filters.Limit, 1), 100)
 
 	// Build the API call
-	call := gpclient.Service.Albums.List().PageSize(pageSize)
+	call := gpclient.Service.Albums.List().PageSize(limit)
 	if filters.ExcludeAppData {
 		call = call.ExcludeNonAppCreatedData()
 	}
@@ -132,7 +132,7 @@ func (gpclient *GPotosClient) ListAlbums(c echo.Context) (*PaginatedAlbumsRespon
 	return &PaginatedAlbumsResponse{
 		Albums:        convertToAlbumType(response.Albums),
 		NextPageToken: response.NextPageToken,
-		PageSize:      pageSize,
+		Limit:         limit,
 		TotalAlbums:   int64(len(response.Albums)),
 	}, nil
 }
@@ -204,18 +204,18 @@ func (gpclient *GPotosClient) UploadFileToGPhotos(c echo.Context, filename, albu
 }
 
 func (gpclient *GPotosClient) ListFilesFromAlbum(ctx context.Context, albumID string, filters *PhotosFilters) (*PaginatedMediaItemsResponse, error) {
-	pageSize := parseIntWithLimits("", 25, 1, 100)
-	if filters != nil && filters.PageSize > 0 {
-		if filters.PageSize > 100 {
-			pageSize = 100
+	limit := parseIntWithLimits("", 25, 1, 100)
+	if filters != nil && filters.Limit > 0 {
+		if filters.Limit > 100 {
+			limit = 100
 		} else {
-			pageSize = filters.PageSize
+			limit = filters.Limit
 		}
 	}
 
 	searchReq := &photoslibrary.SearchMediaItemsRequest{
 		AlbumId:   albumID,
-		PageSize:  pageSize,
+		PageSize:  limit,
 		PageToken: getPageToken(filters),
 	}
 
@@ -229,7 +229,7 @@ func (gpclient *GPotosClient) ListFilesFromAlbum(ctx context.Context, albumID st
 	return &PaginatedMediaItemsResponse{
 		MediaItems:    filteredItems,
 		NextPageToken: response.NextPageToken,
-		PageSize:      pageSize,
+		Limit:         limit,
 		TotalItems:    int64(len(filteredItems)),
 	}, nil
 }

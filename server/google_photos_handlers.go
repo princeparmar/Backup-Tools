@@ -142,7 +142,7 @@ func handleListPhotosInAlbum(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"mediaItems":    photosRespJSON,
 		"nextPageToken": paginatedResponse.NextPageToken,
-		"pageSize":      paginatedResponse.PageSize,
+		"limit":         paginatedResponse.Limit,
 		"totalItems":    paginatedResponse.TotalItems,
 	})
 }
