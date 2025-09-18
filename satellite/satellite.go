@@ -7,7 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
+	"time"
 
+	"github.com/dgrijalva/jwt-go"
 	"github.com/labstack/echo/v4"
 	"storj.io/common/grant"
 	"storj.io/uplink"
@@ -354,4 +358,104 @@ func GetUserdetails(token string) (string, error) {
 	}
 
 	return userDetailResponse.ID, nil
+}
+
+func createJWTToken(email, errorMsg, method, secretKey string) (string, error) {
+	claims := jwt.MapClaims{
+		"email":  email,
+		"error":  errorMsg,
+		"method": method,
+		"iat":    time.Now().Unix(),
+		"exp":    time.Now().Add(7 * time.Minute).Unix(),
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString([]byte(secretKey))
+	if err != nil {
+		return "", fmt.Errorf("failed to sign token: %w", err)
+	}
+
+	return tokenString, nil
+}
+
+type BackupFailureRequest struct {
+	Email  string `json:"email"`
+	Error  string `json:"error"`
+	Method string `json:"method"`
+}
+
+func SendEmailForBackupFailure(ctx context.Context, email, errorMsg, method string) error {
+	// Create a new context with timeout (respect caller context)
+	emailCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	if StorxSatelliteService == "" {
+		return fmt.Errorf("STORX_SATELLITE_SERVICE environment variable is not set")
+	}
+
+	emailAPIKey := os.Getenv("EMAIL_API_KEY")
+	if emailAPIKey == "" {
+		return fmt.Errorf("EMAIL_API_KEY environment variable is not set")
+	}
+
+	jwtToken, err := createJWTToken(email, errorMsg, method, emailAPIKey)
+	if err != nil {
+		return fmt.Errorf("failed to create JWT token: %w", err)
+	}
+
+	payload := struct {
+		Token string `json:"token"`
+	}{
+		Token: jwtToken,
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	url := strings.TrimSuffix(StorxSatelliteService, "/") + "/api/v0/auth/send-email"
+
+	req, err := http.NewRequestWithContext(emailCtx, http.MethodPost, url, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	res, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return fmt.Errorf("request failed with status %d: %s", res.StatusCode, string(body))
+	}
+
+	var response struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+		Error   string `json:"error"`
+	}
+
+	if err := json.Unmarshal(body, &response); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if response.Error != "" {
+		return fmt.Errorf("server error: %s", response.Error)
+	}
+
+	if !response.Success {
+		return fmt.Errorf("request was not successful: %s", response.Message)
+	}
+
+	return nil
 }

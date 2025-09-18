@@ -23,12 +23,6 @@ import (
 
 // <<<<<------------ GOOGLE PHOTOS ------------>>>>>
 
-type AlbumsJSON struct {
-	Title string `json:"album_title"`
-	ID    string `json:"album_id"`
-	Items string `json:"items_count"`
-}
-
 // Shows list of user's Google Photos albums.
 // Supports date range filtering via 'date_range' query parameter:
 // - today, yesterday, last_7_days, last_30_days, this_year, last_year
@@ -47,27 +41,15 @@ func handleListGPhotosAlbums(c echo.Context) error {
 		}
 	}
 
-	// Google Photos API doesn't support album filtering directly
-	// Return all albums and let the client handle any filtering they need
-	var albs []albums.Album
-	albs, err = client.ListAlbums(c)
-
+	// Get paginated albums response
+	response, err := client.ListAlbums(c)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
 
-	var photosListJSON []*AlbumsJSON
-	for _, v := range albs {
-		photosListJSON = append(photosListJSON, &AlbumsJSON{
-			Title: v.Title,
-			ID:    v.ID,
-			Items: v.MediaItemsCount,
-		})
-	}
-
-	return c.JSON(http.StatusOK, photosListJSON)
+	return c.JSON(http.StatusOK, response)
 
 }
 
@@ -125,8 +107,7 @@ func handleListPhotosInAlbum(c echo.Context) error {
 	// Filters are already properly parsed by DecodeURLPhotosFilter
 	// No need to overwrite them with the raw filterParam
 
-	files, err := client.ListFilesFromAlbum(c.Request().Context(), id, filters)
-
+	paginatedResponse, err := client.ListFilesFromAlbum(c.Request().Context(), id, filters)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -141,7 +122,7 @@ func handleListPhotosInAlbum(c echo.Context) error {
 	}
 
 	var photosRespJSON []*AllPhotosJSON
-	for _, v := range files {
+	for _, v := range paginatedResponse.MediaItems {
 		photosRespJSON = append(photosRespJSON, &AllPhotosJSON{
 			Name:         v.Filename,
 			ID:           v.ID,
@@ -157,7 +138,13 @@ func handleListPhotosInAlbum(c echo.Context) error {
 		})
 	}
 
-	return c.JSON(http.StatusOK, photosRespJSON)
+	// Return paginated response
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"mediaItems":    photosRespJSON,
+		"nextPageToken": paginatedResponse.NextPageToken,
+		"limit":         paginatedResponse.Limit,
+		"totalItems":    paginatedResponse.TotalItems,
+	})
 }
 
 type AllPhotosJSON struct {
@@ -187,12 +174,13 @@ func handleListAllPhotos(c echo.Context) error {
 			})
 		}
 	}
-	albs, err := client.ListAlbums(c)
+	response, err := client.ListAlbums(c)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
+	albs := response.Albums
 
 	type albumData struct {
 		albumTitle string
@@ -208,10 +196,11 @@ func handleListAllPhotos(c echo.Context) error {
 	for _, alb := range albs {
 		func(alb albums.Album) { // added this function to avoid closure issue https://stackoverflow.com/questions/26692844/captured-closure-for-loop-variable-in-go
 			g.Go(func() error {
-				files, err := client.ListFilesFromAlbum(ctx, alb.ID, nil)
+				paginatedResponse, err := client.ListFilesFromAlbum(ctx, alb.ID, nil)
 				if err != nil {
 					return err
 				}
+				files := paginatedResponse.MediaItems
 
 				mt.Lock()
 				defer mt.Unlock()
@@ -406,12 +395,13 @@ func handleSendAllFilesFromGooglePhotosToSatellite(c echo.Context) error {
 			})
 		}
 	}
-	files, err := client.ListFilesFromAlbum(c.Request().Context(), id, nil)
+	paginatedResponse, err := client.ListFilesFromAlbum(c.Request().Context(), id, nil)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
+	files := paginatedResponse.MediaItems
 
 	var photosRespJSON []*PhotosJSON
 	for _, v := range files {

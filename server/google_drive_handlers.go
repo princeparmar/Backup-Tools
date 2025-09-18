@@ -38,7 +38,7 @@ func handleGetGoogleDriveFileNames(c echo.Context) error {
 
 // Get all files names in a google drive root
 func handleRootGoogleDriveFileNames(c echo.Context) error {
-	fileNames, err := google.GetFileNamesInRoot(c)
+	response, err := google.GetFileNamesInRoot(c)
 	if err != nil {
 		if err.Error() == "token error" {
 			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -51,7 +51,7 @@ func handleRootGoogleDriveFileNames(c echo.Context) error {
 			})
 		}
 	}
-	return c.JSON(http.StatusOK, fileNames)
+	return c.JSON(http.StatusOK, response)
 }
 
 // Get all files names in a google drive root
@@ -489,7 +489,7 @@ func handleSendAllFilesFromGoogleDriveToSatellite(c echo.Context) error {
 			}(file)
 		}
 	}
-	resp, err := google.GetFileNamesInRoot(c)
+	response, err := google.GetFileNamesInRoot(c)
 	if err != nil {
 		if err.Error() == "token error" {
 			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -503,7 +503,7 @@ func handleSendAllFilesFromGoogleDriveToSatellite(c echo.Context) error {
 		}
 	}
 
-	for _, file := range resp {
+	for _, file := range response.Files {
 		func(file *google.FilesJSON) {
 			g.Go(func() error {
 				name, data, err := google.GetFile(c, file.ID)

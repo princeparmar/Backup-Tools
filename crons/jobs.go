@@ -1,10 +1,12 @@
 package crons
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/robfig/cron/v3"
 )
@@ -193,46 +195,57 @@ func (a *AutosyncManager) processTask(task *storage.TaskListingDB, job *storage.
 }
 
 func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *storage.CronJobListingDB, err error) error {
+	// Set initial status for success case
 	task.Status = storage.TaskStatusSuccess
 	task.Execution = uint64(time.Since(*task.StartTime).Seconds())
 	job.Message = "Automatic backup completed successfully"
 	task.Message = "Automatic backup completed successfully"
 	job.MessageStatus = storage.JobMessageStatusInfo
 	job.LastRun = time.Now()
+
+	// If there's an error, update status and prepare to send email
 	if err != nil {
 		task.Status = storage.TaskStatusFailed
 		task.Message = err.Error()
-
 		job.Message = "Last Task Execution failed because of some error"
 		job.MessageStatus = storage.JobMessageStatusError
+
+		var emailMessage string = err.Error() // default
 
 		if strings.Contains(err.Error(), "googleapi: Error 401") {
 			if task.RetryCount == storage.MaxRetryCount-1 {
 				job.InputData["refresh_token"] = ""
 				job.Active = false
-
 				job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
 				task.Message = "Google Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
+				emailMessage = "Google Credentials are invalid. Please update the credentials and reactivate the automatic backup"
 			} else {
 				job.Message = "Invalid google credentials. Retrying..."
 				task.Message = "Google Credentials are invalid. Retrying..."
+				emailMessage = "Google Credentials are invalid. Retrying..."
 			}
 		} else if strings.Contains(err.Error(), "uplink: permission") || strings.Contains(err.Error(), "uplink: invalid access") {
 			job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
 			job.StorxToken = ""
 			job.Active = false
 			task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
+			emailMessage = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
 		}
+
+		// Send the appropriate error message once
+		go satellite.SendEmailForBackupFailure(context.Background(), job.Name, emailMessage, job.Method)
+
 		task.RetryCount++
 	}
 
-	err = a.store.DB.Save(task).Error
-	if err != nil {
+	// Save task and job to DB
+	if err := a.store.DB.Save(task).Error; err != nil {
+		go satellite.SendEmailForBackupFailure(context.Background(), job.Name, fmt.Sprintf("Failed to save task status to database: %v", err), job.Method)
 		return err
 	}
 
-	err = a.store.DB.Save(job).Error
-	if err != nil {
+	if err := a.store.DB.Save(job).Error; err != nil {
+		go satellite.SendEmailForBackupFailure(context.Background(), job.Name, fmt.Sprintf("Failed to save job status to database: %v", err), job.Method)
 		return err
 	}
 
