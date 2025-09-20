@@ -114,6 +114,8 @@ func (gpclient *GPotosClient) ListAlbums(c echo.Context) (*PaginatedAlbumsRespon
 	// Ensure page size is within limits
 	limit := min(max(filters.Limit, 1), 100)
 
+	limit = limit + 1
+
 	// Build the API call
 	call := gpclient.Service.Albums.List().PageSize(limit)
 	if filters.ExcludeAppData {
@@ -132,7 +134,7 @@ func (gpclient *GPotosClient) ListAlbums(c echo.Context) (*PaginatedAlbumsRespon
 	return &PaginatedAlbumsResponse{
 		Albums:        convertToAlbumType(response.Albums),
 		NextPageToken: response.NextPageToken,
-		Limit:         limit,
+		Limit:         limit - 1,
 		TotalAlbums:   int64(len(response.Albums)),
 	}, nil
 }
