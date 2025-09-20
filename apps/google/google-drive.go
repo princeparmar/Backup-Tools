@@ -801,7 +801,7 @@ func GetFileNamesInRoot(c echo.Context) (*PaginatedFilesResponse, error) {
 	}, nil
 }
 
-func GetSharedFiles(c echo.Context) ([]*FilesJSON, error) {
+func GetSharedFiles(c echo.Context) (*PaginatedFilesResponse, error) {
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return nil, errors.New("access token not found")
@@ -825,12 +825,66 @@ func GetSharedFiles(c echo.Context) ([]*FilesJSON, error) {
 
 	var files []*FilesJSON
 
+	// Parse filter parameter
+	filterParam := c.QueryParam("filter")
+	var filter *GoogleDriveFilter
+	if filterParam != "" {
+		decodedFilter, err := DecodeURLDriveFilter(filterParam)
+		if err != nil {
+			return nil, fmt.Errorf("invalid filter parameter: %v", err)
+		}
+		filter = decodedFilter
+	}
+
 	// Query to list files that have been shared
 	query := "sharedWithMe=true"
 
-	// Loop to handle pagination
+	// Apply filter if provided
+	if filter != nil {
+		// If a raw query is provided, use it directly
+		if filter.Query != "" {
+			query = filter.Query
+		} else {
+			// Build query from individual filter parameters
+			// Validation: Don't execute filesOnly and folderOnly filters when file_type is specified
+			if filter.FileType != "" {
+				// Add file type filtering based on MIME types
+				query += buildFileTypeQuery(filter.FileType)
+			} else {
+				// Only apply folder/file filters when file_type is not specified
+				if filter.FolderOnly {
+					query += " and mimeType = 'application/vnd.google-apps.folder'"
+				} else if filter.FilesOnly {
+					query += " and mimeType != 'application/vnd.google-apps.folder'"
+				}
+			}
+
+			// Add date modified filtering
+			if filter.DateModified != "" {
+				query += buildDateModifiedQuery(filter.DateModified)
+			}
+		}
+	}
+
+	// Set up pagination parameters
 	pageToken := ""
-	limit := int64(25)
+	limit := int64(25) // Default limit
+
+	// Use custom page size if specified in filter
+	if filter != nil && filter.Limit > 0 {
+		limit = filter.Limit
+		// Ensure page size doesn't exceed Google's maximum
+		if limit > 1000 {
+			limit = 1000
+		}
+	}
+
+	// Use custom page token if specified in filter
+	if filter != nil && filter.PageToken != "" {
+		pageToken = filter.PageToken
+	}
+
+	// Loop to handle pagination
 	for {
 		r, err := srv.Files.List().Q(query).Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").PageToken(pageToken).PageSize(limit).Do()
 		if err != nil {
@@ -879,7 +933,18 @@ func GetSharedFiles(c echo.Context) ([]*FilesJSON, error) {
 		}
 	}
 
-	return files, nil
+	// Convert to the expected response format
+	var fileResp []*FilesJSON
+	for _, file := range files {
+		fileResp = append(fileResp, file)
+	}
+
+	return &PaginatedFilesResponse{
+		Files:         fileResp,
+		NextPageToken: pageToken,
+		Limit:         limit,
+		TotalFiles:    int64(len(fileResp)),
+	}, nil
 }
 
 func GetFolderPathByID(ctx context.Context, srv *drive.Service, folderID string) (string, error) {

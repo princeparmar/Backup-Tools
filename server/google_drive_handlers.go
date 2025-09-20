@@ -183,7 +183,7 @@ func handleSyncAllSharedFolderAndFiles(c echo.Context) error {
 	g.SetLimit(10)
 
 	processedIDs, failedIDs := utils.NewLockedArray(), utils.NewLockedArray()
-	for _, file := range fileNames {
+	for _, file := range fileNames.Files {
 		func(file *google.FilesJSON) {
 			g.Go(func() error {
 				name, data, err := google.GetFile(c, file.ID)
@@ -466,7 +466,7 @@ func handleSendAllFilesFromGoogleDriveToSatellite(c echo.Context) error {
 			})
 		}*/
 
-		for _, file := range fileNames {
+		for _, file := range fileNames.Files {
 			func(file *google.FilesJSON) {
 				g.Go(func() error {
 					name, data, err := google.GetFile(c, file.ID)
