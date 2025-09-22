@@ -513,23 +513,6 @@ type GoogleDriveFilter struct {
 	PageToken    string `json:"page_token,omitempty"`    // Token for pagination (next page)
 }
 
-// DecodeURLDriveFilter decodes a URL-encoded JSON filter parameter and returns a GoogleDriveFilter
-func DecodeURLDriveFilter(urlEncodedFilter string) (*GoogleDriveFilter, error) {
-	// URL decode the filter string
-	decodedFilter, err := url.QueryUnescape(urlEncodedFilter)
-	if err != nil {
-		return nil, fmt.Errorf("failed to URL decode filter: %v", err)
-	}
-
-	// Parse the JSON string into GoogleDriveFilter struct
-	var filter GoogleDriveFilter
-	if err := json.Unmarshal([]byte(decodedFilter), &filter); err != nil {
-		return nil, fmt.Errorf("failed to parse filter JSON: %v", err)
-	}
-
-	return &filter, nil
-}
-
 // buildFileTypeQuery builds a Google Drive query string based on file type filter
 func buildFileTypeQuery(fileType string) string {
 	switch strings.ToLower(fileType) {
@@ -577,19 +560,6 @@ func buildFileTypeQuery(fileType string) string {
 
 	default:
 		return ""
-	}
-}
-
-// buildOwnerQuery builds a Google Drive query string based on owner filter
-func buildOwnerQuery(owner string) string {
-	switch strings.ToLower(owner) {
-	case "me", "myself":
-		return " and owners contains 'me'"
-	case "others", "not me":
-		return " and not owners contains 'me'"
-	default:
-		// If owner is an email address or specific user identifier
-		return " and owners contains '" + owner + "'"
 	}
 }
 
@@ -659,292 +629,296 @@ func buildCustomDateQuery(dateRange string) string {
 
 // This function gets files only in root. It does not list files in folders
 func GetFileNamesInRoot(c echo.Context) (*PaginatedFilesResponse, error) {
-	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accesGrant == "" {
+	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accessGrant == "" {
 		return nil, errors.New("access token not found")
 	}
-	o, err := satellite.ListObjects1(context.Background(), accesGrant, "google-drive")
-	if err != nil {
-		return nil, errors.New("failed to get list from satellite with error:" + err.Error())
-	}
 
-	slices.SortStableFunc(o, func(a, b uplink.Object) int {
-		return cmp.Compare(a.Key, b.Key)
-	})
 	client, err := client(c)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get Google Drive client: %v", err)
+		return nil, fmt.Errorf("failed to get Google Drive client: %w", err)
 	}
 
 	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Drive service: %v", err)
+		return nil, fmt.Errorf("failed to create Drive service: %w", err)
 	}
 
-	var fileResp []*FilesJSON
+	// Get satellite objects for sync checking
+	satelliteObjects, err := satellite.ListObjects1(context.Background(), accessGrant, "google-drive")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get satellite list: %w", err)
+	}
+	slices.SortStableFunc(satelliteObjects, func(a, b uplink.Object) int {
+		return cmp.Compare(a.Key, b.Key)
+	})
 
-	// Parse filter from URL-encoded query parameter
-	var filter *GoogleDriveFilter
-	if filterParam := c.QueryParam("filter"); filterParam != "" {
-		decodedFilter, err := DecodeURLDriveFilter(filterParam)
-		if err != nil {
-			return nil, fmt.Errorf("invalid filter parameter: %v", err)
-		}
-		filter = decodedFilter
+	// Parse filter
+	filter, err := ParseFilter(c.QueryParam("filter"))
+	if err != nil {
+		return nil, err
 	}
 
-	// Query to list files not in any folders
+	// Build query
 	query := "'root' in parents"
-
-	// Apply filter if provided
-	if filter != nil {
-		// If a raw query is provided, use it directly
-		if filter.Query != "" {
-			query = filter.Query
-		} else {
-			// Build query from individual filter parameters
-			// Validation: Don't execute filesOnly and folderOnly filters when file_type is specified
-			if filter.FileType != "" {
-				// Add file type filtering based on MIME types
-				query += buildFileTypeQuery(filter.FileType)
-			} else {
-				// Only apply folder/file filters when file_type is not specified
-				if filter.FolderOnly {
-					query += " and mimeType = 'application/vnd.google-apps.folder'"
-				} else if filter.FilesOnly {
-					query += " and mimeType != 'application/vnd.google-apps.folder'"
-				}
-			}
-
-			// Add owner filtering
-			if filter.Owner != "" {
-				query += buildOwnerQuery(filter.Owner)
-			}
-
-			// Add date modified filtering
-			if filter.DateModified != "" {
-				query += buildDateModifiedQuery(filter.DateModified)
-			}
-		}
+	if filter != nil && filter.Query != "" {
+		query = filter.Query
+	} else if filter != nil {
+		query = applyFiltersToQuery(query, filter)
 	}
 
-	// Set up pagination parameters
-	pageToken := ""
-	limit := int64(25) // Default limit
+	// Set up pagination
+	pageSize, pageToken := GetPaginationParams(filter)
 
-	// Use custom page size if specified in filter
-	if filter != nil && filter.Limit > 0 {
-		limit = filter.Limit
-		// Ensure page size doesn't exceed Google's maximum
-		if limit > 1000 {
-			limit = 1000
-		}
-	}
-
-	// Use custom page token if specified in filter
-	if filter != nil && filter.PageToken != "" {
-		pageToken = filter.PageToken
-	}
-
-	// Make single API call for this page
-	r, err := srv.Files.List().
+	// Fetch files from Google Drive
+	response, err := srv.Files.List().
 		Q(query).
 		Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").
 		PageToken(pageToken).
-		PageSize(limit).
+		PageSize(pageSize).
 		Do()
 	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve files: %v", err)
+		return nil, fmt.Errorf("failed to retrieve files: %w", err)
 	}
 
-	// Process files from this page
-	for _, i := range r.Files {
-		//check if file is synced in storx
-		if i.MimeType != "application/vnd.google-apps.folder" {
-			switch i.MimeType {
-			case "application/vnd.google-apps.document":
-				i.Name += ".docx"
-			case "application/vnd.google-apps.spreadsheet":
-				i.Name += ".xlsx"
-			case "application/vnd.google-apps.presentation":
-				i.Name += ".pptx"
-			case "application/vnd.google-apps.site":
-
-			case "application/vnd.google-apps.script":
-				i.Name += ".json"
-			}
-			_, synced := slices.BinarySearchFunc(o, i.Name, func(a uplink.Object, b string) int {
-				return cmp.Compare(a.Key, b)
-			})
-			fileResp = append(fileResp, createFilesJSON(i, synced, ""))
-		} else {
-			// Checked if the folder exist
-			_, synced := slices.BinarySearchFunc(o, i.Name+"/", func(a uplink.Object, b string) int {
-				return cmp.Compare(a.Key, b)
-			})
-			if synced {
-				folderFiles, _ := GetFilesInFolderByID(c, i.Id)
-				//
-				for _, v := range folderFiles {
-					synced = v.Synced
-				}
-			}
-			fileResp = append(fileResp, createFilesJSON(i, synced, ""))
-		}
-	}
+	// Process files
+	files := processRootFiles(response.Files, satelliteObjects, c)
 
 	return &PaginatedFilesResponse{
-		Files:         fileResp,
-		NextPageToken: r.NextPageToken,
-		Limit:         limit,
-		TotalFiles:    int64(len(fileResp)),
+		Files:         files,
+		NextPageToken: response.NextPageToken,
+		Limit:         pageSize,
+		TotalFiles:    int64(len(files)),
 	}, nil
 }
 
 func GetSharedFiles(c echo.Context) (*PaginatedFilesResponse, error) {
-	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accesGrant == "" {
+	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accessGrant == "" {
 		return nil, errors.New("access token not found")
 	}
 	client, err := client(c)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get Google Drive client: %v", err)
+		return nil, fmt.Errorf("failed to get Google Drive client: %w", err)
 	}
 
 	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Drive service: %v", err)
+		return nil, fmt.Errorf("failed to create Drive service: %w", err)
 	}
-	o, err := satellite.GetFilesInFolder(context.Background(), accesGrant, "google-drive", "shared with me/")
+
+	// Get satellite objects for sync checking
+	satelliteObjects, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", "shared with me/")
 	if err != nil {
-		return nil, errors.New("failed to get list from satellite with error:" + err.Error())
+		return nil, fmt.Errorf("failed to get satellite list: %w", err)
 	}
-	slices.SortStableFunc(o, func(a, b uplink.Object) int {
+	slices.SortStableFunc(satelliteObjects, func(a, b uplink.Object) int {
 		return cmp.Compare(a.Key, b.Key)
 	})
 
-	var files []*FilesJSON
-
-	// Parse filter parameter
-	filterParam := c.QueryParam("filter")
-	var filter *GoogleDriveFilter
-	if filterParam != "" {
-		decodedFilter, err := DecodeURLDriveFilter(filterParam)
-		if err != nil {
-			return nil, fmt.Errorf("invalid filter parameter: %v", err)
-		}
-		filter = decodedFilter
+	// Parse filter
+	filter, err := ParseFilter(c.QueryParam("filter"))
+	if err != nil {
+		return nil, err
 	}
 
-	// Query to list files that have been shared
+	// Build query
 	query := "sharedWithMe=true"
-
-	// Apply filter if provided
-	if filter != nil {
-		// If a raw query is provided, use it directly
-		if filter.Query != "" {
-			query = filter.Query
-		} else {
-			// Build query from individual filter parameters
-			// Validation: Don't execute filesOnly and folderOnly filters when file_type is specified
-			if filter.FileType != "" {
-				// Add file type filtering based on MIME types
-				query += buildFileTypeQuery(filter.FileType)
-			} else {
-				// Only apply folder/file filters when file_type is not specified
-				if filter.FolderOnly {
-					query += " and mimeType = 'application/vnd.google-apps.folder'"
-				} else if filter.FilesOnly {
-					query += " and mimeType != 'application/vnd.google-apps.folder'"
-				}
-			}
-
-			// Add date modified filtering
-			if filter.DateModified != "" {
-				query += buildDateModifiedQuery(filter.DateModified)
-			}
-		}
+	if filter != nil && filter.Query != "" {
+		query = filter.Query
+	} else if filter != nil {
+		query = applyFiltersToQuery(query, filter)
 	}
 
-	// Set up pagination parameters
-	pageToken := ""
-	limit := int64(25) // Default limit
+	// Set up pagination
+	pageSize, pageToken := GetPaginationParams(filter)
 
-	// Use custom page size if specified in filter
-	if filter != nil && filter.Limit > 0 {
-		limit = filter.Limit
-		// Ensure page size doesn't exceed Google's maximum
-		if limit > 1000 {
-			limit = 1000
-		}
+	// Fetch files from Google Drive
+	response, err := srv.Files.List().
+		Q(query).
+		Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").
+		PageToken(pageToken).
+		PageSize(pageSize).
+		Do()
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve shared files: %w", err)
 	}
 
-	// Use custom page token if specified in filter
-	if filter != nil && filter.PageToken != "" {
-		pageToken = filter.PageToken
-	}
-
-	// Loop to handle pagination
-	for {
-		r, err := srv.Files.List().Q(query).Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").PageToken(pageToken).PageSize(limit).Do()
-		if err != nil {
-			return nil, fmt.Errorf("failed to retrieve shared files: %v", err)
-		}
-
-		// Append files to response
-		for _, i := range r.Files {
-			if i.MimeType != "application/vnd.google-apps.folder" {
-				switch i.MimeType {
-				case "application/vnd.google-apps.document":
-					i.Name += ".docx"
-				case "application/vnd.google-apps.spreadsheet":
-					i.Name += ".xlsx"
-				case "application/vnd.google-apps.presentation":
-					i.Name += ".pptx"
-				case "application/vnd.google-apps.site":
-
-				case "application/vnd.google-apps.script":
-					i.Name += ".json"
-				}
-				_, synced := slices.BinarySearchFunc(o, path.Join("shared with me", i.Name), func(a uplink.Object, b string) int {
-					return cmp.Compare(a.Key, b)
-				})
-				files = append(files, createFilesJSON(i, synced, ""))
-			} else {
-				_, synced := slices.BinarySearchFunc(o, path.Join("shared with me", i.Name)+"/", func(a uplink.Object, b string) int {
-					return cmp.Compare(a.Key, b)
-				})
-				if synced {
-					folderFiles, _ := GetFilesInFolderByID(c, i.Id)
-					//var synced bool
-					for _, v := range folderFiles {
-						synced = v.Synced
-					}
-				}
-
-				files = append(files, createFilesJSON(i, synced, ""))
-			}
-		}
-
-		// Check if there's another page
-		pageToken = r.NextPageToken
-		if pageToken == "" {
-			break // No more pages
-		}
-	}
-
-	// Convert to the expected response format
-	var fileResp []*FilesJSON
-	for _, file := range files {
-		fileResp = append(fileResp, file)
-	}
+	// Process files
+	files := processSharedFiles(response.Files, satelliteObjects, c)
 
 	return &PaginatedFilesResponse{
-		Files:         fileResp,
-		NextPageToken: pageToken,
-		Limit:         limit,
-		TotalFiles:    int64(len(fileResp)),
+		Files:         files,
+		NextPageToken: response.NextPageToken,
+		Limit:         pageSize,
+		TotalFiles:    int64(len(files)),
 	}, nil
+}
+
+func ParseFilter(filterParam string) (*GoogleDriveFilter, error) {
+	if filterParam == "" {
+		return nil, nil
+	}
+
+	// URL decode the filter string
+	decodedFilter, err := url.QueryUnescape(filterParam)
+	if err != nil {
+		return nil, fmt.Errorf("failed to URL decode filter: %w", err)
+	}
+
+	// Parse the JSON string into GoogleDriveFilter struct
+	var filter GoogleDriveFilter
+	if err := json.Unmarshal([]byte(decodedFilter), &filter); err != nil {
+		return nil, fmt.Errorf("failed to parse filter JSON: %w", err)
+	}
+
+	return &filter, nil
+}
+
+func applyFiltersToQuery(baseQuery string, filter *GoogleDriveFilter) string {
+	query := baseQuery
+
+	// Apply folder/file filters
+	if filter.FolderOnly {
+		query += " and mimeType = 'application/vnd.google-apps.folder'"
+	} else if filter.FilesOnly {
+		query += " and mimeType != 'application/vnd.google-apps.folder'"
+	}
+
+	// Add file type filtering
+	if filter.FileType != "" {
+		query += buildFileTypeQuery(filter.FileType)
+	}
+
+	// Add date modified filtering
+	if filter.DateModified != "" {
+		query += buildDateModifiedQuery(filter.DateModified)
+	}
+
+	return query
+}
+
+func GetPaginationParams(filter *GoogleDriveFilter) (int64, string) {
+	pageSize := int64(25)
+	pageToken := ""
+
+	if filter != nil {
+		if filter.Limit > 0 {
+			pageSize = min(filter.Limit, 1000)
+		}
+		if filter.PageToken != "" {
+			pageToken = filter.PageToken
+		}
+	}
+
+	return pageSize, pageToken
+}
+
+func processSharedFiles(driveFiles []*drive.File, satelliteObjects []uplink.Object, c echo.Context) []*FilesJSON {
+	var files []*FilesJSON
+
+	for _, file := range driveFiles {
+		fullPath := path.Join("shared with me", file.Name)
+		synced := isFileSynced(satelliteObjects, fullPath, file.MimeType)
+
+		if file.MimeType == "application/vnd.google-apps.folder" && synced {
+			// Check if all files in folder are synced
+			folderFiles, err := GetFilesInFolderByID(c, file.Id)
+			if err == nil {
+				allSynced := true
+				for _, v := range folderFiles {
+					if !v.Synced {
+						allSynced = false
+						break
+					}
+				}
+				synced = allSynced
+			} else {
+				synced = false // If we can't check folder contents, assume not synced
+			}
+		}
+
+		files = append(files, createFilesJSON(file, synced, ""))
+	}
+
+	return files
+}
+
+func processRootFiles(driveFiles []*drive.File, satelliteObjects []uplink.Object, c echo.Context) []*FilesJSON {
+	var files []*FilesJSON
+
+	for _, file := range driveFiles {
+		synced := isRootFileSynced(satelliteObjects, file.Name, file.MimeType)
+
+		if file.MimeType == "application/vnd.google-apps.folder" && synced {
+			// Check if all files in folder are synced
+			folderFiles, err := GetFilesInFolderByID(c, file.Id)
+			if err == nil {
+				allSynced := true
+				for _, v := range folderFiles {
+					if !v.Synced {
+						allSynced = false
+						break
+					}
+				}
+				synced = allSynced
+			} else {
+				synced = false // If we can't check folder contents, assume not synced
+			}
+		}
+
+		files = append(files, createFilesJSON(file, synced, ""))
+	}
+
+	return files
+}
+
+func isRootFileSynced(satelliteObjects []uplink.Object, fileName, mimeType string) bool {
+	searchPath := fileName
+	if mimeType == "application/vnd.google-apps.folder" {
+		searchPath += "/"
+	} else {
+		// Add appropriate extensions for Google Apps files
+		switch mimeType {
+		case "application/vnd.google-apps.document":
+			searchPath += ".docx"
+		case "application/vnd.google-apps.spreadsheet":
+			searchPath += ".xlsx"
+		case "application/vnd.google-apps.presentation":
+			searchPath += ".pptx"
+		case "application/vnd.google-apps.script":
+			searchPath += ".json"
+		}
+	}
+
+	_, found := slices.BinarySearchFunc(satelliteObjects, searchPath, func(a uplink.Object, b string) int {
+		return cmp.Compare(a.Key, b)
+	})
+	return found
+}
+
+func isFileSynced(satelliteObjects []uplink.Object, fullPath, mimeType string) bool {
+	searchPath := fullPath
+	if mimeType == "application/vnd.google-apps.folder" {
+		searchPath += "/"
+	} else {
+		// Add appropriate extensions for Google Apps files
+		switch mimeType {
+		case "application/vnd.google-apps.document":
+			searchPath += ".docx"
+		case "application/vnd.google-apps.spreadsheet":
+			searchPath += ".xlsx"
+		case "application/vnd.google-apps.presentation":
+			searchPath += ".pptx"
+		case "application/vnd.google-apps.script":
+			searchPath += ".json"
+		}
+	}
+
+	_, found := slices.BinarySearchFunc(satelliteObjects, searchPath, func(a uplink.Object, b string) int {
+		return cmp.Compare(a.Key, b)
+	})
+	return found
 }
 
 func GetFolderPathByID(ctx context.Context, srv *drive.Service, folderID string) (string, error) {
