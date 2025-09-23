@@ -625,3 +625,67 @@ func validateInterval(interval, on string) bool {
 
 	return false
 }
+
+// Default password for admin operations
+const DefaultAdminPassword = "admin123!@#"
+
+// Request structure for delete jobs by email
+type DeleteJobsByEmailRequest struct {
+	Email    string `json:"email" validate:"required,email"`
+	Password string `json:"password" validate:"required"`
+}
+
+// handleDeleteJobsByEmail deletes all jobs and tasks for a user by email with password protection
+func handleDeleteJobsByEmail(c echo.Context) error {
+	var req DeleteJobsByEmailRequest
+
+	// Parse request body
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid request format",
+			"error":   err.Error(),
+		})
+	}
+
+	// Validate required fields
+	if req.Email == "" || req.Password == "" {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Email and password are required",
+		})
+	}
+
+	// Validate email format
+	if !strings.Contains(req.Email, "@") {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid email format",
+		})
+	}
+
+	// Check password
+	if req.Password != DefaultAdminPassword {
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "Invalid password",
+		})
+	}
+
+	// Get database instance
+	database := c.Get(dbContextKey).(*storage.PosgresStore)
+
+	// Delete all jobs and tasks for the user by email
+	deletedJobIDs, deletedTaskIDs, err := database.DeleteAllJobsAndTasksByEmail(req.Email)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"message": "Failed to delete jobs and tasks",
+			"error":   err.Error(),
+		})
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message":             "All jobs and tasks deleted successfully for user",
+		"email":               req.Email,
+		"deleted_job_ids":     deletedJobIDs,
+		"deleted_task_ids":    deletedTaskIDs,
+		"total_jobs_deleted":  len(deletedJobIDs),
+		"total_tasks_deleted": len(deletedTaskIDs),
+	})
+}

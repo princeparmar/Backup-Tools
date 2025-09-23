@@ -475,3 +475,65 @@ func (storage *PosgresStore) ListAllTasksByJobID(ID, limit, offset uint) ([]Task
 	}
 	return res, nil
 }
+
+// DeleteAllJobsAndTasksByEmail deletes all jobs and related tasks for a user by email
+// Returns the list of deleted job IDs and task IDs
+func (storage *PosgresStore) DeleteAllJobsAndTasksByEmail(email string) ([]uint, []uint, error) {
+	// Start a transaction to ensure atomicity
+	tx := storage.DB.Begin()
+	if tx.Error != nil {
+		return nil, nil, fmt.Errorf("error starting transaction: %v", tx.Error)
+	}
+
+	// First, get all job IDs for this email before deleting
+	var jobs []CronJobListingDB
+	if err := tx.Where("name = ?", email).Find(&jobs).Error; err != nil {
+		tx.Rollback()
+		return nil, nil, fmt.Errorf("error getting jobs for email: %v", err)
+	}
+
+	if len(jobs) == 0 {
+		tx.Rollback()
+		return nil, nil, fmt.Errorf("no jobs found for email: %s", email)
+	}
+
+	// Extract job IDs
+	var deletedJobIDs []uint
+	for _, job := range jobs {
+		deletedJobIDs = append(deletedJobIDs, job.ID)
+	}
+
+	// Get all task IDs for these jobs before deleting
+	var taskIDs []uint
+	for _, jobID := range deletedJobIDs {
+		var tasks []TaskListingDB
+		if err := tx.Where("cron_job_id = ?", jobID).Find(&tasks).Error; err != nil {
+			tx.Rollback()
+			return nil, nil, fmt.Errorf("error getting tasks for job %d: %v", jobID, err)
+		}
+		for _, task := range tasks {
+			taskIDs = append(taskIDs, task.ID)
+		}
+	}
+
+	// Delete all tasks for these jobs first (hard delete)
+	if len(taskIDs) > 0 {
+		if err := tx.Exec("DELETE FROM task_listing_dbs WHERE cron_job_id IN ?", deletedJobIDs).Error; err != nil {
+			tx.Rollback()
+			return nil, nil, fmt.Errorf("error deleting tasks: %v", err)
+		}
+	}
+
+	// Delete all jobs for the email (hard delete)
+	if err := tx.Exec("DELETE FROM cron_job_listing_dbs WHERE name = ?", email).Error; err != nil {
+		tx.Rollback()
+		return nil, nil, fmt.Errorf("error deleting jobs for email: %v", err)
+	}
+
+	// Commit the transaction
+	if err := tx.Commit().Error; err != nil {
+		return nil, nil, fmt.Errorf("error committing transaction: %v", err)
+	}
+
+	return deletedJobIDs, taskIDs, nil
+}

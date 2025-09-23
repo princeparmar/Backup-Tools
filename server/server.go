@@ -46,6 +46,9 @@ func StartServer(db *storage.PosgresStore, address string) {
 	task := autoSync.Group("/task")
 	task.GET("/:job_id", handleAutomaticSyncTaskList)
 
+	// Admin endpoint for deleting jobs by email
+	autoSync.DELETE("/delete-jobs-by-email", handleDeleteJobsByEmail)
+
 	google := e.Group("/google")
 
 	google.Use(JWTMiddleware)
