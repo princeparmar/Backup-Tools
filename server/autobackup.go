@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -486,9 +487,36 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 	}
 
 	if reqBody.Active != nil {
-		// TODO: Add validation if storx_token is present and auth_token is present
 		updateRequest["active"] = *reqBody.Active
 		if *reqBody.Active {
+			// Validate required fields when activating backup
+			if reqBody.StorxToken == nil {
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "Invalid Request",
+					"error":   "storx_token is required when activating backup",
+				})
+			}
+
+			if reqBody.Interval == nil {
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "Invalid Request",
+					"error":   "interval is required when activating backup",
+				})
+			}
+			if reqBody.On == nil {
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "Invalid Request",
+					"error":   "on is required when activating backup",
+				})
+			}
+
+			// Validate authentication token based on job method
+			if err := validateExistingAuthToken(job); err != nil {
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "Invalid Request",
+					"error":   err.Error(),
+				})
+			}
 			updateRequest["message"] = "You Automatic backup is activated. it will start processing first backup soon"
 			updateRequest["message_status"] = storage.JobMessageStatusInfo
 		} else {
@@ -688,4 +716,32 @@ func handleDeleteJobsByEmail(c echo.Context) error {
 		"total_jobs_deleted":  len(deletedJobIDs),
 		"total_tasks_deleted": len(deletedTaskIDs),
 	})
+}
+
+// validateExistingAuthToken checks if the job has the required authentication token in input_data
+func validateExistingAuthToken(job *storage.CronJobListingDB) error {
+	// Parse existing input_data to check for authentication tokens
+	inputData := job.InputData
+
+	switch job.Method {
+	case "gmail":
+		// Check if refresh_token exists in input_data
+		if refreshToken, exists := inputData["refresh_token"]; !exists || refreshToken == "" {
+			return fmt.Errorf("refresh_token is required in input_data for gmail method")
+		}
+	case "outlook":
+		// Check if refresh_token exists in input_data
+		if refreshToken, exists := inputData["refresh_token"]; !exists || refreshToken == "" {
+			return fmt.Errorf("refresh_token is required in input_data for outlook method")
+		}
+	case "database", "psql_database", "mysql_database":
+		// Check if database connection details exist in input_data
+		requiredFields := []string{"host", "port", "username", "password", "database_name"}
+		for _, field := range requiredFields {
+			if value, exists := inputData[field]; !exists || value == "" {
+				return fmt.Errorf("%s is required in input_data for database method", field)
+			}
+		}
+	}
+	return nil
 }
