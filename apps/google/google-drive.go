@@ -359,10 +359,12 @@ func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
 				return cmp.Compare(a.Key, b)
 			})
 			if synced {
-				folderFiles, _ := GetFilesInFolderByID(c, i.Id)
+				folderFilesResp, _ := GetFilesInFolderByID(c, i.Id)
 				//var synced bool
-				for _, v := range folderFiles {
-					synced = v.Synced
+				if folderFilesResp != nil {
+					for _, v := range folderFilesResp.Files {
+						synced = v.Synced
+					}
 				}
 			}
 
@@ -375,7 +377,7 @@ func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
 
 // func embeddedSynced(c echo.Context, folderID, folderName string)
 // GetFilesInFolder retrieves all files within a specific folder from Google Drive
-func GetFilesInFolderByID(c echo.Context, folderID string) ([]*FilesJSON, error) {
+func GetFilesInFolderByID(c echo.Context, folderID string) (*PaginatedFilesResponse, error) {
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return nil, errors.New("access token is missing")
@@ -401,8 +403,31 @@ func GetFilesInFolderByID(c echo.Context, folderID string) ([]*FilesJSON, error)
 	slices.SortStableFunc(o, func(a, b uplink.Object) int {
 		return cmp.Compare(a.Key, b.Key)
 	})
+
+	// Parse filter
+	filter, err := ParseFilter(c.QueryParam("filter"))
+	if err != nil {
+		return nil, err
+	}
+
+	// Build query
+	query := fmt.Sprintf("'%s' in parents", folderID)
+	if filter != nil && filter.Query != "" {
+		query = filter.Query
+	} else if filter != nil {
+		query = applyFiltersToQuery(query, filter)
+	}
+
+	// Set up pagination
+	pageSize, pageToken := GetPaginationParams(filter)
+
 	// List all files within the folder
-	r, err := srv.Files.List().Q(fmt.Sprintf("'%s' in parents", folderID)).Fields("files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").Do()
+	r, err := srv.Files.List().
+		Q(query).
+		Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").
+		PageToken(pageToken).
+		PageSize(pageSize).
+		Do()
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve files: %v", err)
 	}
@@ -435,7 +460,7 @@ func GetFilesInFolderByID(c echo.Context, folderID string) ([]*FilesJSON, error)
 			if synced {
 				folderFiles, _ := GetFilesInFolderByID(c, i.Id)
 				//var synced bool
-				for _, v := range folderFiles {
+				for _, v := range folderFiles.Files {
 					synced = v.Synced
 				}
 			}
@@ -444,7 +469,12 @@ func GetFilesInFolderByID(c echo.Context, folderID string) ([]*FilesJSON, error)
 		}
 	}
 
-	return files, nil
+	return &PaginatedFilesResponse{
+		Files:         files,
+		NextPageToken: r.NextPageToken,
+		Limit:         pageSize,
+		TotalFiles:    int64(len(files)),
+	}, nil
 }
 
 // GetFilesInFolder retrieves all files within a specific folder from Google Drive
@@ -829,7 +859,7 @@ func processSharedFiles(driveFiles []*drive.File, satelliteObjects []uplink.Obje
 			folderFiles, err := GetFilesInFolderByID(c, file.Id)
 			if err == nil {
 				allSynced := true
-				for _, v := range folderFiles {
+				for _, v := range folderFiles.Files {
 					if !v.Synced {
 						allSynced = false
 						break
@@ -858,7 +888,7 @@ func processRootFiles(driveFiles []*drive.File, satelliteObjects []uplink.Object
 			folderFiles, err := GetFilesInFolderByID(c, file.Id)
 			if err == nil {
 				allSynced := true
-				for _, v := range folderFiles {
+				for _, v := range folderFiles.Files {
 					if !v.Synced {
 						allSynced = false
 						break

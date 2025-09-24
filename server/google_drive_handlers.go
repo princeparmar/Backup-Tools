@@ -93,8 +93,8 @@ func handleListAllFolderFiles(c echo.Context) error {
 
 // List all files in a folder given the folder ID
 func handleListAllFolderFilesByID(c echo.Context) error {
-	folderName := c.Param("id")
-	fileNames, err := google.GetFilesInFolderByID(c, folderName)
+	folderID := c.Param("id")
+	fileNames, err := google.GetFilesInFolderByID(c, folderID)
 	if err != nil {
 		if err.Error() == "token error" {
 			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -126,7 +126,7 @@ func handleFolder(folderName, folderID string, c echo.Context) error {
 		return err
 	}
 
-	for _, file := range fileNames {
+	for _, file := range fileNames.Files {
 		name, data, err := google.GetFile(c, file.ID)
 		if err != nil {
 			if strings.Contains(err.Error(), "folder error") {
