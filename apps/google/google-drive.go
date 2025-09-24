@@ -516,32 +516,32 @@ type GoogleDriveFilter struct {
 // buildFileTypeQuery builds a Google Drive query string based on file type filter
 func buildFileTypeQuery(fileType string) string {
 	switch strings.ToLower(fileType) {
-	case "documents", "docs":
+	case "docs":
 		return " and (mimeType = 'application/vnd.google-apps.document' or mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' or mimeType = 'application/msword' or mimeType = 'application/vnd.oasis.opendocument.text' or mimeType = 'application/rtf' or mimeType = 'text/plain')"
 
-	case "spreadsheets", "sheets":
+	case "sheets":
 		return " and (mimeType = 'application/vnd.google-apps.spreadsheet' or mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or mimeType = 'application/vnd.ms-excel' or mimeType = 'application/vnd.oasis.opendocument.spreadsheet' or mimeType = 'text/csv')"
 
-	case "presentations", "slides":
+	case "slides":
 		return " and (mimeType = 'application/vnd.google-apps.presentation' or mimeType = 'application/vnd.openxmlformats-officedocument.presentationml.presentation' or mimeType = 'application/vnd.ms-powerpoint' or mimeType = 'application/vnd.oasis.opendocument.presentation')"
 
-	case "images", "photos":
+	case "images":
 		return " and (mimeType contains 'image/' or mimeType = 'image/jpeg' or mimeType = 'image/png' or mimeType = 'image/gif' or mimeType = 'image/bmp' or mimeType = 'image/tiff' or mimeType = 'image/svg+xml' or mimeType = 'image/webp')"
 
 	case "videos":
-		return " and (mimeType contains 'video/' or mimeType = 'video/webm' or mimeType = 'video/mp4' or mimeType = 'video/3gpp' or mimeType = 'video/quicktime' or mimeType = 'video/x-msvideo' or mimeType = 'video/mpeg' or mimeType = 'video/x-ms-wmv' or mimeType = 'video/x-flv' or mimeType = 'video/ogg')"
+		return " and (mimeType contains 'video/' or mimeType = 'video/webm' or mimeType = 'video/mp4' or mimeType = 'video/3gpp' or mimeType = 'video/quicktime' or mimeType = 'video/x-msvideo' or mimeType = 'video/mpeg' or mimeType = 'video/x-ms-wmv' or mimeType = 'video/x-flv' or mimeType = 'video/ogg' or mimeType = 'video/mov' or mimeType = 'video/avi' or mimeType = 'video/mpegps')"
 
 	case "audio":
 		return " and (mimeType contains 'audio/' or mimeType = 'audio/mpeg' or mimeType = 'audio/mp4' or mimeType = 'audio/wav' or mimeType = 'audio/ogg' or mimeType = 'audio/opus')"
 
-	case "pdfs", "pdf":
+	case "pdf":
 		return " and mimeType = 'application/pdf'"
 
-	case "archives", "zip":
-		return " and (mimeType = 'application/zip' or mimeType = 'application/x-rar-compressed' or mimeType = 'application/x-tar' or mimeType = 'application/gzip')"
+	case "zip":
+		return " and (mimeType = 'application/zip' or mimeType = 'application/x-rar-compressed' or mimeType = 'application/x-tar' or mimeType = 'application/gzip' or mimeType = 'application/x-7z-compressed' or mimeType = 'application/epub+zip')"
 
-	case "code", "scripts":
-		return " and (mimeType = 'text/css' or mimeType = 'text/html' or mimeType = 'text/php' or mimeType = 'text/x-c' or mimeType = 'text/x-c++' or mimeType = 'text/x-h' or mimeType = 'text/javascript' or mimeType = 'text/x-java-source' or mimeType = 'text/x-python' or mimeType = 'text/x-sql' or mimeType = 'text/xml' or mimeType = 'application/json')"
+	case "code":
+		return " and (mimeType = 'text/css' or mimeType = 'text/html' or mimeType = 'text/php' or mimeType = 'text/x-c' or mimeType = 'text/x-c++' or mimeType = 'text/x-h' or mimeType = 'text/javascript' or mimeType = 'text/x-java-source' or mimeType = 'text/x-python' or mimeType = 'text/x-sql' or mimeType = 'text/xml' or mimeType = 'application/json' or mimeType = 'text/markdown' or mimeType = 'text/csv' or mimeType = 'text/tab-separated-values')"
 
 	case "drawings":
 		return " and mimeType = 'application/vnd.google-apps.drawing'"
@@ -557,6 +557,9 @@ func buildFileTypeQuery(fileType string) string {
 
 	case "jams":
 		return " and mimeType = 'application/vnd.google-apps.jam'"
+
+	case "folders":
+		return " and mimeType = 'application/vnd.google-apps.folder'"
 
 	default:
 		return ""
