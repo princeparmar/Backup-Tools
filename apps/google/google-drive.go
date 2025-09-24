@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -63,26 +64,7 @@ func createFilesJSON(file *drive.File, synced bool, path string) *FilesJSON {
 	size := file.Size
 
 	// Check if it's a Google Apps file (all have no physical size)
-	googleAppsMimeTypes := []string{
-		"application/vnd.google-apps.document",     // Google Docs
-		"application/vnd.google-apps.spreadsheet",  // Google Sheets
-		"application/vnd.google-apps.presentation", // Google Slides
-		"application/vnd.google-apps.form",         // Google Forms
-		"application/vnd.google-apps.drawing",      // Google Drawings
-		"application/vnd.google-apps.map",          // Google My Maps
-		"application/vnd.google-apps.site",         // Google Sites
-		"application/vnd.google-apps.script",       // Google Apps Script
-	}
-
-	isGoogleApp := false
-	for _, mimeType := range googleAppsMimeTypes {
-		if file.MimeType == mimeType {
-			isGoogleApp = true
-			break
-		}
-	}
-
-	if isGoogleApp {
+	if isGoogleAppsFile(file.MimeType) {
 		// For Google Apps files, they don't have a physical size in Drive API
 		// Set to -1 to indicate it's a Google Apps file
 		size = -1
@@ -106,14 +88,9 @@ func createFilesJSON(file *drive.File, synced bool, path string) *FilesJSON {
 
 // GetFileNames retrieves all file names and their IDs from Google Drive
 func GetFileNames(c echo.Context) ([]*FilesJSON, error) {
-	client, err := client(c)
+	srv, err := getDriveService(c)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get Google Drive client: %v", err)
-	}
-
-	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Drive service: %v", err)
+		return nil, err
 	}
 
 	var fileResp []*FilesJSON
@@ -142,27 +119,17 @@ func GetFileNames(c echo.Context) ([]*FilesJSON, error) {
 	return fileResp, nil
 }
 
-// Returns file by ID as attachment.
+// GetFileByID returns file by ID as attachment
 func GetFileByID(c echo.Context) error {
-	id := c.Param("ID")
-
-	name, data, err := GetFile(c, id)
+	name, data, err := GetFile(c, c.Param("ID"))
 	if err != nil {
 		return c.String(http.StatusForbidden, "error")
 	}
 
-	userCachePath := "./cache/" + utils.CreateUserTempCacheFolder() + "/" + name
-
-	dbFile, err := os.Create(userCachePath)
-	if err != nil {
+	userCachePath := filepath.Join("./cache", utils.CreateUserTempCacheFolder(), name)
+	if err := os.WriteFile(userCachePath, data, 0644); err != nil {
 		return c.String(http.StatusForbidden, err.Error())
 	}
-	_, err = dbFile.Write(data)
-	if err != nil {
-		return c.String(http.StatusForbidden, err.Error())
-	}
-
-	// delete file from cache after user get's it.
 	defer os.Remove(userCachePath)
 
 	return c.Attachment(userCachePath, name)
@@ -201,6 +168,106 @@ func client(c echo.Context) (*http.Client, error) {
 	return client, nil
 }
 
+// Helper function to check if a MIME type is a Google Apps file
+func isGoogleAppsFile(mimeType string) bool {
+	googleAppsMimeTypes := []string{
+		"application/vnd.google-apps.document",     // Google Docs
+		"application/vnd.google-apps.spreadsheet",  // Google Sheets
+		"application/vnd.google-apps.presentation", // Google Slides
+		"application/vnd.google-apps.form",         // Google Forms
+		"application/vnd.google-apps.drawing",      // Google Drawings
+		"application/vnd.google-apps.map",          // Google My Maps
+		"application/vnd.google-apps.site",         // Google Sites
+		"application/vnd.google-apps.script",       // Google Apps Script
+	}
+
+	for _, googleAppMimeType := range googleAppsMimeTypes {
+		if mimeType == googleAppMimeType {
+			return true
+		}
+	}
+	return false
+}
+
+// Helper function to add file extension for Google Apps files
+func addGoogleAppsFileExtension(fileName string, mimeType string) string {
+	switch mimeType {
+	case "application/vnd.google-apps.document":
+		return fileName + ".docx"
+	case "application/vnd.google-apps.spreadsheet":
+		return fileName + ".xlsx"
+	case "application/vnd.google-apps.presentation":
+		return fileName + ".pptx"
+	case "application/vnd.google-apps.script":
+		return fileName + ".json"
+	default:
+		return fileName
+	}
+}
+
+// Helper function to get export MIME type and add extension for Google Apps files
+func getExportMimeTypeAndExtension(mimeType string) (string, string) {
+	switch mimeType {
+	case "application/vnd.google-apps.document":
+		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"
+	case "application/vnd.google-apps.spreadsheet":
+		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"
+	case "application/vnd.google-apps.presentation":
+		return "application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx"
+	case "application/vnd.google-apps.site":
+		return "text/plain", ""
+	case "application/vnd.google-apps.script":
+		return "application/vnd.google-apps.script+json", ".json"
+	default:
+		return mimeType, ""
+	}
+}
+
+// Helper function to sort satellite objects by key
+func sortSatelliteObjects(objects []uplink.Object) {
+	slices.SortStableFunc(objects, func(a, b uplink.Object) int {
+		return cmp.Compare(a.Key, b.Key)
+	})
+}
+
+// Helper function to check if file is synced using binary search
+func isFileSyncedInObjects(objects []uplink.Object, searchPath string) bool {
+	_, found := slices.BinarySearchFunc(objects, searchPath, func(a uplink.Object, b string) int {
+		return cmp.Compare(a.Key, b)
+	})
+	return found
+}
+
+// Helper function to check folder sync status
+func checkFolderSyncStatus(c echo.Context, folderID string) (bool, error) {
+	folderFiles, err := GetFilesInFolderByID(c, folderID)
+	if err != nil {
+		return false, err
+	}
+
+	for _, v := range folderFiles.Files {
+		if !v.Synced {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// Helper function to get Google Drive service with error handling
+func getDriveService(c echo.Context) (*drive.Service, error) {
+	client, err := client(c)
+	if err != nil {
+		return nil, err
+	}
+
+	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Drive service: %v", err)
+	}
+
+	return srv, nil
+}
+
 func clientUsingToken(token string) (*http.Client, error) {
 	b, err := os.ReadFile("credentials.json")
 	if err != nil {
@@ -218,14 +285,9 @@ func clientUsingToken(token string) (*http.Client, error) {
 
 // GetFile downloads file from Google Drive by ID
 func GetFile(c echo.Context, id string) (string, []byte, error) {
-	client, err := client(c)
+	srv, err := getDriveService(c)
 	if err != nil {
 		return "", nil, err
-	}
-
-	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
-	if err != nil {
-		return "", nil, fmt.Errorf("token error")
 	}
 
 	file, err := srv.Files.Get(id).Do()
@@ -236,25 +298,8 @@ func GetFile(c echo.Context, id string) (string, []byte, error) {
 	res, err := srv.Files.Get(id).Download()
 	if err != nil {
 		if strings.Contains(err.Error(), "Use Export with Docs Editors files., fileNotDownloadable") {
-			var mt string
-			switch file.MimeType {
-			case "application/vnd.google-apps.document":
-				mt = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-				file.Name += ".docx"
-			case "application/vnd.google-apps.spreadsheet":
-				mt = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-				file.Name += ".xlsx"
-			case "application/vnd.google-apps.presentation":
-				mt = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-				file.Name += ".pptx"
-			case "application/vnd.google-apps.site":
-				mt = "text/plain"
-			case "application/vnd.google-apps.script":
-				mt = "application/vnd.google-apps.script+json"
-				file.Name += ".json"
-			default:
-				mt = file.MimeType
-			}
+			mt, ext := getExportMimeTypeAndExtension(file.MimeType)
+			file.Name += ext
 			// handle folders
 			if mt != "application/vnd.google-apps.folder" {
 				if res, err = srv.Files.Export(id, mt).Download(); err != nil {
@@ -279,20 +324,11 @@ func GetFile(c echo.Context, id string) (string, []byte, error) {
 
 // Uploads file to Google Drive.
 func UploadFile(c echo.Context, name string, data []byte) error {
-	client, err := client(c)
+	srv, err := getDriveService(c)
 	if err != nil {
 		return err
 	}
-	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
-	if err != nil {
-		return fmt.Errorf("token error")
-	}
-	_, err = srv.Files.Create(
-		&drive.File{
-			Name: name,
-		}).Media(
-		bytes.NewReader(data),
-	).Do()
+	_, err = srv.Files.Create(&drive.File{Name: name}).Media(bytes.NewReader(data)).Do()
 	if err != nil {
 		return err
 	}
@@ -301,18 +337,13 @@ func UploadFile(c echo.Context, name string, data []byte) error {
 
 // GetFilesInFolder retrieves all files within a specific folder from Google Drive
 func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
-	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accesGrant == "" {
+	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accessGrant == "" {
 		return nil, errors.New("access token is missing")
 	}
-	client, err := client(c)
+	srv, err := getDriveService(c)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get Google Drive client: %v", err)
-	}
-
-	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Drive service: %v", err)
+		return nil, err
 	}
 
 	// Get folder ID by name
@@ -324,13 +355,11 @@ func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get folder name: %v", err)
 	}
-	o, err := satellite.GetFilesInFolder(context.Background(), accesGrant, "google-drive", folderName+"/")
+	o, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", folderName+"/")
 	if err != nil {
 		return nil, errors.New("failed to get list from satellite with error:" + err.Error())
 	}
-	slices.SortStableFunc(o, func(a, b uplink.Object) int {
-		return cmp.Compare(a.Key, b.Key)
-	})
+	sortSatelliteObjects(o)
 	// List all files within the folder
 	r, err := srv.Files.List().Q(fmt.Sprintf("'%s' in parents", folderID)).Fields("files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").Do()
 	if err != nil {
@@ -340,34 +369,13 @@ func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
 	var files []*FilesJSON
 	for _, i := range r.Files {
 		if i.MimeType != "application/vnd.google-apps.folder" {
-			switch i.MimeType {
-			case "application/vnd.google-apps.document":
-				i.Name += ".docx"
-			case "application/vnd.google-apps.spreadsheet":
-				i.Name += ".xlsx"
-			case "application/vnd.google-apps.presentation":
-				i.Name += ".pptx"
-			case "application/vnd.google-apps.site":
-
-			case "application/vnd.google-apps.script":
-				i.Name += ".json"
-			}
-			_, synced := slices.BinarySearchFunc(o, path.Join(folderName, i.Name), func(a uplink.Object, b string) int {
-				return cmp.Compare(a.Key, b)
-			})
+			i.Name = addGoogleAppsFileExtension(i.Name, i.MimeType)
+			synced := isFileSyncedInObjects(o, path.Join(folderName, i.Name))
 			files = append(files, createFilesJSON(i, synced, ""))
 		} else {
-			_, synced := slices.BinarySearchFunc(o, path.Join(folderName, i.Name)+"/", func(a uplink.Object, b string) int {
-				return cmp.Compare(a.Key, b)
-			})
+			synced := isFileSyncedInObjects(o, path.Join(folderName, i.Name)+"/")
 			if synced {
-				folderFilesResp, _ := GetFilesInFolderByID(c, i.Id)
-				//var synced bool
-				if folderFilesResp != nil {
-					for _, v := range folderFilesResp.Files {
-						synced = v.Synced
-					}
-				}
+				synced, _ = checkFolderSyncStatus(c, i.Id)
 			}
 
 			files = append(files, createFilesJSON(i, synced, ""))
@@ -380,31 +388,24 @@ func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
 // func embeddedSynced(c echo.Context, folderID, folderName string)
 // GetFilesInFolder retrieves all files within a specific folder from Google Drive
 func GetFilesInFolderByID(c echo.Context, folderID string) (*PaginatedFilesResponse, error) {
-	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accesGrant == "" {
+	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accessGrant == "" {
 		return nil, errors.New("access token is missing")
 	}
-	client, err := client(c)
+	srv, err := getDriveService(c)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get Google Drive client: %v", err)
-	}
-
-	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Drive service: %v", err)
+		return nil, err
 	}
 	//fpath, err :=
 	folderName, err := GetFolderPathByID(context.Background(), srv, folderID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get folder name: %v", err)
 	}
-	o, err := satellite.GetFilesInFolder(context.Background(), accesGrant, "google-drive", folderName+"/")
+	o, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", folderName+"/")
 	if err != nil {
 		return nil, errors.New("failed to get list from satellite with error:" + err.Error())
 	}
-	slices.SortStableFunc(o, func(a, b uplink.Object) int {
-		return cmp.Compare(a.Key, b.Key)
-	})
+	sortSatelliteObjects(o)
 
 	// Parse filter
 	filter, err := ParseFilter(c.QueryParam("filter"))
@@ -437,34 +438,13 @@ func GetFilesInFolderByID(c echo.Context, folderID string) (*PaginatedFilesRespo
 	var files []*FilesJSON
 	for _, i := range r.Files {
 		if i.MimeType != "application/vnd.google-apps.folder" {
-			switch i.MimeType {
-			case "application/vnd.google-apps.document":
-				i.Name += ".docx"
-			case "application/vnd.google-apps.spreadsheet":
-				i.Name += ".xlsx"
-			case "application/vnd.google-apps.presentation":
-				i.Name += ".pptx"
-			case "application/vnd.google-apps.site":
-
-			case "application/vnd.google-apps.script":
-				i.Name += ".json"
-			}
-			fmt.Println(path.Join(folderName, i.Name))
-			_, synced := slices.BinarySearchFunc(o, path.Join(folderName, i.Name), func(a uplink.Object, b string) int {
-				return cmp.Compare(a.Key, b)
-			})
+			i.Name = addGoogleAppsFileExtension(i.Name, i.MimeType)
+			synced := isFileSyncedInObjects(o, path.Join(folderName, i.Name))
 			files = append(files, createFilesJSON(i, synced, ""))
 		} else {
-			fmt.Println(path.Join(folderName, i.Name))
-			_, synced := slices.BinarySearchFunc(o, path.Join(folderName, i.Name)+"/", func(a uplink.Object, b string) int {
-				return cmp.Compare(a.Key, b)
-			})
+			synced := isFileSyncedInObjects(o, path.Join(folderName, i.Name)+"/")
 			if synced {
-				folderFiles, _ := GetFilesInFolderByID(c, i.Id)
-				//var synced bool
-				for _, v := range folderFiles.Files {
-					synced = v.Synced
-				}
+				synced, _ = checkFolderSyncStatus(c, i.Id)
 			}
 
 			files = append(files, createFilesJSON(i, synced, ""))
@@ -482,14 +462,9 @@ func GetFilesInFolderByID(c echo.Context, folderID string) (*PaginatedFilesRespo
 // GetFilesInFolder retrieves all files within a specific folder from Google Drive
 func GetFolderNameAndFilesInFolderByID(c echo.Context, folderID string) (string, []*FilesJSON, error) {
 
-	client, err := client(c)
+	srv, err := getDriveService(c)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to get Google Drive client: %v", err)
-	}
-
-	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to create Drive service: %v", err)
+		return "", nil, err
 	}
 	folderName, err := getFolderNameByID(srv, folderID)
 	if err != nil {
@@ -535,87 +510,79 @@ func getFolderNameByID(srv *drive.Service, folderID string) (string, error) {
 
 // Helper function to determine file type based on MIME type
 func getFileType(mimeType string) string {
-	switch mimeType {
-	// Documents
-	case "application/vnd.google-apps.document",
+	switch {
+	case utils.Contains([]string{
+		"application/vnd.google-apps.document",
 		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-		"application/msword",
-		"application/vnd.oasis.opendocument.text",
-		"application/rtf",
-		"text/plain":
+		"application/msword", "application/vnd.oasis.opendocument.text",
+		"application/rtf", "text/plain",
+	}, mimeType):
 		return "docs"
 
-	// Spreadsheets
-	case "application/vnd.google-apps.spreadsheet",
+	case utils.Contains([]string{
+		"application/vnd.google-apps.spreadsheet",
 		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-		"application/vnd.ms-excel",
-		"application/vnd.oasis.opendocument.spreadsheet",
-		"text/csv":
+		"application/vnd.ms-excel", "application/vnd.oasis.opendocument.spreadsheet",
+		"text/csv",
+	}, mimeType):
 		return "sheets"
 
-	// Presentations
-	case "application/vnd.google-apps.presentation",
+	case utils.Contains([]string{
+		"application/vnd.google-apps.presentation",
 		"application/vnd.openxmlformats-officedocument.presentationml.presentation",
-		"application/vnd.ms-powerpoint",
-		"application/vnd.oasis.opendocument.presentation":
+		"application/vnd.ms-powerpoint", "application/vnd.oasis.opendocument.presentation",
+	}, mimeType):
 		return "slides"
 
-	// Images
-	case "image/jpeg", "image/png", "image/gif", "image/bmp", "image/tiff",
-		"image/svg+xml", "image/webp":
+	case utils.Contains([]string{
+		"image/jpeg", "image/png", "image/gif", "image/bmp", "image/tiff",
+		"image/svg+xml", "image/webp",
+	}, mimeType) || strings.HasPrefix(mimeType, "image/"):
 		return "images"
 
-	// Videos
-	case "video/webm", "video/mp4", "video/3gpp", "video/quicktime",
+	case utils.Contains([]string{
+		"video/webm", "video/mp4", "video/3gpp", "video/quicktime",
 		"video/x-msvideo", "video/mpeg", "video/x-ms-wmv", "video/x-flv",
-		"video/ogg", "video/mov", "video/avi", "video/mpegps":
+		"video/ogg", "video/mov", "video/avi", "video/mpegps",
+	}, mimeType) || strings.HasPrefix(mimeType, "video/"):
 		return "videos"
 
-	// Audio
-	case "audio/mpeg", "audio/mp4", "audio/wav", "audio/ogg", "audio/opus":
+	case utils.Contains([]string{
+		"audio/mpeg", "audio/mp4", "audio/wav", "audio/ogg", "audio/opus",
+	}, mimeType) || strings.HasPrefix(mimeType, "audio/"):
 		return "audio"
 
-	// PDF
-	case "application/pdf":
+	case mimeType == "application/pdf":
 		return "pdf"
 
-	// Archives
-	case "application/zip", "application/x-rar-compressed", "application/x-tar",
-		"application/gzip", "application/x-7z-compressed", "application/epub+zip":
+	case utils.Contains([]string{
+		"application/zip", "application/x-rar-compressed", "application/x-tar",
+		"application/gzip", "application/x-7z-compressed", "application/epub+zip",
+	}, mimeType):
 		return "zip"
 
-	// Code files
-	case "text/css", "text/html", "text/php", "text/x-c", "text/x-c++",
+	case utils.Contains([]string{
+		"text/css", "text/html", "text/php", "text/x-c", "text/x-c++",
 		"text/x-h", "text/javascript", "text/x-java-source", "text/x-python",
 		"text/x-sql", "text/xml", "application/json", "text/markdown",
-		"text/tab-separated-values":
+		"text/tab-separated-values",
+	}, mimeType):
 		return "code"
 
-	// Google Apps specific
-	case "application/vnd.google-apps.drawing":
+	case mimeType == "application/vnd.google-apps.drawing":
 		return "drawings"
-	case "application/vnd.google-apps.form":
+	case mimeType == "application/vnd.google-apps.form":
 		return "forms"
-	case "application/vnd.google-apps.site":
+	case mimeType == "application/vnd.google-apps.site":
 		return "sites"
-	case "application/vnd.google-apps.script":
+	case mimeType == "application/vnd.google-apps.script":
 		return "scripts_apps"
-	case "application/vnd.google-apps.jam":
+	case mimeType == "application/vnd.google-apps.jam":
 		return "jams"
-	case "application/vnd.google-apps.folder":
+	case mimeType == "application/vnd.google-apps.folder":
 		return "folders"
 
-	// Check for generic MIME types
 	default:
-		if strings.HasPrefix(mimeType, "image/") {
-			return "images"
-		}
-		if strings.HasPrefix(mimeType, "video/") {
-			return "videos"
-		}
-		if strings.HasPrefix(mimeType, "audio/") {
-			return "audio"
-		}
 		return "other"
 	}
 }
@@ -684,86 +651,61 @@ func buildFileTypeQuery(fileType string) string {
 		return ""
 	}
 }
-
-// buildDateModifiedQuery builds a Google Drive query string based on date modified filter
-func buildDateModifiedQuery(dateModified string) string {
-	switch strings.ToLower(dateModified) {
-	case "today":
-		return " and modifiedTime > '" + getTodayStart() + "'"
-	case "yesterday":
-		return " and modifiedTime > '" + getYesterdayStart() + "' and modifiedTime < '" + getTodayStart() + "'"
-	case "last_7_days", "last7days", "7days":
-		return " and modifiedTime > '" + getDaysAgoStart(7) + "'"
-	case "last_30_days", "last30days", "30days":
-		return " and modifiedTime > '" + getDaysAgoStart(30) + "'"
-	case "this_year", "thisyear":
-		return " and modifiedTime > '" + getYearStart() + "'"
-	case "last_year", "lastyear":
-		return " and modifiedTime > '" + getLastYearStart() + "' and modifiedTime < '" + getYearStart() + "'"
-	default:
-		// For custom date ranges, expect format like "2024-01-01" or "2024-01-01,2024-12-31"
-		return buildCustomDateQuery(dateModified)
-	}
-}
-
-// Helper functions for date calculations
-func getTodayStart() string {
-	now := time.Now()
-	return now.Format("2006-01-02T00:00:00.000Z")
-}
-
-func getYesterdayStart() string {
-	yesterday := time.Now().AddDate(0, 0, -1)
-	return yesterday.Format("2006-01-02T00:00:00.000Z")
-}
-
-func getDaysAgoStart(days int) string {
-	date := time.Now().AddDate(0, 0, -days)
-	return date.Format("2006-01-02T00:00:00.000Z")
-}
-
-func getYearStart() string {
-	now := time.Now()
-	yearStart := time.Date(now.Year(), 1, 1, 0, 0, 0, 0, now.Location())
-	return yearStart.Format("2006-01-02T00:00:00.000Z")
-}
-
-func getLastYearStart() string {
-	now := time.Now()
-	lastYearStart := time.Date(now.Year()-1, 1, 1, 0, 0, 0, 0, now.Location())
-	return lastYearStart.Format("2006-01-02T00:00:00.000Z")
-}
-
 func buildCustomDateQuery(dateRange string) string {
-	// Handle custom date ranges like "2024-01-01" or "2024-01-01,2024-12-31"
 	dates := strings.Split(dateRange, ",")
 	if len(dates) == 1 {
-		// Single date - files modified on or after this date
-		return " and modifiedTime > '" + dates[0] + "T00:00:00.000Z'"
-	} else if len(dates) == 2 {
-		// Date range - files modified between these dates
-		startDate := strings.TrimSpace(dates[0]) + "T00:00:00.000Z"
-		endDate := strings.TrimSpace(dates[1]) + "T23:59:59.999Z"
-		return " and modifiedTime > '" + startDate + "' and modifiedTime < '" + endDate + "'"
+		return " and modifiedTime > '" + strings.TrimSpace(dates[0]) + "T00:00:00.000Z'"
+	}
+	if len(dates) == 2 {
+		start := strings.TrimSpace(dates[0]) + "T00:00:00.000Z"
+		end := strings.TrimSpace(dates[1]) + "T23:59:59.999Z"
+		return " and modifiedTime > '" + start + "' and modifiedTime < '" + end + "'"
 	}
 	return ""
 }
+
+func buildDateModifiedQuery(dateModified string) string {
+	now := time.Now()
+	lower := strings.ToLower(dateModified)
+
+	type dateFn func() (start, end string)
+	ranges := map[string]dateFn{
+		"today":        func() (string, string) { return formatTime(now), "" },
+		"yesterday":    func() (string, string) { return formatTime(now.AddDate(0, 0, -1)), formatTime(now) },
+		"last_7_days":  func() (string, string) { return formatTime(now.AddDate(0, 0, -7)), "" },
+		"last_30_days": func() (string, string) { return formatTime(now.AddDate(0, 0, -30)), "" },
+		"this_year": func() (string, string) {
+			return time.Date(now.Year(), 1, 1, 0, 0, 0, 0, now.Location()).Format("2006-01-02T00:00:00.000Z"), ""
+		},
+		"last_year": func() (string, string) {
+			lastYear := now.Year() - 1
+			return time.Date(lastYear, 1, 1, 0, 0, 0, 0, now.Location()).Format("2006-01-02T00:00:00.000Z"),
+				time.Date(now.Year(), 1, 1, 0, 0, 0, 0, now.Location()).Format("2006-01-02T00:00:00.000Z")
+		},
+	}
+
+	if fn, exists := ranges[lower]; exists {
+		start, end := fn()
+		if end == "" {
+			return " and modifiedTime > '" + start + "'"
+		}
+		return " and modifiedTime > '" + start + "' and modifiedTime < '" + end + "'"
+	}
+	return buildCustomDateQuery(dateModified)
+}
+
+func formatTime(t time.Time) string { return t.Format("2006-01-02T00:00:00.000Z") }
 
 // This function gets files only in root. It does not list files in folders
 func GetFileNamesInRoot(c echo.Context) (*PaginatedFilesResponse, error) {
 	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accessGrant == "" {
-		return nil, errors.New("access token not found")
+		return nil, errors.New("access token is missing")
 	}
 
-	client, err := client(c)
+	srv, err := getDriveService(c)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get Google Drive client: %w", err)
-	}
-
-	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Drive service: %w", err)
+		return nil, err
 	}
 
 	// Get satellite objects for sync checking
@@ -771,9 +713,7 @@ func GetFileNamesInRoot(c echo.Context) (*PaginatedFilesResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get satellite list: %w", err)
 	}
-	slices.SortStableFunc(satelliteObjects, func(a, b uplink.Object) int {
-		return cmp.Compare(a.Key, b.Key)
-	})
+	sortSatelliteObjects(satelliteObjects)
 
 	// Parse filter
 	filter, err := ParseFilter(c.QueryParam("filter"))
@@ -819,14 +759,9 @@ func GetSharedFiles(c echo.Context) (*PaginatedFilesResponse, error) {
 	if accessGrant == "" {
 		return nil, errors.New("access token not found")
 	}
-	client, err := client(c)
+	srv, err := getDriveService(c)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get Google Drive client: %w", err)
-	}
-
-	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Drive service: %w", err)
+		return nil, err
 	}
 
 	// Get satellite objects for sync checking
@@ -834,9 +769,7 @@ func GetSharedFiles(c echo.Context) (*PaginatedFilesResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get satellite list: %w", err)
 	}
-	slices.SortStableFunc(satelliteObjects, func(a, b uplink.Object) int {
-		return cmp.Compare(a.Key, b.Key)
-	})
+	sortSatelliteObjects(satelliteObjects)
 
 	// Parse filter
 	filter, err := ParseFilter(c.QueryParam("filter"))
@@ -921,18 +854,13 @@ func applyFiltersToQuery(baseQuery string, filter *GoogleDriveFilter) string {
 }
 
 func GetPaginationParams(filter *GoogleDriveFilter) (int64, string) {
-	pageSize := int64(25)
-	pageToken := ""
-
+	pageSize, pageToken := int64(25), ""
 	if filter != nil {
 		if filter.Limit > 0 {
 			pageSize = min(filter.Limit, 1000)
 		}
-		if filter.PageToken != "" {
-			pageToken = filter.PageToken
-		}
+		pageToken = filter.PageToken
 	}
-
 	return pageSize, pageToken
 }
 
@@ -945,19 +873,7 @@ func processSharedFiles(driveFiles []*drive.File, satelliteObjects []uplink.Obje
 
 		if file.MimeType == "application/vnd.google-apps.folder" && synced {
 			// Check if all files in folder are synced
-			folderFiles, err := GetFilesInFolderByID(c, file.Id)
-			if err == nil {
-				allSynced := true
-				for _, v := range folderFiles.Files {
-					if !v.Synced {
-						allSynced = false
-						break
-					}
-				}
-				synced = allSynced
-			} else {
-				synced = false // If we can't check folder contents, assume not synced
-			}
+			synced, _ = checkFolderSyncStatus(c, file.Id)
 		}
 
 		files = append(files, createFilesJSON(file, synced, ""))
@@ -970,23 +886,11 @@ func processRootFiles(driveFiles []*drive.File, satelliteObjects []uplink.Object
 	var files []*FilesJSON
 
 	for _, file := range driveFiles {
-		synced := isRootFileSynced(satelliteObjects, file.Name, file.MimeType)
+		synced := isFileSynced(satelliteObjects, file.Name, file.MimeType)
 
 		if file.MimeType == "application/vnd.google-apps.folder" && synced {
 			// Check if all files in folder are synced
-			folderFiles, err := GetFilesInFolderByID(c, file.Id)
-			if err == nil {
-				allSynced := true
-				for _, v := range folderFiles.Files {
-					if !v.Synced {
-						allSynced = false
-						break
-					}
-				}
-				synced = allSynced
-			} else {
-				synced = false // If we can't check folder contents, assume not synced
-			}
+			synced, _ = checkFolderSyncStatus(c, file.Id)
 		}
 
 		files = append(files, createFilesJSON(file, synced, ""))
@@ -995,156 +899,90 @@ func processRootFiles(driveFiles []*drive.File, satelliteObjects []uplink.Object
 	return files
 }
 
-func isRootFileSynced(satelliteObjects []uplink.Object, fileName, mimeType string) bool {
-	searchPath := fileName
+// Helper function to check if a file is synced with proper path handling
+func isFileSynced(satelliteObjects []uplink.Object, filePath, mimeType string) bool {
+	searchPath := filePath
 	if mimeType == "application/vnd.google-apps.folder" {
 		searchPath += "/"
 	} else {
 		// Add appropriate extensions for Google Apps files
-		switch mimeType {
-		case "application/vnd.google-apps.document":
-			searchPath += ".docx"
-		case "application/vnd.google-apps.spreadsheet":
-			searchPath += ".xlsx"
-		case "application/vnd.google-apps.presentation":
-			searchPath += ".pptx"
-		case "application/vnd.google-apps.script":
-			searchPath += ".json"
-		}
+		searchPath += addGoogleAppsFileExtension("", mimeType)
 	}
 
-	_, found := slices.BinarySearchFunc(satelliteObjects, searchPath, func(a uplink.Object, b string) int {
-		return cmp.Compare(a.Key, b)
-	})
-	return found
-}
-
-func isFileSynced(satelliteObjects []uplink.Object, fullPath, mimeType string) bool {
-	searchPath := fullPath
-	if mimeType == "application/vnd.google-apps.folder" {
-		searchPath += "/"
-	} else {
-		// Add appropriate extensions for Google Apps files
-		switch mimeType {
-		case "application/vnd.google-apps.document":
-			searchPath += ".docx"
-		case "application/vnd.google-apps.spreadsheet":
-			searchPath += ".xlsx"
-		case "application/vnd.google-apps.presentation":
-			searchPath += ".pptx"
-		case "application/vnd.google-apps.script":
-			searchPath += ".json"
-		}
-	}
-
-	_, found := slices.BinarySearchFunc(satelliteObjects, searchPath, func(a uplink.Object, b string) int {
-		return cmp.Compare(a.Key, b)
-	})
-	return found
+	return isFileSyncedInObjects(satelliteObjects, searchPath)
 }
 
 func GetFolderPathByID(ctx context.Context, srv *drive.Service, folderID string) (string, error) {
-	// Get folder metadata
-	folder, err := srv.Files.Get(folderID).Fields("name,parents").Do()
-	if err != nil {
-		return "", fmt.Errorf("unable to retrieve folder metadata: %v", err)
-	}
-	// Check if the folder is in the root
-	if len(folder.Parents) == 0 {
-		return folder.Name, nil
-	}
-
-	// Initialize the path with the folder name
-	p := folder.Name
-
-	// Recursively traverse parent folders to build the full path
-	for {
+	var segments []string
+	for id := folderID; id != "root"; {
+		folder, err := srv.Files.Get(id).Fields("name,parents").Do()
+		if err != nil {
+			return "", fmt.Errorf("unable to retrieve folder metadata: %v", err)
+		}
+		if folder.Name != "My Drive" {
+			segments = append([]string{folder.Name}, segments...)
+		}
 		if len(folder.Parents) == 0 {
 			break
 		}
-		parentID := folder.Parents[0]
-		if parentID == "root" {
-			break // Reached the root folder
-		}
-
-		// Get the parent folder metadata
-		parent, err := srv.Files.Get(parentID).Fields("name,parents").Do()
-		if err != nil {
-			return "", fmt.Errorf("unable to retrieve parent folder metadata: %v", err)
-		}
-
-		// Prepend the parent folder name to the path
-		if parent.Name != "My Drive" {
-			p = path.Join(parent.Name, p)
-		}
-
-		// Update folder to the parent folder for the next iteration
-		folder = parent
+		id = folder.Parents[0]
 	}
-
-	return p, nil
+	return path.Join(segments...), nil
 }
 
-// GetFile downloads file from Google Drive by ID
+// GetFileAndPath downloads file from Google Drive by ID and returns path with content
 func GetFileAndPath(c echo.Context, id string) (string, []byte, error) {
-	client, err := client(c)
+	srv, err := getDriveService(c)
 	if err != nil {
 		return "", nil, err
 	}
 
-	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
-	if err != nil {
-		return "", nil, fmt.Errorf("token error")
-	}
-
 	file, err := srv.Files.Get(id).Do()
 	if err != nil {
-		return "", nil, fmt.Errorf("unable to retrieve file metadata: %v", err)
+		return "", nil, fmt.Errorf("unable to retrieve file metadata: %w", err)
 	}
+
 	p, err := GetFolderPathByID(context.Background(), srv, file.Id)
 	if err != nil {
-		return "", nil, fmt.Errorf("unable to read file content: %v", err)
+		return "", nil, fmt.Errorf("unable to get file path: %w", err)
 	}
-	res, err := srv.Files.Get(id).Download()
+
+	res, err := downloadFile(srv, id, file.MimeType, &p)
 	if err != nil {
-		if strings.Contains(err.Error(), "Use Export with Docs Editors files., fileNotDownloadable") {
-			var mt string
-			switch file.MimeType {
-			case "application/vnd.google-apps.document":
-				mt = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-				p += ".docx"
-			case "application/vnd.google-apps.spreadsheet":
-				mt = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-				p += ".xlsx"
-			case "application/vnd.google-apps.presentation":
-				mt = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-				p += ".pptx"
-			case "application/vnd.google-apps.site":
-				mt = "text/plain"
-			case "application/vnd.google-apps.script":
-				mt = "application/vnd.google-apps.script+json"
-				p += ".json"
-			default:
-				mt = file.MimeType
-			}
-			// handle folders
-			if mt != "application/vnd.google-apps.folder" {
-				if res, err = srv.Files.Export(id, mt).Download(); err != nil {
-					return "", nil, fmt.Errorf("unable to download file: %v", err)
-				}
-			} else {
-				return p, nil, errors.New("folder error")
-			}
-		} else {
-			return "", nil, fmt.Errorf("unable to download file: %v", err)
-		}
+		return "", nil, err
 	}
 	defer res.Body.Close()
 
 	data, err := io.ReadAll(res.Body)
 	if err != nil {
-		return "", nil, fmt.Errorf("unable to read file content: %v", err)
+		return "", nil, fmt.Errorf("unable to read file content: %w", err)
 	}
 
 	return p, data, nil
+}
+
+// downloadFile handles both regular files and Google Docs export
+func downloadFile(srv *drive.Service, id, mimeType string, path *string) (*http.Response, error) {
+	res, err := srv.Files.Get(id).Download()
+	if err == nil {
+		return res, nil
+	}
+
+	if !strings.Contains(err.Error(), "Use Export with Docs Editors files., fileNotDownloadable") {
+		return nil, fmt.Errorf("unable to download file: %w", err)
+	}
+
+	mt, ext := getExportMimeTypeAndExtension(mimeType)
+	*path += ext
+
+	if mt == "application/vnd.google-apps.folder" {
+		return nil, errors.New("folder error")
+	}
+
+	res, err = srv.Files.Export(id, mt).Download()
+	if err != nil {
+		return nil, fmt.Errorf("unable to export file: %w", err)
+	}
+
+	return res, nil
 }

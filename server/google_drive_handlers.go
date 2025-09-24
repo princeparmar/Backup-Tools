@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -22,16 +21,7 @@ import (
 func handleGetGoogleDriveFileNames(c echo.Context) error {
 	fileNames, err := google.GetFileNames(c)
 	if err != nil {
-		if err.Error() == "token error" {
-			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-				"error": "token expired",
-			})
-		} else {
-			slog.Debug("Error retrieving file names from drive", "error", err)
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "failed to retrieve file from Google Drive",
-			})
-		}
+		return HandleError(c, err, "retrieve file names from Google Drive")
 	}
 	return c.JSON(http.StatusOK, fileNames)
 }
@@ -40,16 +30,7 @@ func handleGetGoogleDriveFileNames(c echo.Context) error {
 func handleRootGoogleDriveFileNames(c echo.Context) error {
 	response, err := google.GetFileNamesInRoot(c)
 	if err != nil {
-		if err.Error() == "token error" {
-			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-				"error": "token expired",
-			})
-		} else {
-			slog.Debug("Error retrieving file names from drive", "error", err)
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "failed to retrieve file from Google Drive",
-			})
-		}
+		return HandleError(c, err, "retrieve file names from Google Drive")
 	}
 	return c.JSON(http.StatusOK, response)
 }
@@ -58,16 +39,7 @@ func handleRootGoogleDriveFileNames(c echo.Context) error {
 func handleSharedGoogleDriveFileNames(c echo.Context) error {
 	fileNames, err := google.GetSharedFiles(c)
 	if err != nil {
-		if err.Error() == "token error" {
-			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-				"error": "token expired",
-			})
-		} else {
-			slog.Debug("Error retrieving file names from drive", "error", err)
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "failed to retrieve file from Google Drive",
-			})
-		}
+		return HandleError(c, err, "retrieve shared files from Google Drive")
 	}
 	return c.JSON(http.StatusOK, fileNames)
 }
@@ -77,16 +49,7 @@ func handleListAllFolderFiles(c echo.Context) error {
 	folderName := c.Param("name")
 	fileNames, err := google.GetFilesInFolder(c, folderName)
 	if err != nil {
-		if err.Error() == "token error" {
-			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-				"error": "token expired",
-			})
-		} else {
-			slog.Debug("Error retrieving file names from drive", "error", err)
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "failed to retrieve file from Google Drive",
-			})
-		}
+		return HandleError(c, err, "retrieve files from Google Drive folder")
 	}
 	return c.JSON(http.StatusOK, fileNames)
 }
@@ -96,16 +59,7 @@ func handleListAllFolderFilesByID(c echo.Context) error {
 	folderID := c.Param("id")
 	fileNames, err := google.GetFilesInFolderByID(c, folderID)
 	if err != nil {
-		if err.Error() == "token error" {
-			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-				"error": "token expired",
-			})
-		} else {
-			slog.Debug("Error retrieving file names from drive", "error", err)
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "failed to retrieve file from Google Drive",
-			})
-		}
+		return HandleError(c, err, "retrieve files from Google Drive folder by ID")
 	}
 	return c.JSON(http.StatusOK, fileNames)
 }
@@ -117,11 +71,11 @@ func handleFolder(folderName, folderID string, c echo.Context) error {
 	}
 	// If folder is empty, create an empty folder
 
-	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accesGrant == "" {
+	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accessGrant == "" {
 		return errors.New("error: access token not found")
 	}
-	err = satellite.UploadObject(context.Background(), accesGrant, "google-drive", folderName+"/.file_placeholder", nil)
+	err = satellite.UploadObject(context.Background(), accessGrant, "google-drive", folderName+"/.file_placeholder", nil)
 	if err != nil {
 		return err
 	}
@@ -141,7 +95,7 @@ func handleFolder(folderName, folderID string, c echo.Context) error {
 				return err
 			}
 		} else {
-			err = satellite.UploadObject(context.Background(), accesGrant, "google-drive", path.Join(folderName, name), data)
+			err = satellite.UploadObject(context.Background(), accessGrant, "google-drive", path.Join(folderName, name), data)
 			if err != nil {
 				return err
 			}
@@ -153,16 +107,7 @@ func handleFolder(folderName, folderID string, c echo.Context) error {
 func handleSyncAllSharedFolderAndFiles(c echo.Context) error {
 	fileNames, err := google.GetSharedFiles(c)
 	if err != nil {
-		if err.Error() == "token error" {
-			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-				"error": "token expired",
-			})
-		} else {
-			slog.Debug("Error retrieving file names from drive", "error", err)
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "failed to retrieve file from Google Drive",
-			})
-		}
+		return HandleError(c, err, "retrieve shared files from Google Drive")
 	}
 	// If folder is empty, create an empty folder
 
@@ -224,16 +169,7 @@ func handleSyncAllFolderFiles(c echo.Context) error {
 	folderName := c.Param("name")
 	fileNames, err := google.GetFilesInFolder(c, folderName)
 	if err != nil {
-		if err.Error() == "token error" {
-			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-				"error": "token expired",
-			})
-		} else {
-			slog.Debug("Error retrieving file names from drive", "error", err)
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "failed to retrieve file from Google Drive",
-			})
-		}
+		return HandleError(c, err, "retrieve files from Google Drive folder")
 	}
 	// If folder is empty, create an empty folder
 
@@ -327,16 +263,7 @@ func handleSyncAllFolderFilesByID(c echo.Context) error {
 	folderID := c.Param("id")
 	folderName, fileNames, err := google.GetFolderNameAndFilesInFolderByID(c, folderID)
 	if err != nil {
-		if err.Error() == "token error" {
-			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-				"error": "token expired",
-			})
-		} else {
-			slog.Debug("Error retrieving file names from drive", "error", err)
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "failed to retrieve file from Google Drive",
-			})
-		}
+		return HandleError(c, err, "retrieve folder and files from Google Drive")
 	}
 	// If folder is empty, create an empty folder
 
@@ -400,15 +327,7 @@ func handleSendFileFromGoogleDriveToSatellite(c echo.Context) error {
 
 	name, data, err := google.GetFileAndPath(c, id)
 	if err != nil {
-		if err.Error() == "token error" {
-			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-				"error": "token expired",
-			})
-		} else {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
+		return HandleError(c, err, "retrieve file from Google Drive")
 	}
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
@@ -446,25 +365,16 @@ func handleSendAllFilesFromGoogleDriveToSatellite(c echo.Context) error {
 	if shared == "true" {
 		fileNames, err := google.GetSharedFiles(c)
 		if err != nil {
-			if err.Error() == "token error" {
-				return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-					"error": "token expired",
-				})
-			} else {
-				slog.Debug("Error retrieving file names from drive", "error", err)
-				return c.JSON(http.StatusForbidden, map[string]interface{}{
-					"error": "failed to retrieve file from Google Drive",
-				})
-			}
+			return HandleError(c, err, "retrieve shared files from Google Drive")
 		}
 		// If folder is empty, create an empty folder
 
 		err = satellite.UploadObject(ctx, accesGrant, "google-drive", "shared with me/", nil)
-		/*if err != nil {
+		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 				"error": fmt.Sprintf("failed to upload file to Satellite: %v", err),
 			})
-		}*/
+		}
 
 		for _, file := range fileNames.Files {
 			func(file *google.FilesJSON) {
@@ -491,16 +401,7 @@ func handleSendAllFilesFromGoogleDriveToSatellite(c echo.Context) error {
 	}
 	response, err := google.GetFileNamesInRoot(c)
 	if err != nil {
-		if err.Error() == "token error" {
-			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-				"error": "token expired",
-			})
-		} else {
-			slog.Debug("Error retrieving google drive", "error", err)
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "failed to retrieve file from Google Drive",
-			})
-		}
+		return HandleError(c, err, "retrieve files from Google Drive root")
 	}
 
 	for _, file := range response.Files {
@@ -559,15 +460,7 @@ func handleSendFileFromSatelliteToGoogleDrive(c echo.Context) error {
 
 	err = google.UploadFile(c, name, data)
 	if err != nil {
-		if err.Error() == "token error" {
-			return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-				"error": "token expired",
-			})
-		} else {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
+		return HandleError(c, err, "upload file to Google Drive")
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
@@ -576,22 +469,16 @@ func handleSendFileFromSatelliteToGoogleDrive(c echo.Context) error {
 }
 
 func handleSendListFromGoogleDriveToSatellite(c echo.Context) error {
-	// Get only file names in root
-	var allIDs []string
-	if strings.Contains(c.Request().Header.Get(echo.HeaderContentType), echo.MIMEApplicationJSON) {
-		// Decode JSON array from request body
-		if err := json.NewDecoder(c.Request().Body).Decode(&allIDs); err != nil {
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"error": "invalid JSON format",
-			})
-		}
-	} else {
-		// Handle form data
-		formIDs := c.FormValue("ids")
-		allIDs = strings.Split(formIDs, ",")
+	// Parse request IDs
+	allIDs, err := parseRequestIDs(c)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
-	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accesGrant == "" {
+
+	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accessGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": "access token not found",
 		})
@@ -620,7 +507,7 @@ func handleSendListFromGoogleDriveToSatellite(c echo.Context) error {
 					}
 				} else {
 
-					if err = satellite.UploadObject(ctx, accesGrant, "google-drive", name, data); err != nil {
+					if err = satellite.UploadObject(ctx, accessGrant, "google-drive", name, data); err != nil {
 						failedIDs.Add(id)
 						return nil
 					}
@@ -643,4 +530,18 @@ func handleSendListFromGoogleDriveToSatellite(c echo.Context) error {
 		"failed_ids":    failedIDs.Get(),
 		"processed_ids": processedIDs.Get(),
 	})
+}
+
+// Helper function to handle Google Drive errors with consistent response format
+func HandleError(c echo.Context, err error, operation string) error {
+	if err.Error() == "token error" {
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"error": "token expired",
+		})
+	} else {
+		slog.Debug("Error in Google Drive operation", "operation", operation, "error", err)
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "failed to " + operation,
+		})
+	}
 }
