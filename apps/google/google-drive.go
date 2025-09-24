@@ -34,6 +34,7 @@ type FilesJSON struct {
 	Name              string    `json:"file_name"`
 	ID                string    `json:"file_id"`
 	MimeType          string    `json:"mime_type"`
+	FileType          string    `json:"file_type"`
 	Synced            bool      `json:"synced"`
 	Size              int64     `json:"size"`
 	FullFileExtension string    `json:"full_file_extension"`
@@ -93,6 +94,7 @@ func createFilesJSON(file *drive.File, synced bool, path string) *FilesJSON {
 		Name:              file.Name,
 		ID:                file.Id,
 		MimeType:          file.MimeType,
+		FileType:          getFileType(file.MimeType),
 		Path:              path,
 		Size:              size,
 		FullFileExtension: file.FullFileExtension,
@@ -528,7 +530,94 @@ func getFolderNameByID(srv *drive.Service, folderID string) (string, error) {
 	if len(r.Files) == 0 {
 		return "", fmt.Errorf("folder '%s' not found", folderID)
 	}
-	return r.Files[0].Id, nil
+	return r.Files[0].Name, nil
+}
+
+// Helper function to determine file type based on MIME type
+func getFileType(mimeType string) string {
+	switch mimeType {
+	// Documents
+	case "application/vnd.google-apps.document",
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		"application/msword",
+		"application/vnd.oasis.opendocument.text",
+		"application/rtf",
+		"text/plain":
+		return "docs"
+
+	// Spreadsheets
+	case "application/vnd.google-apps.spreadsheet",
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		"application/vnd.ms-excel",
+		"application/vnd.oasis.opendocument.spreadsheet",
+		"text/csv":
+		return "sheets"
+
+	// Presentations
+	case "application/vnd.google-apps.presentation",
+		"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		"application/vnd.ms-powerpoint",
+		"application/vnd.oasis.opendocument.presentation":
+		return "slides"
+
+	// Images
+	case "image/jpeg", "image/png", "image/gif", "image/bmp", "image/tiff",
+		"image/svg+xml", "image/webp":
+		return "images"
+
+	// Videos
+	case "video/webm", "video/mp4", "video/3gpp", "video/quicktime",
+		"video/x-msvideo", "video/mpeg", "video/x-ms-wmv", "video/x-flv",
+		"video/ogg", "video/mov", "video/avi", "video/mpegps":
+		return "videos"
+
+	// Audio
+	case "audio/mpeg", "audio/mp4", "audio/wav", "audio/ogg", "audio/opus":
+		return "audio"
+
+	// PDF
+	case "application/pdf":
+		return "pdf"
+
+	// Archives
+	case "application/zip", "application/x-rar-compressed", "application/x-tar",
+		"application/gzip", "application/x-7z-compressed", "application/epub+zip":
+		return "zip"
+
+	// Code files
+	case "text/css", "text/html", "text/php", "text/x-c", "text/x-c++",
+		"text/x-h", "text/javascript", "text/x-java-source", "text/x-python",
+		"text/x-sql", "text/xml", "application/json", "text/markdown",
+		"text/tab-separated-values":
+		return "code"
+
+	// Google Apps specific
+	case "application/vnd.google-apps.drawing":
+		return "drawings"
+	case "application/vnd.google-apps.form":
+		return "forms"
+	case "application/vnd.google-apps.site":
+		return "sites"
+	case "application/vnd.google-apps.script":
+		return "scripts_apps"
+	case "application/vnd.google-apps.jam":
+		return "jams"
+	case "application/vnd.google-apps.folder":
+		return "folders"
+
+	// Check for generic MIME types
+	default:
+		if strings.HasPrefix(mimeType, "image/") {
+			return "images"
+		}
+		if strings.HasPrefix(mimeType, "video/") {
+			return "videos"
+		}
+		if strings.HasPrefix(mimeType, "audio/") {
+			return "audio"
+		}
+		return "other"
+	}
 }
 
 // GoogleDriveFilter represents filter parameters for Google Drive file queries
