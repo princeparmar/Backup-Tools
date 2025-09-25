@@ -459,11 +459,48 @@ func (storage *PosgresStore) DeleteCronJobByID(ID uint) error {
 }
 
 func (storage *PosgresStore) UpdateCronJobByID(ID uint, m map[string]interface{}) error {
-	res := storage.DB.Model(&CronJobListingDB{}).Where("id = ?", ID).Updates(m)
-	if res != nil && res.Error != nil {
-		return fmt.Errorf("error updating cron job interval: %v", res.Error)
+	tx := storage.DB.Begin()
+	if tx.Error != nil {
+		return fmt.Errorf("error starting transaction: %w", tx.Error)
 	}
 
+	// Use a flag to track if we should rollback
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Rollback()
+		}
+	}()
+
+	// Update the cron job
+	res := tx.Model(&CronJobListingDB{}).Where("id = ?", ID).Updates(m)
+	if res.Error != nil {
+		return fmt.Errorf("error updating cron job: %w", res.Error)
+	}
+
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("no cron job found with id %d", ID)
+	}
+
+	// Get the updated cron job
+	var updatedJob CronJobListingDB
+	if err := tx.First(&updatedJob, ID).Error; err != nil {
+		return fmt.Errorf("error getting updated cron job: %w", err)
+	}
+
+	// Validate activation if the job is being activated
+	if active, exists := m["active"]; exists && active == true {
+		if err := storage.validateJobForActivation(&updatedJob); err != nil {
+			return err
+		}
+	}
+
+	// Commit the transaction
+	if err := tx.Commit().Error; err != nil {
+		return fmt.Errorf("error committing transaction: %w", err)
+	}
+
+	committed = true
 	return nil
 }
 
@@ -536,4 +573,43 @@ func (storage *PosgresStore) DeleteAllJobsAndTasksByEmail(email string) ([]uint,
 	}
 
 	return deletedJobIDs, taskIDs, nil
+}
+
+// ValidateJobForActivation checks if the job has all required fields and authentication tokens for activation
+func (storage *PosgresStore) validateJobForActivation(job *CronJobListingDB) error {
+	// Validate required fields for activation
+	if job.StorxToken == "" {
+		return fmt.Errorf("storx_token is required when activating backup")
+	}
+	if job.Interval == "" {
+		return fmt.Errorf("interval is required when activating backup")
+	}
+	if job.On == "" {
+		return fmt.Errorf("on is required when activating backup")
+	}
+
+	// Parse existing input_data to check for authentication tokens
+	inputData := job.InputData
+
+	switch job.Method {
+	case "gmail":
+		// Check if refresh_token exists in input_data
+		if refreshToken, exists := inputData["refresh_token"]; !exists || refreshToken == "" {
+			return fmt.Errorf("refresh_token is required in input_data for gmail method")
+		}
+	case "outlook":
+		// Check if refresh_token exists in input_data
+		if refreshToken, exists := inputData["refresh_token"]; !exists || refreshToken == "" {
+			return fmt.Errorf("refresh_token is required in input_data for outlook method")
+		}
+	case "database", "psql_database", "mysql_database":
+		// Check if database connection details exist in input_data
+		requiredFields := []string{"host", "port", "username", "password", "database_name"}
+		for _, field := range requiredFields {
+			if value, exists := inputData[field]; !exists || value == "" {
+				return fmt.Errorf("%s is required in input_data for database method", field)
+			}
+		}
+	}
+	return nil
 }

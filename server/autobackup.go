@@ -1,7 +1,6 @@
 package server
 
 import (
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -305,28 +304,29 @@ func handleAutomaticSyncCreateDatabase(c echo.Context) error {
 }
 
 func handleAutomaticBackupUpdate(c echo.Context) error {
+	// Validate jobID
 	jobID, err := strconv.Atoi(c.Param("job_id"))
-	if err != nil {
+	if err != nil || jobID <= 0 {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "Invalid Request",
-			"error":   err.Error(),
+			"message": "Invalid Job ID",
 		})
 	}
 
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-			"message": "Invalid Request",
+			"message": "Authentication required",
 			"error":   err.Error(),
 		})
 	}
 
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
 
+	// Verify job exists and belongs to user
 	job, err := database.GetJobByIDForUser(userID, uint(jobID))
 	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-			"message": "Invalid Request",
+		return c.JSON(http.StatusNotFound, map[string]interface{}{
+			"message": "Job not found",
 			"error":   err.Error(),
 		})
 	}
@@ -356,20 +356,22 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 
 	if err := c.Bind(&reqBody); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "Invalid Request",
+			"message": "Invalid request body",
 			"error":   err.Error(),
+		})
+	}
+
+	// Validate interval and on together
+	if (reqBody.Interval != nil && reqBody.On == nil) ||
+		(reqBody.On != nil && reqBody.Interval == nil) {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Both interval and on are required together",
 		})
 	}
 
 	updateRequest := map[string]interface{}{}
 
 	if reqBody.Interval != nil {
-		if reqBody.On == nil {
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "Invalid Request",
-				"error":   "On is required with Interval",
-			})
-		}
 		if !validateInterval(*reqBody.Interval, *reqBody.On) {
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
 				"message": "Invalid Request",
@@ -384,14 +386,13 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 	if reqBody.Code != nil {
 		if job.Method != "gmail" {
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "Invalid Request",
-				"error":   "refresh token is not allowed for this method",
+				"message": "refresh token is not allowed for this method",
 			})
 		}
 		tok, err := google.GetRefreshTokenFromCodeForEmail(*reqBody.Code)
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "Invalid Request",
+				"message": "Invalid Code. Not able to generate auth token from code",
 				"error":   err.Error(),
 			})
 		}
@@ -400,22 +401,21 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 		userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(tok.AccessToken)
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "Invalid Request",
+				"message": "Invalid Code. May be it is expired or invalid",
 				"error":   err.Error(),
 			})
 		}
 
 		if userDetails.Email == "" {
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "Invalid Request",
+				"message": "Invalid Code. May be it is expired or invalid",
 				"error":   "getting empty email id from google token",
 			})
 		}
 
 		if userDetails.Email != job.Name {
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "Invalid Request",
-				"error":   "email id mismatch",
+				"message": "email id mismatch",
 			})
 		}
 		updateRequest["input_data"] = map[string]interface{}{
@@ -424,8 +424,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 	} else if reqBody.DatabaseConnection != nil {
 		if job.Method != "database" {
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "Invalid Request",
-				"error":   "database connection is not allowed for this method",
+				"message": "database connection is not allowed for this method",
 			})
 		}
 
@@ -439,8 +438,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 	} else if reqBody.RefreshToken != nil {
 		if job.Method != "outlook" {
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "Invalid Request",
-				"error":   "refresh token is not allowed for this method",
+				"message": "refresh token is not allowed for this method",
 			})
 		}
 
@@ -489,34 +487,6 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 	if reqBody.Active != nil {
 		updateRequest["active"] = *reqBody.Active
 		if *reqBody.Active {
-			// Validate required fields when activating backup
-			if reqBody.StorxToken == nil {
-				return c.JSON(http.StatusBadRequest, map[string]interface{}{
-					"message": "Invalid Request",
-					"error":   "storx_token is required when activating backup",
-				})
-			}
-
-			if reqBody.Interval == nil {
-				return c.JSON(http.StatusBadRequest, map[string]interface{}{
-					"message": "Invalid Request",
-					"error":   "interval is required when activating backup",
-				})
-			}
-			if reqBody.On == nil {
-				return c.JSON(http.StatusBadRequest, map[string]interface{}{
-					"message": "Invalid Request",
-					"error":   "on is required when activating backup",
-				})
-			}
-
-			// Validate authentication token based on job method
-			if err := validateExistingAuthToken(job); err != nil {
-				return c.JSON(http.StatusBadRequest, map[string]interface{}{
-					"message": "Invalid Request",
-					"error":   err.Error(),
-				})
-			}
 			updateRequest["message"] = "You Automatic backup is activated. it will start processing first backup soon"
 			updateRequest["message_status"] = storage.JobMessageStatusInfo
 		} else {
@@ -528,7 +498,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 	err = database.UpdateCronJobByID(uint(jobID), updateRequest)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"message": "internal server error",
+			"message": "Failed to update job",
 			"error":   err.Error(),
 		})
 	}
@@ -542,7 +512,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message": "Automatic Backup Updated Successfully",
+		"message": "Automatic backup updated successfully",
 		"data":    data,
 	})
 }
@@ -716,32 +686,4 @@ func handleDeleteJobsByEmail(c echo.Context) error {
 		"total_jobs_deleted":  len(deletedJobIDs),
 		"total_tasks_deleted": len(deletedTaskIDs),
 	})
-}
-
-// validateExistingAuthToken checks if the job has the required authentication token in input_data
-func validateExistingAuthToken(job *storage.CronJobListingDB) error {
-	// Parse existing input_data to check for authentication tokens
-	inputData := job.InputData
-
-	switch job.Method {
-	case "gmail":
-		// Check if refresh_token exists in input_data
-		if refreshToken, exists := inputData["refresh_token"]; !exists || refreshToken == "" {
-			return fmt.Errorf("refresh_token is required in input_data for gmail method")
-		}
-	case "outlook":
-		// Check if refresh_token exists in input_data
-		if refreshToken, exists := inputData["refresh_token"]; !exists || refreshToken == "" {
-			return fmt.Errorf("refresh_token is required in input_data for outlook method")
-		}
-	case "database", "psql_database", "mysql_database":
-		// Check if database connection details exist in input_data
-		requiredFields := []string{"host", "port", "username", "password", "database_name"}
-		for _, field := range requiredFields {
-			if value, exists := inputData[field]; !exists || value == "" {
-				return fmt.Errorf("%s is required in input_data for database method", field)
-			}
-		}
-	}
-	return nil
 }
