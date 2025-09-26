@@ -1,9 +1,9 @@
 package storage
 
 import (
-	"fmt"
 	"os"
 
+	"github.com/StorX2-0/Backup-Tools/logger"
 	goshopify "github.com/bold-commerce/go-shopify/v4"
 	"github.com/glebarez/sqlite"
 	quickbooksLibrary "github.com/rwestlund/quickbooks-go"
@@ -28,7 +28,7 @@ func ConnectToEmailDB(dbPath string) (*SQLiteEmailDatabase, error) {
 	// TODO check if db exists locally
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		// Database file does not exist, create new file
-		fmt.Println("Creating new database file...")
+		logger.Info("Creating new database file...")
 		if _, err := os.Create(dbPath); err != nil {
 			return nil, err
 		}
@@ -75,7 +75,7 @@ func ConnectToShopifyDB() (*SQLiteShopifyDatabase, error) {
 	// TODO check if db exists locally
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		// Database file does not exist, create new file
-		fmt.Println("Creating new database file...")
+		logger.Info("Creating new database file...")
 		if _, err := os.Create(dbPath); err != nil {
 			return nil, err
 		}
@@ -140,7 +140,7 @@ func ConnectToQuickbooksDB() (*SQLiteQuickbooksDatabase, error) {
 	// TODO check if db exists locally
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		// Database file does not exist, create new file
-		fmt.Println("Creating new database file...")
+		logger.Info("Creating new database file...")
 		if _, err := os.Create(dbPath); err != nil {
 			return nil, err
 		}

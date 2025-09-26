@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/logger"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/utils"
 	"golang.org/x/sync/errgroup"
@@ -87,7 +88,7 @@ func (s *GmailService) UploadMessagesToSatellite(ctx context.Context, messageIDs
 
 				err = satellite.UploadObject(ctx, s.accessGrant, "gmail", messagePath, b)
 				if err != nil {
-					fmt.Println("error uploading to satellite", err)
+					logger.Info("error uploading to satellite", logger.ErrorField(err))
 					failedIDs.Add(id)
 					return nil
 				}
@@ -138,7 +139,7 @@ func (s *GmailService) DownloadMessagesFromSatellite(ctx context.Context, keys [
 
 			// Insert message into Gmail
 			if err := s.client.InsertMessage(&gmailMsg); err != nil {
-				fmt.Println(err)
+				logger.Info("error inserting message into Gmail", logger.ErrorField(err))
 				failedIDs.Add(key)
 			} else {
 				processedIDs.Add(key)

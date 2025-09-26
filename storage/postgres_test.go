@@ -1,9 +1,10 @@
 package storage
 
 import (
-	"fmt"
 	"os"
 	"testing"
+
+	"github.com/StorX2-0/Backup-Tools/logger"
 )
 
 func TestConnect(t *testing.T) {
@@ -12,5 +13,5 @@ func TestConnect(t *testing.T) {
 	postgres, _ := NewPostgresStore(dsn)
 	var res GoogleAuthStorage
 	postgres.DB.Where("cookie = ?", "cookie1234").First(&res)
-	fmt.Println(res)
+	logger.Info("res", logger.Any("res", res))
 }

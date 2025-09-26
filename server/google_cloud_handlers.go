@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/logger"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 
 	"github.com/labstack/echo/v4"
@@ -260,7 +261,7 @@ func handleAllFilesFromGoogleCloudBucketToSatellite(c echo.Context) error {
 		}
 
 		err = satellite.UploadObject(context.Background(), accesGrant, bucket.Id, obj.Name, obj.Data)
-		fmt.Println("uploaded : "+obj.Name, "bucketID: ", bucket.Id)
+		logger.Info("uploaded : "+obj.Name, logger.String("bucketID", bucket.Id))
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),
@@ -322,7 +323,7 @@ func syncCloudBucket(c echo.Context, bucketName string) error {
 		}
 
 		err = satellite.UploadObject(context.Background(), accesGrant, bucket.Id, obj.Name, obj.Data)
-		fmt.Println("uploaded : "+obj.Name, "bucketID: ", bucket.Id)
+		logger.Info("uploaded : "+obj.Name, logger.String("bucketID", bucket.Id))
 		if err != nil {
 			return err
 		}

@@ -2,9 +2,9 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/logger"
 	"google.golang.org/api/gmail/v1"
 )
 
@@ -30,5 +30,5 @@ func main() {
 		panic("failed to insert message: " + err.Error())
 	}
 
-	fmt.Println("Message inserted successfully")
+	logger.Info("Message inserted successfully")
 }

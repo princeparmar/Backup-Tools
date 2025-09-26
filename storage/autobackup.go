@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/logger"
 	"github.com/StorX2-0/Backup-Tools/utils"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -217,7 +218,7 @@ func (storage *PosgresStore) MissedHeartbeatForTask() error {
 	}
 
 	for _, task := range tasks {
-		fmt.Println("Updating task", task.ID, "with missed heartbeat")
+		logger.Info("Updating task", logger.Int("task_id", int(task.ID)), logger.String("with missed heartbeat", "with missed heartbeat"))
 
 		task.Status = TaskStatusFailed
 		task.Message = "Process got stuck because of some reason. Marked as failed"

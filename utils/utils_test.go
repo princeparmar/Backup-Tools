@@ -1,10 +1,11 @@
 package utils
 
 import (
-	"fmt"
 	"testing"
+
+	"github.com/StorX2-0/Backup-Tools/logger"
 )
 
 func TestRandStr(t *testing.T) {
-	fmt.Println(RandStringRunes(32))
+	logger.Info(RandStringRunes(32))
 }

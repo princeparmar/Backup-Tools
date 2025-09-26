@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
+	"github.com/StorX2-0/Backup-Tools/logger"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/utils"
 	"github.com/labstack/echo/v4"
@@ -297,7 +297,8 @@ func handleOutlookDownloadAndInsert(c echo.Context) error {
 			// Download file from Satellite
 			data, err := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Outlook, key)
 			if err != nil {
-				fmt.Println("error downloading message: ", err)
+				logger.Info("error downloading message: ", logger.ErrorField(err))
+				logger.Info("key", logger.String("key", key))
 				failedIDs.Add(key)
 				return nil
 			}
@@ -305,7 +306,8 @@ func handleOutlookDownloadAndInsert(c echo.Context) error {
 			// Parse the email data
 			var outlookMsg outlook.OutlookMessage
 			if err := json.Unmarshal(data, &outlookMsg); err != nil {
-				fmt.Println("error unmarshalling message: ", err)
+				logger.Info("error unmarshalling message: ", logger.ErrorField(err))
+				logger.Info("key", logger.String("key", key))
 				failedIDs.Add(key)
 				return nil
 			}
@@ -313,7 +315,8 @@ func handleOutlookDownloadAndInsert(c echo.Context) error {
 			// Insert message into Outlook
 			_, err = client.InsertMessage(&outlookMsg)
 			if err != nil {
-				fmt.Println("error inserting message: ", err)
+				logger.Info("error inserting message: ", logger.ErrorField(err))
+				logger.Info("key", logger.String("key", key))
 				failedIDs.Add(key)
 			} else {
 				processedIDs.Add(key)

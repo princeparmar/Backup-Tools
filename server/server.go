@@ -2,10 +2,10 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 
 	googlepack "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/logger"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
 
@@ -177,6 +177,6 @@ func StartServer(db *storage.PosgresStore, address string) {
 
 	err := e.Start(address)
 	if err != nil {
-		fmt.Println("Error starting server", err)
+		logger.Info("Error starting server", logger.ErrorField(err))
 	}
 }

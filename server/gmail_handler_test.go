@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"testing"
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/logger"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"google.golang.org/api/gmail/v1"
 )
@@ -28,7 +28,7 @@ func TestGmailInsertMessage(t *testing.T) {
 		t.Fatalf("failed to download file: %v", err)
 	}
 
-	fmt.Println(string(data))
+	logger.Info("data", logger.String("data", string(data)))
 
 	// Parse the email data and insert into Gmail
 	var gmailMsg gmail.Message
