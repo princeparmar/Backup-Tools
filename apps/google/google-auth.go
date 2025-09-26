@@ -16,6 +16,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/utils"
 
 	rm "cloud.google.com/go/resourcemanager/apiv3"
+	"github.com/StorX2-0/Backup-Tools/logger"
 	"github.com/dgrijalva/jwt-go"
 	"github.com/gphotosuploader/googlemirror/api/photoslibrary/v1"
 	"github.com/labstack/echo/v4"
@@ -63,7 +64,7 @@ func CreateJWToken(googleToken string) string {
 	// Sign the token with the secret key and get the complete, encoded token as a string
 	tokenString, err := token.SignedString([]byte(JwtSecretKey))
 	if err != nil {
-		fmt.Println("Error generating token:", err)
+		logger.Info("Error generating token:", logger.ErrorField(err))
 		return ""
 	}
 
@@ -97,7 +98,7 @@ func GetGoogleTokenFromJWT(c echo.Context) (string, error) {
 
 		// Extract specific information from claims
 		googleAuth := claims.GoogleAuthToken
-		fmt.Println(googleAuth)
+		logger.Info(googleAuth)
 
 		// Output extracted informationr
 		return googleAuth, nil
@@ -154,7 +155,7 @@ func Autentificate(c echo.Context) error {
 			"error validating google auth token": err.Error(),
 		})
 	}
-	fmt.Println("token validated")
+	logger.Info("token validated")
 
 	// _, err := idtoken.Validate(context.Background(), googleKey, "")
 	// if err != nil {
@@ -371,19 +372,19 @@ func IsGoogleTokenExpired(token string) bool {
 
 	tokenInfo, err := GetGoogleAccountDetailsFromAccessToken(token)
 	if err != nil {
-		fmt.Println("Error getting account details:", err)
+		logger.Info("Error getting account details:", logger.ErrorField(err))
 		return true
 	}
 
 	expireIn, err := strconv.Atoi(tokenInfo.ExpiresIn)
 	if err != nil {
-		fmt.Println("Error converting expires_in to int:", err)
+		logger.Info("Error converting expires_in to int:", logger.ErrorField(err))
 		return true
 	}
 
 	// Check if the token has expired (expires_in should be greater than 0)
 	if expireIn > 0 {
-		fmt.Println("Token expires in:", tokenInfo.ExpiresIn, "seconds")
+		logger.Info("Token expires in:" + tokenInfo.ExpiresIn + "seconds")
 		return false
 	}
 

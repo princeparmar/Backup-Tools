@@ -14,6 +14,7 @@ require (
 	github.com/microsoftgraph/msgraph-sdk-go v1.61.0
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/stretchr/testify v1.10.0
+	go.uber.org/zap v1.27.0
 	golang.org/x/oauth2 v0.17.0
 	google.golang.org/api v0.168.0
 	gorm.io/gorm v1.25.5
@@ -76,6 +77,7 @@ require (
 	go.opentelemetry.io/otel v1.24.0 // indirect
 	go.opentelemetry.io/otel/metric v1.24.0 // indirect
 	go.opentelemetry.io/otel/trace v1.24.0 // indirect
+	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/exp v0.0.0-20231006140011-7918f672742d // indirect
 	golang.org/x/time v0.5.0 // indirect
 	golang.org/x/xerrors v0.0.0-20231012003039-104605ab7028 // indirect
@@ -119,7 +121,7 @@ require (
 	golang.org/x/sys v0.30.0 // indirect
 	golang.org/x/text v0.22.0 // indirect
 	gorm.io/driver/postgres v1.5.4
-	storj.io/common v0.0.0-20240325183111-3a1a80390ccd // indirect
+	storj.io/common v0.0.0-20240325183111-3a1a80390ccd
 	storj.io/drpc v0.0.33 // indirect
 	storj.io/uplink v1.12.3-0.20240325204957-7e1a1e616922
 )

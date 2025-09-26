@@ -3,9 +3,9 @@ package google
 import (
 	_ "embed"
 	"encoding/json"
-	"fmt"
 	"testing"
 
+	"github.com/StorX2-0/Backup-Tools/logger"
 	"google.golang.org/api/gmail/v1"
 )
 
@@ -28,5 +28,5 @@ func Test_createRawMessage(t *testing.T) {
 		return
 	}
 
-	fmt.Println(got)
+	logger.Info(got)
 }

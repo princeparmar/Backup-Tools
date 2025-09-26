@@ -5,26 +5,32 @@ import (
 	"os"
 
 	"github.com/StorX2-0/Backup-Tools/crons"
+	"github.com/StorX2-0/Backup-Tools/logger"
+	"github.com/StorX2-0/Backup-Tools/logger/newrelic"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/server"
 	"github.com/StorX2-0/Backup-Tools/storage"
 
 	"github.com/joho/godotenv"
+	"go.uber.org/zap"
 )
 
 func main() {
+	defer logger.Sync()
+
 	dsn := os.Getenv("POSTGRES_DSN")
 
 	storage, err := storage.NewPostgresStore(dsn)
 	if err != nil {
-		slog.Error("error starting the postgress store", "error", err)
-		slog.Warn("exiting...")
+		logger.Error("error starting the postgress store", zap.Error(err))
+		logger.Warn("exiting...")
 		os.Exit(1)
 	}
+
 	err = storage.Migrate()
 	if err != nil {
-		slog.Error("error migrating to the postgress store", "error", err)
-		slog.Warn("exiting...")
+		logger.Error("error migrating to the postgress store", zap.Error(err))
+		logger.Warn("exiting...")
 		os.Exit(1)
 	}
 
@@ -40,15 +46,22 @@ func main() {
 	server.StartServer(storage, address)
 }
 
-// Loads all data from .env file into Environmental variables.
 func init() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{AddSource: true, Level: slog.LevelInfo})))
 	err := godotenv.Load()
 	if err != nil {
+		// Fallback to basic logger for init errors
 		slog.Error("error loading the environment", "error", err)
 		slog.Warn("exiting...")
 		os.Exit(1)
 	}
 
 	satellite.StorxSatelliteService = os.Getenv("STORX_SATELLITE_SERVICE")
+
+	// Initialize logger with New Relic integration
+	newRelicAPIKey := os.Getenv("NEWRELIC_API_KEY")
+	newRelicEnabled := os.Getenv("NEWRELIC_ENABLED") == "true"
+
+	if newRelicAPIKey != "" || newRelicEnabled {
+		logger.InitWithNewRelic(newrelic.NewLogInterceptor(newRelicAPIKey, newRelicEnabled))
+	}
 }

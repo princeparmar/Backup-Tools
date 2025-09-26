@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/logger"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/StorX2-0/Backup-Tools/utils"
@@ -153,14 +154,14 @@ func client(c echo.Context) (*http.Client, error) {
 		return nil, fmt.Errorf("unable to retrieve google-auth token from JWT: %v", err)
 	}
 
-	fmt.Println("processing google token" + googleToken)
+	logger.Info("processing google token" + googleToken)
 
 	tok, err := database.ReadGoogleAuthToken(googleToken)
 	if err != nil {
 		return nil, echo.NewHTTPError(http.StatusUnauthorized, "user is not authorized")
 	}
 
-	fmt.Println("processing access token" + tok)
+	logger.Info("processing access token" + tok)
 	client := config.Client(context.Background(), &oauth2.Token{
 		AccessToken: tok,
 	})

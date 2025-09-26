@@ -3,11 +3,11 @@ package google
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/StorX2-0/Backup-Tools/logger"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 )
@@ -19,7 +19,7 @@ func Tes1t_AuthTokenUsingRefreshToken(t *testing.T) {
 		t.Errorf("Error: %v", err)
 	}
 
-	fmt.Println(newToken)
+	logger.Info(newToken)
 }
 
 // Mock database for testing

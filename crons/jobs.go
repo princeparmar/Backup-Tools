@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/logger"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/robfig/cron/v3"
@@ -39,32 +40,32 @@ func NewAutosyncManager(store *storage.PosgresStore) *AutosyncManager {
 func (a *AutosyncManager) Start() {
 	c := cron.New()
 	c.AddFunc("@every 1m", func() {
-		fmt.Println("Creating task for all pending jobs")
+		logger.Info("Creating task for all pending jobs")
 		err := a.CreateTaskForAllPendingJobs()
 		if err != nil {
-			fmt.Println("Failed to create task for all pending jobs", err)
+			logger.Error("Failed to create task for all pending jobs", logger.ErrorField(err))
 			return
 		}
 
-		fmt.Println("Task created for all pending jobs")
+		logger.Info("Task created for all pending jobs")
 	})
 
 	c.AddFunc("@every 1m", func() {
-		fmt.Println("Processing task")
+		logger.Info("Processing task")
 		err := a.ProcessTask()
 		if err != nil {
-			fmt.Println("Failed to process task", err)
+			logger.Error("Failed to process task", logger.ErrorField(err))
 			return
 		}
 
-		fmt.Println("Task processed")
+		logger.Info("Task processed")
 	})
 
 	c.AddFunc("@every 1m", func() {
-		fmt.Println("Checking for missed heartbeat")
+		logger.Info("Checking for missed heartbeat")
 		err := a.store.MissedHeartbeatForTask()
 		if err != nil {
-			fmt.Println("Failed to check for missed heartbeat", err)
+			logger.Error("Failed to check for missed heartbeat", logger.ErrorField(err))
 			return
 		}
 	})
@@ -90,11 +91,11 @@ func (a *AutosyncManager) CreateTaskForAllPendingJobs() error {
 	}
 
 	if len(jobIDs) == 0 {
-		fmt.Println("No job to process")
+		logger.Info("No job to process")
 		return nil
 	}
 	for _, jobID := range jobIDs {
-		fmt.Println("Creating task for job", jobID)
+		logger.Info("Creating task for job", logger.Int("job_id", int(jobID.ID)))
 
 		_, err := a.store.CreateTaskForCronJob(jobID.ID)
 		if err != nil {
@@ -148,13 +149,13 @@ func (a *AutosyncManager) ProcessTask() error {
 		task, err := a.store.GetPushedTask()
 		if err != nil {
 			if err.Error() == "error getting pushed task: record not found" {
-				fmt.Println("No task to process")
+				logger.Info("No task to process")
 				break
 			}
 			return err
 		}
 
-		fmt.Println("Processing task", task.ID)
+		logger.Info("Processing task", logger.Int("task_id", int(task.ID)))
 		job, err := a.store.GetCronJobByID(task.CronJobID)
 		if err != nil {
 			return a.UpdateTaskStatus(task, job, err)
@@ -186,7 +187,7 @@ func (a *AutosyncManager) processTask(task *storage.TaskListingDB, job *storage.
 			}
 
 			if t.Status != storage.TaskStatusRunning {
-				return fmt.Errorf("exit task because status changed")
+				return fmt.Errorf("exit task because status changed: %s", t.Status)
 			}
 
 			return a.store.UpdateHeartBeatForTask(task.ID)
