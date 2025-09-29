@@ -14,7 +14,7 @@ import (
 
 const (
 	maxBuffer     = 500
-	flushInterval = 2 * time.Second
+	flushInterval = 2 * time.Minute
 	httpTimeout   = 30 * time.Second
 	maxRetries    = 3
 )

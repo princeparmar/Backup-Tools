@@ -4,7 +4,6 @@ import (
 	"os"
 
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 )
 
 // Logger interface defines the logging methods
@@ -33,23 +32,23 @@ func Init(logger *zap.Logger) {
 
 // NewRelicCore wraps a zapcore.Core with New Relic integration
 type NewRelicCore struct {
-	zapcore.Core
+	Core
 	Interceptor LogInterceptor
 }
 
-func (c *NewRelicCore) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
+func (c *NewRelicCore) Check(ent Entry, ce *CheckedEntry) *CheckedEntry {
 	if c.Enabled(ent.Level) {
 		return ce.AddCore(ent, c)
 	}
 	return ce
 }
 
-func (c *NewRelicCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
+func (c *NewRelicCore) Write(ent Entry, fields []Field) error {
 	c.Interceptor.InterceptLogWithFields(ent, fields)
 	return c.Core.Write(ent, fields)
 }
 
-func (c *NewRelicCore) With(fields []zapcore.Field) zapcore.Core {
+func (c *NewRelicCore) With(fields []Field) Core {
 	return &NewRelicCore{
 		Core:        c.Core.With(fields),
 		Interceptor: c.Interceptor,
@@ -58,7 +57,7 @@ func (c *NewRelicCore) With(fields []zapcore.Field) zapcore.Core {
 
 // LogInterceptor interface for New Relic integration
 type LogInterceptor interface {
-	InterceptLogWithFields(entry zapcore.Entry, fields []zapcore.Field)
+	InterceptLogWithFields(entry Entry, fields []Field)
 }
 
 // InitWithNewRelic initializes the logger with New Relic integration
