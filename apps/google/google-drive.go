@@ -625,8 +625,7 @@ func buildFileTypeQuery(fileType string) string {
 		return " and mimeType = 'application/pdf'"
 
 	case "zip":
-		return " and (mimeType = 'application/zip' or mimeType = 'application/x-rar-compressed' or mimeType = 'application/x-tar' or mimeType = 'application/gzip' or mimeType = 'application/x-7z-compressed' or mimeType = 'application/epub+zip')"
-
+		return " and (mimeType = 'application/zip' or mimeType = 'application/x-rar-compressed' or mimeType = 'application/x-tar' or mimeType = 'application/gzip' or mimeType = 'application/x-7z-compressed' or mimeType = 'application/epub+zip' or mimeType = 'application/x-bzip2' or mimeType = 'application/x-bzip' or mimeType = 'application/java-archive' or mimeType = 'application/vnd.android.package-archive' or mimeType = 'application/x-deb' or mimeType = 'application/x-rpm' or mimeType = 'application/x-apple-diskimage' or mimeType = 'application/vnd.ms-cab-compressed' or mimeType = 'application/x-lzh-compressed' or mimeType = 'application/x-compress' or mimeType = 'application/x-ace-compressed' or mimeType = 'application/x-arj' or mimeType = 'application/x-cpio')"
 	case "code":
 		return " and (mimeType = 'text/css' or mimeType = 'text/html' or mimeType = 'text/php' or mimeType = 'text/x-c' or mimeType = 'text/x-c++' or mimeType = 'text/x-h' or mimeType = 'text/javascript' or mimeType = 'text/x-java-source' or mimeType = 'text/x-python' or mimeType = 'text/x-sql' or mimeType = 'text/xml' or mimeType = 'application/json' or mimeType = 'text/markdown' or mimeType = 'text/csv' or mimeType = 'text/tab-separated-values')"
 
