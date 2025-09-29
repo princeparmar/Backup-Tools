@@ -207,7 +207,8 @@ func (storage *PosgresStore) MissedHeartbeatForTask() error {
 	// update status to failed and message to "missed heartbeat"
 	// and for job set message to process got stuck because of some reason
 	// and message status to error
-	tx := storage.DB.Begin().Debug()
+	tx := storage.DB.Begin()
+	logger.Info("Starting transaction for missed heartbeat check")
 
 	var tasks []TaskListingDB
 	db := tx.Clauses(clause.Locking{Strength: "UPDATE"}).

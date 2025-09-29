@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"net/http"
+	"os"
 
 	googlepack "github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/logger"
@@ -17,8 +18,10 @@ func StartServer(db *storage.PosgresStore, address string) {
 	e := echo.New()
 	e.HideBanner = true
 
-	// Enable logging middleware
-	e.Use(middleware.Logger())
+	// Enable logging middleware based on environment variable
+	if os.Getenv("HTTP_LOGGING") == "true" {
+		e.Use(middleware.Logger())
+	}
 
 	// Enable recovery middleware to handle panics and return a 500
 	e.Use(middleware.Recover())

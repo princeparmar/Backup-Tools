@@ -10,7 +10,7 @@ import (
 func TestConnect(t *testing.T) {
 	dsn := os.Getenv("POSTGRES_DSN")
 
-	postgres, _ := NewPostgresStore(dsn)
+	postgres, _ := NewPostgresStore(dsn, false)
 	var res GoogleAuthStorage
 	postgres.DB.Where("cookie = ?", "cookie1234").First(&res)
 	logger.Info("res", logger.Any("res", res))

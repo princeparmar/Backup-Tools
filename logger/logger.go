@@ -9,12 +9,12 @@ import (
 
 // Logger interface defines the logging methods
 type Logger interface {
-	Debug(msg string, fields ...zap.Field)
-	Info(msg string, fields ...zap.Field)
-	Warn(msg string, fields ...zap.Field)
-	Error(msg string, fields ...zap.Field)
-	Fatal(msg string, fields ...zap.Field)
-	With(fields ...zap.Field) Logger
+	Debug(msg string, fields ...Field)
+	Info(msg string, fields ...Field)
+	Warn(msg string, fields ...Field)
+	Error(msg string, fields ...Field)
+	Fatal(msg string, fields ...Field)
+	With(fields ...Field) Logger
 	Sync() error
 }
 
@@ -100,32 +100,32 @@ func L() Logger {
 }
 
 // Debug logs a debug message
-func Debug(msg string, fields ...zap.Field) {
+func Debug(msg string, fields ...Field) {
 	L().Debug(msg, fields...)
 }
 
 // Info logs an info message
-func Info(msg string, fields ...zap.Field) {
+func Info(msg string, fields ...Field) {
 	L().Info(msg, fields...)
 }
 
 // Warn logs a warning message
-func Warn(msg string, fields ...zap.Field) {
+func Warn(msg string, fields ...Field) {
 	L().Warn(msg, fields...)
 }
 
 // Error logs an error message
-func Error(msg string, fields ...zap.Field) {
+func Error(msg string, fields ...Field) {
 	L().Error(msg, fields...)
 }
 
 // Fatal logs a fatal message and exits
-func Fatal(msg string, fields ...zap.Field) {
+func Fatal(msg string, fields ...Field) {
 	L().Fatal(msg, fields...)
 }
 
 // With creates a child logger with the specified fields
-func With(fields ...zap.Field) Logger {
+func With(fields ...Field) Logger {
 	return L().With(fields...)
 }
 
@@ -135,52 +135,52 @@ func Sync() error {
 }
 
 // Field creation functions - these wrap zap field functions
-func String(key string, val string) zap.Field {
+func String(key string, val string) Field {
 	return zap.String(key, val)
 }
 
-func Int(key string, val int) zap.Field {
+func Int(key string, val int) Field {
 	return zap.Int(key, val)
 }
 
-func Int64(key string, val int64) zap.Field {
+func Int64(key string, val int64) Field {
 	return zap.Int64(key, val)
 }
 
-func Bool(key string, val bool) zap.Field {
+func Bool(key string, val bool) Field {
 	return zap.Bool(key, val)
 }
 
-func Any(key string, val interface{}) zap.Field {
+func Any(key string, val interface{}) Field {
 	return zap.Any(key, val)
 }
 
-func ErrorField(err error) zap.Field {
+func ErrorField(err error) Field {
 	return zap.Error(err)
 }
 
 // Implementation of Logger interface methods
-func (l *loggerImpl) Debug(msg string, fields ...zap.Field) {
+func (l *loggerImpl) Debug(msg string, fields ...Field) {
 	l.zapLogger.Debug(msg, fields...)
 }
 
-func (l *loggerImpl) Info(msg string, fields ...zap.Field) {
+func (l *loggerImpl) Info(msg string, fields ...Field) {
 	l.zapLogger.Info(msg, fields...)
 }
 
-func (l *loggerImpl) Warn(msg string, fields ...zap.Field) {
+func (l *loggerImpl) Warn(msg string, fields ...Field) {
 	l.zapLogger.Warn(msg, fields...)
 }
 
-func (l *loggerImpl) Error(msg string, fields ...zap.Field) {
+func (l *loggerImpl) Error(msg string, fields ...Field) {
 	l.zapLogger.Error(msg, fields...)
 }
 
-func (l *loggerImpl) Fatal(msg string, fields ...zap.Field) {
+func (l *loggerImpl) Fatal(msg string, fields ...Field) {
 	l.zapLogger.Fatal(msg, fields...)
 }
 
-func (l *loggerImpl) With(fields ...zap.Field) Logger {
+func (l *loggerImpl) With(fields ...Field) Logger {
 	return &loggerImpl{zapLogger: l.zapLogger.With(fields...)}
 }
 

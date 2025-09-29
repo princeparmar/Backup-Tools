@@ -20,7 +20,9 @@ func main() {
 
 	dsn := os.Getenv("POSTGRES_DSN")
 
-	storage, err := storage.NewPostgresStore(dsn)
+	querylogging := os.Getenv("QUERY_LOGGING") == "true"
+
+	storage, err := storage.NewPostgresStore(dsn, querylogging)
 	if err != nil {
 		logger.Error("error starting the postgress store", zap.Error(err))
 		logger.Warn("exiting...")

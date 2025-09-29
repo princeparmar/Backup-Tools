@@ -1,9 +1,14 @@
 package storage
 
 import (
+	"log"
+	"os"
+	"time"
+
 	"golang.org/x/oauth2"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 type PosgresStore struct {
@@ -30,8 +35,28 @@ type QuickbooksAuthStorage struct {
 	Token  string
 }
 
-func NewPostgresStore(dsn string) (*PosgresStore, error) {
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+func NewPostgresStore(dsn string, querylogging bool) (*PosgresStore, error) {
+	// Configure GORM logger based on querylogging parameter
+	var logLevel logger.LogLevel
+	if querylogging {
+		logLevel = logger.Info // Enable SQL query logging
+	} else {
+		logLevel = logger.Silent // Disable SQL query logging
+	}
+
+	newLogger := logger.New(
+		log.New(os.Stdout, "\r\n", log.LstdFlags),
+		logger.Config{
+			SlowThreshold:             time.Second,
+			LogLevel:                  logLevel,
+			IgnoreRecordNotFoundError: true,
+			Colorful:                  true,
+		},
+	)
+
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger: newLogger,
+	})
 	if err != nil {
 		return nil, err
 	}
