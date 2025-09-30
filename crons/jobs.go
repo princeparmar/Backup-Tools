@@ -213,7 +213,13 @@ func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *sto
 
 		var emailMessage string = err.Error() // default
 
-		if strings.Contains(err.Error(), "googleapi: Error 401") {
+		// Check if job has no StorX token and deactivate it
+		if job.StorxToken == "" {
+			job.Active = false
+			job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
+			task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
+			emailMessage = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
+		} else if strings.Contains(err.Error(), "googleapi: Error 401") {
 			if task.RetryCount == storage.MaxRetryCount-1 {
 				job.InputData["refresh_token"] = ""
 				job.Active = false
@@ -231,6 +237,12 @@ func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *sto
 			job.Active = false
 			task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
 			emailMessage = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
+		} else {
+			// For any other error, deactivate the job immediately
+			job.Active = false
+			job.Message = "Automatic backup failed. Please check the configuration and reactivate."
+			task.Message = "Task failed. Job has been deactivated."
+			emailMessage = "Automatic backup failed. Please check the configuration and reactivate the backup."
 		}
 
 		// Send the appropriate error message once
