@@ -218,31 +218,37 @@ func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *sto
 			job.Active = false
 			job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
 			task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
-			emailMessage = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
+			emailMessage = "Your automatic backup has been temporarily disabled due to insufficient permissions. Please update your StorX permissions and reactivate the backup from your dashboard."
 		} else if strings.Contains(err.Error(), "googleapi: Error 401") {
 			if task.RetryCount == storage.MaxRetryCount-1 {
 				job.InputData["refresh_token"] = ""
 				job.Active = false
 				job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
 				task.Message = "Google Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
-				emailMessage = "Google Credentials are invalid. Please update the credentials and reactivate the automatic backup"
+				emailMessage = "Your automatic backup has been temporarily disabled due to invalid Google credentials. Please update your Google account permissions and reactivate the backup from your dashboard."
 			} else {
 				job.Message = "Invalid google credentials. Retrying..."
 				task.Message = "Google Credentials are invalid. Retrying..."
-				emailMessage = "Google Credentials are invalid. Retrying..."
+				emailMessage = "Your automatic backup encountered an authentication issue with Google. We're retrying the backup automatically."
 			}
 		} else if strings.Contains(err.Error(), "uplink: permission") || strings.Contains(err.Error(), "uplink: invalid access") {
 			job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
 			job.StorxToken = ""
 			job.Active = false
 			task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
-			emailMessage = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
+			emailMessage = "Your automatic backup has been temporarily disabled due to insufficient StorX permissions. Please update your StorX permissions and reactivate the backup from your dashboard."
+		} else if strings.Contains(err.Error(), "could not create bucket") || strings.Contains(err.Error(), "tcp connector failed") || strings.Contains(err.Error(), "connection attempt failed") {
+			// Network/connection errors
+			job.Active = false
+			job.Message = "Automatic backup failed due to network issues. Please check your connection and reactivate."
+			task.Message = "Task failed due to network connectivity issues. Job has been deactivated."
+			emailMessage = "Your automatic backup has been temporarily disabled due to network connectivity issues. Please check your internet connection and reactivate the backup from your dashboard."
 		} else {
 			// For any other error, deactivate the job immediately
 			job.Active = false
 			job.Message = "Automatic backup failed. Please check the configuration and reactivate."
 			task.Message = "Task failed. Job has been deactivated."
-			emailMessage = "Automatic backup failed. Please check the configuration and reactivate the backup."
+			emailMessage = "Your automatic backup has been temporarily disabled due to a technical issue. Please check your backup configuration and reactivate from your dashboard."
 		}
 
 		// Send the appropriate error message once
