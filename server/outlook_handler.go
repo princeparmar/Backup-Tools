@@ -1,10 +1,10 @@
 package server
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -21,58 +21,102 @@ type OutlookMessageListJSON struct {
 	Synced bool `json:"synced"`
 }
 
-func handleOutlookGetMessages(c echo.Context) error {
+// getAccessTokens extracts and validates access tokens from request
+func getAccessTokens(c echo.Context) (accessGrant, accessToken string, err error) {
+	accessGrant = c.Request().Header.Get("ACCESS_TOKEN")
+	accessToken = c.Request().Header.Get("Authorization")
 
-	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accessGrant == "" {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "access token not found",
-		})
+	if accessGrant == "" || accessToken == "" {
+		return "", "", echo.NewHTTPError(http.StatusForbidden, "ACCESS_TOKEN and Authorization headers are required")
 	}
 
-	accessToken := c.Request().Header.Get("Authorization")
-	if accessToken == "" {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "access token not found",
-		})
+	// Remove "Bearer " prefix if present
+	accessToken = strings.TrimPrefix(accessToken, "Bearer ")
+	return accessGrant, accessToken, nil
+}
+
+// parseMessageIDs parses message IDs from request body or form
+func parseMessageIDs(c echo.Context) ([]string, error) {
+	var ids []string
+
+	if strings.Contains(c.Request().Header.Get(echo.HeaderContentType), echo.MIMEApplicationJSON) {
+		if err := json.NewDecoder(c.Request().Body).Decode(&ids); err != nil {
+			return nil, echo.NewHTTPError(http.StatusBadRequest, "invalid JSON format")
+		}
+	} else {
+		formIDs := c.FormValue("ids")
+		ids = strings.Split(formIDs, ",")
+	}
+
+	// Clean and decode IDs
+	for i := range ids {
+		ids[i] = strings.TrimSpace(ids[i])
+
+		// URL decode
+		if urlDecoded, err := url.QueryUnescape(ids[i]); err == nil {
+			ids[i] = urlDecoded
+		}
+
+		// Base64 decode
+		if decoded, err := base64.StdEncoding.DecodeString(ids[i]); err == nil {
+			ids[i] = string(decoded)
+		}
+	}
+
+	return ids, nil
+}
+
+// createOutlookClient creates a new Outlook client using the access token
+func createOutlookClient(accessToken string) (*outlook.OutlookClient, error) {
+	client, err := outlook.NewOutlookClientUsingToken(accessToken)
+	if err != nil {
+		return nil, echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return client, nil
+}
+
+func handleOutlookGetMessages(c echo.Context) error {
+	ctx := c.Request().Context()
+
+	accessGrant, accessToken, err := getAccessTokens(c)
+	if err != nil {
+		return err
 	}
 
 	skip, _ := strconv.Atoi(c.QueryParam("offset"))
 	limit, _ := strconv.Atoi(c.QueryParam("limit"))
 
-	client, err := outlook.NewOutlookClientUsingToken(accessToken)
+	client, err := createOutlookClient(accessToken)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"error": err.Error(),
-		})
+		return err
 	}
 
 	messages, err := client.GetUserMessages(int32(skip), int32(limit))
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"error": err.Error(),
-		})
+		logger.Error(ctx, "Failed to get user messages from Outlook", logger.ErrorField(err))
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 
 	userDetails, err := client.GetCurrentUser()
 	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
-		})
+		logger.Error(ctx, "Failed to get current user details", logger.ErrorField(err))
+		return echo.NewHTTPError(http.StatusForbidden, err.Error())
 	}
 
-	emailListFromBucket, err := satellite.ListObjectsWithPrefix(context.Background(),
+	emailListFromBucket, err := satellite.ListObjectsWithPrefix(ctx,
 		accessGrant, satellite.ReserveBucket_Outlook, userDetails.Mail+"/")
 	if err != nil && !strings.Contains(err.Error(), "object not found") {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
-		})
+		logger.Error(ctx, "Failed to list objects from satellite", logger.ErrorField(err))
+		return echo.NewHTTPError(http.StatusForbidden, err.Error())
 	}
 
 	outlookMessages := make([]*OutlookMessageListJSON, 0, len(messages))
 	for _, message := range messages {
 		_, synced := emailListFromBucket[userDetails.Mail+"/"+utils.GenerateTitleFromOutlookMessage(message)]
-		outlookMessages = append(outlookMessages, &OutlookMessageListJSON{OutlookMinimalMessage: *message, Synced: synced})
+		outlookMessages = append(outlookMessages, &OutlookMessageListJSON{
+			OutlookMinimalMessage: *message,
+			Synced:                synced,
+		})
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
@@ -81,35 +125,21 @@ func handleOutlookGetMessages(c echo.Context) error {
 }
 
 func handleOutlookGetMessageById(c echo.Context) error {
-
-	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accessGrant == "" {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "access token not found",
-		})
-	}
-
-	accessToken := c.Request().Header.Get("Authorization")
-	if accessToken == "" {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "access token not found",
-		})
+	// FIX: Use blank identifier for unused accessGrant
+	_, accessToken, err := getAccessTokens(c)
+	if err != nil {
+		return err
 	}
 
 	msgID := c.Param("id")
-
-	client, err := outlook.NewOutlookClientUsingToken(accessToken)
+	client, err := createOutlookClient(accessToken)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"error": err.Error(),
-		})
+		return err
 	}
 
 	message, err := client.GetMessage(msgID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"error": err.Error(),
-		})
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
@@ -118,229 +148,154 @@ func handleOutlookGetMessageById(c echo.Context) error {
 }
 
 func handleListOutlookMessagesToSatellite(c echo.Context) error {
-	// Get access tokens
-	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accessGrant == "" {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "access token not found",
-		})
-	}
-
-	accessToken := c.Request().Header.Get("Authorization")
-	if accessToken == "" {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "access token not found",
-		})
-	}
-
-	// Parse message IDs from request
-	var allIDs []string
-	if strings.Contains(c.Request().Header.Get(echo.HeaderContentType), echo.MIMEApplicationJSON) {
-		if err := json.NewDecoder(c.Request().Body).Decode(&allIDs); err != nil {
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"error": "invalid JSON format",
-			})
-		}
-	} else {
-		formIDs := c.FormValue("ids")
-		allIDs = strings.Split(formIDs, ",")
-	}
-
-	// Create Outlook client
-	client, err := outlook.NewOutlookClientUsingToken(accessToken)
+	accessGrant, accessToken, err := getAccessTokens(c)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"error": err.Error(),
-		})
+		return err
 	}
 
-	// Get user details
+	allIDs, err := parseMessageIDs(c)
+	if err != nil {
+		return err
+	}
+
+	client, err := createOutlookClient(accessToken)
+	if err != nil {
+		return err
+	}
+
 	userDetails, err := client.GetCurrentUser()
 	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
-		})
+		return echo.NewHTTPError(http.StatusForbidden, err.Error())
 	}
 
-	// Create error group for concurrent processing
-	g, ctx := errgroup.WithContext(c.Request().Context())
-	g.SetLimit(10)
+	return processMessagesConcurrently(c, allIDs, func(echoCtx echo.Context, id string) error {
+		// FIX: Use the echo context parameter
+		reqCtx := echoCtx.Request().Context()
+		msg, err := client.GetMessage(id)
+		if err != nil {
+			logger.Error(reqCtx, "Failed to get message from Outlook",
+				logger.ErrorField(err), logger.String("id", id))
+			return err
+		}
 
-	processedIDs, failedIDs := utils.NewLockedArray(), utils.NewLockedArray()
+		b, err := json.Marshal(msg)
+		if err != nil {
+			logger.Error(reqCtx, "Failed to marshal message to JSON",
+				logger.ErrorField(err), logger.String("id", id))
+			return err
+		}
 
-	// Process each message
-	for _, id := range allIDs {
-		func(id string) {
-			g.Go(func() error {
-				// Get full message with attachments
-				msg, err := client.GetMessage(id)
-				if err != nil {
-					failedIDs.Add(id)
-					return nil
-				}
+		messagePath := userDetails.Mail + "/" + utils.GenerateTitleFromOutlookMessage(&msg.OutlookMinimalMessage)
+		err = satellite.UploadObject(reqCtx, accessGrant, satellite.ReserveBucket_Outlook, messagePath, b)
+		if err != nil {
+			logger.Error(reqCtx, "Failed to upload message to satellite",
+				logger.ErrorField(err), logger.String("id", id), logger.String("path", messagePath))
+			return err
+		}
 
-				// Marshal message to JSON
-				b, err := json.Marshal(msg)
-				if err != nil {
-					failedIDs.Add(id)
-					return nil
-				}
-
-				// Create message path
-				messagePath := userDetails.Mail + "/" + utils.GenerateTitleFromOutlookMessage(&msg.OutlookMinimalMessage)
-
-				// Upload to Satellite
-				err = satellite.UploadObject(ctx, accessGrant, satellite.ReserveBucket_Outlook, messagePath, b)
-				if err != nil {
-					failedIDs.Add(id)
-					return nil
-				}
-
-				processedIDs.Add(id)
-				return nil
-			})
-		}(id)
-	}
-
-	message := "all mails were successfully uploaded from Outlook to Satellite"
-	if failedIDs.Get() != nil {
-		message = "some mails were not uploaded from Outlook to Satellite"
-	}
-
-	if err := g.Wait(); err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error":         err.Error(),
-			"failed_ids":    failedIDs.Get(),
-			"processed_ids": processedIDs.Get(),
-		})
-	}
-
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":       message,
-		"failed_ids":    failedIDs.Get(),
-		"processed_ids": processedIDs.Get(),
+		return nil
 	})
 }
 
 func handleOutlookDownloadAndInsert(c echo.Context) error {
-	// Get access token from header
-	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accessGrant == "" {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "access token not found",
-		})
+	accessGrant, accessToken, err := getAccessTokens(c)
+	if err != nil {
+		return err
 	}
 
-	accessToken := c.Request().Header.Get("Authorization")
-	if accessToken == "" {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "access token not found",
-		})
+	allIDs, err := parseMessageIDs(c)
+	if err != nil {
+		return err
 	}
 
-	// Parse message keys from request
-	var allIDs []string
-	if strings.Contains(c.Request().Header.Get(echo.HeaderContentType), echo.MIMEApplicationJSON) {
-		if err := json.NewDecoder(c.Request().Body).Decode(&allIDs); err != nil {
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"error": "invalid JSON format",
-			})
-		}
-	} else {
-		formIDs := c.FormValue("ids")
-		allIDs = strings.Split(formIDs, ",")
-	}
-
-	for i := range allIDs {
-		allIDs[i] = strings.TrimSpace(allIDs[i])
-		decodedID, err := base64.StdEncoding.DecodeString(allIDs[i])
-		if err != nil {
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"error": "invalid base64 format",
-			})
-		}
-		allIDs[i] = string(decodedID)
-	}
-
-	// Validate request
 	if len(allIDs) == 0 || allIDs[0] == "" {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"error": "no keys provided",
-		})
+		return echo.NewHTTPError(http.StatusBadRequest, "no keys provided")
 	}
 	if len(allIDs) > 10 {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"error": "maximum 10 keys allowed",
-		})
+		return echo.NewHTTPError(http.StatusBadRequest, "maximum 10 keys allowed")
 	}
 
-	// Create Outlook client
-	client, err := outlook.NewOutlookClientUsingToken(accessToken)
+	client, err := createOutlookClient(accessToken)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"error": err.Error(),
-		})
+		return err
 	}
 
-	g, ctx := errgroup.WithContext(c.Request().Context())
+	return processMessagesConcurrently(c, allIDs, func(echoCtx echo.Context, key string) error {
+		// FIX: Use the echo context parameter
+		reqCtx := echoCtx.Request().Context()
+		userDetails, err := client.GetCurrentUser()
+		if err != nil {
+			logger.Error(reqCtx, "Failed to get user details", logger.ErrorField(err))
+			return err
+		}
+
+		msg, err := client.GetMessage(key)
+		if err != nil {
+			logger.Error(reqCtx, "Failed to get message details for key generation",
+				logger.ErrorField(err), logger.String("key", key))
+			return err
+		}
+
+		satelliteKey := userDetails.Mail + "/" + utils.GenerateTitleFromOutlookMessage(&msg.OutlookMinimalMessage)
+		data, err := satellite.DownloadObject(reqCtx, accessGrant, satellite.ReserveBucket_Outlook, satelliteKey)
+		if err != nil {
+			logger.Error(reqCtx, "error downloading message from satellite",
+				logger.ErrorField(err), logger.String("key", key))
+			return err
+		}
+
+		var outlookMsg outlook.OutlookMessage
+		if err := json.Unmarshal(data, &outlookMsg); err != nil {
+			logger.Error(reqCtx, "error unmarshalling message data",
+				logger.ErrorField(err), logger.String("key", key))
+			return err
+		}
+
+		_, err = client.InsertMessage(&outlookMsg)
+		if err != nil {
+			logger.Error(reqCtx, "error inserting message into Outlook",
+				logger.ErrorField(err), logger.String("key", key))
+			return err
+		}
+
+		return nil
+	})
+}
+
+// processMessagesConcurrently handles concurrent message processing with error tracking
+func processMessagesConcurrently(c echo.Context, ids []string, processor func(echo.Context, string) error) error {
+	g, _ := errgroup.WithContext(c.Request().Context())
 	g.SetLimit(10)
 
 	processedIDs, failedIDs := utils.NewLockedArray(), utils.NewLockedArray()
 
-	for _, key := range allIDs {
-		key := key
-		if key == "" {
+	for _, id := range ids {
+		if id == "" {
 			continue
 		}
 
+		id := id
 		g.Go(func() error {
-			// Download file from Satellite
-			data, err := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Outlook, key)
-			if err != nil {
-				logger.Info(ctx, "error downloading message",
-					logger.ErrorField(err),
-					logger.String("key", key))
-				failedIDs.Add(key)
-				return nil
+			if err := processor(c, id); err != nil {
+				failedIDs.Add(id)
+				return nil // Don't return error to continue processing other messages
 			}
-
-			// Parse the email data
-			var outlookMsg outlook.OutlookMessage
-			if err := json.Unmarshal(data, &outlookMsg); err != nil {
-				logger.Info(ctx, "error unmarshalling message",
-					logger.ErrorField(err),
-					logger.String("key", key))
-				failedIDs.Add(key)
-				return nil
-			}
-
-			// Insert message into Outlook
-			_, err = client.InsertMessage(&outlookMsg)
-			if err != nil {
-				logger.Info(ctx, "error inserting message",
-					logger.ErrorField(err),
-					logger.String("key", key))
-				failedIDs.Add(key)
-			} else {
-				logger.Info(ctx, "message processed successfully",
-					logger.String("key", key))
-				processedIDs.Add(key)
-			}
+			processedIDs.Add(id)
 			return nil
 		})
 	}
 
-	message := "all outlook messages processed"
-	if failedIDs.Get() != nil {
-		message = "some outlook messages were not processed"
-	}
-
 	if err := g.Wait(); err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"error":         err.Error(),
 			"failed_ids":    failedIDs.Get(),
 			"processed_ids": processedIDs.Get(),
 		})
+	}
+
+	message := "all messages processed successfully"
+	if len(failedIDs.Get()) > 0 {
+		message = "some messages failed to process"
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{

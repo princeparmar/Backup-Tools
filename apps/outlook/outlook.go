@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	abs "github.com/microsoft/kiota-abstractions-go"
 	msgraph "github.com/microsoftgraph/msgraph-sdk-go"
@@ -30,21 +31,31 @@ func NewOutlookClientUsingToken(accessToken string) (*OutlookClient, error) {
 	authProvider := &BearerTokenAuthenticationProvider{accessToken: accessToken}
 	adapter, err := msgraph.NewGraphRequestAdapter(authProvider)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create Graph request adapter: %w", err)
 	}
 	client := msgraph.NewGraphServiceClient(adapter)
 	return &OutlookClient{client}, nil
 }
 
 func (client *OutlookClient) GetCurrentUser() (*OutlookUser, error) {
-	user, err := client.Me().Get(context.Background(), nil)
+	user, err := client.Me().Get(context.Background(), &users.UserItemRequestBuilderGetRequestConfiguration{
+		QueryParameters: &users.UserItemRequestBuilderGetQueryParameters{
+			Select: []string{"id", "displayName", "mail", "userPrincipalName"},
+		},
+	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get user from Microsoft Graph API: %w", err)
 	}
 
 	u := NewOutlookUser(user)
-	if u == nil || u.ID == "" || u.Mail == "" {
-		return nil, errors.New("user is nil")
+	if u == nil {
+		return nil, errors.New("NewOutlookUser returned nil")
+	}
+	if u.ID == "" {
+		return nil, errors.New("user ID is empty")
+	}
+	if u.Mail == "" {
+		return nil, errors.New("user email is empty")
 	}
 
 	return u, nil
@@ -52,33 +63,30 @@ func (client *OutlookClient) GetCurrentUser() (*OutlookUser, error) {
 
 // GetUserMessages retrieves messages from Outlook with pagination support
 func (client *OutlookClient) GetUserMessages(skip, limit int32) ([]*OutlookMinimalMessage, error) {
-	requestBuilder := client.Me().Messages()
-
 	if limit > 100 || limit < 1 {
 		limit = 100
 	}
-
 	if skip < 0 {
 		skip = 0
 	}
 
-	// Set up request parameters with expanded fields
 	query := users.ItemMessagesRequestBuilderGetQueryParameters{
-		Top:    int32Ptr(limit),
-		Skip:   int32Ptr(skip),
-		Select: []string{"id", "subject", "from", "receivedDateTime"},
+		Top:     int32Ptr(limit),
+		Skip:    int32Ptr(skip),
+		Select:  []string{"id", "subject", "from", "receivedDateTime", "isRead", "hasAttachments"},
+		Orderby: []string{"receivedDateTime DESC"},
 	}
 
 	configuration := users.ItemMessagesRequestBuilderGetRequestConfiguration{
 		QueryParameters: &query,
 	}
 
-	result, err := requestBuilder.Get(context.Background(), &configuration)
+	result, err := client.Me().Messages().Get(context.Background(), &configuration)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get user messages: %w", err)
 	}
 
-	outlookMessages := make([]*OutlookMinimalMessage, 0)
+	outlookMessages := make([]*OutlookMinimalMessage, 0, len(result.GetValue()))
 	for _, message := range result.GetValue() {
 		outlookMessages = append(outlookMessages, NewOutlookMinimalMessage(message))
 	}
@@ -86,30 +94,33 @@ func (client *OutlookClient) GetUserMessages(skip, limit int32) ([]*OutlookMinim
 	return outlookMessages, nil
 }
 
-func (client *OutlookClient) GetMessageWithDetail(skip, limit int32) ([]*OutlookMessage, error) {
-	requestBuilder := client.Me().Messages()
-
-	if limit > 100 || limit < 1 {
-		limit = 100
+// GetMessageWithDetails retrieves detailed messages with attachments
+func (client *OutlookClient) GetMessageWithDetails(skip, limit int32) ([]*OutlookMessage, error) {
+	if limit > 50 || limit < 1 { // Reduced limit for detailed requests
+		limit = 50
+	}
+	if skip < 0 {
+		skip = 0
 	}
 
 	query := users.ItemMessagesRequestBuilderGetQueryParameters{
-		Top:    int32Ptr(limit),
-		Skip:   int32Ptr(skip),
-		Select: []string{"subject", "body", "from", "toRecipients", "receivedDateTime", "ccRecipients", "bccRecipients", "attachments"},
-		Expand: []string{"attachments"},
+		Top:     int32Ptr(limit),
+		Skip:    int32Ptr(skip),
+		Select:  []string{"subject", "body", "from", "toRecipients", "receivedDateTime", "ccRecipients", "bccRecipients", "attachments", "isRead", "importance"},
+		Expand:  []string{"attachments"},
+		Orderby: []string{"receivedDateTime DESC"},
 	}
 
 	configuration := users.ItemMessagesRequestBuilderGetRequestConfiguration{
 		QueryParameters: &query,
 	}
 
-	result, err := requestBuilder.Get(context.Background(), &configuration)
+	result, err := client.Me().Messages().Get(context.Background(), &configuration)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get detailed messages: %w", err)
 	}
 
-	outlookMessages := make([]*OutlookMessage, 0)
+	outlookMessages := make([]*OutlookMessage, 0, len(result.GetValue()))
 	for _, message := range result.GetValue() {
 		outlookMessages = append(outlookMessages, NewOutlookMessage(message))
 	}
@@ -117,64 +128,65 @@ func (client *OutlookClient) GetMessageWithDetail(skip, limit int32) ([]*Outlook
 	return outlookMessages, nil
 }
 
+// GetMessage retrieves a specific message by ID
 func (client *OutlookClient) GetMessage(msgID string) (*OutlookMessage, error) {
+	if msgID == "" {
+		return nil, errors.New("message ID cannot be empty")
+	}
+
 	msg, err := client.Me().Messages().ByMessageId(msgID).Get(context.Background(), &users.ItemMessagesMessageItemRequestBuilderGetRequestConfiguration{
 		QueryParameters: &users.ItemMessagesMessageItemRequestBuilderGetQueryParameters{
-			Select: []string{"subject", "body", "from", "toRecipients", "receivedDateTime", "ccRecipients", "bccRecipients",
-				"attachments", "internetMessageHeaders", "internetMessageId"},
+			Select: []string{
+				"subject", "body", "from", "toRecipients", "receivedDateTime",
+				"ccRecipients", "bccRecipients", "attachments", "internetMessageHeaders",
+				"internetMessageId", "isRead", "importance", "conversationId",
+			},
 			Expand: []string{"attachments"},
 		},
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get message %s: %w", msgID, err)
 	}
 
 	return NewOutlookMessage(msg), nil
 }
 
-func (client *OutlookClient) GetAttachment(msgID string, attID string) (*OutlookAttachment, error) {
+// GetAttachment retrieves a specific attachment
+func (client *OutlookClient) GetAttachment(msgID, attID string) (*OutlookAttachment, error) {
+	if msgID == "" || attID == "" {
+		return nil, errors.New("message ID and attachment ID cannot be empty")
+	}
+
 	att, err := client.Me().Messages().ByMessageId(msgID).Attachments().ByAttachmentId(attID).Get(context.Background(), nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get attachment %s for message %s: %w", attID, msgID, err)
 	}
 
 	return NewOutlookAttachment(att), nil
 }
 
-// Helper function to create int32 pointer
-func int32Ptr(i int32) *int32 {
-	return &i
-}
-
 // InsertMessage inserts a message into Outlook
 func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Messageable, error) {
-	// Create message request body
+	if message == nil {
+		return nil, errors.New("message cannot be nil")
+	}
+
 	messageRequest := models.NewMessage()
 	messageRequest.SetSubject(stringPointer(message.Subject))
 
 	// Set body content
 	body := models.NewItemBody()
 	body.SetContent(stringPointer(message.Body))
-	body.SetContentType(message.ContentType)
-	if message.ODataType != nil {
-		body.SetOdataType(message.ODataType)
+	if message.ContentType != nil {
+		body.SetContentType(message.ContentType)
 	} else {
-		body.SetOdataType(stringPointer("#microsoft.graph.itemBody"))
+		textType := models.TEXT_BODYTYPE
+		body.SetContentType(&textType)
 	}
+	body.SetOdataType(stringPointer("#microsoft.graph.itemBody"))
 	messageRequest.SetBody(body)
 
-	// internetMessageHeaders := make([]models.InternetMessageHeaderable, 0, len(message.InternetMessageHeaders))
-	// for k, v := range message.InternetMessageHeaders {
-	// 	internetMessageHeader := models.NewInternetMessageHeader()
-	// 	internetMessageHeader.SetName(stringPointer(k))
-	// 	internetMessageHeader.SetValue(stringPointer(v))
-	// 	internetMessageHeaders = append(internetMessageHeaders, internetMessageHeader)
-	// }
-
-	// if len(internetMessageHeaders) > 0 {
-	// 	messageRequest.SetInternetMessageHeaders(internetMessageHeaders)
-	// }
-
+	// Set internet message ID if available
 	if message.InternetMessageID != "" {
 		messageRequest.SetInternetMessageId(stringPointer(message.InternetMessageID))
 	}
@@ -192,11 +204,13 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 	if len(message.ToRecipients) > 0 {
 		toRecipients := make([]models.Recipientable, 0, len(message.ToRecipients))
 		for _, addr := range message.ToRecipients {
-			recipient := models.NewRecipient()
-			emailAddress := models.NewEmailAddress()
-			emailAddress.SetAddress(stringPointer(addr))
-			recipient.SetEmailAddress(emailAddress)
-			toRecipients = append(toRecipients, recipient)
+			if addr != "" {
+				recipient := models.NewRecipient()
+				emailAddress := models.NewEmailAddress()
+				emailAddress.SetAddress(stringPointer(addr))
+				recipient.SetEmailAddress(emailAddress)
+				toRecipients = append(toRecipients, recipient)
+			}
 		}
 		messageRequest.SetToRecipients(toRecipients)
 	}
@@ -205,39 +219,72 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 	if len(message.CcRecipients) > 0 {
 		ccRecipients := make([]models.Recipientable, 0, len(message.CcRecipients))
 		for _, addr := range message.CcRecipients {
-			recipient := models.NewRecipient()
-			emailAddress := models.NewEmailAddress()
-			emailAddress.SetAddress(stringPointer(addr))
-			recipient.SetEmailAddress(emailAddress)
-			ccRecipients = append(ccRecipients, recipient)
+			if addr != "" {
+				recipient := models.NewRecipient()
+				emailAddress := models.NewEmailAddress()
+				emailAddress.SetAddress(stringPointer(addr))
+				recipient.SetEmailAddress(emailAddress)
+				ccRecipients = append(ccRecipients, recipient)
+			}
 		}
 		messageRequest.SetCcRecipients(ccRecipients)
 	}
 
-	attachments := make([]models.Attachmentable, 0)
-	// Add attachments if present
+	// Set BCC recipients
+	if len(message.BccRecipients) > 0 {
+		bccRecipients := make([]models.Recipientable, 0, len(message.BccRecipients))
+		for _, addr := range message.BccRecipients {
+			if addr != "" {
+				recipient := models.NewRecipient()
+				emailAddress := models.NewEmailAddress()
+				emailAddress.SetAddress(stringPointer(addr))
+				recipient.SetEmailAddress(emailAddress)
+				bccRecipients = append(bccRecipients, recipient)
+			}
+		}
+		messageRequest.SetBccRecipients(bccRecipients)
+	}
+
+	// Add attachments
 	if len(message.Attachments) > 0 {
+		attachments := make([]models.Attachmentable, 0, len(message.Attachments))
 		for _, attachment := range message.Attachments {
-			fileAttachment := models.NewFileAttachment()
-			fileAttachment.SetName(&attachment.Name)
-			fileAttachment.SetContentType(attachment.ContentType)
-			if attachment.ODataType != nil {
-				fileAttachment.SetOdataType(attachment.ODataType)
-			} else {
-				fileAttachment.SetOdataType(stringPointer("#microsoft.graph.fileAttachment"))
+			if attachment.Name == "" || len(attachment.Data) == 0 {
+				continue // Skip invalid attachments
 			}
 
+			fileAttachment := models.NewFileAttachment()
+			fileAttachment.SetName(&attachment.Name)
+
+			if attachment.ContentType != nil {
+				fileAttachment.SetContentType(attachment.ContentType)
+			} else {
+				contentType := stringPointer("application/octet-stream")
+				fileAttachment.SetContentType(contentType)
+			}
+
+			fileAttachment.SetOdataType(stringPointer("#microsoft.graph.fileAttachment"))
 			fileAttachment.SetContentBytes(attachment.Data)
+			fileAttachment.SetSize(int32Ptr(int32(len(attachment.Data))))
 
 			attachments = append(attachments, fileAttachment)
 		}
+		messageRequest.SetAttachments(attachments)
 	}
-	messageRequest.SetAttachments(attachments)
+
+	// Set received date time if available
+	if message.ReceivedDateTime != "" {
+		receivedDateTime, err := time.Parse(time.RFC3339, message.ReceivedDateTime)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse received date time: %w", err)
+		}
+		messageRequest.SetReceivedDateTime(&receivedDateTime)
+	}
 
 	// Create the message in drafts
 	createdMessage, err := client.Me().Messages().Post(context.Background(), messageRequest, nil)
 	if err != nil {
-		return nil, fmt.Errorf("error creating message: %v", err)
+		return nil, fmt.Errorf("failed to create message: %w", err)
 	}
 
 	// Move the message to inbox to make it appear as received
@@ -247,8 +294,37 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 	_, err = client.Me().Messages().ByMessageId(*createdMessage.GetId()).
 		Move().Post(context.Background(), req, nil)
 	if err != nil {
-		return nil, fmt.Errorf("error moving message to inbox: %v", err)
+		// Log the error but don't fail the entire operation
+		// The message was created successfully, just not moved
+		return createdMessage, fmt.Errorf("message created but failed to move to inbox: %w", err)
 	}
 
 	return createdMessage, nil
+}
+
+// SendMessage sends a message immediately (without saving to drafts)
+func (client *OutlookClient) SendMessage(message *OutlookMessage) error {
+	if message == nil {
+		return errors.New("message cannot be nil")
+	}
+
+	// First create the message in drafts
+	createdMessage, err := client.InsertMessage(message)
+	if err != nil {
+		return fmt.Errorf("failed to create message for sending: %w", err)
+	}
+
+	// Then send it immediately
+	err = client.Me().Messages().ByMessageId(*createdMessage.GetId()).
+		Send().Post(context.Background(), nil)
+	if err != nil {
+		return fmt.Errorf("failed to send message: %w", err)
+	}
+
+	return nil
+}
+
+// Helper function to create int32 pointer
+func int32Ptr(i int32) *int32 {
+	return &i
 }

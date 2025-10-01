@@ -68,7 +68,7 @@ func (o *outlookProcessor) Run(input ProcessorInput) error {
 	emptyLoopCount := 0
 
 	for {
-		messages, err := outlookClient.GetMessageWithDetail(int32(input.Job.TaskMemory.OutlookSkipCount), int32(OutlookLimit))
+		messages, err := outlookClient.GetMessageWithDetails(int32(input.Job.TaskMemory.OutlookSkipCount), int32(OutlookLimit))
 		if err != nil {
 			return err
 		}
