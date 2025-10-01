@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"strings"
@@ -305,23 +306,25 @@ func handleAutomaticSyncCreateDatabase(c echo.Context) error {
 }
 
 func handleAutomaticBackupUpdate(c echo.Context) error {
-	logger.Info("Starting automatic backup update request")
+
+	ctx := c.Request().Context()
+	logger.Info(ctx, "Starting automatic backup update request")
 
 	// Validate jobID
 	jobID, err := strconv.Atoi(c.Param("job_id"))
 	if err != nil || jobID <= 0 {
-		logger.Error("Invalid job ID provided",
+		logger.Error(ctx, "Invalid job ID provided",
 			logger.String("job_id_param", c.Param("job_id")),
 			logger.ErrorField(err))
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"message": "Invalid Job ID",
 		})
 	}
-	logger.Info("Job ID validated", logger.Int("job_id", jobID))
+	logger.Info(ctx, "Job ID validated", logger.Int("job_id", jobID))
 
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
-		logger.Error("Authentication failed for backup update",
+		logger.Error(ctx, "Authentication failed for backup update",
 			logger.Int("job_id", jobID),
 			logger.ErrorField(err))
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -329,7 +332,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 			"error":   err.Error(),
 		})
 	}
-	logger.Info("User authenticated",
+	logger.Info(ctx, "User authenticated",
 		logger.String("user_id", userID),
 		logger.Int("job_id", jobID))
 
@@ -338,7 +341,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 	// Verify job exists and belongs to user
 	job, err := database.GetJobByIDForUser(userID, uint(jobID))
 	if err != nil {
-		logger.Error("Job not found or access denied",
+		logger.Error(ctx, "Job not found or access denied",
 			logger.String("user_id", userID),
 			logger.Int("job_id", jobID),
 			logger.ErrorField(err))
@@ -347,7 +350,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 			"error":   err.Error(),
 		})
 	}
-	logger.Info("Job retrieved successfully",
+	logger.Info(ctx, "Job retrieved successfully",
 		logger.Int("job_id", jobID),
 		logger.String("job_name", job.Name),
 		logger.String("job_method", job.Method),
@@ -372,7 +375,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 	}
 
 	if err := c.Bind(&reqBody); err != nil {
-		logger.Error("Failed to bind request body",
+		logger.Error(ctx, "Failed to bind request body",
 			logger.Int("job_id", jobID),
 			logger.ErrorField(err))
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -380,7 +383,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 			"error":   err.Error(),
 		})
 	}
-	logger.Info("Request body parsed successfully",
+	logger.Info(ctx, "Request body parsed successfully",
 		logger.Int("job_id", jobID),
 		logger.Bool("has_interval", reqBody.Interval != nil),
 		logger.Bool("has_on", reqBody.On != nil),
@@ -393,7 +396,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 	// Validate interval and on together
 	if (reqBody.Interval != nil && reqBody.On == nil) ||
 		(reqBody.On != nil && reqBody.Interval == nil) {
-		logger.Warn("Invalid interval/on combination",
+		logger.Warn(ctx, "Invalid interval/on combination",
 			logger.Int("job_id", jobID),
 			logger.Bool("has_interval", reqBody.Interval != nil),
 			logger.Bool("has_on", reqBody.On != nil))
@@ -403,11 +406,11 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 	}
 
 	updateRequest := map[string]interface{}{}
-	logger.Info("Starting update request processing", logger.Int("job_id", jobID))
+	logger.Info(ctx, "Starting update request processing", logger.Int("job_id", jobID))
 
 	if reqBody.Interval != nil {
 		if !validateInterval(*reqBody.Interval, *reqBody.On) {
-			logger.Warn("Invalid interval validation",
+			logger.Warn(ctx, "Invalid interval validation",
 				logger.Int("job_id", jobID),
 				logger.String("interval", *reqBody.Interval),
 				logger.String("on", *reqBody.On))
@@ -419,7 +422,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 
 		updateRequest["interval"] = *reqBody.Interval
 		updateRequest["on"] = *reqBody.On
-		logger.Info("Interval and on updated",
+		logger.Info(ctx, "Interval and on updated",
 			logger.Int("job_id", jobID),
 			logger.String("interval", *reqBody.Interval),
 			logger.String("on", *reqBody.On))
@@ -427,7 +430,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 
 	if reqBody.Code != nil {
 		if job.Method != "gmail" {
-			logger.Warn("Code update attempted for non-gmail method",
+			logger.Warn(ctx, "Code update attempted for non-gmail method",
 				logger.Int("job_id", jobID),
 				logger.String("current_method", job.Method))
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -435,10 +438,10 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 			})
 		}
 
-		logger.Info("Processing Google OAuth code", logger.Int("job_id", jobID))
+		logger.Info(ctx, "Processing Google OAuth code", logger.Int("job_id", jobID))
 		tok, err := google.GetRefreshTokenFromCodeForEmail(*reqBody.Code)
 		if err != nil {
-			logger.Error("Failed to get refresh token from code",
+			logger.Error(ctx, "Failed to get refresh token from code",
 				logger.Int("job_id", jobID),
 				logger.ErrorField(err))
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -450,7 +453,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 		// Get User Email
 		userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(tok.AccessToken)
 		if err != nil {
-			logger.Error("Failed to get Google account details",
+			logger.Error(ctx, "Failed to get Google account details",
 				logger.Int("job_id", jobID),
 				logger.ErrorField(err))
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -460,7 +463,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 		}
 
 		if userDetails.Email == "" {
-			logger.Error("Empty email received from Google token", logger.Int("job_id", jobID))
+			logger.Error(ctx, "Empty email received from Google token", logger.Int("job_id", jobID))
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
 				"message": "Invalid Code. May be it is expired or invalid",
 				"error":   "getting empty email id from google token",
@@ -468,7 +471,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 		}
 
 		if userDetails.Email != job.Name {
-			logger.Warn("Email mismatch in Google OAuth",
+			logger.Warn(ctx, "Email mismatch in Google OAuth",
 				logger.Int("job_id", jobID),
 				logger.String("token_email", userDetails.Email),
 				logger.String("job_email", job.Name))
@@ -480,13 +483,13 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 		updateRequest["input_data"] = map[string]interface{}{
 			"refresh_token": tok.RefreshToken,
 		}
-		logger.Info("Google OAuth token updated successfully",
+		logger.Info(ctx, "Google OAuth token updated successfully",
 			logger.Int("job_id", jobID),
 			logger.String("email", userDetails.Email))
 
 	} else if reqBody.DatabaseConnection != nil {
 		if job.Method != "database" {
-			logger.Warn("Database connection update attempted for non-database method",
+			logger.Warn(ctx, "Database connection update attempted for non-database method",
 				logger.Int("job_id", jobID),
 				logger.String("current_method", job.Method))
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -501,14 +504,14 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 			"password":      reqBody.DatabaseConnection.Password,
 			"database_name": reqBody.DatabaseConnection.DatabaseName,
 		}
-		logger.Info("Database connection updated",
+		logger.Info(ctx, "Database connection updated",
 			logger.Int("job_id", jobID),
 			logger.String("host", reqBody.DatabaseConnection.Host),
 			logger.String("database", reqBody.DatabaseConnection.DatabaseName))
 
 	} else if reqBody.RefreshToken != nil {
 		if job.Method != "outlook" {
-			logger.Warn("Refresh token update attempted for non-outlook method",
+			logger.Warn(ctx, "Refresh token update attempted for non-outlook method",
 				logger.Int("job_id", jobID),
 				logger.String("current_method", job.Method))
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -516,11 +519,11 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 			})
 		}
 
-		logger.Info("Processing Outlook refresh token", logger.Int("job_id", jobID))
+		logger.Info(ctx, "Processing Outlook refresh token", logger.Int("job_id", jobID))
 		// Get new access token using refresh token
 		authToken, err := outlook.AuthTokenUsingRefreshToken(*reqBody.RefreshToken)
 		if err != nil {
-			logger.Error("Failed to get auth token from refresh token",
+			logger.Error(ctx, "Failed to get auth token from refresh token",
 				logger.Int("job_id", jobID),
 				logger.ErrorField(err))
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -532,7 +535,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 		// Create Outlook client and get user details
 		client, err := outlook.NewOutlookClientUsingToken(authToken)
 		if err != nil {
-			logger.Error("Failed to create Outlook client",
+			logger.Error(ctx, "Failed to create Outlook client",
 				logger.Int("job_id", jobID),
 				logger.ErrorField(err))
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -543,7 +546,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 
 		userDetails, err := client.GetCurrentUser()
 		if err != nil {
-			logger.Error("Failed to get Outlook user details",
+			logger.Error(ctx, "Failed to get Outlook user details",
 				logger.Int("job_id", jobID),
 				logger.ErrorField(err))
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -553,7 +556,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 		}
 
 		if userDetails.Mail == "" {
-			logger.Error("Empty email received from Outlook token", logger.Int("job_id", jobID))
+			logger.Error(ctx, "Empty email received from Outlook token", logger.Int("job_id", jobID))
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
 				"message": "Invalid Refresh Token. May be it is expired or invalid",
 				"error":   "getting empty email id from outlook token",
@@ -563,14 +566,14 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 		updateRequest["input_data"] = map[string]interface{}{
 			"refresh_token": *reqBody.RefreshToken,
 		}
-		logger.Info("Outlook token updated successfully",
+		logger.Info(context.Background(), "Outlook token updated successfully",
 			logger.Int("job_id", jobID),
 			logger.String("email", userDetails.Mail))
 	}
 
 	if reqBody.StorxToken != nil {
 		updateRequest["storx_token"] = *reqBody.StorxToken
-		logger.Info("Storx token updated",
+		logger.Info(ctx, "Storx token updated",
 			logger.Int("job_id", jobID),
 			logger.Bool("has_storx_token", true))
 	}
@@ -580,21 +583,21 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 		if *reqBody.Active {
 			updateRequest["message"] = "You Automatic backup is activated. it will start processing first backup soon"
 			updateRequest["message_status"] = storage.JobMessageStatusInfo
-			logger.Info("Job activated", logger.Int("job_id", jobID))
+			logger.Info(ctx, "Job activated", logger.Int("job_id", jobID))
 		} else {
 			updateRequest["message"] = "You Automatic backup is deactivated. it will not process any backup"
 			updateRequest["message_status"] = storage.JobMessageStatusInfo
-			logger.Info("Job deactivated", logger.Int("job_id", jobID))
+			logger.Info(ctx, "Job deactivated", logger.Int("job_id", jobID))
 		}
 	}
 
-	logger.Info("Updating job in database",
+	logger.Info(ctx, "Updating job in database",
 		logger.Int("job_id", jobID),
 		logger.Int("update_fields_count", len(updateRequest)))
 
 	err = database.UpdateCronJobByID(uint(jobID), updateRequest)
 	if err != nil {
-		logger.Error("Failed to update job in database",
+		logger.Error(ctx, "Failed to update job in database",
 			logger.Int("job_id", jobID),
 			logger.ErrorField(err))
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
@@ -605,7 +608,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 
 	data, err := database.GetCronJobByID(uint(jobID))
 	if err != nil {
-		logger.Error("Failed to retrieve updated job data",
+		logger.Error(ctx, "Failed to retrieve updated job data",
 			logger.Int("job_id", jobID),
 			logger.ErrorField(err))
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
@@ -614,7 +617,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 		})
 	}
 
-	logger.Info("Automatic backup update completed successfully",
+	logger.Info(ctx, "Automatic backup update completed successfully",
 		logger.Int("job_id", jobID),
 		logger.String("job_name", data.Name),
 		logger.Bool("job_active", data.Active))

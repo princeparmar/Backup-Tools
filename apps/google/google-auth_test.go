@@ -2,6 +2,7 @@ package google
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -19,7 +20,7 @@ func Tes1t_AuthTokenUsingRefreshToken(t *testing.T) {
 		t.Errorf("Error: %v", err)
 	}
 
-	logger.Info(newToken)
+	logger.Info(context.Background(), newToken)
 }
 
 // Mock database for testing

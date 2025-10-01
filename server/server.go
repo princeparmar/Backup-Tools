@@ -26,6 +26,9 @@ func StartServer(db *storage.PosgresStore, address string) {
 	// Enable recovery middleware to handle panics and return a 500
 	e.Use(middleware.Recover())
 
+	// Add trace ID middleware for request tracing
+	e.Use(TraceIDMiddleware())
+
 	e.Use(DBMiddleware(db))
 
 	e.Use(middleware.CORS())
@@ -180,6 +183,6 @@ func StartServer(db *storage.PosgresStore, address string) {
 
 	err := e.Start(address)
 	if err != nil {
-		logger.Info("Error starting server", logger.ErrorField(err))
+		logger.Info(context.Background(), "Error starting server", logger.ErrorField(err))
 	}
 }

@@ -64,7 +64,7 @@ func CreateJWToken(googleToken string) string {
 	// Sign the token with the secret key and get the complete, encoded token as a string
 	tokenString, err := token.SignedString([]byte(JwtSecretKey))
 	if err != nil {
-		logger.Info("Error generating token:", logger.ErrorField(err))
+		logger.Info(context.Background(), "Error generating token:", logger.ErrorField(err))
 		return ""
 	}
 
@@ -98,7 +98,7 @@ func GetGoogleTokenFromJWT(c echo.Context) (string, error) {
 
 		// Extract specific information from claims
 		googleAuth := claims.GoogleAuthToken
-		logger.Info(googleAuth)
+		logger.Info(context.Background(), googleAuth)
 
 		// Output extracted informationr
 		return googleAuth, nil
@@ -155,7 +155,7 @@ func Autentificate(c echo.Context) error {
 			"error validating google auth token": err.Error(),
 		})
 	}
-	logger.Info("token validated")
+	logger.Info(context.Background(), "token validated")
 
 	// _, err := idtoken.Validate(context.Background(), googleKey, "")
 	// if err != nil {
@@ -370,21 +370,23 @@ func GetGoogleAccountDetailsFromAccessToken(accessToken string) (*GoogleAuthResp
 // IsGoogleTokenExpired checks if the provided Google access token is valid or expired
 func IsGoogleTokenExpired(token string) bool {
 
+	ctx := context.Background()
+
 	tokenInfo, err := GetGoogleAccountDetailsFromAccessToken(token)
 	if err != nil {
-		logger.Info("Error getting account details:", logger.ErrorField(err))
+		logger.Info(ctx, "Error getting account details:", logger.ErrorField(err))
 		return true
 	}
 
 	expireIn, err := strconv.Atoi(tokenInfo.ExpiresIn)
 	if err != nil {
-		logger.Info("Error converting expires_in to int:", logger.ErrorField(err))
+		logger.Info(ctx, "Error converting expires_in to int:", logger.ErrorField(err))
 		return true
 	}
 
 	// Check if the token has expired (expires_in should be greater than 0)
 	if expireIn > 0 {
-		logger.Info("Token expires in:" + tokenInfo.ExpiresIn + "seconds")
+		logger.Info(ctx, "Token expires in:"+tokenInfo.ExpiresIn+"seconds")
 		return false
 	}
 

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"log/slog"
+	"context"
 	"os"
 
 	"github.com/StorX2-0/Backup-Tools/crons"
@@ -17,6 +17,7 @@ import (
 
 func main() {
 	defer logger.Sync()
+	ctx := context.Background()
 
 	dsn := os.Getenv("POSTGRES_DSN")
 
@@ -24,15 +25,15 @@ func main() {
 
 	storage, err := storage.NewPostgresStore(dsn, querylogging)
 	if err != nil {
-		logger.Error("error starting the postgress store", zap.Error(err))
-		logger.Warn("exiting...")
+		logger.Error(ctx, "error starting the postgress store", zap.Error(err))
+		logger.Warn(ctx, "exiting...")
 		os.Exit(1)
 	}
 
 	err = storage.Migrate()
 	if err != nil {
-		logger.Error("error migrating to the postgress store", zap.Error(err))
-		logger.Warn("exiting...")
+		logger.Error(ctx, "error migrating to the postgress store", zap.Error(err))
+		logger.Warn(ctx, "exiting...")
 		os.Exit(1)
 	}
 
@@ -49,11 +50,12 @@ func main() {
 }
 
 func init() {
+	ctx := context.Background()
 	err := godotenv.Load()
 	if err != nil {
 		// Fallback to basic logger for init errors
-		slog.Error("error loading the environment", "error", err)
-		slog.Warn("exiting...")
+		logger.Error(ctx, "error loading the environment", logger.ErrorField(err))
+		logger.Warn(ctx, "exiting...")
 		os.Exit(1)
 	}
 

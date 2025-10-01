@@ -9,6 +9,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/logger"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
+	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
 )
 
@@ -23,7 +24,7 @@ type Processor interface {
 	Run(ProcessorInput) error
 }
 
-var m = map[string]Processor{
+var processorMap = map[string]Processor{
 	"gmail":         NewGmailProcessor(),
 	"outlook":       NewOutlookProcessor(),
 	"psql_database": NewPsqlDatabaseProcessor(),
@@ -37,36 +38,50 @@ func NewAutosyncManager(store *storage.PosgresStore) *AutosyncManager {
 	return &AutosyncManager{store: store}
 }
 
+// createCronContext creates a context with trace ID for cron jobs
+func createCronContext(operation string) context.Context {
+	traceID := uuid.New().String()
+	ctx := logger.WithTraceID(context.Background(), traceID)
+	logger.Info(ctx, "Cron job started", logger.String("operation", operation))
+	return ctx
+}
+
 func (a *AutosyncManager) Start() {
 	c := cron.New()
-	c.AddFunc("@every 1m", func() {
-		logger.Info("Creating task for all pending jobs")
-		err := a.CreateTaskForAllPendingJobs()
-		if err != nil {
-			logger.Error("Failed to create task for all pending jobs", logger.ErrorField(err))
-			return
-		}
 
-		logger.Info("Task created for all pending jobs")
+	// Create tasks for pending jobs
+	c.AddFunc("@every 1m", func() {
+		ctx := createCronContext("create_tasks")
+		logger.Info(ctx, "Creating tasks for all pending jobs")
+		err := a.CreateTaskForAllPendingJobs(ctx)
+		if err != nil {
+			logger.Error(ctx, "Failed to create tasks for pending jobs", logger.ErrorField(err))
+		} else {
+			logger.Info(ctx, "Successfully created tasks for pending jobs")
+		}
 	})
 
+	// Process tasks
 	c.AddFunc("@every 1m", func() {
-		logger.Info("Processing task")
-		err := a.ProcessTask()
+		ctx := createCronContext("process_tasks")
+		logger.Info(ctx, "Processing tasks")
+		err := a.ProcessTask(ctx)
 		if err != nil {
-			logger.Error("Failed to process task", logger.ErrorField(err))
-			return
+			logger.Error(ctx, "Failed to process tasks", logger.ErrorField(err))
+		} else {
+			logger.Info(ctx, "Successfully processed tasks")
 		}
-
-		logger.Info("Task processed")
 	})
 
+	// Check for missed heartbeats
 	c.AddFunc("@every 1m", func() {
-		logger.Info("Checking for missed heartbeat")
+		ctx := createCronContext("missed_heartbeat_check")
+		logger.Info(ctx, "Checking for missed heartbeats")
 		err := a.store.MissedHeartbeatForTask()
 		if err != nil {
-			logger.Error("Failed to check for missed heartbeat", logger.ErrorField(err))
-			return
+			logger.Error(ctx, "Failed to check for missed heartbeats", logger.ErrorField(err))
+		} else {
+			logger.Info(ctx, "Successfully checked for missed heartbeats")
 		}
 	})
 
@@ -82,25 +97,39 @@ func (a *AutosyncManager) Start() {
 	// })
 
 	c.Start()
+	logger.Info(context.Background(), "Cron scheduler started successfully")
 }
 
-func (a *AutosyncManager) CreateTaskForAllPendingJobs() error {
+func (a *AutosyncManager) CreateTaskForAllPendingJobs(ctx context.Context) error {
 	jobIDs, err := a.store.GetJobsToProcess()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get jobs to process: %w", err)
 	}
 
 	if len(jobIDs) == 0 {
-		logger.Info("No job to process")
+		logger.Info(ctx, "No jobs to process")
 		return nil
 	}
+
 	for _, jobID := range jobIDs {
-		logger.Info("Creating task for job", logger.Int("job_id", int(jobID.ID)))
+		logger.Info(ctx, "Creating task for job",
+			logger.Int("job_id", int(jobID.ID)),
+			logger.String("job_name", jobID.Name),
+		)
 
 		_, err := a.store.CreateTaskForCronJob(jobID.ID)
 		if err != nil {
-			return a.store.DB.Save(&jobID).Error
+			// Log error but continue with other jobs
+			logger.Error(ctx, "Failed to create task for job",
+				logger.Int("job_id", int(jobID.ID)),
+				logger.ErrorField(err),
+			)
+			continue
 		}
+
+		logger.Info(ctx, "Successfully created task for job",
+			logger.Int("job_id", int(jobID.ID)),
+		)
 	}
 
 	return nil
@@ -144,129 +173,219 @@ func (a *AutosyncManager) CreateTaskForAllPendingJobs() error {
 // 	return errGroup.Err()
 // }
 
-func (a *AutosyncManager) ProcessTask() error {
+func (a *AutosyncManager) ProcessTask(ctx context.Context) error {
 	for {
 		task, err := a.store.GetPushedTask()
 		if err != nil {
-			if err.Error() == "error getting pushed task: record not found" {
-				logger.Info("No task to process")
+			if strings.Contains(err.Error(), "record not found") {
+				logger.Info(ctx, "No tasks to process")
 				break
 			}
-			return err
+			return fmt.Errorf("failed to get pushed task: %w", err)
 		}
 
-		logger.Info("Processing task", logger.Int("task_id", int(task.ID)))
+		logger.Info(ctx, "Processing task",
+			logger.Int("task_id", int(task.ID)),
+			logger.Int("job_id", int(task.CronJobID)),
+		)
+
 		job, err := a.store.GetCronJobByID(task.CronJobID)
 		if err != nil {
-			return a.UpdateTaskStatus(task, job, err)
+			logger.Error(ctx, "Failed to get cron job for task",
+				logger.Int("task_id", int(task.ID)),
+				logger.Int("job_id", int(task.CronJobID)),
+				logger.ErrorField(err),
+			)
+			// Update task status with error and continue to next task
+			if updateErr := a.UpdateTaskStatus(task, job, err); updateErr != nil {
+				logger.Error(ctx, "Failed to update task status after job fetch error",
+					logger.Int("task_id", int(task.ID)),
+					logger.ErrorField(updateErr),
+				)
+			}
+			continue
 		}
 
-		err = a.processTask(task, job)
-		if err := a.UpdateTaskStatus(task, job, err); err != nil {
-			return err
+		// Process the task
+		processErr := a.processTask(ctx, task, job)
+
+		// Update task status
+		if updateErr := a.UpdateTaskStatus(task, job, processErr); updateErr != nil {
+			logger.Error(ctx, "Failed to update task status",
+				logger.Int("task_id", int(task.ID)),
+				logger.ErrorField(updateErr),
+			)
+			// Continue with next task even if status update fails
+			continue
 		}
 	}
 
 	return nil
 }
 
-func (a *AutosyncManager) processTask(task *storage.TaskListingDB, job *storage.CronJobListingDB) error {
-	processor, ok := m[job.Method]
+func (a *AutosyncManager) processTask(ctx context.Context, task *storage.TaskListingDB, job *storage.CronJobListingDB) error {
+	processor, ok := processorMap[job.Method]
 	if !ok {
-		return fmt.Errorf("method %s not found", job.Method)
+		return fmt.Errorf("processor for method '%s' not found", job.Method)
 	}
+
+	logger.Info(ctx, "Executing processor for task",
+		logger.Int("task_id", int(task.ID)),
+		logger.String("method", job.Method),
+	)
 
 	return processor.Run(ProcessorInput{
 		InputData: job.InputData,
 		Job:       job,
 		Task:      task,
 		HeartBeatFunc: func() error {
-			t, err := a.store.GetTaskByID(task.ID)
+			// Check if task is still running
+			currentTask, err := a.store.GetTaskByID(task.ID)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to get task status: %w", err)
 			}
 
-			if t.Status != storage.TaskStatusRunning {
-				return fmt.Errorf("exit task because status changed: %s", t.Status)
+			if currentTask.Status != storage.TaskStatusRunning {
+				return fmt.Errorf("task status changed to '%s', stopping execution", currentTask.Status)
 			}
 
-			return a.store.UpdateHeartBeatForTask(task.ID)
+			// Update heartbeat
+			if err := a.store.UpdateHeartBeatForTask(task.ID); err != nil {
+				return fmt.Errorf("failed to update heartbeat: %w", err)
+			}
+
+			return nil
 		},
 	})
 }
 
-func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *storage.CronJobListingDB, err error) error {
-	// Set initial status for success case
+func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *storage.CronJobListingDB, processErr error) error {
+	ctx := context.Background() // You might want to pass context here
+
+	// Initialize default values for success case
 	task.Status = storage.TaskStatusSuccess
-	task.Execution = uint64(time.Since(*task.StartTime).Seconds())
-	job.Message = "Automatic backup completed successfully"
 	task.Message = "Automatic backup completed successfully"
-	job.MessageStatus = storage.JobMessageStatusInfo
-	job.LastRun = time.Now()
 
-	// If there's an error, update status and prepare to send email
-	if err != nil {
+	if task.StartTime != nil {
+		task.Execution = uint64(time.Since(*task.StartTime).Seconds())
+	}
+
+	if job != nil {
+		job.Message = "Automatic backup completed successfully"
+		job.MessageStatus = storage.JobMessageStatusInfo
+		job.LastRun = time.Now()
+	}
+
+	// Handle error case
+	if processErr != nil {
 		task.Status = storage.TaskStatusFailed
-		task.Message = err.Error()
-		job.Message = "Last Task Execution failed because of some error"
-		job.MessageStatus = storage.JobMessageStatusError
-
-		var emailMessage string = err.Error() // default
-
-		// Check if job has no StorX token and deactivate it
-		if job.StorxToken == "" {
-			job.Active = false
-			job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
-			task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
-			emailMessage = "Your automatic backup has been temporarily disabled due to insufficient permissions. Please update your StorX permissions and reactivate the backup from your dashboard."
-		} else if strings.Contains(err.Error(), "googleapi: Error 401") {
-			if task.RetryCount == storage.MaxRetryCount-1 {
-				job.InputData["refresh_token"] = ""
-				job.Active = false
-				job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
-				task.Message = "Google Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
-				emailMessage = "Your automatic backup has been temporarily disabled due to invalid Google credentials. Please update your Google account permissions and reactivate the backup from your dashboard."
-			} else {
-				job.Message = "Invalid google credentials. Retrying..."
-				task.Message = "Google Credentials are invalid. Retrying..."
-				emailMessage = "Your automatic backup encountered an authentication issue with Google. We're retrying the backup automatically."
-			}
-		} else if strings.Contains(err.Error(), "uplink: permission") || strings.Contains(err.Error(), "uplink: invalid access") {
-			job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
-			job.StorxToken = ""
-			job.Active = false
-			task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
-			emailMessage = "Your automatic backup has been temporarily disabled due to insufficient StorX permissions. Please update your StorX permissions and reactivate the backup from your dashboard."
-		} else if strings.Contains(err.Error(), "could not create bucket") || strings.Contains(err.Error(), "tcp connector failed") || strings.Contains(err.Error(), "connection attempt failed") {
-			// Network/connection errors
-			job.Active = false
-			job.Message = "Automatic backup failed due to network issues. Please check your connection and reactivate."
-			task.Message = "Task failed due to network connectivity issues. Job has been deactivated."
-			emailMessage = "Your automatic backup has been temporarily disabled due to network connectivity issues. Please check your internet connection and reactivate the backup from your dashboard."
-		} else {
-			// For any other error, deactivate the job immediately
-			job.Active = false
-			job.Message = "Automatic backup failed. Please check the configuration and reactivate."
-			task.Message = "Task failed. Job has been deactivated."
-			emailMessage = "Your automatic backup has been temporarily disabled due to a technical issue. Please check your backup configuration and reactivate from your dashboard."
-		}
-
-		// Send the appropriate error message once
-		go satellite.SendEmailForBackupFailure(context.Background(), job.Name, emailMessage, job.Method)
-
+		task.Message = processErr.Error()
 		task.RetryCount++
+
+		if job != nil {
+			job.Message = "Last task execution failed"
+			job.MessageStatus = storage.JobMessageStatusError
+			job.LastRun = time.Now()
+
+			emailMessage := a.determineErrorMessage(processErr, job, task)
+			a.handleErrorScenarios(processErr, job, task)
+
+			// Send email notification
+			go satellite.SendEmailForBackupFailure(context.Background(), job.Name, emailMessage, job.Method)
+		}
 	}
 
-	// Save task and job to DB
+	// Save task to database
 	if err := a.store.DB.Save(task).Error; err != nil {
-		go satellite.SendEmailForBackupFailure(context.Background(), job.Name, fmt.Sprintf("Failed to save task status to database: %v", err), job.Method)
-		return err
+		logger.Error(ctx, "Failed to save task status",
+			logger.Int("task_id", int(task.ID)),
+			logger.ErrorField(err),
+		)
+		return fmt.Errorf("failed to save task: %w", err)
 	}
 
-	if err := a.store.DB.Save(job).Error; err != nil {
-		go satellite.SendEmailForBackupFailure(context.Background(), job.Name, fmt.Sprintf("Failed to save job status to database: %v", err), job.Method)
-		return err
+	// Save job to database if job exists
+	if job != nil {
+		if err := a.store.DB.Save(job).Error; err != nil {
+			logger.Error(ctx, "Failed to save job status",
+				logger.Int("job_id", int(job.ID)),
+				logger.ErrorField(err),
+			)
+			return fmt.Errorf("failed to save job: %w", err)
+		}
 	}
+
+	logger.Info(ctx, "Task status updated",
+		logger.Int("task_id", int(task.ID)),
+		logger.String("status", string(task.Status)),
+		logger.Int("retry_count", int(task.RetryCount)),
+	)
 
 	return nil
+}
+
+func (a *AutosyncManager) determineErrorMessage(processErr error, job *storage.CronJobListingDB, task *storage.TaskListingDB) string {
+	errMsg := processErr.Error()
+
+	switch {
+	case job.StorxToken == "":
+		return "Your automatic backup has been temporarily disabled due to insufficient permissions. Please update your StorX permissions and reactivate the backup from your dashboard."
+
+	case strings.Contains(errMsg, "googleapi: Error 401"):
+		if task.RetryCount == storage.MaxRetryCount-1 {
+			return "Your automatic backup has been temporarily disabled due to invalid Google credentials. Please update your Google account permissions and reactivate the backup from your dashboard."
+		}
+		return "Your automatic backup encountered an authentication issue with Google. We're retrying the backup automatically."
+
+	case strings.Contains(errMsg, "uplink: permission") || strings.Contains(errMsg, "uplink: invalid access"):
+		return "Your automatic backup has been temporarily disabled due to insufficient StorX permissions. Please update your StorX permissions and reactivate the backup from your dashboard."
+
+	case strings.Contains(errMsg, "could not create bucket") ||
+		strings.Contains(errMsg, "tcp connector failed") ||
+		strings.Contains(errMsg, "connection attempt failed"):
+		return "Your automatic backup has been temporarily disabled due to network connectivity issues. Please check your internet connection and reactivate the backup from your dashboard."
+
+	default:
+		return "Your automatic backup has been temporarily disabled due to a technical issue. Please check your backup configuration and reactivate from your dashboard."
+	}
+}
+
+func (a *AutosyncManager) handleErrorScenarios(processErr error, job *storage.CronJobListingDB, task *storage.TaskListingDB) {
+	errMsg := processErr.Error()
+
+	switch {
+	case job.StorxToken == "":
+		job.Active = false
+		job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
+		task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
+
+	case strings.Contains(errMsg, "googleapi: Error 401"):
+		if task.RetryCount == storage.MaxRetryCount-1 {
+			job.InputData["refresh_token"] = ""
+			job.Active = false
+			job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
+			task.Message = "Google Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
+		} else {
+			job.Message = "Invalid google credentials. Retrying..."
+			task.Message = "Google Credentials are invalid. Retrying..."
+		}
+
+	case strings.Contains(errMsg, "uplink: permission") || strings.Contains(errMsg, "uplink: invalid access"):
+		job.StorxToken = ""
+		job.Active = false
+		job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
+		task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
+
+	case strings.Contains(errMsg, "could not create bucket") ||
+		strings.Contains(errMsg, "tcp connector failed") ||
+		strings.Contains(errMsg, "connection attempt failed"):
+		job.Active = false
+		job.Message = "Automatic backup failed due to network issues. Please check your connection and reactivate."
+		task.Message = "Task failed due to network connectivity issues. Job has been deactivated."
+
+	default:
+		job.Active = false
+		job.Message = "Automatic backup failed. Please check the configuration and reactivate."
+		task.Message = "Task failed. Job has been deactivated."
+	}
 }

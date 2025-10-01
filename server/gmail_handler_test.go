@@ -28,7 +28,7 @@ func TestGmailInsertMessage(t *testing.T) {
 		t.Fatalf("failed to download file: %v", err)
 	}
 
-	logger.Info("data", logger.String("data", string(data)))
+	logger.Info(context.Background(), "data", logger.String("data", string(data)))
 
 	// Parse the email data and insert into Gmail
 	var gmailMsg gmail.Message

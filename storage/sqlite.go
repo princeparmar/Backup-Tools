@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"os"
 
 	"github.com/StorX2-0/Backup-Tools/logger"
@@ -28,7 +29,7 @@ func ConnectToEmailDB(dbPath string) (*SQLiteEmailDatabase, error) {
 	// TODO check if db exists locally
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		// Database file does not exist, create new file
-		logger.Info("Creating new database file...")
+		logger.Info(context.Background(), "Creating new database file...")
 		if _, err := os.Create(dbPath); err != nil {
 			return nil, err
 		}
@@ -75,7 +76,7 @@ func ConnectToShopifyDB() (*SQLiteShopifyDatabase, error) {
 	// TODO check if db exists locally
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		// Database file does not exist, create new file
-		logger.Info("Creating new database file...")
+		logger.Info(context.Background(), "Creating new database file...")
 		if _, err := os.Create(dbPath); err != nil {
 			return nil, err
 		}
@@ -140,7 +141,7 @@ func ConnectToQuickbooksDB() (*SQLiteQuickbooksDatabase, error) {
 	// TODO check if db exists locally
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		// Database file does not exist, create new file
-		logger.Info("Creating new database file...")
+		logger.Info(context.Background(), "Creating new database file...")
 		if _, err := os.Create(dbPath); err != nil {
 			return nil, err
 		}

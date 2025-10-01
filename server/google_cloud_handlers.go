@@ -218,6 +218,7 @@ func handleSatelliteToGoogleCloud(c echo.Context) error {
 
 func handleAllFilesFromGoogleCloudBucketToSatellite(c echo.Context) error {
 	bucketName := c.Param("bucketName")
+	ctx := c.Request().Context()
 
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
@@ -261,7 +262,7 @@ func handleAllFilesFromGoogleCloudBucketToSatellite(c echo.Context) error {
 		}
 
 		err = satellite.UploadObject(context.Background(), accesGrant, bucket.Id, obj.Name, obj.Data)
-		logger.Info("uploaded : "+obj.Name, logger.String("bucketID", bucket.Id))
+		logger.Info(ctx, "uploaded : "+obj.Name, logger.String("bucketID", bucket.Id))
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),
@@ -301,7 +302,7 @@ func syncCloudBucket(c echo.Context, bucketName string) error {
 	if accesGrant == "" {
 		return errors.New("access token not found")
 	}
-
+	ctx := c.Request().Context()
 	client, err := google.NewGoogleStorageClient(c)
 	if err != nil {
 		return err
@@ -323,7 +324,7 @@ func syncCloudBucket(c echo.Context, bucketName string) error {
 		}
 
 		err = satellite.UploadObject(context.Background(), accesGrant, bucket.Id, obj.Name, obj.Data)
-		logger.Info("uploaded : "+obj.Name, logger.String("bucketID", bucket.Id))
+		logger.Info(ctx, "uploaded : "+obj.Name, logger.String("bucketID", bucket.Id))
 		if err != nil {
 			return err
 		}

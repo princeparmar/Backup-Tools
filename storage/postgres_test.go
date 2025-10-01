@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"os"
 	"testing"
 
@@ -13,5 +14,5 @@ func TestConnect(t *testing.T) {
 	postgres, _ := NewPostgresStore(dsn, false)
 	var res GoogleAuthStorage
 	postgres.DB.Where("cookie = ?", "cookie1234").First(&res)
-	logger.Info("res", logger.Any("res", res))
+	logger.Info(context.Background(), "res", logger.Any("res", res))
 }

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -208,7 +209,7 @@ func (storage *PosgresStore) MissedHeartbeatForTask() error {
 	// and for job set message to process got stuck because of some reason
 	// and message status to error
 	tx := storage.DB.Begin()
-	logger.Info("Starting transaction for missed heartbeat check")
+	logger.Info(context.Background(), "Starting transaction for missed heartbeat check")
 
 	var tasks []TaskListingDB
 	db := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
@@ -219,7 +220,7 @@ func (storage *PosgresStore) MissedHeartbeatForTask() error {
 	}
 
 	for _, task := range tasks {
-		logger.Info("Updating task", logger.Int("task_id", int(task.ID)), logger.String("with missed heartbeat", "with missed heartbeat"))
+		logger.Info(context.Background(), "Updating task", logger.Int("task_id", int(task.ID)), logger.String("with missed heartbeat", "with missed heartbeat"))
 
 		task.Status = TaskStatusFailed
 		task.Message = "Process got stuck because of some reason. Marked as failed"

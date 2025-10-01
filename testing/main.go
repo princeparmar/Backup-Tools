@@ -42,7 +42,7 @@ func handleGoogleLogin(w http.ResponseWriter, r *http.Request) {
 func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	state := r.FormValue("state")
 	if state != oauthStateString {
-		logger.Info("invalid oauth state")
+		logger.Info(context.Background(), "invalid oauth state")
 		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 		return
 	}
@@ -50,14 +50,14 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	code := r.FormValue("code")
 	token, err := googleOauthConfig.Exchange(context.Background(), code)
 	if err != nil {
-		logger.Info("code exchange failed: ", logger.ErrorField(err))
+		logger.Info(context.Background(), "code exchange failed: ", logger.ErrorField(err))
 		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 		return
 	}
 
 	tokenJSON, err := json.Marshal(token)
 	if err != nil {
-		logger.Info("failed to marshal token: ", logger.ErrorField(err))
+		logger.Info(context.Background(), "failed to marshal token: ", logger.ErrorField(err))
 		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 		return
 	}

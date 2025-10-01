@@ -1,6 +1,7 @@
 package google
 
 import (
+	"context"
 	_ "embed"
 	"encoding/json"
 	"testing"
@@ -28,5 +29,5 @@ func Test_createRawMessage(t *testing.T) {
 		return
 	}
 
-	logger.Info(got)
+	logger.Info(context.Background(), got)
 }

@@ -7,6 +7,7 @@ require (
 	github.com/bold-commerce/go-shopify/v4 v4.6.0
 	github.com/dropbox/dropbox-sdk-go-unofficial/v6 v6.0.5
 	github.com/google/go-github/v53 v53.2.0
+	github.com/google/uuid v1.6.0
 	github.com/gphotosuploader/google-photos-api-client-go/v2 v2.4.2
 	github.com/gphotosuploader/googlemirror v0.5.0
 	github.com/labstack/echo/v4 v4.11.4
@@ -44,7 +45,6 @@ require (
 	github.com/golang/protobuf v1.5.3 // indirect
 	github.com/google/go-querystring v1.1.0 // indirect
 	github.com/google/s2a-go v0.1.7 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.2 // indirect
 	github.com/googleapis/gax-go/v2 v2.12.2 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect

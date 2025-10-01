@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
@@ -30,5 +31,5 @@ func main() {
 		panic("failed to insert message: " + err.Error())
 	}
 
-	logger.Info("Message inserted successfully")
+	logger.Info(context.Background(), "Message inserted successfully")
 }

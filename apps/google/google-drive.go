@@ -138,6 +138,7 @@ func GetFileByID(c echo.Context) error {
 
 // client authenticates the client and returns an HTTP client
 func client(c echo.Context) (*http.Client, error) {
+	ctx := c.Request().Context()
 	database := c.Get(dbContextKey).(*storage.PosgresStore)
 
 	b, err := os.ReadFile("credentials.json")
@@ -154,14 +155,14 @@ func client(c echo.Context) (*http.Client, error) {
 		return nil, fmt.Errorf("unable to retrieve google-auth token from JWT: %v", err)
 	}
 
-	logger.Info("processing google token" + googleToken)
+	logger.Info(ctx, "processing google token"+googleToken)
 
 	tok, err := database.ReadGoogleAuthToken(googleToken)
 	if err != nil {
 		return nil, echo.NewHTTPError(http.StatusUnauthorized, "user is not authorized")
 	}
 
-	logger.Info("processing access token" + tok)
+	logger.Info(ctx, "processing access token"+tok)
 	client := config.Client(context.Background(), &oauth2.Token{
 		AccessToken: tok,
 	})

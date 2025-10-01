@@ -88,7 +88,7 @@ func (s *GmailService) UploadMessagesToSatellite(ctx context.Context, messageIDs
 
 				err = satellite.UploadObject(ctx, s.accessGrant, "gmail", messagePath, b)
 				if err != nil {
-					logger.Info("error uploading to satellite", logger.ErrorField(err))
+					logger.Info(ctx, "error uploading to satellite", logger.ErrorField(err))
 					failedIDs.Add(id)
 					return nil
 				}
@@ -139,7 +139,7 @@ func (s *GmailService) DownloadMessagesFromSatellite(ctx context.Context, keys [
 
 			// Insert message into Gmail
 			if err := s.client.InsertMessage(&gmailMsg); err != nil {
-				logger.Info("error inserting message into Gmail", logger.ErrorField(err))
+				logger.Info(ctx, "error inserting message into Gmail", logger.ErrorField(err))
 				failedIDs.Add(key)
 			} else {
 				processedIDs.Add(key)

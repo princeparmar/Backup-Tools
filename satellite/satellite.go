@@ -56,9 +56,9 @@ func GetUploader(ctx context.Context, accessGrant, bucketName, objectKey string)
 	if err != nil {
 		return nil, fmt.Errorf("could not parse access grant: %v", err)
 	}
-	logger.Info("testAccessParse", logger.String("testAccessParse", testAccessParse.SatelliteAddress))
-	logger.Info("access", logger.String("access", testAccessParse.APIKey.Serialize()))
-	logger.Info("encAccess", logger.String("encAccess", fmt.Sprintf("%+v", testAccessParse.EncAccess)))
+	logger.Info(ctx, "testAccessParse", logger.String("testAccessParse", testAccessParse.SatelliteAddress))
+	logger.Info(ctx, "access", logger.String("access", testAccessParse.APIKey.Serialize()))
+	logger.Info(ctx, "encAccess", logger.String("encAccess", fmt.Sprintf("%+v", testAccessParse.EncAccess)))
 
 	// Open up the Project we will be working with.
 	project, err := uplink.OpenProject(ctx, access)
@@ -76,7 +76,7 @@ func GetUploader(ctx context.Context, accessGrant, bucketName, objectKey string)
 		}
 	}
 
-	logger.Info("Uploading object to bucket:", logger.String("bucketName", bucketName), logger.String("objectKey", objectKey))
+	logger.Info(ctx, "Uploading object to bucket:", logger.String("bucketName", bucketName), logger.String("objectKey", objectKey))
 	// Intitiate the upload of our Object to the specified bucket and key.
 	upload, err := project.UploadObject(ctx, bucketName, objectKey, nil)
 	if err != nil {
