@@ -12,8 +12,8 @@ import (
 	"sync"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
-	"github.com/StorX2-0/Backup-Tools/utils"
 
 	"github.com/gphotosuploader/google-photos-api-client-go/v2/albums"
 	"github.com/gphotosuploader/google-photos-api-client-go/v2/media_items"

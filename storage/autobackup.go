@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/StorX2-0/Backup-Tools/logger"
-	"github.com/StorX2-0/Backup-Tools/utils"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )

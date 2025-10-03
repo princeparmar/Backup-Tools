@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/StorX2-0/Backup-Tools/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/google/uuid"

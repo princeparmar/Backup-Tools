@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
-	"github.com/StorX2-0/Backup-Tools/utils"
 )
 
 type gmailProcessor struct{}

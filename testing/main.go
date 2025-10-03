@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/StorX2-0/Backup-Tools/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/gphotosuploader/googlemirror/api/photoslibrary/v1"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"

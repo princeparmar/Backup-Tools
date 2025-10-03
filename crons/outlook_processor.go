@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
-	"github.com/StorX2-0/Backup-Tools/utils"
 )
 
 const (

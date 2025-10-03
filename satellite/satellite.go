@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/StorX2-0/Backup-Tools/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/dgrijalva/jwt-go"
 	"github.com/labstack/echo/v4"
 	"storj.io/common/grant"

@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/StorX2-0/Backup-Tools/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 )

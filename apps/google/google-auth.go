@@ -12,11 +12,11 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/storage"
-	"github.com/StorX2-0/Backup-Tools/utils"
 
 	rm "cloud.google.com/go/resourcemanager/apiv3"
-	"github.com/StorX2-0/Backup-Tools/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/dgrijalva/jwt-go"
 	"github.com/gphotosuploader/googlemirror/api/photoslibrary/v1"
 	"github.com/labstack/echo/v4"

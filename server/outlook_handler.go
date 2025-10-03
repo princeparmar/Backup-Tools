@@ -9,9 +9,9 @@ import (
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
-	"github.com/StorX2-0/Backup-Tools/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
-	"github.com/StorX2-0/Backup-Tools/utils"
 	"github.com/labstack/echo/v4"
 	"golang.org/x/sync/errgroup"
 )

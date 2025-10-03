@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
-	"github.com/StorX2-0/Backup-Tools/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"google.golang.org/api/gmail/v1"
 )

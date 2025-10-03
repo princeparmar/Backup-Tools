@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/StorX2-0/Backup-Tools/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 )
 
 func TestRandStr(t *testing.T) {

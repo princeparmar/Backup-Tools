@@ -12,7 +12,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/StorX2-0/Backup-Tools/utils"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 
 	"github.com/google/go-github/v53/github"
 	"github.com/labstack/echo/v4"

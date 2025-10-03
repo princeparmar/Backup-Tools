@@ -12,9 +12,9 @@ import (
 	"strings"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
-	"github.com/StorX2-0/Backup-Tools/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
-	"github.com/StorX2-0/Backup-Tools/utils"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/labstack/echo/v4"

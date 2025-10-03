@@ -10,8 +10,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/storage"
-	"github.com/StorX2-0/Backup-Tools/utils"
 
 	"github.com/labstack/echo/v4"
 	"google.golang.org/api/gmail/v1"

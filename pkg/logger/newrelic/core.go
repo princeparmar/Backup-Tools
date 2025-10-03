@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/StorX2-0/Backup-Tools/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 )
 
 // LogInterceptor implements the logger.LogInterceptor interface

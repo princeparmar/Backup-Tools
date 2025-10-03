@@ -4,7 +4,7 @@ import (
 	"io"
 	"os"
 
-	. "github.com/StorX2-0/Backup-Tools/utils"
+	. "github.com/StorX2-0/Backup-Tools/pkg/utils"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"

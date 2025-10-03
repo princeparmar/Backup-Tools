@@ -15,9 +15,9 @@ import (
 	gthb "github.com/StorX2-0/Backup-Tools/apps/github"
 	"github.com/StorX2-0/Backup-Tools/apps/quickbooks"
 	"github.com/StorX2-0/Backup-Tools/apps/shopify"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
-	"github.com/StorX2-0/Backup-Tools/utils"
 
 	"github.com/labstack/echo/v4"
 )

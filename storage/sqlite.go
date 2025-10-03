@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 
-	"github.com/StorX2-0/Backup-Tools/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	goshopify "github.com/bold-commerce/go-shopify/v4"
 	"github.com/glebarez/sqlite"
 	quickbooksLibrary "github.com/rwestlund/quickbooks-go"
