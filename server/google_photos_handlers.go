@@ -260,13 +260,18 @@ func handleSendFileFromSatelliteToGooglePhotos(c echo.Context) error {
 	}
 
 	path := filepath.Join("./cache", utils.CreateUserTempCacheFolder(), name)
-	file, err := os.Create(path)
+	file, err := utils.CreateFile(path)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
-	file.Write(data)
+	_, err = file.Write(data)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
 	file.Close()
 	defer os.Remove(path)
 

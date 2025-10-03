@@ -17,7 +17,7 @@ import (
 )
 
 type OutlookMessageListJSON struct {
-	outlook.OutlookMinimalMessage
+	utils.OutlookMinimalMessage
 	Synced bool `json:"synced"`
 }
 
@@ -111,7 +111,13 @@ func handleOutlookGetMessages(c echo.Context) error {
 	}
 
 	outlookMessages := make([]*OutlookMessageListJSON, 0, len(messages))
-	for _, message := range messages {
+	for _, msg := range messages {
+		message := &utils.OutlookMinimalMessage{
+			ID:               msg.ID,
+			Subject:          msg.Subject,
+			From:             msg.From,
+			ReceivedDateTime: msg.ReceivedDateTime,
+		}
 		_, synced := emailListFromBucket[userDetails.Mail+"/"+utils.GenerateTitleFromOutlookMessage(message)]
 		outlookMessages = append(outlookMessages, &OutlookMessageListJSON{
 			OutlookMinimalMessage: *message,
@@ -185,7 +191,14 @@ func handleListOutlookMessagesToSatellite(c echo.Context) error {
 			return err
 		}
 
-		messagePath := userDetails.Mail + "/" + utils.GenerateTitleFromOutlookMessage(&msg.OutlookMinimalMessage)
+		message := &utils.OutlookMinimalMessage{
+			ID:               msg.ID,
+			Subject:          msg.Subject,
+			From:             msg.From,
+			ReceivedDateTime: msg.ReceivedDateTime,
+		}
+
+		messagePath := userDetails.Mail + "/" + utils.GenerateTitleFromOutlookMessage(message)
 		err = satellite.UploadObject(reqCtx, accessGrant, satellite.ReserveBucket_Outlook, messagePath, b)
 		if err != nil {
 			logger.Error(reqCtx, "Failed to upload message to satellite",
@@ -236,7 +249,14 @@ func handleOutlookDownloadAndInsert(c echo.Context) error {
 			return err
 		}
 
-		satelliteKey := userDetails.Mail + "/" + utils.GenerateTitleFromOutlookMessage(&msg.OutlookMinimalMessage)
+		message := &utils.OutlookMinimalMessage{
+			ID:               msg.ID,
+			Subject:          msg.Subject,
+			From:             msg.From,
+			ReceivedDateTime: msg.ReceivedDateTime,
+		}
+
+		satelliteKey := userDetails.Mail + "/" + utils.GenerateTitleFromOutlookMessage(message)
 		data, err := satellite.DownloadObject(reqCtx, accessGrant, satellite.ReserveBucket_Outlook, satelliteKey)
 		if err != nil {
 			logger.Error(reqCtx, "error downloading message from satellite",

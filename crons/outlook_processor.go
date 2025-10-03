@@ -84,7 +84,12 @@ func (o *outlookProcessor) Run(input ProcessorInput) error {
 				return err
 			}
 
-			messagePath := userDetails.Mail + "/" + utils.GenerateTitleFromOutlookMessage(&message.OutlookMinimalMessage)
+			messagePath := userDetails.Mail + "/" + utils.GenerateTitleFromOutlookMessage(&utils.OutlookMinimalMessage{
+				ID:               message.ID,
+				Subject:          message.Subject,
+				From:             message.From,
+				ReceivedDateTime: message.ReceivedDateTime,
+			})
 			_, synced := emailListFromBucket[messagePath]
 			if synced {
 				continue

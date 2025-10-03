@@ -54,6 +54,9 @@ func (gh Github) ListReps(accessToken string) ([]*github.Repository, error) {
 		return nil, err
 	}
 	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
 	var reps []*github.Repository
 	err = json.Unmarshal(data, &reps)
 	if err != nil {
@@ -75,9 +78,8 @@ func (gh Github) DownloadRepositoryToCache(owner, repo, accessToken string) (str
 
 	dirPath := filepath.Join("./cache", utils.CreateUserTempCacheFolder())
 	path := filepath.Join(dirPath, repo+".zip")
-	os.Mkdir(dirPath, 0777)
 
-	file, err := os.Create(path)
+	file, err := utils.CreateFile(path)
 	if err != nil {
 		return "", err
 	}

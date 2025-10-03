@@ -124,9 +124,8 @@ func handleS3toSatellite(c echo.Context) error {
 
 	dirPath := filepath.Join("./cache", utils.CreateUserTempCacheFolder())
 	path := filepath.Join(dirPath, itemName)
-	os.Mkdir(dirPath, 0777)
 
-	file, err := os.Create(path)
+	file, err := utils.CreateFile(path)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -175,15 +174,19 @@ func handleSatelliteToS3(c echo.Context) error {
 	}
 	dirPath := filepath.Join("./cache", utils.CreateUserTempCacheFolder())
 	path := filepath.Join(dirPath, itemName)
-	os.Mkdir(dirPath, 0777)
 
-	file, err := os.Create(path)
+	file, err := utils.CreateFile(path)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
-	file.Write(data)
+	_, err = file.Write(data)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
 	file.Close()
 	defer os.Remove(path)
 
@@ -374,21 +377,30 @@ func handleRepositoryFromSatelliteToGithub(c echo.Context) error {
 	}
 	dirPath := filepath.Join("./cache", utils.CreateUserTempCacheFolder())
 	basePath := filepath.Join(dirPath, repo+".zip")
-	os.Mkdir(dirPath, 0777)
 
-	file, err := os.Create(basePath)
+	file, err := utils.CreateFile(basePath)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
-	file.Write(repoData)
+	_, err = file.Write(repoData)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
 	file.Close()
 
 	defer os.RemoveAll(dirPath)
 
 	unzipPath := filepath.Join(dirPath, "unarchived")
-	os.Mkdir(unzipPath, 0777)
+	err = os.MkdirAll(unzipPath, 0755)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
 
 	err = utils.Unzip(basePath, unzipPath)
 	if err != nil {
@@ -500,7 +512,7 @@ func handleShopifyProductsToSatellite(c echo.Context) error {
 	// Copy file from satellite to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
-		dbFile, err := os.Create(userCacheDBPath)
+		dbFile, err := utils.CreateFile(userCacheDBPath)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),
@@ -512,6 +524,7 @@ func handleShopifyProductsToSatellite(c echo.Context) error {
 				"error": err.Error(),
 			})
 		}
+		dbFile.Close()
 	}
 
 	db, err := storage.ConnectToShopifyDB()
@@ -591,7 +604,7 @@ func handleShopifyCustomersToSatellite(c echo.Context) error {
 	// Copy file from satellite to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
-		dbFile, err := os.Create(userCacheDBPath)
+		dbFile, err := utils.CreateFile(userCacheDBPath)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),
@@ -603,6 +616,7 @@ func handleShopifyCustomersToSatellite(c echo.Context) error {
 				"error": err.Error(),
 			})
 		}
+		dbFile.Close()
 	}
 
 	db, err := storage.ConnectToShopifyDB()
@@ -683,7 +697,7 @@ func handleShopifyOrdersToSatellite(c echo.Context) error {
 	// Copy file from satellite to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
-		dbFile, err := os.Create(userCacheDBPath)
+		dbFile, err := utils.CreateFile(userCacheDBPath)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),
@@ -695,6 +709,7 @@ func handleShopifyOrdersToSatellite(c echo.Context) error {
 				"error": err.Error(),
 			})
 		}
+		dbFile.Close()
 	}
 
 	db, err := storage.ConnectToShopifyDB()
@@ -849,7 +864,7 @@ func handleQuickbooksCustomersToSatellite(c echo.Context) error {
 	// Copy file from satellite to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
-		dbFile, err := os.Create(userCacheDBPath)
+		dbFile, err := utils.CreateFile(userCacheDBPath)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),
@@ -861,6 +876,7 @@ func handleQuickbooksCustomersToSatellite(c echo.Context) error {
 				"error": err.Error(),
 			})
 		}
+		dbFile.Close()
 	}
 
 	db, err := storage.ConnectToQuickbooksDB()
@@ -937,7 +953,7 @@ func handleQuickbooksItemsToSatellite(c echo.Context) error {
 	// Copy file from satellite to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
-		dbFile, err := os.Create(userCacheDBPath)
+		dbFile, err := utils.CreateFile(userCacheDBPath)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),
@@ -949,6 +965,7 @@ func handleQuickbooksItemsToSatellite(c echo.Context) error {
 				"error": err.Error(),
 			})
 		}
+		dbFile.Close()
 	}
 
 	db, err := storage.ConnectToQuickbooksDB()
@@ -1025,7 +1042,7 @@ func handleQuickbooksInvoicesToSatellite(c echo.Context) error {
 	// Copy file from satellite to local cache if everything's fine.
 	// Skip error check, if there's error - we will check that and create new file
 	if err == nil {
-		dbFile, err := os.Create(userCacheDBPath)
+		dbFile, err := utils.CreateFile(userCacheDBPath)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),
@@ -1037,6 +1054,7 @@ func handleQuickbooksInvoicesToSatellite(c echo.Context) error {
 				"error": err.Error(),
 			})
 		}
+		dbFile.Close()
 	}
 
 	db, err := storage.ConnectToQuickbooksDB()

@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"google.golang.org/api/gmail/v1"
 )
 
@@ -62,7 +61,7 @@ func DownloadFile(filepath, url string) error {
 	}
 	defer resp.Body.Close()
 
-	out, err := os.Create(filepath)
+	out, err := CreateFile(filepath)
 	if err != nil {
 		return err
 	}
@@ -115,7 +114,14 @@ func GenerateTitleFromGmailMessage(msg *gmail.Message) string {
 	return strings.ReplaceAll(title, "/", "_")
 }
 
-func GenerateTitleFromOutlookMessage(msg *outlook.OutlookMinimalMessage) string {
+type OutlookMinimalMessage struct {
+	ID               string `json:"id"`
+	Subject          string `json:"subject"`
+	From             string `json:"from"`
+	ReceivedDateTime string `json:"received_datetime"`
+}
+
+func GenerateTitleFromOutlookMessage(msg *OutlookMinimalMessage) string {
 	return fmt.Sprintf("%s - %s - %s.outlook", msg.From, msg.Subject, msg.ID)
 }
 
