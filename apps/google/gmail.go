@@ -257,11 +257,11 @@ func (client *GmailClient) processHeaders(headers []*gmail.MessagePartHeader, gm
 
 		switch header.Name {
 		case "To":
-			if res, ok := utils.GetStringInBetweenTwoString(header.Value, "\u003c", "\u003e"); ok {
+			if res, ok := utils.GetStringBetween(header.Value, "\u003c", "\u003e"); ok {
 				gmailMsg.To = res
 			}
 		case "From":
-			if res, ok := utils.GetStringInBetweenTwoString(header.Value, "\u003c", "\u003e"); ok {
+			if res, ok := utils.GetStringBetween(header.Value, "\u003c", "\u003e"); ok {
 				gmailMsg.From = res
 			}
 		case "Subject":

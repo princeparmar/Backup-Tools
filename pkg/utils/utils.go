@@ -4,51 +4,44 @@ import (
 	"archive/zip"
 	"fmt"
 	"io"
-	"log"
 	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"google.golang.org/api/gmail/v1"
 )
 
-type lockedArray struct {
+type LockedArray struct {
 	sync.Mutex
-	ar []string
+	items []string
 }
 
-func NewLockedArray() *lockedArray {
-	return &lockedArray{ar: make([]string, 0)}
+func NewLockedArray() *LockedArray {
+	return &LockedArray{items: make([]string, 0)}
 }
 
-func (la *lockedArray) Add(s string) {
-	la.Lock()
-	la.ar = append(la.ar, s)
-	la.Unlock()
-}
-
-func (la *lockedArray) Get() []string {
+func (la *LockedArray) Add(s string) {
 	la.Lock()
 	defer la.Unlock()
-	return la.ar
+	la.items = append(la.items, s)
 }
 
-func init() {
-	rand.Seed(time.Now().UnixNano())
+func (la *LockedArray) Get() []string {
+	la.Lock()
+	defer la.Unlock()
+	return la.items
 }
 
-var letterRunes = []rune("1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+const letters = "1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
-// Creates random string for cookie purposes.
 func RandStringRunes(n int) string {
-	b := make([]rune, n)
+	b := make([]byte, n)
 	for i := range b {
-		b[i] = letterRunes[rand.Intn(len(letterRunes))]
+		b[i] = letters[rand.Intn(len(letters))]
 	}
 	return string(b)
 }
@@ -59,62 +52,45 @@ func Contains(ar []string, b string) bool {
 			return true
 		}
 	}
-
 	return false
 }
 
-// DownloadFile will download a url to a local file. It's efficient because it will
-// write as it downloads and not load the whole file into memory.
-func DownloadFile(filepath string, url string) error {
-
-	// Get the data
+func DownloadFile(filepath, url string) error {
 	resp, err := http.Get(url)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
-	// Create the file
 	out, err := os.Create(filepath)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
 
-	// Write the body to file
 	_, err = io.Copy(out, resp.Body)
 	return err
 }
 
-func GetStringInBetweenTwoString(str string, startS string, endS string) (result string, found bool) {
-	s := strings.Index(str, startS)
+func GetStringBetween(str, start, end string) (string, bool) {
+	s := strings.Index(str, start)
 	if s == -1 {
-		return result, false
+		return "", false
 	}
-	newS := str[s+len(startS):]
-	e := strings.Index(newS, endS)
+
+	newStr := str[s+len(start):]
+	e := strings.Index(newStr, end)
 	if e == -1 {
-		return result, false
+		return "", false
 	}
-	result = newS[:e]
-	return result, true
+
+	return newStr[:e], true
 }
 
-// creates temporary folder for user's cache to avoid situation of conflicts in case different users have the same file name.
 func CreateUserTempCacheFolder() string {
-	const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-
-	rand.Seed(time.Now().UnixNano())
-
-	b := make([]byte, 20)
-	for i := range b {
-		b[i] = letterBytes[rand.Intn(len(letterBytes))]
-	}
-
-	return string(b)
+	return RandStringRunes(20)
 }
 
-// GetEnvWithKey : get env value
 func GetEnvWithKey(key string) string {
 	return os.Getenv(key)
 }
@@ -125,8 +101,7 @@ func GenerateTitleFromGmailMessage(msg *gmail.Message) string {
 	for _, v := range msg.Payload.Headers {
 		switch v.Name {
 		case "From":
-			res, ok := GetStringInBetweenTwoString(v.Value, "\u003c", "\u003e")
-			if ok {
+			if res, ok := GetStringBetween(v.Value, "\u003c", "\u003e"); ok {
 				from = res
 			} else {
 				from = v.Value
@@ -135,6 +110,7 @@ func GenerateTitleFromGmailMessage(msg *gmail.Message) string {
 			subject = v.Value
 		}
 	}
+
 	title := fmt.Sprintf("%s - %s - %s.gmail", from, subject, msg.Id)
 	return strings.ReplaceAll(title, "/", "_")
 }
@@ -155,48 +131,43 @@ func Unzip(src, dest string) error {
 		if err != nil {
 			return err
 		}
-		defer rc.Close()
 
 		fpath := filepath.Join(dest, f.Name)
 		if f.FileInfo().IsDir() {
 			os.MkdirAll(fpath, f.Mode())
-		} else {
-			var fdir string
-			if lastIndex := strings.LastIndex(fpath, string(os.PathSeparator)); lastIndex > -1 {
-				fdir = fpath[:lastIndex]
-			}
-
-			err = os.MkdirAll(fdir, f.Mode())
-			if err != nil {
-				log.Fatal(err)
-				return err
-			}
-			f, err := os.OpenFile(
-				fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
-			if err != nil {
-				return err
-			}
-			defer f.Close()
-
-			_, err = io.Copy(f, rc)
-			if err != nil {
-				return err
-			}
+			rc.Close()
+			continue
 		}
+
+		if err := os.MkdirAll(filepath.Dir(fpath), 0755); err != nil {
+			rc.Close()
+			return err
+		}
+
+		out, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+		if err != nil {
+			rc.Close()
+			return err
+		}
+
+		if _, err := io.Copy(out, rc); err != nil {
+			out.Close()
+			rc.Close()
+			return err
+		}
+
+		out.Close()
+		rc.Close()
 	}
 	return nil
 }
 
 func CreateFile(filePath string) (*os.File, error) {
-	// Create the directory if it doesn't exist
 	dir := filepath.Dir(filePath)
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create directory: %v", err)
-		}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create directory: %v", err)
 	}
 
-	// Create the file
 	file, err := os.Create(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file: %v", err)
@@ -208,5 +179,5 @@ func MaskString(s string) string {
 	if len(s) < 4 {
 		return s
 	}
-	return "****************************************************" + s[len(s)-4:]
+	return strings.Repeat("*", len(s)-4) + s[len(s)-4:]
 }
