@@ -15,11 +15,6 @@ type PosgresStore struct {
 	DB *gorm.DB
 }
 
-// type GoogleAuthStorage struct {
-// 	JWTtoken    string
-// 	GoogleToken string
-// }
-
 type GoogleAuthStorage struct {
 	JWTtoken string
 	oauth2.Token
@@ -35,13 +30,11 @@ type QuickbooksAuthStorage struct {
 	Token  string
 }
 
-func NewPostgresStore(dsn string, querylogging bool) (*PosgresStore, error) {
-	// Configure GORM logger based on querylogging parameter
-	var logLevel logger.LogLevel
-	if querylogging {
-		logLevel = logger.Info // Enable SQL query logging
-	} else {
-		logLevel = logger.Silent // Disable SQL query logging
+// NewPostgresStore creates a new PostgreSQL store instance
+func NewPostgresStore(dsn string, queryLogging bool) (*PosgresStore, error) {
+	logLevel := logger.Silent
+	if queryLogging {
+		logLevel = logger.Info
 	}
 
 	newLogger := logger.New(
@@ -54,35 +47,26 @@ func NewPostgresStore(dsn string, querylogging bool) (*PosgresStore, error) {
 		},
 	)
 
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: newLogger,
-	})
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: newLogger})
 	if err != nil {
 		return nil, err
 	}
 	return &PosgresStore{DB: db}, nil
 }
 
-func (storage *PosgresStore) Migrate() error {
-	return storage.DB.AutoMigrate(
-		&GoogleAuthStorage{}, &ShopifyAuthStorage{},
-		&QuickbooksAuthStorage{}, &CronJobListingDB{},
+// Migrate runs database migrations
+func (s *PosgresStore) Migrate() error {
+	return s.DB.AutoMigrate(
+		&GoogleAuthStorage{},
+		&ShopifyAuthStorage{},
+		&QuickbooksAuthStorage{},
+		&CronJobListingDB{},
 		&TaskListingDB{},
 	)
 }
 
-func (storage *PosgresStore) WriteGoogleAuthToken(JWToken, authToken string) error {
-	data := GoogleAuthStorage{}
-	data.JWTtoken = JWToken
-	data.AccessToken = authToken
-	// data.RefreshToken = refreshToken
-
-	res := storage.DB.Create(data)
-	if res.Error != nil {
-		return res.Error
-	}
-
-	return nil
+func (s *PosgresStore) writeToken(model interface{}) error {
+	return s.DB.Create(model).Error
 }
 
 // func (storage *PosgresStore) WriteGoogleAuthToken(cookie string, token *oauth2.Token) error {
@@ -105,48 +89,51 @@ func (storage *PosgresStore) WriteGoogleAuthToken(JWToken, authToken string) err
 // 	return &res.Token, nil
 // }
 
-func (storage *PosgresStore) ReadGoogleAuthToken(JWTtoken string) (string, error) {
+func (s *PosgresStore) readToken(cookie string, model interface{}) error {
+	return s.DB.Where("cookie = ?", cookie).First(model).Error
+}
+
+// Google Auth operations
+func (s *PosgresStore) WriteGoogleAuthToken(JWTtoken, accessToken string) error {
+	data := &GoogleAuthStorage{
+		JWTtoken: JWTtoken,
+		Token: oauth2.Token{
+			AccessToken: accessToken,
+		},
+	}
+	return s.DB.Create(data).Error
+}
+
+func (s *PosgresStore) ReadGoogleAuthToken(JWTtoken string) (string, error) {
 	var res GoogleAuthStorage
-	storage.DB.Where("jw_ttoken = ?", JWTtoken).First(&res)
+	if err := s.DB.Where("jwt_token = ?", JWTtoken).First(&res).Error; err != nil {
+		return "", err
+	}
 	return res.AccessToken, nil
 }
 
-func (storage *PosgresStore) WriteShopifyAuthToken(cookie string, token string) error {
-	data := ShopifyAuthStorage{
-		Cookie: cookie,
-		Token:  token,
-	}
-
-	res := storage.DB.Create(data)
-	if res.Error != nil {
-		return res.Error
-	}
-
-	return nil
+// Shopify Auth operations
+func (s *PosgresStore) WriteShopifyAuthToken(cookie, token string) error {
+	return s.writeToken(&ShopifyAuthStorage{Cookie: cookie, Token: token})
 }
 
-func (storage *PosgresStore) ReadShopifyAuthToken(cookie string) (string, error) {
+func (s *PosgresStore) ReadShopifyAuthToken(cookie string) (string, error) {
 	var res ShopifyAuthStorage
-	storage.DB.Where("cookie = ?", cookie).First(&res)
+	if err := s.readToken(cookie, &res); err != nil {
+		return "", err
+	}
 	return res.Token, nil
 }
 
-func (storage *PosgresStore) WriteQuickbooksAuthToken(cookie string, token string) error {
-	data := QuickbooksAuthStorage{
-		Cookie: cookie,
-		Token:  token,
-	}
-
-	res := storage.DB.Create(data)
-	if res.Error != nil {
-		return res.Error
-	}
-
-	return nil
+// Quickbooks Auth operations
+func (s *PosgresStore) WriteQuickbooksAuthToken(cookie, token string) error {
+	return s.writeToken(&QuickbooksAuthStorage{Cookie: cookie, Token: token})
 }
 
-func (storage *PosgresStore) ReadQuickbooksAuthToken(cookie string) (string, error) {
+func (s *PosgresStore) ReadQuickbooksAuthToken(cookie string) (string, error) {
 	var res QuickbooksAuthStorage
-	storage.DB.Where("cookie = ?", cookie).First(&res)
+	if err := s.readToken(cookie, &res); err != nil {
+		return "", err
+	}
 	return res.Token, nil
 }
