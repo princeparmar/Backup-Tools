@@ -235,7 +235,7 @@ func handleSatelliteDrive(c echo.Context) error {
 			"error": "access token not found",
 		})
 	}
-	o, err := satellite.ListObjects1(context.Background(), accesGrant, "google-drive")
+	o, err := satellite.ListObjects(context.Background(), accesGrant, "google-drive")
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"error": fmt.Sprintf("failed to get file list from Satellite: %v", err),

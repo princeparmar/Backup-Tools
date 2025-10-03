@@ -110,7 +110,7 @@ func handleStorageListObjects(c echo.Context) error {
 		})
 	}
 	// We use bucket ids since its unique
-	o, err := satellite.ListObjectsRecurisive(context.Background(), accesGrant, bucket.Id)
+	o, err := satellite.ListObjectsRecursive(context.Background(), accesGrant, bucket.Id)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"error": fmt.Sprintf("failed to get file list from Satellite: %v", err),

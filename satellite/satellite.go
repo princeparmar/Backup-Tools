@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
 	"github.com/dgrijalva/jwt-go"
 	"github.com/labstack/echo/v4"
 	"storj.io/common/grant"
@@ -33,334 +34,330 @@ const (
 
 var StorxSatelliteService string
 
-// Authenticates app with your satellite accout.
+// HandleSatelliteAuthentication authenticates app with satellite account
 func HandleSatelliteAuthentication(c echo.Context) error {
+	start := time.Now()
+
 	accessToken := c.FormValue("satellite")
+	if accessToken == "" {
+		prometheus.RecordRequestError("POST", "/satellite-auth", "missing_token")
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"error": "satellite access token is required",
+		})
+	}
+
 	c.SetCookie(&http.Cookie{
 		Name:  "access_token",
 		Value: accessToken,
 	})
+
+	duration := time.Since(start)
+	prometheus.RecordRequestDuration("POST", "/satellite-auth", "200", duration)
+	prometheus.RecordRequestTotal("POST", "/satellite-auth", "200")
+
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "authentication was successful",
 	})
 }
 
+// GetUploader creates an uploader for the specified bucket and object
 func GetUploader(ctx context.Context, accessGrant, bucketName, objectKey string) (*uplink.Upload, error) {
-	// Parse the Access Grant.
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
-		return nil, fmt.Errorf("could not parse access grant: %v", err)
+		prometheus.RecordBucketOperation(bucketName, "ensure_bucket", "error")
+		prometheus.RecordSatelliteError("parse_access_failed", "get_uploader")
+		return nil, fmt.Errorf("parse access grant: %w", err)
 	}
 
 	testAccessParse, err := grant.ParseAccess(accessGrant)
 	if err != nil {
-		return nil, fmt.Errorf("could not parse access grant: %v", err)
+		prometheus.RecordBucketOperation(bucketName, "ensure_bucket", "error")
+		prometheus.RecordSatelliteError("parse_access_failed", "get_uploader")
+		return nil, fmt.Errorf("parse access grant: %w", err)
 	}
-	logger.Info(ctx, "testAccessParse", logger.String("testAccessParse", testAccessParse.SatelliteAddress))
-	logger.Info(ctx, "access", logger.String("access", testAccessParse.APIKey.Serialize()))
-	logger.Info(ctx, "encAccess", logger.String("encAccess", fmt.Sprintf("%+v", testAccessParse.EncAccess)))
 
-	// Open up the Project we will be working with.
+	logger.Info(ctx, "access details",
+		logger.String("satellite", testAccessParse.SatelliteAddress),
+		logger.String("api_key", testAccessParse.APIKey.Serialize()))
+
 	project, err := uplink.OpenProject(ctx, access)
 	if err != nil {
-		return nil, fmt.Errorf("could not open project: %v", err)
+		prometheus.RecordBucketOperation(bucketName, "ensure_bucket", "error")
+		prometheus.RecordSatelliteError("open_project_failed", "get_uploader")
+		return nil, fmt.Errorf("open project: %w", err)
 	}
 	defer project.Close()
 
-	// Ensure the desired Bucket within the Project is created.
 	_, err = project.EnsureBucket(ctx, bucketName)
 	if err != nil {
-		_, err := project.CreateBucket(ctx, bucketName)
+		_, err = project.CreateBucket(ctx, bucketName)
 		if err != nil {
-			return nil, fmt.Errorf("could not create bucket: %v", err)
+			prometheus.RecordBucketOperation(bucketName, "create_bucket", "error")
+			prometheus.RecordSatelliteError("create_bucket_failed", "get_uploader")
+			return nil, fmt.Errorf("create bucket: %w", err)
 		}
+		prometheus.RecordBucketOperation(bucketName, "create_bucket", "success")
+	} else {
+		prometheus.RecordBucketOperation(bucketName, "ensure_bucket", "success")
 	}
 
-	logger.Info(ctx, "Uploading object to bucket:", logger.String("bucketName", bucketName), logger.String("objectKey", objectKey))
-	// Intitiate the upload of our Object to the specified bucket and key.
+	logger.Info(ctx, "Uploading object",
+		logger.String("bucket", bucketName),
+		logger.String("object", objectKey))
+
 	upload, err := project.UploadObject(ctx, bucketName, objectKey, nil)
 	if err != nil {
-		return nil, fmt.Errorf("could not initiate upload: %v", err)
+		prometheus.RecordSatelliteError("upload_object_failed", "get_uploader")
+		return nil, fmt.Errorf("initiate upload: %w", err)
 	}
 
 	return upload, nil
 }
 
+// UploadObject uploads data to satellite storage
 func UploadObject(ctx context.Context, accessGrant, bucketName, objectKey string, data []byte) error {
+	start := time.Now()
+
 	upload, err := GetUploader(ctx, accessGrant, bucketName, objectKey)
 	if err != nil {
+		prometheus.RecordUploadError(bucketName, "get_uploader_failed")
 		return err
 	}
 
-	// Copy the data to the upload.
 	buf := bytes.NewBuffer(data)
 	_, err = io.Copy(upload, buf)
 	if err != nil {
 		_ = upload.Abort()
-		return fmt.Errorf("could not upload data: %v", err)
+		prometheus.RecordUploadError(bucketName, "copy_data_failed")
+		return fmt.Errorf("upload data: %w", err)
 	}
 
-	// Commit the uploaded object.
 	err = upload.Commit()
 	if err != nil {
-		return fmt.Errorf("could not commit uploaded object: %v", err)
+		prometheus.RecordUploadError(bucketName, "commit_failed")
+		return fmt.Errorf("commit object: %w", err)
 	}
+
+	duration := time.Since(start)
+	prometheus.RecordUploadDuration(bucketName, "success", duration)
+	prometheus.RecordUploadSize(bucketName, int64(len(data)))
+	prometheus.RecordObjectOperation(bucketName, "upload", "success")
 
 	return nil
 }
 
+// DownloadObject downloads data from satellite storage
 func DownloadObject(ctx context.Context, accessGrant, bucketName, objectKey string) ([]byte, error) {
-	// Parse the Access Grant.
+	start := time.Now()
+
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
-		return nil, fmt.Errorf("could not parse access grant: %v", err)
+		prometheus.RecordDownloadError(bucketName, "parse_access_failed")
+		return nil, fmt.Errorf("parse access grant: %w", err)
 	}
 
-	// Open up the Project we will be working with.
 	project, err := uplink.OpenProject(ctx, access)
 	if err != nil {
-		return nil, fmt.Errorf("could not open project: %v", err)
+		prometheus.RecordDownloadError(bucketName, "open_project_failed")
+		return nil, fmt.Errorf("open project: %w", err)
 	}
 	defer project.Close()
 
-	// Ensure the desired Bucket within the Project is created.
 	_, err = project.EnsureBucket(ctx, bucketName)
 	if err != nil {
-		return nil, err
+		prometheus.RecordDownloadError(bucketName, "ensure_bucket_failed")
+		return nil, fmt.Errorf("ensure bucket: %w", err)
 	}
+
 	download, err := project.DownloadObject(ctx, bucketName, objectKey, nil)
 	if err != nil {
-		return nil, fmt.Errorf("could not open object: %v", err)
+		prometheus.RecordDownloadError(bucketName, "download_object_failed")
+		return nil, fmt.Errorf("open object: %w", err)
 	}
 	defer download.Close()
 
-	// Read everything from the download stream
 	receivedContents, err := io.ReadAll(download)
 	if err != nil {
-		return nil, fmt.Errorf("could not read data: %v", err)
+		prometheus.RecordDownloadError(bucketName, "read_data_failed")
+		return nil, fmt.Errorf("read data: %w", err)
 	}
+
+	duration := time.Since(start)
+	prometheus.RecordDownloadDuration(bucketName, "success", duration)
+	prometheus.RecordDownloadSize(bucketName, int64(len(receivedContents)))
+	prometheus.RecordObjectOperation(bucketName, "download", "success")
+
 	return receivedContents, nil
 }
 
+// ListObjects lists all objects in a bucket
 func ListObjects(ctx context.Context, accessGrant, bucketName string) (map[string]bool, error) {
 	return ListObjectsWithPrefix(ctx, accessGrant, bucketName, "")
 }
 
+// ListObjectsWithPrefix lists objects with a specific prefix
 func ListObjectsWithPrefix(ctx context.Context, accessGrant, bucketName, prefix string) (map[string]bool, error) {
-	// Parse the Access Grant.
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
-		return nil, fmt.Errorf("could not parse access grant: %v", err)
+		return nil, fmt.Errorf("parse access grant: %w", err)
 	}
 
-	// Open up the Project we will be working with.
 	project, err := uplink.OpenProject(ctx, access)
 	if err != nil {
-		return nil, fmt.Errorf("could not open project: %v", err)
+		return nil, fmt.Errorf("open project: %w", err)
 	}
 	defer project.Close()
 
-	// Ensure the desired Bucket within the Project is created.
 	_, err = project.EnsureBucket(ctx, bucketName)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ensure bucket: %w", err)
 	}
+
 	listIter := project.ListObjects(ctx, bucketName, &uplink.ListObjectsOptions{
 		Prefix: prefix,
 	})
-	/*if err != nil {
-		return nil, fmt.Errorf("could not open object: %v", err)
-	}*/
 
-	objects := map[string]bool{}
+	objects := make(map[string]bool)
 	for listIter.Next() {
 		objects[listIter.Item().Key] = true
 	}
 
-	if listIter.Err() != nil {
-		return nil, fmt.Errorf("could not list objects: %v", listIter.Err())
+	if err := listIter.Err(); err != nil {
+		return nil, fmt.Errorf("list objects: %w", err)
 	}
 
 	return objects, nil
 }
 
-func DeleteObject(ctx context.Context, accessGrant, bucketName, objectKey string) error {
-	// Parse the Access Grant.
+// ListObjectsDetailed returns detailed object information
+func ListObjectsDetailed(ctx context.Context, accessGrant, bucketName string) ([]uplink.Object, error) {
+	return listObjectsWithOptions(ctx, accessGrant, bucketName, &uplink.ListObjectsOptions{})
+}
+
+// GetFilesInFolder lists objects with a specific prefix
+func GetFilesInFolder(ctx context.Context, accessGrant, bucketName, prefix string) ([]uplink.Object, error) {
+	return listObjectsWithOptions(ctx, accessGrant, bucketName, &uplink.ListObjectsOptions{
+		Prefix: prefix,
+	})
+}
+
+// ListObjectsRecursive lists all objects recursively
+func ListObjectsRecursive(ctx context.Context, accessGrant, bucketName string) ([]uplink.Object, error) {
+	return listObjectsWithOptions(ctx, accessGrant, bucketName, &uplink.ListObjectsOptions{
+		Recursive: true,
+	})
+}
+
+// listObjectsWithOptions helper function for listing objects with options
+func listObjectsWithOptions(ctx context.Context, accessGrant, bucketName string, options *uplink.ListObjectsOptions) ([]uplink.Object, error) {
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
-		return fmt.Errorf("could not parse access grant: %v", err)
+		prometheus.RecordObjectOperation(bucketName, "list", "error")
+		prometheus.RecordSatelliteError("parse_access_failed", "list_objects")
+		return nil, fmt.Errorf("parse access grant: %w", err)
 	}
 
-	// Open up the Project we will be working with.
 	project, err := uplink.OpenProject(ctx, access)
 	if err != nil {
-		return fmt.Errorf("could not open project: %v", err)
+		return nil, fmt.Errorf("open project: %w", err)
 	}
 	defer project.Close()
 
-	// Ensure the desired Bucket within the Project is created.
 	_, err = project.EnsureBucket(ctx, bucketName)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("ensure bucket: %w", err)
 	}
 
-	// Delete object
+	listIter := project.ListObjects(ctx, bucketName, options)
+	var objects []uplink.Object
+
+	for listIter.Next() {
+		objects = append(objects, *listIter.Item())
+	}
+
+	if err := listIter.Err(); err != nil {
+		return nil, fmt.Errorf("list objects: %w", err)
+	}
+
+	return objects, nil
+}
+
+// DeleteObject deletes an object from satellite storage
+func DeleteObject(ctx context.Context, accessGrant, bucketName, objectKey string) error {
+	access, err := uplink.ParseAccess(accessGrant)
+	if err != nil {
+		prometheus.RecordObjectOperation(bucketName, "delete", "error")
+		prometheus.RecordSatelliteError("parse_access_failed", "delete_object")
+		return fmt.Errorf("parse access grant: %w", err)
+	}
+
+	project, err := uplink.OpenProject(ctx, access)
+	if err != nil {
+		prometheus.RecordObjectOperation(bucketName, "delete", "error")
+		prometheus.RecordSatelliteError("open_project_failed", "delete_object")
+		return fmt.Errorf("open project: %w", err)
+	}
+	defer project.Close()
+
+	_, err = project.EnsureBucket(ctx, bucketName)
+	if err != nil {
+		prometheus.RecordObjectOperation(bucketName, "delete", "error")
+		prometheus.RecordSatelliteError("ensure_bucket_failed", "delete_object")
+		return fmt.Errorf("ensure bucket: %w", err)
+	}
+
 	_, err = project.DeleteObject(ctx, bucketName, objectKey)
 	if err != nil {
-		return err
+		prometheus.RecordObjectOperation(bucketName, "delete", "error")
+		prometheus.RecordSatelliteError("delete_object_failed", "delete_object")
+		return fmt.Errorf("delete object: %w", err)
 	}
+
+	prometheus.RecordObjectOperation(bucketName, "delete", "success")
 	return nil
-
 }
 
-func ListObjects1(ctx context.Context, accessGrant, bucketName string) ([]uplink.Object, error) {
-	// Parse the Access Grant.
-	access, err := uplink.ParseAccess(accessGrant)
-	if err != nil {
-		return nil, fmt.Errorf("could not parse access grant: %v", err)
-	}
-
-	// Open up the Project we will be working with.
-	project, err := uplink.OpenProject(ctx, access)
-	if err != nil {
-		return nil, fmt.Errorf("could not open project: %v", err)
-	}
-	defer project.Close()
-
-	// Ensure the desired Bucket within the Project is created.
-	_, err = project.EnsureBucket(ctx, bucketName)
-	if err != nil {
-		return nil, err
-	}
-	listIter := project.ListObjects(ctx, bucketName, nil)
-	/*if err != nil {
-		return nil, fmt.Errorf("could not open object: %v", err)
-	}*/
-
-	objects := []uplink.Object{}
-	for listIter.Next() {
-		//objects[listIter.Item().Key] = true
-		objects = append(objects, *listIter.Item())
-	}
-
-	if listIter.Err() != nil {
-		return nil, fmt.Errorf("could not list objects: %v", listIter.Err())
-	}
-
-	return objects, nil
-}
-
-func GetFilesInFolder(ctx context.Context, accessGrant, bucketName, prefix string) ([]uplink.Object, error) {
-	// Parse the Access Grant.
-	access, err := uplink.ParseAccess(accessGrant)
-	if err != nil {
-		return nil, fmt.Errorf("could not parse access grant: %v", err)
-	}
-
-	// Open up the Project we will be working with.
-	project, err := uplink.OpenProject(ctx, access)
-	if err != nil {
-		return nil, fmt.Errorf("could not open project: %v", err)
-	}
-	defer project.Close()
-
-	// Ensure the desired Bucket within the Project is created.
-	_, err = project.EnsureBucket(ctx, bucketName)
-	if err != nil {
-		return nil, err
-	}
-	listIter := project.ListObjects(ctx, bucketName, &uplink.ListObjectsOptions{Prefix: prefix})
-
-	objects := []uplink.Object{}
-	for listIter.Next() {
-		//objects[listIter.Item().Key] = true
-		objects = append(objects, *listIter.Item())
-	}
-
-	if listIter.Err() != nil {
-		return nil, fmt.Errorf("could not list objects: %v", listIter.Err())
-	}
-
-	return objects, nil
-}
-
-func ListObjectsRecurisive(ctx context.Context, accessGrant, bucketName string) ([]uplink.Object, error) {
-	// Parse the Access Grant.
-	access, err := uplink.ParseAccess(accessGrant)
-	if err != nil {
-		return nil, fmt.Errorf("could not parse access grant: %v", err)
-	}
-
-	// Open up the Project we will be working with.
-	project, err := uplink.OpenProject(ctx, access)
-	if err != nil {
-		return nil, fmt.Errorf("could not open project: %v", err)
-	}
-	defer project.Close()
-
-	// Ensure the desired Bucket within the Project is created.
-	_, err = project.EnsureBucket(ctx, bucketName)
-	if err != nil {
-		return nil, err
-	}
-	listIter := project.ListObjects(ctx, bucketName, &uplink.ListObjectsOptions{Recursive: true, Prefix: ""})
-	/*if err != nil {
-		return nil, fmt.Errorf("could not open object: %v", err)
-	}*/
-
-	objects := []uplink.Object{}
-	for listIter.Next() {
-		objects = append(objects, *listIter.Item())
-	}
-
-	if listIter.Err() != nil {
-		return nil, fmt.Errorf("could not list objects: %v", listIter.Err())
-	}
-
-	return objects, nil
-}
-
+// GetUserdetails retrieves user details from satellite service
 func GetUserdetails(token string) (string, error) {
-
 	url := StorxSatelliteService + "/api/v0/auth/account"
 
-	client := &http.Client{}
 	req, err := http.NewRequest(http.MethodGet, url, nil)
-
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("create request: %w", err)
 	}
-	req.Header.Add("accept", "application/json")
-	req.Header.Add("cookie", "_tokenKey="+token)
 
+	req.Header.Set("accept", "application/json")
+	req.Header.Set("cookie", "_tokenKey="+token)
+
+	client := &http.Client{Timeout: 30 * time.Second}
 	res, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("send request: %w", err)
 	}
 	defer res.Body.Close()
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read response: %w", err)
 	}
 
-	var userDetailResponse struct {
+	var response struct {
 		ID    string `json:"id"`
 		Error string `json:"error"`
 	}
 
-	err = json.Unmarshal(body, &userDetailResponse)
-	if err != nil {
-		return "", err
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", fmt.Errorf("parse response: %w", err)
 	}
 
-	if userDetailResponse.Error != "" {
-		return "", fmt.Errorf(userDetailResponse.Error)
+	if response.Error != "" {
+		return "", fmt.Errorf("api error: %s", response.Error)
 	}
 
-	return userDetailResponse.ID, nil
+	return response.ID, nil
 }
 
+// createJWTToken creates a JWT token for email notifications
 func createJWTToken(email, errorMsg, method, secretKey string) (string, error) {
 	claims := jwt.MapClaims{
 		"email":  email,
@@ -373,35 +370,29 @@ func createJWTToken(email, errorMsg, method, secretKey string) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	tokenString, err := token.SignedString([]byte(secretKey))
 	if err != nil {
-		return "", fmt.Errorf("failed to sign token: %w", err)
+		return "", fmt.Errorf("sign token: %w", err)
 	}
 
 	return tokenString, nil
 }
 
-type BackupFailureRequest struct {
-	Email  string `json:"email"`
-	Error  string `json:"error"`
-	Method string `json:"method"`
-}
-
+// SendEmailForBackupFailure sends email notification for backup failures
 func SendEmailForBackupFailure(ctx context.Context, email, errorMsg, method string) error {
-	// Create a new context with timeout (respect caller context)
 	emailCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	if StorxSatelliteService == "" {
-		return fmt.Errorf("STORX_SATELLITE_SERVICE environment variable is not set")
+		return fmt.Errorf("STORX_SATELLITE_SERVICE not set")
 	}
 
 	emailAPIKey := os.Getenv("EMAIL_API_KEY")
 	if emailAPIKey == "" {
-		return fmt.Errorf("EMAIL_API_KEY environment variable is not set")
+		return fmt.Errorf("EMAIL_API_KEY not set")
 	}
 
 	jwtToken, err := createJWTToken(email, errorMsg, method, emailAPIKey)
 	if err != nil {
-		return fmt.Errorf("failed to create JWT token: %w", err)
+		return fmt.Errorf("create token: %w", err)
 	}
 
 	payload := struct {
@@ -412,32 +403,33 @@ func SendEmailForBackupFailure(ctx context.Context, email, errorMsg, method stri
 
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("failed to marshal payload: %w", err)
+		return fmt.Errorf("marshal payload: %w", err)
 	}
 
 	url := strings.TrimSuffix(StorxSatelliteService, "/") + "/api/v0/auth/send-email"
 
 	req, err := http.NewRequestWithContext(emailCtx, http.MethodPost, url, bytes.NewBuffer(payloadBytes))
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return fmt.Errorf("create request: %w", err)
 	}
+
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	res, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
+		return fmt.Errorf("send request: %w", err)
 	}
 	defer res.Body.Close()
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
+		return fmt.Errorf("read response: %w", err)
 	}
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return fmt.Errorf("request failed with status %d: %s", res.StatusCode, string(body))
+		return fmt.Errorf("status %d: %s", res.StatusCode, string(body))
 	}
 
 	var response struct {
@@ -447,7 +439,7 @@ func SendEmailForBackupFailure(ctx context.Context, email, errorMsg, method stri
 	}
 
 	if err := json.Unmarshal(body, &response); err != nil {
-		return fmt.Errorf("failed to parse response: %w", err)
+		return fmt.Errorf("parse response: %w", err)
 	}
 
 	if response.Error != "" {
@@ -455,7 +447,7 @@ func SendEmailForBackupFailure(ctx context.Context, email, errorMsg, method stri
 	}
 
 	if !response.Success {
-		return fmt.Errorf("request was not successful: %s", response.Message)
+		return fmt.Errorf("request failed: %s", response.Message)
 	}
 
 	return nil

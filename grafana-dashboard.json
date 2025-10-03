@@ -1,0 +1,149 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "Backup Tools Satellite Metrics",
+    "tags": ["backup-tools", "satellite"],
+    "style": "dark",
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Request Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "rate(satellite_requests_total[5m])",
+            "legendFormat": "{{method}} {{endpoint}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Request Duration",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(satellite_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "95th percentile"
+          },
+          {
+            "expr": "histogram_quantile(0.50, rate(satellite_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "50th percentile"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Error Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "rate(satellite_request_errors_total[5m])",
+            "legendFormat": "{{error_type}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+      },
+      {
+        "id": 4,
+        "title": "Upload Operations",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(satellite_upload_duration_seconds[5m])",
+            "legendFormat": "{{bucket}} - {{status}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+      },
+      {
+        "id": 5,
+        "title": "Download Operations",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(satellite_download_duration_seconds[5m])",
+            "legendFormat": "{{bucket}} - {{status}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}
+      },
+      {
+        "id": 6,
+        "title": "Upload Size Distribution",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(satellite_upload_size_bytes_bucket[5m]))",
+            "legendFormat": "95th percentile - {{bucket}}"
+          },
+          {
+            "expr": "histogram_quantile(0.50, rate(satellite_upload_size_bytes_bucket[5m]))",
+            "legendFormat": "50th percentile - {{bucket}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}
+      },
+      {
+        "id": 7,
+        "title": "System Resources",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "satellite_memory_usage_bytes",
+            "legendFormat": "Memory Usage"
+          },
+          {
+            "expr": "satellite_goroutines_total",
+            "legendFormat": "Goroutines"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24}
+      },
+      {
+        "id": 8,
+        "title": "Bucket Operations",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "rate(satellite_bucket_operations_total[5m])",
+            "legendFormat": "{{bucket}} - {{operation}} - {{status}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24}
+      },
+      {
+        "id": 9,
+        "title": "Object Operations",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "rate(satellite_object_operations_total[5m])",
+            "legendFormat": "{{bucket}} - {{operation}} - {{status}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32}
+      },
+      {
+        "id": 10,
+        "title": "Satellite Errors",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(satellite_errors_total[5m])",
+            "legendFormat": "{{error_type}} - {{component}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32}
+      }
+    ],
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "refresh": "30s"
+  }
+}
+

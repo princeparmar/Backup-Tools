@@ -12,6 +12,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func StartServer(db *storage.PosgresStore, address string) {
@@ -29,9 +30,15 @@ func StartServer(db *storage.PosgresStore, address string) {
 	// Add trace ID middleware for request tracing
 	e.Use(TraceIDMiddleware())
 
+	// Add Prometheus metrics middleware
+	e.Use(PrometheusMiddleware())
+
 	e.Use(DBMiddleware(db))
 
 	e.Use(middleware.CORS())
+
+	// Prometheus metrics endpoint
+	e.GET("/metrics", echo.WrapHandler(promhttp.Handler()))
 
 	e.POST("/satellite-auth", satellite.HandleSatelliteAuthentication)
 	e.POST("/google-auth", googlepack.Autentificate)
@@ -126,7 +133,7 @@ func StartServer(db *storage.PosgresStore, address string) {
 				"error": "access token not found",
 			})
 		}
-		list, err := satellite.ListObjectsRecurisive(context.Background(), accesGrant, bucketName)
+		list, err := satellite.ListObjectsRecursive(context.Background(), accesGrant, bucketName)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),

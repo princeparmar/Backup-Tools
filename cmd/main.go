@@ -8,6 +8,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/crons"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger/newrelic"
+	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/server"
 	"github.com/StorX2-0/Backup-Tools/storage"
@@ -19,7 +20,7 @@ func main() {
 	ctx := context.Background()
 
 	// Initialize environment and dependencies
-	if err := initApp(); err != nil {
+	if err := initApp(ctx); err != nil {
 		logger.Error(ctx, "failed to initialize application", logger.ErrorField(err))
 		os.Exit(1)
 	}
@@ -37,7 +38,7 @@ func main() {
 	server.StartServer(storage, getAddress())
 }
 
-func initApp() error {
+func initApp(ctx context.Context) error {
 	// Get the directory where the binary is located
 	execPath, err := os.Executable()
 	if err != nil {
@@ -60,6 +61,12 @@ func initApp() error {
 	// Initialize logger with New Relic integration
 	if apiKey := os.Getenv("NEWRELIC_API_KEY"); apiKey != "" || os.Getenv("NEWRELIC_ENABLED") == "true" {
 		logger.InitWithNewRelic(newrelic.NewLogInterceptor(apiKey, true))
+	}
+
+	// Initialize Prometheus metrics and push gateway from environment
+	if err := prometheus.InitFromEnv(ctx); err != nil {
+		// Don't exit, just log the error and continue without metrics pushing
+		logger.Error(ctx, "Failed to initialize Prometheus", logger.ErrorField(err))
 	}
 
 	return nil

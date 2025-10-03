@@ -1,0 +1,28 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - "prometheus-alerts.yml"
+
+scrape_configs:
+  # The job name is added as a label `job=<job_name>` to any timeseries scraped from this config.
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Backup Tools Satellite metrics
+  - job_name: 'backup-tools-satellite'
+    static_configs:
+      - targets: ['localhost:8005']  # Adjust port as needed
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+    scrape_timeout: 10s
+
+  # Push Gateway (if using push gateway instead of pull)
+  - job_name: 'pushgateway'
+    static_configs:
+      - targets: ['localhost:9091']  # Default push gateway port
+    honor_labels: true
+    scrape_interval: 15s
+

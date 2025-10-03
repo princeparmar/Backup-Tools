@@ -1,0 +1,273 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "Backup Tools - Alerts & Incidents",
+    "description": "Alert monitoring dashboard for Backup Tools application showing current alerts, alert history, and incident management",
+    "tags": ["backup-tools", "alerts", "incidents", "monitoring"],
+    "style": "dark",
+    "timezone": "browser",
+    "editable": true,
+    "graphTooltip": "default",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "refresh": "10s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Current Alerts Overview",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "ALERTS{alertstate=\"firing\"}",
+            "legendFormat": "Firing Alerts",
+            "refId": "A"
+          },
+          {
+            "expr": "ALERTS{alertstate=\"pending\"}",
+            "legendFormat": "Pending Alerts",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "yellow",
+                  "value": 1
+                },
+                {
+                  "color": "red",
+                  "value": 5
+                }
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 4, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Alert Severity Distribution",
+        "type": "piechart",
+        "targets": [
+          {
+            "expr": "count by (severity) (ALERTS{alertstate=\"firing\"})",
+            "legendFormat": "{{severity}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 4, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Alert History Timeline",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "changes(ALERTS{alertstate=\"firing\"}[1m])",
+            "legendFormat": "Alert Changes",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 4}
+      },
+      {
+        "id": 4,
+        "title": "Critical Alerts",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "ALERTS{alertstate=\"firing\",severity=\"critical\"}",
+            "legendFormat": "{{alertname}} - {{instance}}",
+            "refId": "A",
+            "format": "table"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}
+      },
+      {
+        "id": 5,
+        "title": "Warning Alerts",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "ALERTS{alertstate=\"firing\",severity=\"warning\"}",
+            "legendFormat": "{{alertname}} - {{instance}}",
+            "refId": "A",
+            "format": "table"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}
+      },
+      {
+        "id": 6,
+        "title": "Alert Resolution Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "rate(ALERTS{alertstate=\"firing\"}[1h])",
+            "legendFormat": "Alerts per hour",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "yellow",
+                  "value": 1
+                },
+                {
+                  "color": "red",
+                  "value": 5
+                }
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 4, "w": 8, "x": 0, "y": 20}
+      },
+      {
+        "id": 7,
+        "title": "Service Health Score",
+        "type": "gauge",
+        "targets": [
+          {
+            "expr": "100 - (count(ALERTS{alertstate=\"firing\"}) * 10)",
+            "legendFormat": "Health Score %",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "min": 0,
+            "max": 100,
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "red",
+                  "value": 0
+                },
+                {
+                  "color": "yellow",
+                  "value": 70
+                },
+                {
+                  "color": "green",
+                  "value": 90
+                }
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 4, "w": 8, "x": 8, "y": 20}
+      },
+      {
+        "id": 8,
+        "title": "Alert Frequency by Service",
+        "type": "bargauge",
+        "targets": [
+          {
+            "expr": "count by (service) (ALERTS{alertstate=\"firing\"})",
+            "legendFormat": "{{service}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 4, "w": 8, "x": 16, "y": 20}
+      }
+    ],
+    "templating": {
+      "list": [
+        {
+          "name": "severity",
+          "type": "query",
+          "query": "label_values(ALERTS, severity)",
+          "refresh": 1,
+          "includeAll": true,
+          "multi": true,
+          "allValue": ".*"
+        },
+        {
+          "name": "service",
+          "type": "query",
+          "query": "label_values(ALERTS, service)",
+          "refresh": 1,
+          "includeAll": true,
+          "multi": true,
+          "allValue": ".*"
+        }
+      ]
+    },
+    "annotations": {
+      "list": [
+        {
+          "name": "Alert Events",
+          "datasource": "Prometheus",
+          "expr": "changes(ALERTS{alertstate=\"firing\"}[1m])",
+          "iconColor": "red",
+          "enable": true,
+          "showIn": 0
+        }
+      ]
+    }
+  }
+}

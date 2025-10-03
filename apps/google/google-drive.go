@@ -710,7 +710,7 @@ func GetFileNamesInRoot(c echo.Context) (*PaginatedFilesResponse, error) {
 	}
 
 	// Get satellite objects for sync checking
-	satelliteObjects, err := satellite.ListObjects1(context.Background(), accessGrant, "google-drive")
+	satelliteObjects, err := satellite.ListObjectsDetailed(context.Background(), accessGrant, "google-drive")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get satellite list: %w", err)
 	}

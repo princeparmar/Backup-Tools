@@ -1,0 +1,584 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "Backup Tools - Comprehensive Monitoring Dashboard",
+    "description": "Complete monitoring dashboard for Backup Tools application including HTTP requests, system metrics, satellite operations, and alerts",
+    "tags": ["backup-tools", "monitoring", "satellite", "prometheus"],
+    "style": "dark",
+    "timezone": "browser",
+    "editable": true,
+    "graphTooltip": "default",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "refresh": "30s",
+    "timepicker": {
+      "refresh_intervals": ["5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h", "2h", "1d"],
+      "time_options": ["5m", "15m", "1h", "6h", "12h", "24h", "2d", "7d", "30d"]
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Application Status Overview",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "up{job=\"backup-tools-satellite\"}",
+            "legendFormat": "Backup Tools Status",
+            "refId": "A"
+          },
+          {
+            "expr": "up{job=\"pushgateway\"}",
+            "legendFormat": "Push Gateway Status",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "mappings": [
+              {
+                "options": {
+                  "0": {
+                    "text": "DOWN"
+                  },
+                  "1": {
+                    "text": "UP"
+                  }
+                },
+                "type": "value"
+              }
+            ],
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "red",
+                  "value": 0
+                },
+                {
+                  "color": "green",
+                  "value": 1
+                }
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 4, "w": 24, "x": 0, "y": 0},
+        "options": {
+          "colorMode": "background",
+          "graphMode": "area",
+          "justifyMode": "auto",
+          "orientation": "auto"
+        }
+      },
+      {
+        "id": 2,
+        "title": "HTTP Request Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "rate(promhttp_metric_handler_requests_total{job=\"backup-tools-satellite\"}[5m])",
+            "legendFormat": "Requests/sec",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "reqps",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 4}
+      },
+      {
+        "id": 3,
+        "title": "HTTP Request Duration (95th percentile)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(promhttp_metric_handler_request_duration_seconds_bucket{job=\"backup-tools-satellite\"}[5m]))",
+            "legendFormat": "95th percentile",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "yellow",
+                  "value": 0.5
+                },
+                {
+                  "color": "red",
+                  "value": 1
+                }
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 4}
+      },
+      {
+        "id": 4,
+        "title": "Error Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "rate(promhttp_metric_handler_requests_total{job=\"backup-tools-satellite\",code!=\"200\"}[5m]) / rate(promhttp_metric_handler_requests_total{job=\"backup-tools-satellite\"}[5m]) * 100",
+            "legendFormat": "Error Rate %",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "yellow",
+                  "value": 1
+                },
+                {
+                  "color": "red",
+                  "value": 5
+                }
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 4}
+      },
+      {
+        "id": 5,
+        "title": "Active Goroutines",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "go_goroutines{job=\"backup-tools-satellite\"}",
+            "legendFormat": "Goroutines",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "yellow",
+                  "value": 100
+                },
+                {
+                  "color": "red",
+                  "value": 1000
+                }
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 4}
+      },
+      {
+        "id": 6,
+        "title": "HTTP Request Rate Over Time",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(promhttp_metric_handler_requests_total{job=\"backup-tools-satellite\"}[5m])",
+            "legendFormat": "{{code}} - {{method}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "reqps",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "bottom"
+          }
+        }
+      },
+      {
+        "id": 7,
+        "title": "HTTP Request Duration Distribution",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, rate(promhttp_metric_handler_request_duration_seconds_bucket{job=\"backup-tools-satellite\"}[5m]))",
+            "legendFormat": "50th percentile",
+            "refId": "A"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(promhttp_metric_handler_request_duration_seconds_bucket{job=\"backup-tools-satellite\"}[5m]))",
+            "legendFormat": "95th percentile",
+            "refId": "B"
+          },
+          {
+            "expr": "histogram_quantile(0.99, rate(promhttp_metric_handler_request_duration_seconds_bucket{job=\"backup-tools-satellite\"}[5m]))",
+            "legendFormat": "99th percentile",
+            "refId": "C"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+      },
+      {
+        "id": 8,
+        "title": "Memory Usage",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "go_memstats_heap_alloc_bytes{job=\"backup-tools-satellite\"}",
+            "legendFormat": "Heap Allocated",
+            "refId": "A"
+          },
+          {
+            "expr": "go_memstats_heap_sys_bytes{job=\"backup-tools-satellite\"}",
+            "legendFormat": "Heap System",
+            "refId": "B"
+          },
+          {
+            "expr": "go_memstats_heap_idle_bytes{job=\"backup-tools-satellite\"}",
+            "legendFormat": "Heap Idle",
+            "refId": "C"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "bytes",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}
+      },
+      {
+        "id": 9,
+        "title": "Garbage Collection",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(go_gc_duration_seconds_sum{job=\"backup-tools-satellite\"}[5m])",
+            "legendFormat": "GC Duration/sec",
+            "refId": "A"
+          },
+          {
+            "expr": "rate(go_gc_duration_seconds_count{job=\"backup-tools-satellite\"}[5m])",
+            "legendFormat": "GC Count/sec",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}
+      },
+      {
+        "id": 10,
+        "title": "HTTP Status Codes",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(promhttp_metric_handler_requests_total{job=\"backup-tools-satellite\",code=\"200\"}[5m])",
+            "legendFormat": "200 OK",
+            "refId": "A"
+          },
+          {
+            "expr": "rate(promhttp_metric_handler_requests_total{job=\"backup-tools-satellite\",code=\"400\"}[5m])",
+            "legendFormat": "400 Bad Request",
+            "refId": "B"
+          },
+          {
+            "expr": "rate(promhttp_metric_handler_requests_total{job=\"backup-tools-satellite\",code=\"401\"}[5m])",
+            "legendFormat": "401 Unauthorized",
+            "refId": "C"
+          },
+          {
+            "expr": "rate(promhttp_metric_handler_requests_total{job=\"backup-tools-satellite\",code=\"404\"}[5m])",
+            "legendFormat": "404 Not Found",
+            "refId": "D"
+          },
+          {
+            "expr": "rate(promhttp_metric_handler_requests_total{job=\"backup-tools-satellite\",code=\"500\"}[5m])",
+            "legendFormat": "500 Internal Server Error",
+            "refId": "E"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "reqps",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24}
+      },
+      {
+        "id": 11,
+        "title": "System Resources",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "go_goroutines{job=\"backup-tools-satellite\"}",
+            "legendFormat": "Goroutines",
+            "refId": "A"
+          },
+          {
+            "expr": "go_memstats_mallocs_total{job=\"backup-tools-satellite\"}",
+            "legendFormat": "Memory Allocations",
+            "refId": "B"
+          },
+          {
+            "expr": "go_memstats_frees_total{job=\"backup-tools-satellite\"}",
+            "legendFormat": "Memory Frees",
+            "refId": "C"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24}
+      },
+      {
+        "id": 12,
+        "title": "Satellite Operations (Custom Metrics)",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(satellite_upload_duration_seconds{job=\"backup-tools-satellite\"}[5m])",
+            "legendFormat": "Upload Duration - {{bucket}}",
+            "refId": "A"
+          },
+          {
+            "expr": "rate(satellite_download_duration_seconds{job=\"backup-tools-satellite\"}[5m])",
+            "legendFormat": "Download Duration - {{bucket}}",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32}
+      },
+      {
+        "id": 13,
+        "title": "Satellite Upload/Download Size",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(satellite_upload_size_bytes{job=\"backup-tools-satellite\"}[5m])",
+            "legendFormat": "Upload Size/sec - {{bucket}}",
+            "refId": "A"
+          },
+          {
+            "expr": "rate(satellite_download_size_bytes{job=\"backup-tools-satellite\"}[5m])",
+            "legendFormat": "Download Size/sec - {{bucket}}",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "binBps",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32}
+      },
+      {
+        "id": 14,
+        "title": "Error Tracking",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(satellite_request_errors_total{job=\"backup-tools-satellite\"}[5m])",
+            "legendFormat": "Request Errors - {{error_type}}",
+            "refId": "A"
+          },
+          {
+            "expr": "rate(satellite_upload_errors_total{job=\"backup-tools-satellite\"}[5m])",
+            "legendFormat": "Upload Errors - {{bucket}}",
+            "refId": "B"
+          },
+          {
+            "expr": "rate(satellite_download_errors_total{job=\"backup-tools-satellite\"}[5m])",
+            "legendFormat": "Download Errors - {{bucket}}",
+            "refId": "C"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40}
+      },
+      {
+        "id": 15,
+        "title": "Bucket Operations",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "rate(satellite_bucket_operations_total{job=\"backup-tools-satellite\"}[5m])",
+            "legendFormat": "{{bucket}} - {{operation}} - {{status}}",
+            "refId": "A",
+            "format": "table"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40}
+      },
+      {
+        "id": 16,
+        "title": "Object Operations",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "rate(satellite_object_operations_total{job=\"backup-tools-satellite\"}[5m])",
+            "legendFormat": "{{bucket}} - {{operation}} - {{status}}",
+            "refId": "A",
+            "format": "table"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 48}
+      },
+      {
+        "id": 17,
+        "title": "Satellite Errors by Component",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(satellite_errors_total{job=\"backup-tools-satellite\"}[5m])",
+            "legendFormat": "{{error_type}} - {{component}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 48}
+      }
+    ],
+    "templating": {
+      "list": [
+        {
+          "name": "job",
+          "type": "query",
+          "query": "label_values(up, job)",
+          "refresh": 1,
+          "includeAll": true,
+          "multi": true,
+          "allValue": ".*"
+        },
+        {
+          "name": "instance",
+          "type": "query",
+          "query": "label_values(up{job=~\"$job\"}, instance)",
+          "refresh": 1,
+          "includeAll": true,
+          "multi": true,
+          "allValue": ".*"
+        }
+      ]
+    },
+    "annotations": {
+      "list": [
+        {
+          "name": "Deployments",
+          "datasource": "Prometheus",
+          "expr": "changes(up{job=\"backup-tools-satellite\"}[5m])",
+          "iconColor": "blue",
+          "enable": true,
+          "showIn": 0
+        }
+      ]
+    },
+    "alerting": {
+      "alertRuleTags": {},
+      "notifications": []
+    }
+  }
+}

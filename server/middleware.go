@@ -2,10 +2,13 @@ package server
 
 import (
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
 	"github.com/StorX2-0/Backup-Tools/storage"
 
 	"github.com/dgrijalva/jwt-go"
@@ -102,4 +105,138 @@ func TraceIDMiddleware() echo.MiddlewareFunc {
 			return err
 		}
 	}
+}
+
+func PrometheusMiddleware() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			start := time.Now()
+
+			// Optional: panic recovery
+			defer func() {
+				if r := recover(); r != nil {
+					prometheus.RecordRequestError(c.Request().Method, c.Request().URL.Path, "panic")
+					panic(r)
+				}
+			}()
+
+			err := next(c)
+			duration := time.Since(start)
+
+			method := c.Request().Method
+			path := sanitizePath(c.Request().URL.Path) // Sanitize path
+			status := strconv.Itoa(c.Response().Status)
+
+			prometheus.RecordRequestDuration(method, path, status, duration)
+			prometheus.RecordRequestTotal(method, path, status)
+
+			if err != nil {
+				prometheus.RecordRequestError(method, path, "handler_error")
+				// Note: Echo might handle the error, we're just recording it
+			}
+
+			return err
+		}
+	}
+}
+
+func sanitizePath(path string) string {
+	// Remove query parameters
+	if idx := strings.Index(path, "?"); idx != -1 {
+		path = path[:idx]
+	}
+
+	// Remove trailing slashes except for root
+	if len(path) > 1 && strings.HasSuffix(path, "/") {
+		path = strings.TrimSuffix(path, "/")
+	}
+
+	// Replace dynamic path parameters with placeholders
+	path = replaceDynamicParams(path)
+
+	return path
+}
+
+func replaceDynamicParams(path string) string {
+	// Handle file extensions first (most specific)
+	path = replaceFileExtensions(path)
+
+	// Handle IDs
+	path = replaceIDs(path)
+
+	// Handle names
+	path = replaceNames(path)
+
+	return path
+}
+
+func replaceFileExtensions(path string) string {
+	// Replace file extensions with placeholder
+	extensions := []string{".jpg", ".jpeg", ".png", ".gif", ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".zip", ".rar", ".mp4", ".mp3", ".avi", ".mov"}
+	for _, ext := range extensions {
+		if strings.Contains(path, ext) {
+			// Find the last occurrence and replace the filename part
+			lastSlash := strings.LastIndex(path, "/")
+			if lastSlash != -1 {
+				filename := path[lastSlash+1:]
+				if strings.Contains(filename, ext) {
+					path = path[:lastSlash+1] + "{filename}"
+					break
+				}
+			}
+		}
+	}
+	return path
+}
+
+func replaceIDs(path string) string {
+	// Replace UUIDs and numeric IDs
+	parts := strings.Split(path, "/")
+	for i, part := range parts {
+		// Check if it's a UUID (8-4-4-4-12 pattern)
+		if len(part) == 36 && strings.Count(part, "-") == 4 {
+			parts[i] = "{id}"
+		} else if len(part) > 0 && isNumeric(part) {
+			parts[i] = "{id}"
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
+func replaceNames(path string) string {
+	// Replace dynamic names in common route patterns
+	parts := strings.Split(path, "/")
+	for i, part := range parts {
+		// Skip known static parts
+		if isStaticRoutePart(part) {
+			continue
+		}
+		// Replace if it looks like a dynamic name
+		if len(part) > 0 && !isNumeric(part) && !strings.Contains(part, ".") {
+			parts[i] = "{name}"
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
+func isNumeric(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
+func isStaticRoutePart(part string) bool {
+	staticParts := map[string]bool{
+		"google": true, "drive": true, "satellite": true, "folder": true, "list": true,
+		"sync": true, "photos": true, "gmail": true, "storage": true, "cloud": true,
+		"dropbox": true, "office365": true, "aws": true, "github": true, "shopify": true,
+		"quickbooks": true, "auto-sync": true, "job": true, "task": true, "root": true,
+		"shared": true, "bucket": true, "project": true, "organization": true,
+		"album": true, "message": true, "customer": true, "product": true, "order": true,
+		"item": true, "invoice": true, "repo": true, "repository": true,
+	}
+	return staticParts[part]
 }
