@@ -33,6 +33,17 @@ type Metrics struct {
 	BucketOperations *prometheus.CounterVec
 	ObjectOperations *prometheus.CounterVec
 	SatelliteErrors  *prometheus.CounterVec
+
+	// Cron job metrics
+	CronJobExecutions *prometheus.CounterVec
+	CronJobDuration   *prometheus.HistogramVec
+	CronJobErrors     *prometheus.CounterVec
+	CronJobRetries    *prometheus.CounterVec
+	TaskCreations     *prometheus.CounterVec
+	TaskCompletions   *prometheus.CounterVec
+	TaskFailures      *prometheus.CounterVec
+	HeartbeatMisses   *prometheus.CounterVec
+	JobDeactivations  *prometheus.CounterVec
 }
 
 // NewMetrics creates a new Metrics instance
@@ -119,6 +130,53 @@ func NewMetrics() *Metrics {
 			Name: "satellite_errors_total",
 			Help: "Total number of satellite-related errors",
 		}, []string{"error_type", "component"}),
+
+		// Cron job metrics
+		CronJobExecutions: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "cron_job_executions_total",
+			Help: "Total number of cron job executions",
+		}, []string{"job_name", "method", "status"}),
+
+		CronJobDuration: promauto.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "cron_job_duration_seconds",
+			Help:    "Duration of cron job executions",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"job_name", "method"}),
+
+		CronJobErrors: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "cron_job_errors_total",
+			Help: "Total number of cron job errors",
+		}, []string{"job_name", "method", "error_type"}),
+
+		CronJobRetries: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "cron_job_retries_total",
+			Help: "Total number of cron job retries",
+		}, []string{"job_name", "method"}),
+
+		TaskCreations: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "cron_task_creations_total",
+			Help: "Total number of tasks created for cron jobs",
+		}, []string{"job_name", "method"}),
+
+		TaskCompletions: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "cron_task_completions_total",
+			Help: "Total number of tasks completed successfully",
+		}, []string{"job_name", "method"}),
+
+		TaskFailures: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "cron_task_failures_total",
+			Help: "Total number of task failures",
+		}, []string{"job_name", "method", "error_type"}),
+
+		HeartbeatMisses: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "cron_heartbeat_misses_total",
+			Help: "Total number of missed heartbeats",
+		}, []string{"job_name", "method"}),
+
+		JobDeactivations: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "cron_job_deactivations_total",
+			Help: "Total number of job deactivations",
+		}, []string{"job_name", "method", "reason"}),
 	}
 }
 
@@ -278,5 +336,97 @@ func RecordObjectOperation(bucket, operation, status string) {
 func RecordSatelliteError(errorType, component string) {
 	if GlobalMetrics != nil {
 		GlobalMetrics.RecordSatelliteError(errorType, component)
+	}
+}
+
+// Cron job metric recording methods
+func (m *Metrics) RecordCronJobExecution(jobName, method, status string) {
+	m.CronJobExecutions.WithLabelValues(jobName, method, status).Inc()
+}
+
+func (m *Metrics) RecordCronJobDuration(jobName, method string, duration time.Duration) {
+	m.CronJobDuration.WithLabelValues(jobName, method).Observe(duration.Seconds())
+}
+
+func (m *Metrics) RecordCronJobError(jobName, method, errorType string) {
+	m.CronJobErrors.WithLabelValues(jobName, method, errorType).Inc()
+}
+
+func (m *Metrics) RecordCronJobRetry(jobName, method string) {
+	m.CronJobRetries.WithLabelValues(jobName, method).Inc()
+}
+
+func (m *Metrics) RecordTaskCreation(jobName, method string) {
+	m.TaskCreations.WithLabelValues(jobName, method).Inc()
+}
+
+func (m *Metrics) RecordTaskCompletion(jobName, method string) {
+	m.TaskCompletions.WithLabelValues(jobName, method).Inc()
+}
+
+func (m *Metrics) RecordTaskFailure(jobName, method, errorType string) {
+	m.TaskFailures.WithLabelValues(jobName, method, errorType).Inc()
+}
+
+func (m *Metrics) RecordHeartbeatMiss(jobName, method string) {
+	m.HeartbeatMisses.WithLabelValues(jobName, method).Inc()
+}
+
+func (m *Metrics) RecordJobDeactivation(jobName, method, reason string) {
+	m.JobDeactivations.WithLabelValues(jobName, method, reason).Inc()
+}
+
+// Global convenience functions for cron job metrics
+func RecordCronJobExecution(jobName, method, status string) {
+	if GlobalMetrics != nil {
+		GlobalMetrics.RecordCronJobExecution(jobName, method, status)
+	}
+}
+
+func RecordCronJobDuration(jobName, method string, duration time.Duration) {
+	if GlobalMetrics != nil {
+		GlobalMetrics.RecordCronJobDuration(jobName, method, duration)
+	}
+}
+
+func RecordCronJobError(jobName, method, errorType string) {
+	if GlobalMetrics != nil {
+		GlobalMetrics.RecordCronJobError(jobName, method, errorType)
+	}
+}
+
+func RecordCronJobRetry(jobName, method string) {
+	if GlobalMetrics != nil {
+		GlobalMetrics.RecordCronJobRetry(jobName, method)
+	}
+}
+
+func RecordTaskCreation(jobName, method string) {
+	if GlobalMetrics != nil {
+		GlobalMetrics.RecordTaskCreation(jobName, method)
+	}
+}
+
+func RecordTaskCompletion(jobName, method string) {
+	if GlobalMetrics != nil {
+		GlobalMetrics.RecordTaskCompletion(jobName, method)
+	}
+}
+
+func RecordTaskFailure(jobName, method, errorType string) {
+	if GlobalMetrics != nil {
+		GlobalMetrics.RecordTaskFailure(jobName, method, errorType)
+	}
+}
+
+func RecordHeartbeatMiss(jobName, method string) {
+	if GlobalMetrics != nil {
+		GlobalMetrics.RecordHeartbeatMiss(jobName, method)
+	}
+}
+
+func RecordJobDeactivation(jobName, method, reason string) {
+	if GlobalMetrics != nil {
+		GlobalMetrics.RecordJobDeactivation(jobName, method, reason)
 	}
 }

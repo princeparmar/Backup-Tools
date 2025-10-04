@@ -15,6 +15,7 @@ services:
       - '--web.console.templates=/etc/prometheus/consoles'
       - '--storage.tsdb.retention.time=200h'
       - '--web.enable-lifecycle'
+      - '--web.external-url=http://localhost:9090'
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

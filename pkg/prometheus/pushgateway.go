@@ -75,6 +75,16 @@ func (pgc *PushGatewayClient) RegisterMetrics(metrics *Metrics) {
 		metrics.BucketOperations,
 		metrics.ObjectOperations,
 		metrics.SatelliteErrors,
+		// Cron job metrics
+		metrics.CronJobExecutions,
+		metrics.CronJobDuration,
+		metrics.CronJobErrors,
+		metrics.CronJobRetries,
+		metrics.TaskCreations,
+		metrics.TaskCompletions,
+		metrics.TaskFailures,
+		metrics.HeartbeatMisses,
+		metrics.JobDeactivations,
 	}
 
 	for _, collector := range collectors {
