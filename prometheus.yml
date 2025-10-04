@@ -14,7 +14,7 @@ scrape_configs:
   # Backup Tools Satellite metrics
   - job_name: 'backup-tools-satellite'
     static_configs:
-      - targets: ['localhost:8005']  # Adjust port as needed
+      - targets: ['host.docker.internal:8005']  # Use host.docker.internal to access host machine
     metrics_path: '/metrics'
     scrape_interval: 30s
     scrape_timeout: 10s
@@ -22,7 +22,7 @@ scrape_configs:
   # Push Gateway (if using push gateway instead of pull)
   - job_name: 'pushgateway'
     static_configs:
-      - targets: ['localhost:9091']  # Default push gateway port
+      - targets: ['host.docker.internal:9091']  # Use host.docker.internal to access host machine
     honor_labels: true
     scrape_interval: 15s
 

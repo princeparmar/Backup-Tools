@@ -15,6 +15,8 @@ services:
       - '--web.console.templates=/etc/prometheus/consoles'
       - '--storage.tsdb.retention.time=200h'
       - '--web.enable-lifecycle'
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   pushgateway:
@@ -22,6 +24,8 @@ services:
     container_name: backup-tools-pushgateway
     ports:
       - "9091:9091"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   grafana:
@@ -31,10 +35,12 @@ services:
       - "3000:3000"
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./grafana-dashboard.json:/etc/grafana/provisioning/dashboards/backup-tools.json
+      - ./grafana-dashboard-comprehensive.json:/etc/grafana/provisioning/dashboards/backup-tools.json
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_USERS_ALLOW_SIGN_UP=false
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
 volumes:
