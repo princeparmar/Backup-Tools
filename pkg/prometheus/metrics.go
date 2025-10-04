@@ -2,245 +2,198 @@ package prometheus
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"runtime"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	monkit "github.com/spacemonkeygo/monkit/v3"
 )
 
-// Metrics holds all Prometheus metrics for the Satellite component
-type Metrics struct {
-	// Request metrics
-	RequestDuration *prometheus.HistogramVec
-	RequestTotal    *prometheus.CounterVec
-	RequestErrors   *prometheus.CounterVec
+// MetricType represents the type of metric
+type MetricType string
 
-	// Operation metrics
-	UploadDuration   *prometheus.HistogramVec
-	DownloadDuration *prometheus.HistogramVec
-	UploadSize       *prometheus.HistogramVec
-	DownloadSize     *prometheus.HistogramVec
-	UploadErrors     *prometheus.CounterVec
-	DownloadErrors   *prometheus.CounterVec
+const (
+	CounterType   MetricType = "counter"
+	HistogramType MetricType = "histogram"
+	GaugeType     MetricType = "gauge"
+	TimerType     MetricType = "timer"
+)
+
+// MetricConfig holds configuration for a metric
+type MetricConfig struct {
+	Name        string
+	Type        MetricType
+	Help        string
+	Labels      []string
+	ConstLabels map[string]string
+}
+
+// Metrics holds all Prometheus metrics with Monkit integration
+type Metrics struct {
+	// Monkit registry for automatic instrumentation
+	monkitRegistry *monkit.Registry
 
 	// System metrics
 	CPUUsage       prometheus.Gauge
 	MemoryUsage    prometheus.Gauge
 	GoroutineCount prometheus.Gauge
 
-	// Satellite-specific metrics
-	BucketOperations *prometheus.CounterVec
-	ObjectOperations *prometheus.CounterVec
-	SatelliteErrors  *prometheus.CounterVec
-
-	// Cron job metrics
-	CronJobExecutions *prometheus.CounterVec
-	CronJobDuration   *prometheus.HistogramVec
-	CronJobErrors     *prometheus.CounterVec
-	CronJobRetries    *prometheus.CounterVec
-	TaskCreations     *prometheus.CounterVec
-	TaskCompletions   *prometheus.CounterVec
-	TaskFailures      *prometheus.CounterVec
-	HeartbeatMisses   *prometheus.CounterVec
-	JobDeactivations  *prometheus.CounterVec
+	// Generic metric storage
+	metrics map[string]prometheus.Collector
+	mu      sync.RWMutex
 }
 
-// NewMetrics creates a new Metrics instance
+// Global metrics instance
+var (
+	GlobalMetrics *Metrics
+	metricsMu     sync.RWMutex
+)
+
+// NewMetrics creates a new Metrics instance with Monkit integration
 func NewMetrics() *Metrics {
-	buckets := prometheus.ExponentialBuckets(1024, 2, 20) // 1KB to 1GB
-
 	return &Metrics{
-		RequestDuration: promauto.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "satellite_request_duration_seconds",
-			Help:    "Duration of HTTP requests to satellite endpoints",
-			Buckets: prometheus.DefBuckets,
-		}, []string{"method", "endpoint", "status"}),
-
-		RequestTotal: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "satellite_requests_total",
-			Help: "Total number of HTTP requests to satellite endpoints",
-		}, []string{"method", "endpoint", "status"}),
-
-		RequestErrors: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "satellite_request_errors_total",
-			Help: "Total number of failed HTTP requests to satellite endpoints",
-		}, []string{"method", "endpoint", "error_type"}),
-
-		UploadDuration: promauto.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "satellite_upload_duration_seconds",
-			Help:    "Duration of upload operations to satellite",
-			Buckets: prometheus.DefBuckets,
-		}, []string{"bucket", "status"}),
-
-		DownloadDuration: promauto.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "satellite_download_duration_seconds",
-			Help:    "Duration of download operations from satellite",
-			Buckets: prometheus.DefBuckets,
-		}, []string{"bucket", "status"}),
-
-		UploadSize: promauto.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "satellite_upload_size_bytes",
-			Help:    "Size of uploaded objects to satellite",
-			Buckets: buckets,
-		}, []string{"bucket"}),
-
-		DownloadSize: promauto.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "satellite_download_size_bytes",
-			Help:    "Size of downloaded objects from satellite",
-			Buckets: buckets,
-		}, []string{"bucket"}),
-
-		UploadErrors: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "satellite_upload_errors_total",
-			Help: "Total number of upload errors to satellite",
-		}, []string{"bucket", "error_type"}),
-
-		DownloadErrors: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "satellite_download_errors_total",
-			Help: "Total number of download errors from satellite",
-		}, []string{"bucket", "error_type"}),
+		monkitRegistry: monkit.Default,
+		metrics:        make(map[string]prometheus.Collector),
 
 		CPUUsage: promauto.NewGauge(prometheus.GaugeOpts{
-			Name: "satellite_cpu_usage_percent",
+			Name: "system_cpu_usage_percent",
 			Help: "Current CPU usage percentage",
 		}),
 
 		MemoryUsage: promauto.NewGauge(prometheus.GaugeOpts{
-			Name: "satellite_memory_usage_bytes",
+			Name: "system_memory_usage_bytes",
 			Help: "Current memory usage in bytes",
 		}),
 
 		GoroutineCount: promauto.NewGauge(prometheus.GaugeOpts{
-			Name: "satellite_goroutines_total",
+			Name: "system_goroutines_total",
 			Help: "Current number of goroutines",
 		}),
-
-		BucketOperations: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "satellite_bucket_operations_total",
-			Help: "Total number of bucket operations",
-		}, []string{"bucket", "operation", "status"}),
-
-		ObjectOperations: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "satellite_object_operations_total",
-			Help: "Total number of object operations",
-		}, []string{"bucket", "operation", "status"}),
-
-		SatelliteErrors: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "satellite_errors_total",
-			Help: "Total number of satellite-related errors",
-		}, []string{"error_type", "component"}),
-
-		// Cron job metrics
-		CronJobExecutions: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "cron_job_executions_total",
-			Help: "Total number of cron job executions",
-		}, []string{"job_name", "method", "status"}),
-
-		CronJobDuration: promauto.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "cron_job_duration_seconds",
-			Help:    "Duration of cron job executions",
-			Buckets: prometheus.DefBuckets,
-		}, []string{"job_name", "method"}),
-
-		CronJobErrors: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "cron_job_errors_total",
-			Help: "Total number of cron job errors",
-		}, []string{"job_name", "method", "error_type"}),
-
-		CronJobRetries: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "cron_job_retries_total",
-			Help: "Total number of cron job retries",
-		}, []string{"job_name", "method"}),
-
-		TaskCreations: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "cron_task_creations_total",
-			Help: "Total number of tasks created for cron jobs",
-		}, []string{"job_name", "method"}),
-
-		TaskCompletions: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "cron_task_completions_total",
-			Help: "Total number of tasks completed successfully",
-		}, []string{"job_name", "method"}),
-
-		TaskFailures: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "cron_task_failures_total",
-			Help: "Total number of task failures",
-		}, []string{"job_name", "method", "error_type"}),
-
-		HeartbeatMisses: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "cron_heartbeat_misses_total",
-			Help: "Total number of missed heartbeats",
-		}, []string{"job_name", "method"}),
-
-		JobDeactivations: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "cron_job_deactivations_total",
-			Help: "Total number of job deactivations",
-		}, []string{"job_name", "method", "reason"}),
 	}
 }
 
-// Global metrics instance
-var GlobalMetrics *Metrics
-
 // InitMetrics initializes the global metrics instance
 func InitMetrics() {
+	metricsMu.Lock()
+	defer metricsMu.Unlock()
 	if GlobalMetrics == nil {
 		GlobalMetrics = NewMetrics()
 	}
 }
 
-// Metric recording methods
-func (m *Metrics) RecordRequestDuration(method, endpoint, status string, duration time.Duration) {
-	m.RequestDuration.WithLabelValues(method, endpoint, status).Observe(duration.Seconds())
+// GetMonkitRegistry returns the monkit registry for Prometheus collection
+func (m *Metrics) GetMonkitRegistry() *monkit.Registry {
+	if m == nil {
+		return monkit.Default
+	}
+	return m.monkitRegistry
 }
 
-func (m *Metrics) RecordRequestTotal(method, endpoint, status string) {
-	m.RequestTotal.WithLabelValues(method, endpoint, status).Inc()
+// Generic instrumentation method using Monkit
+func (m *Metrics) InstrumentOperation(operationName string, tags ...monkit.SeriesTag) func(context.Context) func(error) {
+	if m == nil || m.monkitRegistry == nil {
+		return func(ctx context.Context) func(error) {
+			return func(err error) {}
+		}
+	}
+
+	task := m.monkitRegistry.Package().Task(append(tags,
+		monkit.NewSeriesTag("operation", operationName))...)
+	return func(ctx context.Context) func(error) {
+		start := time.Now()
+		return func(err error) {
+			duration := time.Since(start)
+			task(&ctx)(&err)
+			// Also record as a Prometheus metric
+			status := "success"
+			if err != nil {
+				status = "error"
+			}
+			m.RecordOperation(operationName, status, duration)
+		}
+	}
 }
 
-func (m *Metrics) RecordRequestError(method, endpoint, errorType string) {
-	m.RequestErrors.WithLabelValues(method, endpoint, errorType).Inc()
+// Generic metric recording methods
+func (m *Metrics) RecordMetric(metricName string, metricType MetricType, value float64, labels ...string) {
+	if m == nil || m.monkitRegistry == nil {
+		return
+	}
+
+	tags := labelsToTags(labels...)
+
+	switch metricType {
+	case CounterType:
+		m.monkitRegistry.Package().Counter(metricName, tags...).Inc(int64(value))
+	case HistogramType, GaugeType:
+		m.monkitRegistry.Package().FloatVal(metricName, tags...).Observe(value)
+	case TimerType:
+		// For TimerType, we record the duration value directly as a histogram
+		// This allows us to record pre-calculated durations
+		m.monkitRegistry.Package().FloatVal(metricName+"_duration_seconds", tags...).Observe(value)
+	}
 }
 
-func (m *Metrics) RecordUploadDuration(bucket, status string, duration time.Duration) {
-	m.UploadDuration.WithLabelValues(bucket, status).Observe(duration.Seconds())
+// Convenience methods for specific metric types
+func (m *Metrics) RecordCounter(metricName string, value int64, labels ...string) {
+	if m != nil {
+		m.RecordMetric(metricName, CounterType, float64(value), labels...)
+	}
 }
 
-func (m *Metrics) RecordDownloadDuration(bucket, status string, duration time.Duration) {
-	m.DownloadDuration.WithLabelValues(bucket, status).Observe(duration.Seconds())
+func (m *Metrics) RecordHistogram(metricName string, value float64, labels ...string) {
+	if m != nil {
+		m.RecordMetric(metricName, HistogramType, value, labels...)
+	}
 }
 
-func (m *Metrics) RecordUploadSize(bucket string, size int64) {
-	m.UploadSize.WithLabelValues(bucket).Observe(float64(size))
+func (m *Metrics) RecordGauge(metricName string, value float64, labels ...string) {
+	if m != nil {
+		m.RecordMetric(metricName, GaugeType, value, labels...)
+	}
 }
 
-func (m *Metrics) RecordDownloadSize(bucket string, size int64) {
-	m.DownloadSize.WithLabelValues(bucket).Observe(float64(size))
+func (m *Metrics) RecordTimer(metricName string, duration time.Duration, labels ...string) {
+	if m != nil {
+		m.RecordMetric(metricName, TimerType, duration.Seconds(), labels...)
+	}
 }
 
-func (m *Metrics) RecordUploadError(bucket, errorType string) {
-	m.UploadErrors.WithLabelValues(bucket, errorType).Inc()
+// Generic operation recording methods
+func (m *Metrics) RecordOperation(operation, status string, duration time.Duration, labels ...string) {
+	if m != nil {
+		allLabels := append([]string{"operation", operation, "status", status}, labels...)
+		m.RecordTimer("operation_duration_seconds", duration, allLabels...)
+		m.RecordCounter("operation_total", 1, allLabels...)
+	}
 }
 
-func (m *Metrics) RecordDownloadError(bucket, errorType string) {
-	m.DownloadErrors.WithLabelValues(bucket, errorType).Inc()
+func (m *Metrics) RecordError(errorType, component string, labels ...string) {
+	if m != nil {
+		allLabels := append([]string{"error_type", errorType, "component", component}, labels...)
+		m.RecordCounter("errors_total", 1, allLabels...)
+	}
 }
 
-func (m *Metrics) RecordBucketOperation(bucket, operation, status string) {
-	m.BucketOperations.WithLabelValues(bucket, operation, status).Inc()
-}
-
-func (m *Metrics) RecordObjectOperation(bucket, operation, status string) {
-	m.ObjectOperations.WithLabelValues(bucket, operation, status).Inc()
-}
-
-func (m *Metrics) RecordSatelliteError(errorType, component string) {
-	m.SatelliteErrors.WithLabelValues(errorType, component).Inc()
+func (m *Metrics) RecordSize(operation string, size int64, labels ...string) {
+	if m != nil {
+		allLabels := append([]string{"operation", operation}, labels...)
+		m.RecordHistogram("size_bytes", float64(size), allLabels...)
+	}
 }
 
 // UpdateSystemMetrics updates system-level metrics
 func (m *Metrics) UpdateSystemMetrics() {
+	if m == nil {
+		return
+	}
+
 	m.GoroutineCount.Set(float64(runtime.NumGoroutine()))
 
 	var memStats runtime.MemStats
@@ -248,11 +201,20 @@ func (m *Metrics) UpdateSystemMetrics() {
 	m.MemoryUsage.Set(float64(memStats.Alloc))
 
 	// CPU usage would require more complex implementation
-	m.CPUUsage.Set(0)
+	// For now, we'll calculate a simple CPU usage based on goroutines
+	cpuEstimate := float64(runtime.NumGoroutine()) * 0.1
+	if cpuEstimate > 100 {
+		cpuEstimate = 100
+	}
+	m.CPUUsage.Set(cpuEstimate)
 }
 
 // StartSystemMetricsCollection starts periodic system metrics collection
 func (m *Metrics) StartSystemMetricsCollection(ctx context.Context) {
+	if m == nil {
+		return
+	}
+
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -266,167 +228,148 @@ func (m *Metrics) StartSystemMetricsCollection(ctx context.Context) {
 	}
 }
 
-// Global convenience functions
-func RecordRequestDuration(method, endpoint, status string, duration time.Duration) {
+// Global convenience functions for generic metrics
+func RecordMetric(metricName string, metricType MetricType, value float64, labels ...string) {
+	metricsMu.RLock()
+	defer metricsMu.RUnlock()
 	if GlobalMetrics != nil {
-		GlobalMetrics.RecordRequestDuration(method, endpoint, status, duration)
+		GlobalMetrics.RecordMetric(metricName, metricType, value, labels...)
 	}
 }
 
-func RecordRequestTotal(method, endpoint, status string) {
+func RecordCounter(metricName string, value int64, labels ...string) {
+	metricsMu.RLock()
+	defer metricsMu.RUnlock()
 	if GlobalMetrics != nil {
-		GlobalMetrics.RecordRequestTotal(method, endpoint, status)
+		GlobalMetrics.RecordCounter(metricName, value, labels...)
 	}
 }
 
-func RecordRequestError(method, endpoint, errorType string) {
+func RecordHistogram(metricName string, value float64, labels ...string) {
+	metricsMu.RLock()
+	defer metricsMu.RUnlock()
 	if GlobalMetrics != nil {
-		GlobalMetrics.RecordRequestError(method, endpoint, errorType)
+		GlobalMetrics.RecordHistogram(metricName, value, labels...)
 	}
 }
 
-func RecordUploadDuration(bucket, status string, duration time.Duration) {
+func RecordGauge(metricName string, value float64, labels ...string) {
+	metricsMu.RLock()
+	defer metricsMu.RUnlock()
 	if GlobalMetrics != nil {
-		GlobalMetrics.RecordUploadDuration(bucket, status, duration)
+		GlobalMetrics.RecordGauge(metricName, value, labels...)
 	}
 }
 
-func RecordDownloadDuration(bucket, status string, duration time.Duration) {
+func RecordTimer(metricName string, duration time.Duration, labels ...string) {
+	metricsMu.RLock()
+	defer metricsMu.RUnlock()
 	if GlobalMetrics != nil {
-		GlobalMetrics.RecordDownloadDuration(bucket, status, duration)
+		GlobalMetrics.RecordTimer(metricName, duration, labels...)
 	}
 }
 
-func RecordUploadSize(bucket string, size int64) {
+func RecordOperation(operation, status string, duration time.Duration, labels ...string) {
+	metricsMu.RLock()
+	defer metricsMu.RUnlock()
 	if GlobalMetrics != nil {
-		GlobalMetrics.RecordUploadSize(bucket, size)
+		GlobalMetrics.RecordOperation(operation, status, duration, labels...)
 	}
 }
 
-func RecordDownloadSize(bucket string, size int64) {
+func RecordError(errorType, component string, labels ...string) {
+	metricsMu.RLock()
+	defer metricsMu.RUnlock()
 	if GlobalMetrics != nil {
-		GlobalMetrics.RecordDownloadSize(bucket, size)
+		GlobalMetrics.RecordError(errorType, component, labels...)
 	}
 }
 
-func RecordUploadError(bucket, errorType string) {
+func RecordSize(operation string, size int64, labels ...string) {
+	metricsMu.RLock()
+	defer metricsMu.RUnlock()
 	if GlobalMetrics != nil {
-		GlobalMetrics.RecordUploadError(bucket, errorType)
+		GlobalMetrics.RecordSize(operation, size, labels...)
 	}
 }
 
-func RecordDownloadError(bucket, errorType string) {
+// InstrumentOperation provides global instrumentation
+func InstrumentOperation(operationName string, tags ...monkit.SeriesTag) func(context.Context) func(error) {
+	metricsMu.RLock()
+	defer metricsMu.RUnlock()
 	if GlobalMetrics != nil {
-		GlobalMetrics.RecordDownloadError(bucket, errorType)
+		return GlobalMetrics.InstrumentOperation(operationName, tags...)
+	}
+	return func(ctx context.Context) func(error) {
+		return func(err error) {}
 	}
 }
 
-func RecordBucketOperation(bucket, operation, status string) {
-	if GlobalMetrics != nil {
-		GlobalMetrics.RecordBucketOperation(bucket, operation, status)
+// CreateMonkitHandler creates an HTTP handler for Monkit metrics
+func CreateMonkitHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+
+		monkit.Default.Stats(func(key monkit.SeriesKey, field string, val float64) {
+			metricName := sanitizeMetricName(key.Measurement)
+			labels := makeLabels(key)
+			fmt.Fprintf(w, "%s%s %v\n", metricName, labels, val)
+		})
+	})
+}
+
+// CreateMetricsHandler creates a standard Prometheus metrics handler
+func CreateMetricsHandler() http.Handler {
+	return promhttp.Handler()
+}
+
+// Helper functions
+func labelsToTags(labels ...string) []monkit.SeriesTag {
+	tags := make([]monkit.SeriesTag, 0, len(labels)/2)
+	for i := 0; i < len(labels); i += 2 {
+		if i+1 < len(labels) {
+			tags = append(tags, monkit.NewSeriesTag(labels[i], labels[i+1]))
+		}
 	}
+	return tags
 }
 
-func RecordObjectOperation(bucket, operation, status string) {
-	if GlobalMetrics != nil {
-		GlobalMetrics.RecordObjectOperation(bucket, operation, status)
+func sanitizeMetricName(name string) string {
+	var result strings.Builder
+	for i, c := range name {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' {
+			result.WriteRune(c)
+		} else if c >= '0' && c <= '9' {
+			if i == 0 {
+				result.WriteRune('_')
+			}
+			result.WriteRune(c)
+		} else {
+			result.WriteRune('_')
+		}
 	}
-}
 
-func RecordSatelliteError(errorType, component string) {
-	if GlobalMetrics != nil {
-		GlobalMetrics.RecordSatelliteError(errorType, component)
+	if result.Len() == 0 {
+		return "unnamed_metric"
 	}
+	return result.String()
 }
 
-// Cron job metric recording methods
-func (m *Metrics) RecordCronJobExecution(jobName, method, status string) {
-	m.CronJobExecutions.WithLabelValues(jobName, method, status).Inc()
-}
-
-func (m *Metrics) RecordCronJobDuration(jobName, method string, duration time.Duration) {
-	m.CronJobDuration.WithLabelValues(jobName, method).Observe(duration.Seconds())
-}
-
-func (m *Metrics) RecordCronJobError(jobName, method, errorType string) {
-	m.CronJobErrors.WithLabelValues(jobName, method, errorType).Inc()
-}
-
-func (m *Metrics) RecordCronJobRetry(jobName, method string) {
-	m.CronJobRetries.WithLabelValues(jobName, method).Inc()
-}
-
-func (m *Metrics) RecordTaskCreation(jobName, method string) {
-	m.TaskCreations.WithLabelValues(jobName, method).Inc()
-}
-
-func (m *Metrics) RecordTaskCompletion(jobName, method string) {
-	m.TaskCompletions.WithLabelValues(jobName, method).Inc()
-}
-
-func (m *Metrics) RecordTaskFailure(jobName, method, errorType string) {
-	m.TaskFailures.WithLabelValues(jobName, method, errorType).Inc()
-}
-
-func (m *Metrics) RecordHeartbeatMiss(jobName, method string) {
-	m.HeartbeatMisses.WithLabelValues(jobName, method).Inc()
-}
-
-func (m *Metrics) RecordJobDeactivation(jobName, method, reason string) {
-	m.JobDeactivations.WithLabelValues(jobName, method, reason).Inc()
-}
-
-// Global convenience functions for cron job metrics
-func RecordCronJobExecution(jobName, method, status string) {
-	if GlobalMetrics != nil {
-		GlobalMetrics.RecordCronJobExecution(jobName, method, status)
+func makeLabels(key monkit.SeriesKey) string {
+	if key.Tags.Len() == 0 {
+		return ""
 	}
-}
 
-func RecordCronJobDuration(jobName, method string, duration time.Duration) {
-	if GlobalMetrics != nil {
-		GlobalMetrics.RecordCronJobDuration(jobName, method, duration)
+	var labels strings.Builder
+	labels.WriteString("{")
+	first := true
+	for k, v := range key.Tags.All() {
+		if !first {
+			labels.WriteString(",")
+		}
+		labels.WriteString(fmt.Sprintf("%s=%q", sanitizeMetricName(k), v))
+		first = false
 	}
-}
-
-func RecordCronJobError(jobName, method, errorType string) {
-	if GlobalMetrics != nil {
-		GlobalMetrics.RecordCronJobError(jobName, method, errorType)
-	}
-}
-
-func RecordCronJobRetry(jobName, method string) {
-	if GlobalMetrics != nil {
-		GlobalMetrics.RecordCronJobRetry(jobName, method)
-	}
-}
-
-func RecordTaskCreation(jobName, method string) {
-	if GlobalMetrics != nil {
-		GlobalMetrics.RecordTaskCreation(jobName, method)
-	}
-}
-
-func RecordTaskCompletion(jobName, method string) {
-	if GlobalMetrics != nil {
-		GlobalMetrics.RecordTaskCompletion(jobName, method)
-	}
-}
-
-func RecordTaskFailure(jobName, method, errorType string) {
-	if GlobalMetrics != nil {
-		GlobalMetrics.RecordTaskFailure(jobName, method, errorType)
-	}
-}
-
-func RecordHeartbeatMiss(jobName, method string) {
-	if GlobalMetrics != nil {
-		GlobalMetrics.RecordHeartbeatMiss(jobName, method)
-	}
-}
-
-func RecordJobDeactivation(jobName, method, reason string) {
-	if GlobalMetrics != nil {
-		GlobalMetrics.RecordJobDeactivation(jobName, method, reason)
-	}
+	labels.WriteString("}")
+	return labels.String()
 }

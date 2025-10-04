@@ -115,7 +115,7 @@ func PrometheusMiddleware() echo.MiddlewareFunc {
 			// Optional: panic recovery
 			defer func() {
 				if r := recover(); r != nil {
-					prometheus.RecordRequestError(c.Request().Method, c.Request().URL.Path, "panic")
+					prometheus.RecordError("panic", "middleware")
 					panic(r)
 				}
 			}()
@@ -125,13 +125,13 @@ func PrometheusMiddleware() echo.MiddlewareFunc {
 
 			method := c.Request().Method
 			path := sanitizePath(c.Request().URL.Path) // Sanitize path
-			status := strconv.Itoa(c.Response().Status)
+			status := c.Response().Status
 
-			prometheus.RecordRequestDuration(method, path, status, duration)
-			prometheus.RecordRequestTotal(method, path, status)
+			prometheus.RecordTimer("request_duration_seconds", duration, "method", method, "path", path)
+			prometheus.RecordCounter("requests_total", 1, "method", method, "path", path, "status", strconv.Itoa(status))
 
 			if err != nil {
-				prometheus.RecordRequestError(method, path, "handler_error")
+				prometheus.RecordError("handler_error", "middleware")
 				// Note: Echo might handle the error, we're just recording it
 			}
 

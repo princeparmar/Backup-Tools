@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -177,33 +178,61 @@ type TaskListingDB struct {
 }
 
 func (storage *PosgresStore) GetAllCronJobs() ([]CronJobListingDB, error) {
+	start := time.Now()
+
 	var res []CronJobListingDB
 	db := storage.DB.Find(&res)
 	if db != nil && db.Error != nil {
+		prometheus.RecordError("postgres_get_all_cron_jobs_failed", "storage")
 		return nil, fmt.Errorf("error getting cron jobs for user: %v", db.Error)
 	}
+
+	duration := time.Since(start)
+	prometheus.RecordTimer("postgres_get_all_cron_jobs_duration", duration, "database", "postgres")
+	prometheus.RecordCounter("postgres_get_all_cron_jobs_total", 1, "database", "postgres", "status", "success")
+	prometheus.RecordCounter("postgres_cron_jobs_retrieved_total", int64(len(res)), "database", "postgres")
+
 	return res, nil
 }
 
 func (storage *PosgresStore) GetAllCronJobsForUser(userID string) ([]CronJobListingDB, error) {
+	start := time.Now()
+
 	var res []CronJobListingDB
 	db := storage.DB.Where("user_id = ?", userID).Find(&res)
 	if db != nil && db.Error != nil {
+		prometheus.RecordError("postgres_get_cron_jobs_for_user_failed", "storage")
 		return nil, fmt.Errorf("error getting cron jobs for user: %v", db.Error)
 	}
+
+	duration := time.Since(start)
+	prometheus.RecordTimer("postgres_get_cron_jobs_for_user_duration", duration, "database", "postgres")
+	prometheus.RecordCounter("postgres_get_cron_jobs_for_user_total", 1, "database", "postgres", "status", "success")
+	prometheus.RecordCounter("postgres_user_cron_jobs_retrieved_total", int64(len(res)), "database", "postgres")
+
 	return res, nil
 }
 
 func (storage *PosgresStore) UpdateHeartBeatForTask(ID uint) error {
+	start := time.Now()
+
 	db := storage.DB.Model(&TaskListingDB{}).Where("id = ?", ID).Update("last_heart_beat", time.Now())
 	if db != nil && db.Error != nil {
+		prometheus.RecordError("postgres_update_heartbeat_failed", "storage")
 		return fmt.Errorf("error updating heartbeat for task: %v", db.Error)
 	}
+
+	duration := time.Since(start)
+	prometheus.RecordTimer("postgres_update_heartbeat_duration", duration, "database", "postgres")
+	prometheus.RecordCounter("postgres_update_heartbeat_total", 1, "database", "postgres", "status", "success")
+
 	return nil
 }
 
 // MissedHeartbeatForTask updates the heartbeat for the task if it has not been updated for more than 10 minutes
 func (storage *PosgresStore) MissedHeartbeatForTask() error {
+	start := time.Now()
+
 	// start a transaction, select all tasks with lock where last_heart_beat is more than 1 minute ago
 	// update status to failed and message to "missed heartbeat"
 	// and for job set message to process got stuck because of some reason
@@ -253,14 +282,22 @@ func (storage *PosgresStore) MissedHeartbeatForTask() error {
 
 	err := tx.Commit()
 	if err != nil && err.Error != nil {
+		prometheus.RecordError("postgres_missed_heartbeat_commit_failed", "storage")
 		return fmt.Errorf("error committing transaction: %v", err.Error)
 	}
+
+	duration := time.Since(start)
+	prometheus.RecordTimer("postgres_missed_heartbeat_duration", duration, "database", "postgres")
+	prometheus.RecordCounter("postgres_missed_heartbeat_total", 1, "database", "postgres", "status", "success")
+	prometheus.RecordCounter("postgres_tasks_marked_failed_total", int64(len(tasks)), "database", "postgres", "reason", "missed_heartbeat")
 
 	return nil
 }
 
 // GetJobsToProcess gives the jobs that are to be processed next
 func (storage *PosgresStore) GetJobsToProcess() ([]CronJobListingDB, error) {
+	start := time.Now()
+
 	var res []CronJobListingDB
 	tx := storage.DB.Begin()
 
@@ -290,6 +327,7 @@ func (storage *PosgresStore) GetJobsToProcess() ([]CronJobListingDB, error) {
 		TaskStatusRunning, TaskStatusPushed).Scan(&res)
 	if db.Error != nil {
 		tx.Rollback()
+		prometheus.RecordError("postgres_get_jobs_to_process_failed", "storage")
 		return nil, fmt.Errorf("error getting jobs to process: %v", db.Error)
 	}
 
@@ -301,30 +339,46 @@ func (storage *PosgresStore) GetJobsToProcess() ([]CronJobListingDB, error) {
 		db = tx.Save(&res[i])
 		if db != nil && db.Error != nil {
 			tx.Rollback()
+			prometheus.RecordError("postgres_update_cron_job_in_get_jobs_failed", "storage")
 			return nil, fmt.Errorf("error updating cron job: %v", db.Error)
 		}
 	}
 
 	err := tx.Commit()
 	if err != nil && err.Error != nil {
+		prometheus.RecordError("postgres_get_jobs_to_process_commit_failed", "storage")
 		return nil, fmt.Errorf("error committing transaction: %v", err.Error)
 	}
+
+	duration := time.Since(start)
+	prometheus.RecordTimer("postgres_get_jobs_to_process_duration", duration, "database", "postgres")
+	prometheus.RecordCounter("postgres_get_jobs_to_process_total", 1, "database", "postgres", "status", "success")
+	prometheus.RecordCounter("postgres_jobs_ready_for_processing_total", int64(len(res)), "database", "postgres")
 
 	return res, nil
 }
 
 func (storage *PosgresStore) GetJobByIDForUser(userID string, jobID uint) (*CronJobListingDB, error) {
+	start := time.Now()
+
 	var res CronJobListingDB
 	db := storage.DB.Where("user_id = ? AND id = ?", userID, jobID).First(&res)
 	if db != nil && db.Error != nil {
+		prometheus.RecordError("postgres_get_job_by_id_for_user_failed", "storage")
 		return nil, fmt.Errorf("error getting cron job for user: %v", db.Error)
 	}
+
+	duration := time.Since(start)
+	prometheus.RecordTimer("postgres_get_job_by_id_for_user_duration", duration, "database", "postgres")
+	prometheus.RecordCounter("postgres_get_job_by_id_for_user_total", 1, "database", "postgres", "status", "success")
 
 	return &res, nil
 }
 
 // GetPushedTask gives pushed task and update the status to running and set start time with table locking.
 func (storage *PosgresStore) GetPushedTask() (*TaskListingDB, error) {
+	start := time.Now()
+
 	var res TaskListingDB
 	tx := storage.DB.Begin()
 	// lock table tasks for update and select and return the first row with status pushed
@@ -336,6 +390,7 @@ func (storage *PosgresStore) GetPushedTask() (*TaskListingDB, error) {
 		First(&res)
 	if db.Error != nil {
 		tx.Rollback()
+		prometheus.RecordError("postgres_get_pushed_task_failed", "storage")
 		return nil, fmt.Errorf("error getting pushed task: %v", db.Error)
 	}
 
@@ -349,6 +404,7 @@ func (storage *PosgresStore) GetPushedTask() (*TaskListingDB, error) {
 	db = tx.Save(&res)
 	if db != nil && db.Error != nil {
 		tx.Rollback()
+		prometheus.RecordError("postgres_update_pushed_task_status_failed", "storage")
 		return nil, fmt.Errorf("error updating pushed task status: %v", db.Error)
 	}
 
@@ -356,6 +412,7 @@ func (storage *PosgresStore) GetPushedTask() (*TaskListingDB, error) {
 	db = tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=?", res.CronJobID).First(&job)
 	if db.Error != nil {
 		tx.Rollback()
+		prometheus.RecordError("postgres_get_job_for_pushed_task_failed", "storage")
 		return nil, fmt.Errorf("error getting job: %v", db.Error)
 	}
 
@@ -365,27 +422,43 @@ func (storage *PosgresStore) GetPushedTask() (*TaskListingDB, error) {
 	db = tx.Save(&job)
 	if db != nil && db.Error != nil {
 		tx.Rollback()
+		prometheus.RecordError("postgres_update_job_for_pushed_task_failed", "storage")
 		return nil, fmt.Errorf("error updating pushed task status: %v", db.Error)
 	}
 
 	err := tx.Commit()
 	if err != nil && err.Error != nil {
+		prometheus.RecordError("postgres_get_pushed_task_commit_failed", "storage")
 		return nil, fmt.Errorf("error committing transaction: %v", err.Error)
 	}
+
+	duration := time.Since(start)
+	prometheus.RecordTimer("postgres_get_pushed_task_duration", duration, "database", "postgres")
+	prometheus.RecordCounter("postgres_get_pushed_task_total", 1, "database", "postgres", "status", "success")
 
 	return &res, nil
 }
 
 func (storage *PosgresStore) GetTaskByID(ID uint) (*TaskListingDB, error) {
+	start := time.Now()
+
 	var res TaskListingDB
 	db := storage.DB.First(&res, ID)
 	if db != nil && db.Error != nil {
+		prometheus.RecordError("postgres_get_task_by_id_failed", "storage")
 		return nil, fmt.Errorf("error getting task by ID: %v", db.Error)
 	}
+
+	duration := time.Since(start)
+	prometheus.RecordTimer("postgres_get_task_by_id_duration", duration, "database", "postgres")
+	prometheus.RecordCounter("postgres_get_task_by_id_total", 1, "database", "postgres", "status", "success")
+
 	return &res, nil
 }
 
 func (storage *PosgresStore) CreateTaskForCronJob(cronJobID uint) (*TaskListingDB, error) {
+	start := time.Now()
+
 	data := TaskListingDB{
 		CronJobID: cronJobID,
 		Status:    TaskStatusPushed,
@@ -394,12 +467,20 @@ func (storage *PosgresStore) CreateTaskForCronJob(cronJobID uint) (*TaskListingD
 	// create new entry in database and return newly created task
 	res := storage.DB.Create(&data)
 	if res != nil && res.Error != nil {
+		prometheus.RecordError("postgres_create_task_failed", "storage")
 		return nil, fmt.Errorf("error creating task for cron job: %v", res.Error)
 	}
+
+	duration := time.Since(start)
+	prometheus.RecordTimer("postgres_create_task_duration", duration, "database", "postgres")
+	prometheus.RecordCounter("postgres_create_task_total", 1, "database", "postgres", "status", "success")
+
 	return &data, nil
 }
 
 func (storage *PosgresStore) UpdateTaskByID(ID uint, m map[string]interface{}) error {
+	start := time.Now()
+
 	// update task by ID
 	// create a transaction to update the task and check if m["status"] == "failed"
 	// then update "retry_count" and "status"
@@ -408,6 +489,7 @@ func (storage *PosgresStore) UpdateTaskByID(ID uint, m map[string]interface{}) e
 	db := tx.Model(&TaskListingDB{}).Where("id = ?", ID).Updates(m)
 	if db != nil && db.Error != nil {
 		tx.Rollback()
+		prometheus.RecordError("postgres_update_task_by_id_failed", "storage")
 		return fmt.Errorf("error updating task by ID: %v", db.Error)
 	}
 
@@ -415,29 +497,46 @@ func (storage *PosgresStore) UpdateTaskByID(ID uint, m map[string]interface{}) e
 		db = tx.Model(&TaskListingDB{}).Where("id = ?", ID).Update("retry_count", gorm.Expr("retry_count + 1"))
 		if db != nil && db.Error != nil {
 			tx.Rollback()
+			prometheus.RecordError("postgres_update_task_retry_count_failed", "storage")
 			return fmt.Errorf("error updating task by ID: %v", db.Error)
 		}
+		prometheus.RecordCounter("postgres_task_retry_total", 1, "database", "postgres", "task_id", fmt.Sprintf("%d", ID))
 	}
 
 	err := tx.Commit()
 	if err != nil && err.Error != nil {
+		prometheus.RecordError("postgres_update_task_by_id_commit_failed", "storage")
 		return fmt.Errorf("error committing transaction: %v", err.Error)
 	}
+
+	duration := time.Since(start)
+	prometheus.RecordTimer("postgres_update_task_by_id_duration", duration, "database", "postgres")
+	prometheus.RecordCounter("postgres_update_task_by_id_total", 1, "database", "postgres", "status", "success")
 
 	return nil
 
 }
 
 func (storage *PosgresStore) GetCronJobByID(ID uint) (*CronJobListingDB, error) {
+	start := time.Now()
+
 	var res CronJobListingDB
 	db := storage.DB.First(&res, ID)
 	if db != nil && db.Error != nil {
+		prometheus.RecordError("postgres_get_cron_job_by_id_failed", "storage")
 		return nil, fmt.Errorf("error getting cron job by ID: %v", db.Error)
 	}
+
+	duration := time.Since(start)
+	prometheus.RecordTimer("postgres_get_cron_job_by_id_duration", duration, "database", "postgres")
+	prometheus.RecordCounter("postgres_get_cron_job_by_id_total", 1, "database", "postgres", "status", "success")
+
 	return &res, nil
 }
 
 func (storage *PosgresStore) CreateCronJobForUser(userID, name, method string, inputData map[string]interface{}) (*CronJobListingDB, error) {
+	start := time.Now()
+
 	data := CronJobListingDB{
 		UserID:    userID,
 		Name:      name,
@@ -447,23 +546,39 @@ func (storage *PosgresStore) CreateCronJobForUser(userID, name, method string, i
 	// create new entry in database and return newly created cron job
 	res := storage.DB.Create(&data)
 	if res != nil && res.Error != nil {
+		prometheus.RecordError("postgres_create_cron_job_failed", "storage")
 		return nil, fmt.Errorf("error creating cron job: %v", res.Error)
 	}
+
+	duration := time.Since(start)
+	prometheus.RecordTimer("postgres_create_cron_job_duration", duration, "database", "postgres")
+	prometheus.RecordCounter("postgres_create_cron_job_total", 1, "database", "postgres", "status", "success", "method", method)
 
 	return &data, nil
 }
 
 func (storage *PosgresStore) DeleteCronJobByID(ID uint) error {
+	start := time.Now()
+
 	res := storage.DB.Delete(&CronJobListingDB{}, ID)
 	if res != nil && res.Error != nil {
+		prometheus.RecordError("postgres_delete_cron_job_failed", "storage")
 		return fmt.Errorf("error deleting cron job: %v", res.Error)
 	}
+
+	duration := time.Since(start)
+	prometheus.RecordTimer("postgres_delete_cron_job_duration", duration, "database", "postgres")
+	prometheus.RecordCounter("postgres_delete_cron_job_total", 1, "database", "postgres", "status", "success")
+
 	return nil
 }
 
 func (storage *PosgresStore) UpdateCronJobByID(ID uint, m map[string]interface{}) error {
+	start := time.Now()
+
 	tx := storage.DB.Begin()
 	if tx.Error != nil {
+		prometheus.RecordError("postgres_update_cron_job_transaction_start_failed", "storage")
 		return fmt.Errorf("error starting transaction: %w", tx.Error)
 	}
 
@@ -478,50 +593,72 @@ func (storage *PosgresStore) UpdateCronJobByID(ID uint, m map[string]interface{}
 	// Update the cron job
 	res := tx.Model(&CronJobListingDB{}).Where("id = ?", ID).Updates(m)
 	if res.Error != nil {
+		prometheus.RecordError("postgres_update_cron_job_failed", "storage")
 		return fmt.Errorf("error updating cron job: %w", res.Error)
 	}
 
 	if res.RowsAffected == 0 {
+		prometheus.RecordError("postgres_update_cron_job_not_found", "storage")
 		return fmt.Errorf("no cron job found with id %d", ID)
 	}
 
 	// Get the updated cron job
 	var updatedJob CronJobListingDB
 	if err := tx.First(&updatedJob, ID).Error; err != nil {
+		prometheus.RecordError("postgres_get_updated_cron_job_failed", "storage")
 		return fmt.Errorf("error getting updated cron job: %w", err)
 	}
 
 	// Validate activation if the job is being activated
 	if active, exists := m["active"]; exists && active == true {
 		if err := storage.validateJobForActivation(&updatedJob); err != nil {
+			prometheus.RecordError("postgres_cron_job_activation_validation_failed", "storage")
 			return err
 		}
+		prometheus.RecordCounter("postgres_cron_job_activated_total", 1, "database", "postgres", "method", updatedJob.Method)
 	}
 
 	// Commit the transaction
 	if err := tx.Commit().Error; err != nil {
+		prometheus.RecordError("postgres_update_cron_job_commit_failed", "storage")
 		return fmt.Errorf("error committing transaction: %w", err)
 	}
+
+	duration := time.Since(start)
+	prometheus.RecordTimer("postgres_update_cron_job_duration", duration, "database", "postgres")
+	prometheus.RecordCounter("postgres_update_cron_job_total", 1, "database", "postgres", "status", "success")
 
 	committed = true
 	return nil
 }
 
 func (storage *PosgresStore) ListAllTasksByJobID(ID, limit, offset uint) ([]TaskListingDB, error) {
+	start := time.Now()
+
 	var res []TaskListingDB
 	db := storage.DB.Where("cron_job_id = ?", ID).Limit(int(limit)).Offset(int(offset)).Order("created_at DESC").Find(&res)
 	if db != nil && db.Error != nil {
+		prometheus.RecordError("postgres_list_tasks_by_job_id_failed", "storage")
 		return nil, fmt.Errorf("error getting tasks for job: %v", db.Error)
 	}
+
+	duration := time.Since(start)
+	prometheus.RecordTimer("postgres_list_tasks_by_job_id_duration", duration, "database", "postgres")
+	prometheus.RecordCounter("postgres_list_tasks_by_job_id_total", 1, "database", "postgres", "status", "success")
+	prometheus.RecordCounter("postgres_tasks_listed_total", int64(len(res)), "database", "postgres", "job_id", fmt.Sprintf("%d", ID))
+
 	return res, nil
 }
 
 // DeleteAllJobsAndTasksByEmail deletes all jobs and related tasks for a user by email
 // Returns the list of deleted job IDs and task IDs
 func (storage *PosgresStore) DeleteAllJobsAndTasksByEmail(email string) ([]uint, []uint, error) {
+	start := time.Now()
+
 	// Start a transaction to ensure atomicity
 	tx := storage.DB.Begin()
 	if tx.Error != nil {
+		prometheus.RecordError("postgres_delete_jobs_by_email_transaction_start_failed", "storage")
 		return nil, nil, fmt.Errorf("error starting transaction: %v", tx.Error)
 	}
 
@@ -529,11 +666,13 @@ func (storage *PosgresStore) DeleteAllJobsAndTasksByEmail(email string) ([]uint,
 	var jobs []CronJobListingDB
 	if err := tx.Where("name = ?", email).Find(&jobs).Error; err != nil {
 		tx.Rollback()
+		prometheus.RecordError("postgres_get_jobs_for_email_failed", "storage")
 		return nil, nil, fmt.Errorf("error getting jobs for email: %v", err)
 	}
 
 	if len(jobs) == 0 {
 		tx.Rollback()
+		prometheus.RecordError("postgres_no_jobs_found_for_email", "storage")
 		return nil, nil, fmt.Errorf("no jobs found for email: %s", email)
 	}
 
@@ -549,6 +688,7 @@ func (storage *PosgresStore) DeleteAllJobsAndTasksByEmail(email string) ([]uint,
 		var tasks []TaskListingDB
 		if err := tx.Where("cron_job_id = ?", jobID).Find(&tasks).Error; err != nil {
 			tx.Rollback()
+			prometheus.RecordError("postgres_get_tasks_for_job_failed", "storage")
 			return nil, nil, fmt.Errorf("error getting tasks for job %d: %v", jobID, err)
 		}
 		for _, task := range tasks {
@@ -560,20 +700,29 @@ func (storage *PosgresStore) DeleteAllJobsAndTasksByEmail(email string) ([]uint,
 	if len(taskIDs) > 0 {
 		if err := tx.Exec("DELETE FROM task_listing_dbs WHERE cron_job_id IN ?", deletedJobIDs).Error; err != nil {
 			tx.Rollback()
+			prometheus.RecordError("postgres_delete_tasks_failed", "storage")
 			return nil, nil, fmt.Errorf("error deleting tasks: %v", err)
 		}
+		prometheus.RecordCounter("postgres_tasks_deleted_total", int64(len(taskIDs)), "database", "postgres", "reason", "email_cleanup")
 	}
 
 	// Delete all jobs for the email (hard delete)
 	if err := tx.Exec("DELETE FROM cron_job_listing_dbs WHERE name = ?", email).Error; err != nil {
 		tx.Rollback()
+		prometheus.RecordError("postgres_delete_jobs_for_email_failed", "storage")
 		return nil, nil, fmt.Errorf("error deleting jobs for email: %v", err)
 	}
+	prometheus.RecordCounter("postgres_jobs_deleted_total", int64(len(deletedJobIDs)), "database", "postgres", "reason", "email_cleanup")
 
 	// Commit the transaction
 	if err := tx.Commit().Error; err != nil {
+		prometheus.RecordError("postgres_delete_jobs_by_email_commit_failed", "storage")
 		return nil, nil, fmt.Errorf("error committing transaction: %v", err)
 	}
+
+	duration := time.Since(start)
+	prometheus.RecordTimer("postgres_delete_jobs_by_email_duration", duration, "database", "postgres")
+	prometheus.RecordCounter("postgres_delete_jobs_by_email_total", 1, "database", "postgres", "status", "success")
 
 	return deletedJobIDs, taskIDs, nil
 }

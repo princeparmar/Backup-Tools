@@ -83,15 +83,13 @@ func (a *AutosyncManager) Start() {
 		err := a.store.MissedHeartbeatForTask()
 		if err != nil {
 			logger.Error(ctx, "Failed to check for missed heartbeats", logger.ErrorField(err))
-			prometheus.RecordCronJobError("missed_heartbeat_check", "system", "database_error")
+			prometheus.RecordError("missed_heartbeat_check", "system")
 		} else {
 			logger.Info(ctx, "Successfully checked for missed heartbeats")
-			// Note: MissedHeartbeatForTask doesn't return count, but we can record the check
-			prometheus.RecordHeartbeatMiss("system", "heartbeat_check")
 		}
 
-		prometheus.RecordCronJobExecution("missed_heartbeat_check", "system", "completed")
-		prometheus.RecordCronJobDuration("missed_heartbeat_check", "system", time.Since(startTime))
+		// Record the overall missed heartbeat check duration
+		prometheus.RecordTimer("missed_heartbeat_check", time.Since(startTime), "component", "system", "status", "completed")
 	})
 
 	// c.AddFunc("@every 1m", func() {
@@ -114,14 +112,13 @@ func (a *AutosyncManager) CreateTaskForAllPendingJobs(ctx context.Context) error
 
 	jobIDs, err := a.store.GetJobsToProcess()
 	if err != nil {
-		prometheus.RecordCronJobError("create_tasks", "system", "database_error")
+		prometheus.RecordError("create_tasks", "system")
 		return fmt.Errorf("failed to get jobs to process: %w", err)
 	}
 
 	if len(jobIDs) == 0 {
 		logger.Info(ctx, "No jobs to process")
-		prometheus.RecordCronJobExecution("create_tasks", "system", "no_jobs")
-		prometheus.RecordCronJobDuration("create_tasks", "system", time.Since(startTime))
+		prometheus.RecordMetric("create_tasks", prometheus.TimerType, time.Since(startTime).Seconds(), "system", "no_jobs")
 		return nil
 	}
 
@@ -141,7 +138,7 @@ func (a *AutosyncManager) CreateTaskForAllPendingJobs(ctx context.Context) error
 				logger.Int("job_id", int(jobID.ID)),
 				logger.ErrorField(err),
 			)
-			prometheus.RecordTaskFailure(jobID.Name, jobID.Method, "creation_failed")
+			prometheus.RecordError(jobID.Name, jobID.Method, "creation_failed")
 			errorCount++
 			continue
 		}
@@ -149,13 +146,12 @@ func (a *AutosyncManager) CreateTaskForAllPendingJobs(ctx context.Context) error
 		logger.Info(ctx, "Successfully created task for job",
 			logger.Int("job_id", int(jobID.ID)),
 		)
-		prometheus.RecordTaskCreation(jobID.Name, jobID.Method)
+		prometheus.RecordTimer("task_creation", time.Since(startTime), "job_name", jobID.Name, "method", jobID.Method)
 		successCount++
 	}
 
 	// Record overall execution metrics
-	prometheus.RecordCronJobExecution("create_tasks", "system", "completed")
-	prometheus.RecordCronJobDuration("create_tasks", "system", time.Since(startTime))
+	prometheus.RecordTimer("create_tasks", time.Since(startTime), "component", "system", "status", "completed")
 
 	logger.Info(ctx, "Task creation completed",
 		logger.Int("successful", successCount),
@@ -215,7 +211,7 @@ func (a *AutosyncManager) ProcessTask(ctx context.Context) error {
 				logger.Info(ctx, "No tasks to process")
 				break
 			}
-			prometheus.RecordCronJobError("process_tasks", "system", "database_error")
+			prometheus.RecordError("process_tasks", "system")
 			return fmt.Errorf("failed to get pushed task: %w", err)
 		}
 
@@ -231,7 +227,7 @@ func (a *AutosyncManager) ProcessTask(ctx context.Context) error {
 				logger.Int("job_id", int(task.CronJobID)),
 				logger.ErrorField(err),
 			)
-			prometheus.RecordTaskFailure("unknown", "unknown", "job_fetch_failed")
+			prometheus.RecordError("unknown", "unknown", "job_fetch_failed")
 			errorCount++
 			// Update task status with error and continue to next task
 			if updateErr := a.UpdateTaskStatus(task, job, err); updateErr != nil {
@@ -263,8 +259,7 @@ func (a *AutosyncManager) ProcessTask(ctx context.Context) error {
 	}
 
 	// Record overall execution metrics
-	prometheus.RecordCronJobExecution("process_tasks", "system", "completed")
-	prometheus.RecordCronJobDuration("process_tasks", "system", time.Since(startTime))
+	prometheus.RecordMetric("process_tasks", prometheus.TimerType, time.Since(startTime).Seconds(), "system", "completed")
 
 	logger.Info(ctx, "Task processing completed",
 		logger.Int("processed", processedCount),
@@ -279,7 +274,7 @@ func (a *AutosyncManager) processTask(ctx context.Context, task *storage.TaskLis
 
 	processor, ok := processorMap[job.Method]
 	if !ok {
-		prometheus.RecordCronJobError(job.Name, job.Method, "processor_not_found")
+		prometheus.RecordError(job.Name, job.Method, "processor_not_found")
 		return fmt.Errorf("processor for method '%s' not found", job.Method)
 	}
 
@@ -289,7 +284,7 @@ func (a *AutosyncManager) processTask(ctx context.Context, task *storage.TaskLis
 	)
 
 	// Record job execution start
-	prometheus.RecordCronJobExecution(job.Name, job.Method, "started")
+	prometheus.RecordCounter(job.Name+"_started_total", 1, "job_name", job.Name, "method", job.Method)
 
 	err := processor.Run(ProcessorInput{
 		InputData: job.InputData,
@@ -317,14 +312,14 @@ func (a *AutosyncManager) processTask(ctx context.Context, task *storage.TaskLis
 
 	// Record execution duration
 	duration := time.Since(startTime)
-	prometheus.RecordCronJobDuration(job.Name, job.Method, duration)
+	prometheus.RecordTimer(job.Name+"_duration", duration, "job_name", job.Name, "method", job.Method)
 
 	// Record completion status
 	if err != nil {
-		prometheus.RecordCronJobExecution(job.Name, job.Method, "failed")
-		prometheus.RecordCronJobError(job.Name, job.Method, "execution_failed")
+		prometheus.RecordCounter(job.Name+"_failed_total", 1, "job_name", job.Name, "method", job.Method)
+		prometheus.RecordError(job.Name, job.Method, "execution_failed")
 	} else {
-		prometheus.RecordCronJobExecution(job.Name, job.Method, "completed")
+		prometheus.RecordCounter(job.Name+"_completed_total", 1, "job_name", job.Name, "method", job.Method)
 	}
 
 	return err
@@ -355,14 +350,13 @@ func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *sto
 
 		// Record retry if applicable
 		if task.RetryCount > 0 {
-			prometheus.RecordCronJobRetry(job.Name, job.Method)
+			prometheus.RecordCounter(job.Name+"_retry_total", 1, "job_name", job.Name, "method", job.Method)
 		}
 
 		// Record task failure
-		errorType := a.categorizeError(processErr)
-		prometheus.RecordTaskFailure(job.Name, job.Method, errorType)
-
 		if job != nil {
+			errorType := a.categorizeError(processErr)
+			prometheus.RecordError(job.Name, job.Method, errorType)
 			job.Message = "Last task execution failed"
 			job.MessageStatus = storage.JobMessageStatusError
 			job.LastRun = time.Now()
@@ -376,17 +370,8 @@ func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *sto
 	} else {
 		// Record successful task completion
 		if job != nil {
-			prometheus.RecordTaskCompletion(job.Name, job.Method)
+			prometheus.RecordCounter(job.Name+"_completed_total", 1, "job_name", job.Name, "method", job.Method)
 		}
-	}
-
-	// Save task to database
-	if err := a.store.DB.Save(task).Error; err != nil {
-		logger.Error(ctx, "Failed to save task status",
-			logger.Int("task_id", int(task.ID)),
-			logger.ErrorField(err),
-		)
-		return fmt.Errorf("failed to save task: %w", err)
 	}
 
 	// Save job to database if job exists
@@ -464,7 +449,7 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *storage.Cr
 		job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
 		task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
 		if wasActive {
-			prometheus.RecordJobDeactivation(job.Name, job.Method, "storx_permission")
+			prometheus.RecordError(job.Name, job.Method, "storx_permission")
 		}
 
 	case strings.Contains(errMsg, "googleapi: Error 401"):
@@ -474,7 +459,7 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *storage.Cr
 			job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
 			task.Message = "Google Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
 			if wasActive {
-				prometheus.RecordJobDeactivation(job.Name, job.Method, "google_auth")
+				prometheus.RecordError(job.Name, job.Method, "google_auth")
 			}
 		} else {
 			job.Message = "Invalid google credentials. Retrying..."
@@ -487,7 +472,7 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *storage.Cr
 		job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
 		task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
 		if wasActive {
-			prometheus.RecordJobDeactivation(job.Name, job.Method, "storx_permission")
+			prometheus.RecordError(job.Name, job.Method, "storx_permission")
 		}
 
 	case strings.Contains(errMsg, "could not create bucket") ||
@@ -497,7 +482,7 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *storage.Cr
 		job.Message = "Automatic backup failed due to network issues. Please check your connection and reactivate."
 		task.Message = "Task failed due to network connectivity issues. Job has been deactivated."
 		if wasActive {
-			prometheus.RecordJobDeactivation(job.Name, job.Method, "network_error")
+			prometheus.RecordError(job.Name, job.Method, "network_error")
 		}
 
 	default:
@@ -505,7 +490,7 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *storage.Cr
 		job.Message = "Automatic backup failed. Please check the configuration and reactivate."
 		task.Message = "Task failed. Job has been deactivated."
 		if wasActive {
-			prometheus.RecordJobDeactivation(job.Name, job.Method, "unknown_error")
+			prometheus.RecordError(job.Name, job.Method, "unknown_error")
 		}
 	}
 }

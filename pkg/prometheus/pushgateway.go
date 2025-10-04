@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
@@ -11,93 +12,85 @@ import (
 	"github.com/prometheus/client_golang/prometheus/push"
 )
 
-// PushGatewayConfig holds configuration for the Prometheus push gateway
-type PushGatewayConfig struct {
-	URL      string
-	JobName  string
-	Instance string
-	Username string
-	Password string
-	Interval time.Duration
-}
-
 // PushGatewayClient handles pushing metrics to Prometheus push gateway
 type PushGatewayClient struct {
-	config     PushGatewayConfig
-	pusher     *push.Pusher
-	registry   *prometheus.Registry
-	httpClient *http.Client
-	stopChan   chan struct{}
+	config   PushGatewayConfig
+	pusher   *push.Pusher
+	registry *prometheus.Registry
+	stopChan chan struct{}
+	mu       sync.RWMutex
 }
 
 // NewPushGatewayClient creates a new push gateway client
 func NewPushGatewayClient(config PushGatewayConfig) *PushGatewayClient {
 	registry := prometheus.NewRegistry()
 
-	httpClient := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-
-	pusher := push.New(config.URL, config.JobName).Gatherer(registry)
+	pusher := push.New(config.URL, config.JobName).
+		Gatherer(registry).
+		Grouping("instance", config.Instance)
 
 	if config.Username != "" && config.Password != "" {
 		pusher = pusher.BasicAuth(config.Username, config.Password)
 	}
 
-	if config.Instance != "" {
-		pusher = pusher.Grouping("instance", config.Instance)
-	}
-
 	return &PushGatewayClient{
-		config:     config,
-		pusher:     pusher,
-		registry:   registry,
-		httpClient: httpClient,
-		stopChan:   make(chan struct{}),
+		config:   config,
+		pusher:   pusher,
+		registry: registry,
+		stopChan: make(chan struct{}),
 	}
 }
 
 // RegisterMetrics registers metrics with the push gateway registry
 func (pgc *PushGatewayClient) RegisterMetrics(metrics *Metrics) {
+	if pgc == nil || metrics == nil {
+		return
+	}
+
+	pgc.mu.Lock()
+	defer pgc.mu.Unlock()
+
+	// Register system metrics
 	collectors := []prometheus.Collector{
-		metrics.RequestDuration,
-		metrics.RequestTotal,
-		metrics.RequestErrors,
-		metrics.UploadDuration,
-		metrics.DownloadDuration,
-		metrics.UploadSize,
-		metrics.DownloadSize,
-		metrics.UploadErrors,
-		metrics.DownloadErrors,
 		metrics.CPUUsage,
 		metrics.MemoryUsage,
 		metrics.GoroutineCount,
-		metrics.BucketOperations,
-		metrics.ObjectOperations,
-		metrics.SatelliteErrors,
-		// Cron job metrics
-		metrics.CronJobExecutions,
-		metrics.CronJobDuration,
-		metrics.CronJobErrors,
-		metrics.CronJobRetries,
-		metrics.TaskCreations,
-		metrics.TaskCompletions,
-		metrics.TaskFailures,
-		metrics.HeartbeatMisses,
-		metrics.JobDeactivations,
 	}
 
 	for _, collector := range collectors {
 		if err := pgc.registry.Register(collector); err != nil {
-			logger.Warn(context.Background(), "Failed to register metric",
-				logger.ErrorField(err))
+			if _, ok := err.(*prometheus.AlreadyRegisteredError); !ok {
+				logger.Warn(context.Background(), "Failed to register metric",
+					logger.ErrorField(err))
+			}
+		}
+	}
+
+	// Register additional metrics from the metrics map
+	metrics.mu.RLock()
+	defer metrics.mu.RUnlock()
+	for name, collector := range metrics.metrics {
+		if err := pgc.registry.Register(collector); err != nil {
+			if _, ok := err.(*prometheus.AlreadyRegisteredError); !ok {
+				logger.Warn(context.Background(), "Failed to register metric",
+					logger.String("metric", name),
+					logger.ErrorField(err))
+			}
 		}
 	}
 }
 
 // PushMetrics pushes metrics to the push gateway
 func (pgc *PushGatewayClient) PushMetrics(ctx context.Context) error {
-	if err := pgc.pusher.Client(pgc.httpClient).Push(); err != nil {
+	if pgc == nil {
+		return fmt.Errorf("push gateway client is nil")
+	}
+
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	if err := pgc.pusher.Client(httpClient).Push(); err != nil {
 		logger.Error(ctx, "Failed to push metrics to push gateway",
 			logger.String("url", pgc.config.URL),
 			logger.String("job", pgc.config.JobName),
@@ -114,6 +107,10 @@ func (pgc *PushGatewayClient) PushMetrics(ctx context.Context) error {
 
 // StartPeriodicPush starts a goroutine that periodically pushes metrics
 func (pgc *PushGatewayClient) StartPeriodicPush(ctx context.Context) {
+	if pgc == nil {
+		return
+	}
+
 	interval := pgc.config.Interval
 	if interval <= 0 {
 		interval = 30 * time.Second
@@ -145,6 +142,10 @@ func (pgc *PushGatewayClient) StartPeriodicPush(ctx context.Context) {
 
 // Stop stops the periodic push
 func (pgc *PushGatewayClient) Stop() {
+	if pgc == nil {
+		return
+	}
+
 	select {
 	case <-pgc.stopChan:
 		// Already closed
@@ -155,16 +156,33 @@ func (pgc *PushGatewayClient) Stop() {
 
 // PushMetricsOnce pushes metrics once and returns
 func (pgc *PushGatewayClient) PushMetricsOnce(ctx context.Context) error {
+	if pgc == nil {
+		return fmt.Errorf("push gateway client is nil")
+	}
 	return pgc.PushMetrics(ctx)
 }
 
-// Global push gateway client
-var GlobalPushGateway *PushGatewayClient
+// StartPushGateway starts the push gateway with the given configuration
+func StartPushGateway(ctx context.Context, config PushGatewayConfig) error {
+	globalMu.Lock()
+	defer globalMu.Unlock()
+
+	if err := InitPushGateway(config); err != nil {
+		return fmt.Errorf("initialize push gateway: %w", err)
+	}
+
+	if GlobalPushGateway != nil {
+		go GlobalPushGateway.StartPeriodicPush(ctx)
+	}
+	return nil
+}
 
 // InitPushGateway initializes the global push gateway client
 func InitPushGateway(config PushGatewayConfig) error {
 	GlobalPushGateway = NewPushGatewayClient(config)
 
+	metricsMu.RLock()
+	defer metricsMu.RUnlock()
 	if GlobalMetrics != nil {
 		GlobalPushGateway.RegisterMetrics(GlobalMetrics)
 	}
@@ -172,18 +190,11 @@ func InitPushGateway(config PushGatewayConfig) error {
 	return nil
 }
 
-// StartPushGateway starts the push gateway with the given configuration
-func StartPushGateway(ctx context.Context, config PushGatewayConfig) error {
-	if err := InitPushGateway(config); err != nil {
-		return fmt.Errorf("initialize push gateway: %w", err)
-	}
-
-	go GlobalPushGateway.StartPeriodicPush(ctx)
-	return nil
-}
-
 // PushMetricsNow pushes metrics immediately using the global push gateway
 func PushMetricsNow(ctx context.Context) error {
+	globalMu.RLock()
+	defer globalMu.RUnlock()
+
 	if GlobalPushGateway == nil {
 		return fmt.Errorf("push gateway not initialized")
 	}
@@ -192,6 +203,9 @@ func PushMetricsNow(ctx context.Context) error {
 
 // StopPushGateway stops the global push gateway
 func StopPushGateway() {
+	globalMu.Lock()
+	defer globalMu.Unlock()
+
 	if GlobalPushGateway != nil {
 		GlobalPushGateway.Stop()
 	}

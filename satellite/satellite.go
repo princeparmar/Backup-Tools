@@ -40,7 +40,7 @@ func HandleSatelliteAuthentication(c echo.Context) error {
 
 	accessToken := c.FormValue("satellite")
 	if accessToken == "" {
-		prometheus.RecordRequestError("POST", "/satellite-auth", "missing_token")
+		prometheus.RecordError("POST", "/satellite-auth", "missing_token")
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"error": "satellite access token is required",
 		})
@@ -52,8 +52,8 @@ func HandleSatelliteAuthentication(c echo.Context) error {
 	})
 
 	duration := time.Since(start)
-	prometheus.RecordRequestDuration("POST", "/satellite-auth", "200", duration)
-	prometheus.RecordRequestTotal("POST", "/satellite-auth", "200")
+	prometheus.RecordTimer("satellite_auth_duration", duration, "status", "200")
+	prometheus.RecordCounter("satellite_auth_total", 1, "status", "200")
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "authentication was successful",
@@ -64,15 +64,13 @@ func HandleSatelliteAuthentication(c echo.Context) error {
 func GetUploader(ctx context.Context, accessGrant, bucketName, objectKey string) (*uplink.Upload, error) {
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
-		prometheus.RecordBucketOperation(bucketName, "ensure_bucket", "error")
-		prometheus.RecordSatelliteError("parse_access_failed", "get_uploader")
+		prometheus.RecordError("parse_access_failed", "get_uploader")
 		return nil, fmt.Errorf("parse access grant: %w", err)
 	}
 
 	testAccessParse, err := grant.ParseAccess(accessGrant)
 	if err != nil {
-		prometheus.RecordBucketOperation(bucketName, "ensure_bucket", "error")
-		prometheus.RecordSatelliteError("parse_access_failed", "get_uploader")
+		prometheus.RecordError("parse_access_failed", "get_uploader")
 		return nil, fmt.Errorf("parse access grant: %w", err)
 	}
 
@@ -82,8 +80,7 @@ func GetUploader(ctx context.Context, accessGrant, bucketName, objectKey string)
 
 	project, err := uplink.OpenProject(ctx, access)
 	if err != nil {
-		prometheus.RecordBucketOperation(bucketName, "ensure_bucket", "error")
-		prometheus.RecordSatelliteError("open_project_failed", "get_uploader")
+		prometheus.RecordError("open_project_failed", "get_uploader")
 		return nil, fmt.Errorf("open project: %w", err)
 	}
 	defer project.Close()
@@ -92,13 +89,12 @@ func GetUploader(ctx context.Context, accessGrant, bucketName, objectKey string)
 	if err != nil {
 		_, err = project.CreateBucket(ctx, bucketName)
 		if err != nil {
-			prometheus.RecordBucketOperation(bucketName, "create_bucket", "error")
-			prometheus.RecordSatelliteError("create_bucket_failed", "get_uploader")
+			prometheus.RecordError("create_bucket_failed", "get_uploader")
 			return nil, fmt.Errorf("create bucket: %w", err)
 		}
-		prometheus.RecordBucketOperation(bucketName, "create_bucket", "success")
+		prometheus.RecordCounter("bucket_created_total", 1, "bucket", bucketName)
 	} else {
-		prometheus.RecordBucketOperation(bucketName, "ensure_bucket", "success")
+		prometheus.RecordCounter("bucket_ensured_total", 1, "bucket", bucketName)
 	}
 
 	logger.Info(ctx, "Uploading object",
@@ -107,7 +103,7 @@ func GetUploader(ctx context.Context, accessGrant, bucketName, objectKey string)
 
 	upload, err := project.UploadObject(ctx, bucketName, objectKey, nil)
 	if err != nil {
-		prometheus.RecordSatelliteError("upload_object_failed", "get_uploader")
+		prometheus.RecordError("upload_object_failed", "get_uploader")
 		return nil, fmt.Errorf("initiate upload: %w", err)
 	}
 
@@ -120,7 +116,7 @@ func UploadObject(ctx context.Context, accessGrant, bucketName, objectKey string
 
 	upload, err := GetUploader(ctx, accessGrant, bucketName, objectKey)
 	if err != nil {
-		prometheus.RecordUploadError(bucketName, "get_uploader_failed")
+		prometheus.RecordError(bucketName, "get_uploader_failed")
 		return err
 	}
 
@@ -128,20 +124,19 @@ func UploadObject(ctx context.Context, accessGrant, bucketName, objectKey string
 	_, err = io.Copy(upload, buf)
 	if err != nil {
 		_ = upload.Abort()
-		prometheus.RecordUploadError(bucketName, "copy_data_failed")
+		prometheus.RecordError(bucketName, "copy_data_failed")
 		return fmt.Errorf("upload data: %w", err)
 	}
 
 	err = upload.Commit()
 	if err != nil {
-		prometheus.RecordUploadError(bucketName, "commit_failed")
+		prometheus.RecordError(bucketName, "commit_failed")
 		return fmt.Errorf("commit object: %w", err)
 	}
 
 	duration := time.Since(start)
-	prometheus.RecordUploadDuration(bucketName, "success", duration)
-	prometheus.RecordUploadSize(bucketName, int64(len(data)))
-	prometheus.RecordObjectOperation(bucketName, "upload", "success")
+	prometheus.RecordTimer("upload_duration", duration, "bucket", bucketName)
+	prometheus.RecordCounter("upload_total", 1, "bucket", bucketName)
 
 	return nil
 }
@@ -152,40 +147,39 @@ func DownloadObject(ctx context.Context, accessGrant, bucketName, objectKey stri
 
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
-		prometheus.RecordDownloadError(bucketName, "parse_access_failed")
+		prometheus.RecordError(bucketName, "parse_access_failed")
 		return nil, fmt.Errorf("parse access grant: %w", err)
 	}
 
 	project, err := uplink.OpenProject(ctx, access)
 	if err != nil {
-		prometheus.RecordDownloadError(bucketName, "open_project_failed")
+		prometheus.RecordError(bucketName, "open_project_failed")
 		return nil, fmt.Errorf("open project: %w", err)
 	}
 	defer project.Close()
 
 	_, err = project.EnsureBucket(ctx, bucketName)
 	if err != nil {
-		prometheus.RecordDownloadError(bucketName, "ensure_bucket_failed")
+		prometheus.RecordError(bucketName, "ensure_bucket_failed")
 		return nil, fmt.Errorf("ensure bucket: %w", err)
 	}
 
 	download, err := project.DownloadObject(ctx, bucketName, objectKey, nil)
 	if err != nil {
-		prometheus.RecordDownloadError(bucketName, "download_object_failed")
+		prometheus.RecordError(bucketName, "download_object_failed")
 		return nil, fmt.Errorf("open object: %w", err)
 	}
 	defer download.Close()
 
 	receivedContents, err := io.ReadAll(download)
 	if err != nil {
-		prometheus.RecordDownloadError(bucketName, "read_data_failed")
+		prometheus.RecordError(bucketName, "read_data_failed")
 		return nil, fmt.Errorf("read data: %w", err)
 	}
 
 	duration := time.Since(start)
-	prometheus.RecordDownloadDuration(bucketName, "success", duration)
-	prometheus.RecordDownloadSize(bucketName, int64(len(receivedContents)))
-	prometheus.RecordObjectOperation(bucketName, "download", "success")
+	prometheus.RecordTimer("download_duration", duration, "bucket", bucketName)
+	prometheus.RecordCounter("download_total", 1, "bucket", bucketName)
 
 	return receivedContents, nil
 }
@@ -252,8 +246,7 @@ func ListObjectsRecursive(ctx context.Context, accessGrant, bucketName string) (
 func listObjectsWithOptions(ctx context.Context, accessGrant, bucketName string, options *uplink.ListObjectsOptions) ([]uplink.Object, error) {
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
-		prometheus.RecordObjectOperation(bucketName, "list", "error")
-		prometheus.RecordSatelliteError("parse_access_failed", "list_objects")
+		prometheus.RecordError("parse_access_failed", "list")
 		return nil, fmt.Errorf("parse access grant: %w", err)
 	}
 
@@ -286,34 +279,30 @@ func listObjectsWithOptions(ctx context.Context, accessGrant, bucketName string,
 func DeleteObject(ctx context.Context, accessGrant, bucketName, objectKey string) error {
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
-		prometheus.RecordObjectOperation(bucketName, "delete", "error")
-		prometheus.RecordSatelliteError("parse_access_failed", "delete_object")
+		prometheus.RecordError("parse_access_failed", "delete")
 		return fmt.Errorf("parse access grant: %w", err)
 	}
 
 	project, err := uplink.OpenProject(ctx, access)
 	if err != nil {
-		prometheus.RecordObjectOperation(bucketName, "delete", "error")
-		prometheus.RecordSatelliteError("open_project_failed", "delete_object")
+		prometheus.RecordError("open_project_failed", "delete")
 		return fmt.Errorf("open project: %w", err)
 	}
 	defer project.Close()
 
 	_, err = project.EnsureBucket(ctx, bucketName)
 	if err != nil {
-		prometheus.RecordObjectOperation(bucketName, "delete", "error")
-		prometheus.RecordSatelliteError("ensure_bucket_failed", "delete_object")
+		prometheus.RecordError("ensure_bucket_failed", "delete")
 		return fmt.Errorf("ensure bucket: %w", err)
 	}
 
 	_, err = project.DeleteObject(ctx, bucketName, objectKey)
 	if err != nil {
-		prometheus.RecordObjectOperation(bucketName, "delete", "error")
-		prometheus.RecordSatelliteError("delete_object_failed", "delete_object")
+		prometheus.RecordError("delete_object_failed", "delete")
 		return fmt.Errorf("delete object: %w", err)
 	}
 
-	prometheus.RecordObjectOperation(bucketName, "delete", "success")
+	prometheus.RecordCounter("delete_total", 1, "bucket", bucketName)
 	return nil
 }
 
