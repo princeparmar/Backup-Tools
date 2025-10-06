@@ -3,7 +3,6 @@ package newrelic
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
@@ -22,21 +21,25 @@ func NewLogInterceptor(apiKey string, enabled bool) *LogInterceptor {
 // InterceptLogWithFields intercepts a log entry with structured fields and sends it to New Relic
 func (li *LogInterceptor) InterceptLogWithFields(entry logger.Entry, fields []logger.Field) {
 	fieldMap := li.fieldsToMap(fields)
-	parsedEntry, jsonFields := li.parseLog(entry)
+
+	caller := entry.Caller.String()
+	if caller == "" || caller == "undefined" {
+		caller = entry.Caller.FullPath()
+	}
+	if caller == "" || caller == "undefined" {
+		caller = "unknown"
+	}
 
 	logData := map[string]interface{}{
-		"L": parsedEntry.Level.String(),
-		"M": parsedEntry.Message,
-		"C": parsedEntry.Caller.String(),
-		"N": parsedEntry.LoggerName,
-		"T": parsedEntry.Time.Format(time.RFC3339),
-		"S": parsedEntry.Stack,
+		"L": entry.Level.String(),
+		"M": entry.Message,
+		"C": caller,
+		"N": entry.LoggerName,
+		"T": entry.Time.Format(time.RFC3339),
+		"S": entry.Stack,
 	}
 
-	// Merge fields
-	for k, v := range jsonFields {
-		logData[k] = v
-	}
+	// Merge fields directly from zap fields
 	for k, v := range fieldMap {
 		logData[k] = v
 	}
@@ -82,43 +85,6 @@ func (li *LogInterceptor) fieldsToMap(fields []logger.Field) map[string]interfac
 		}
 	}
 	return fieldMap
-}
-
-// parseLog parses Storj's structured log format: LEVEL\tLOGGER\tCALLER\tMESSAGE\t{JSON}
-func (li *LogInterceptor) parseLog(entry logger.Entry) (logger.Entry, map[string]interface{}) {
-	parts := strings.Split(entry.Message, "\t")
-	if len(parts) < 4 {
-		return entry, make(map[string]interface{})
-	}
-
-	jsonFields := make(map[string]interface{})
-	if len(parts) > 4 {
-		json.Unmarshal([]byte(parts[4]), &jsonFields)
-	}
-
-	entryCaller := logger.NewEntryCaller(0, parts[2], 0, parts[2] != "")
-
-	return logger.Entry{
-		Level:      li.parseLevel(parts[0]),
-		Time:       entry.Time,
-		Message:    parts[3],
-		Caller:     entryCaller,
-		LoggerName: parts[1],
-		Stack:      entry.Stack,
-	}, jsonFields
-}
-
-func (li *LogInterceptor) parseLevel(levelStr string) logger.Level {
-	switch strings.ToUpper(levelStr) {
-	case "ERROR", "ERR":
-		return logger.ErrorLevel
-	case "WARN":
-		return logger.WarnLevel
-	case "DEBUG":
-		return logger.DebugLevel
-	default:
-		return logger.InfoLevel
-	}
 }
 
 // Close closes the interceptor

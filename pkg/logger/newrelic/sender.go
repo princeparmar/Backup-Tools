@@ -17,6 +17,7 @@ const (
 	flushInterval = 2 * time.Minute
 	httpTimeout   = 30 * time.Second
 	maxRetries    = 3
+	newRelicURL   = "https://log-api.newrelic.com/log/v1"
 )
 
 type Sender struct {
@@ -36,6 +37,7 @@ type LogEntry struct {
 	Level     string                 `json:"level,omitempty"`
 	Caller    string                 `json:"caller,omitempty"`
 	LogType   string                 `json:"logtype"`
+	TraceID   string                 `json:"trace_id,omitempty"`
 	Fields    map[string]interface{} `json:"fields,omitempty"`
 }
 
@@ -78,9 +80,14 @@ func (s *Sender) parseLog(data []byte) LogEntry {
 		Fields:    make(map[string]interface{}),
 	}
 
-	// Add extra fields (excluding zap core fields)
+	// Extract trace_id as a top-level field for better visibility in New Relic
+	if traceID, exists := logData["trace_id"]; exists {
+		entry.TraceID = fmt.Sprintf("%v", traceID)
+	}
+
+	// Add extra fields (excluding zap core fields and trace_id)
 	for k, v := range logData {
-		if k != "M" && k != "L" && k != "C" && k != "N" && k != "T" && k != "S" {
+		if k != "M" && k != "L" && k != "C" && k != "N" && k != "T" && k != "S" && k != "trace_id" {
 			entry.Fields[k] = v
 		}
 	}
@@ -134,7 +141,7 @@ func (s *Sender) sendBatch(logs []LogEntry) {
 	}
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		req, err := http.NewRequest("POST", "https://log-api.newrelic.com/log/v1", bytes.NewReader(payload))
+		req, err := http.NewRequest("POST", newRelicURL, bytes.NewReader(payload))
 		if err != nil {
 			time.Sleep(time.Second * time.Duration(attempt))
 			continue

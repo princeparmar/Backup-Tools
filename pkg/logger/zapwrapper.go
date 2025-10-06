@@ -6,6 +6,56 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+)
+
+// Re-export zapcore types for use in other packages
+type (
+	Entry        = zapcore.Entry
+	Field        = zapcore.Field
+	Level        = zapcore.Level
+	Core         = zapcore.Core
+	CheckedEntry = zapcore.CheckedEntry
+	EntryCaller  = zapcore.EntryCaller
+)
+
+// Re-export zapcore constants
+const (
+	DebugLevel = zapcore.DebugLevel
+	InfoLevel  = zapcore.InfoLevel
+	WarnLevel  = zapcore.WarnLevel
+	ErrorLevel = zapcore.ErrorLevel
+	FatalLevel = zapcore.FatalLevel
+)
+
+// Re-export zapcore field types
+const (
+	StringType    = zapcore.StringType
+	Int64Type     = zapcore.Int64Type
+	Int32Type     = zapcore.Int32Type
+	Int16Type     = zapcore.Int16Type
+	Int8Type      = zapcore.Int8Type
+	Uint64Type    = zapcore.Uint64Type
+	Uint32Type    = zapcore.Uint32Type
+	Uint16Type    = zapcore.Uint16Type
+	Uint8Type     = zapcore.Uint8Type
+	Float64Type   = zapcore.Float64Type
+	Float32Type   = zapcore.Float32Type
+	BoolType      = zapcore.BoolType
+	DurationType  = zapcore.DurationType
+	TimeType      = zapcore.TimeType
+	ErrorType     = zapcore.ErrorType
+	StringerType  = zapcore.StringerType
+	NamespaceType = zapcore.NamespaceType
+)
+
+// Re-export zapcore functions
+var (
+	NewEntryCaller     = zapcore.NewEntryCaller
+	ISO8601TimeEncoder = zapcore.ISO8601TimeEncoder
+	NewCore            = zapcore.NewCore
+	NewJSONEncoder     = zapcore.NewJSONEncoder
+	AddSync            = zapcore.AddSync
 )
 
 // Logger interface defines the logging methods
@@ -76,6 +126,8 @@ func InitWithNewRelic(interceptor LogInterceptor) {
 	config.ErrorOutputPaths = []string{"stderr"}
 	config.EncoderConfig.TimeKey = "timestamp"
 	config.EncoderConfig.EncodeTime = ISO8601TimeEncoder
+	config.EncoderConfig.CallerKey = "caller"
+	config.EncoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
 
 	core := NewCore(
 		NewJSONEncoder(config.EncoderConfig),
@@ -89,7 +141,7 @@ func InitWithNewRelic(interceptor LogInterceptor) {
 		Interceptor: interceptor,
 	}
 
-	zapLogger := zap.New(interceptorCore)
+	zapLogger := zap.New(interceptorCore, zap.AddCaller(), zap.AddCallerSkip(2))
 	Init(zapLogger)
 	zap.ReplaceGlobals(zapLogger)
 }
@@ -101,8 +153,10 @@ func InitDefault() {
 	config.ErrorOutputPaths = []string{"stderr"}
 	config.EncoderConfig.TimeKey = "timestamp"
 	config.EncoderConfig.EncodeTime = ISO8601TimeEncoder
+	config.EncoderConfig.CallerKey = "caller"
+	config.EncoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
 
-	zapLogger, err := config.Build()
+	zapLogger, err := config.Build(zap.AddCaller(), zap.AddCallerSkip(2))
 	if err != nil {
 		// Fallback to basic logger
 		zapLogger = zap.NewExample()
@@ -140,23 +194,38 @@ func GetTraceIDFromContext(ctx context.Context) (string, bool) {
 // Package-level convenience functions
 
 func Debug(ctx context.Context, msg string, fields ...Field) {
-	WithContext(ctx).Debug(msg, fields...)
+	if traceID, ok := GetTraceIDFromContext(ctx); ok {
+		fields = append(fields, zap.String("trace_id", traceID))
+	}
+	L().Debug(msg, fields...)
 }
 
 func Info(ctx context.Context, msg string, fields ...Field) {
-	WithContext(ctx).Info(msg, fields...)
+	if traceID, ok := GetTraceIDFromContext(ctx); ok {
+		fields = append(fields, zap.String("trace_id", traceID))
+	}
+	L().Info(msg, fields...)
 }
 
 func Warn(ctx context.Context, msg string, fields ...Field) {
-	WithContext(ctx).Warn(msg, fields...)
+	if traceID, ok := GetTraceIDFromContext(ctx); ok {
+		fields = append(fields, zap.String("trace_id", traceID))
+	}
+	L().Warn(msg, fields...)
 }
 
 func Error(ctx context.Context, msg string, fields ...Field) {
-	WithContext(ctx).Error(msg, fields...)
+	if traceID, ok := GetTraceIDFromContext(ctx); ok {
+		fields = append(fields, zap.String("trace_id", traceID))
+	}
+	L().Error(msg, fields...)
 }
 
 func Fatal(ctx context.Context, msg string, fields ...Field) {
-	WithContext(ctx).Fatal(msg, fields...)
+	if traceID, ok := GetTraceIDFromContext(ctx); ok {
+		fields = append(fields, zap.String("trace_id", traceID))
+	}
+	L().Fatal(msg, fields...)
 }
 
 func With(fields ...Field) Logger {
