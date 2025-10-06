@@ -9,8 +9,8 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger/newrelic"
 	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
+	"github.com/StorX2-0/Backup-Tools/router"
 	"github.com/StorX2-0/Backup-Tools/satellite"
-	"github.com/StorX2-0/Backup-Tools/server"
 	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/joho/godotenv"
 )
@@ -35,7 +35,7 @@ func main() {
 	crons.NewAutosyncManager(storage).Start()
 
 	// Start server
-	server.StartServer(storage, getAddress())
+	router.StartServer(storage, getAddress())
 }
 
 func initApp(ctx context.Context) error {

@@ -1,4 +1,4 @@
-package server
+package handler
 
 import (
 	"cmp"
@@ -19,7 +19,7 @@ import (
 )
 
 // Takes Google Cloud project name as a parameter, returns JSON responce with all the buckets in this project.
-func handleStorageListBuckets(c echo.Context) error {
+func HandleStorageListBuckets(c echo.Context) error {
 	projectName := c.Param("projectName")
 
 	client, err := google.NewGoogleStorageClient(c)
@@ -43,7 +43,7 @@ func handleStorageListBuckets(c echo.Context) error {
 	return c.JSON(http.StatusOK, bucketsJSON)
 }
 
-func handleStorageListProjects(c echo.Context) error {
+func HandleStorageListProjects(c echo.Context) error {
 	client, err := google.ListProjects(c)
 	if err != nil {
 		if err.Error() == "token error" {
@@ -59,7 +59,7 @@ func handleStorageListProjects(c echo.Context) error {
 	return c.JSON(http.StatusOK, client)
 }
 
-func handleStorageListOrganizations(c echo.Context) error {
+func HandleStorageListOrganizations(c echo.Context) error {
 	client, err := google.ListOrganizations(c)
 	if err != nil {
 		if err.Error() == "token error" {
@@ -76,7 +76,7 @@ func handleStorageListOrganizations(c echo.Context) error {
 }
 
 // Takes Google Cloud bucket name as a parameter, returns JSON responce with all the items in this bucket.
-func handleStorageListObjects(c echo.Context) error {
+func HandleStorageListObjects(c echo.Context) error {
 	bucketName := c.Param("bucketName")
 
 	client, err := google.NewGoogleStorageClient(c)
@@ -131,7 +131,7 @@ func handleStorageListObjects(c echo.Context) error {
 }
 
 // Takes bucket name and item name as a parameters, downloads the object from Google Cloud Storage and uploads it into SATELLITE "google-cloud" bucket.
-func handleGoogleCloudItemToSatellite(c echo.Context) error {
+func HandleGoogleCloudItemToSatellite(c echo.Context) error {
 	bucketName := c.Param("bucketName")
 	itemName := c.Param("itemName")
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
@@ -172,7 +172,7 @@ func handleGoogleCloudItemToSatellite(c echo.Context) error {
 }
 
 // Takes bucket name and item name as a parameters, downloads the object from Satellite bucket and uploads it into Google Cloud Storage bucket.
-func handleSatelliteToGoogleCloud(c echo.Context) error {
+func HandleSatelliteToGoogleCloud(c echo.Context) error {
 	bucketName := c.Param("bucketName")
 	itemName := c.Param("itemName")
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
@@ -216,7 +216,7 @@ func handleSatelliteToGoogleCloud(c echo.Context) error {
 
 }
 
-func handleAllFilesFromGoogleCloudBucketToSatellite(c echo.Context) error {
+func HandleAllFilesFromGoogleCloudBucketToSatellite(c echo.Context) error {
 	bucketName := c.Param("bucketName")
 	ctx := c.Request().Context()
 
@@ -274,7 +274,7 @@ func handleAllFilesFromGoogleCloudBucketToSatellite(c echo.Context) error {
 
 }
 
-func handleBucketMetadata(c echo.Context) error {
+func HandleBucketMetadata(c echo.Context) error {
 	bucketName := c.Param("bucketName")
 	client, err := google.NewGoogleStorageClient(c)
 	if err != nil {
@@ -297,7 +297,7 @@ func handleBucketMetadata(c echo.Context) error {
 	return c.JSON(http.StatusOK, bucket)
 }
 
-func syncCloudBucket(c echo.Context, bucketName string) error {
+func SyncCloudBucket(c echo.Context, bucketName string) error {
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return errors.New("access token not found")
@@ -342,7 +342,7 @@ type ProjectSyncResponse struct {
 	}
 }
 
-func syncCloudProject(c echo.Context, projectName string) (res *ProjectSyncResponse) {
+func SyncCloudProject(c echo.Context, projectName string) (res *ProjectSyncResponse) {
 	res = &ProjectSyncResponse{}
 	client, err := google.NewGoogleStorageClient(c)
 	if err != nil {
@@ -356,7 +356,7 @@ func syncCloudProject(c echo.Context, projectName string) (res *ProjectSyncRespo
 	}
 
 	for _, bucket := range bucketsJSON.Items {
-		err = syncCloudBucket(c, bucket.Name)
+		err = SyncCloudBucket(c, bucket.Name)
 		if err != nil {
 			res.Buckets = append(res.Buckets, struct {
 				BucketName string
@@ -374,7 +374,7 @@ func syncCloudProject(c echo.Context, projectName string) (res *ProjectSyncRespo
 	return
 }
 
-func handleListProjects(c echo.Context) error {
+func HandleListProjects(c echo.Context) error {
 	var allIDs []string
 	if strings.Contains(c.Request().Header.Get(echo.HeaderContentType), echo.MIMEApplicationJSON) {
 		// Decode JSON array from request body
@@ -390,13 +390,13 @@ func handleListProjects(c echo.Context) error {
 	}
 	var res []any
 	for _, id := range allIDs {
-		r := syncCloudProject(c, id)
+		r := SyncCloudProject(c, id)
 		res = append(res, r)
 	}
 	return c.JSON(200, res)
 }
 
-func handleListBuckets(c echo.Context) error {
+func HandleListBuckets(c echo.Context) error {
 	var allIDs []string
 	if strings.Contains(c.Request().Header.Get(echo.HeaderContentType), echo.MIMEApplicationJSON) {
 		// Decode JSON array from request body
@@ -412,7 +412,7 @@ func handleListBuckets(c echo.Context) error {
 	}
 	var res []any
 	for _, id := range allIDs {
-		err := syncCloudBucket(c, id)
+		err := SyncCloudBucket(c, id)
 		if err != nil {
 			res = append(res, map[string]any{"bukcetID": id, "success": false, "error": err})
 		} else {
@@ -422,7 +422,7 @@ func handleListBuckets(c echo.Context) error {
 	return c.JSON(200, res)
 }
 
-func handleSyncCloudItems(c echo.Context) error {
+func HandleSyncCloudItems(c echo.Context) error {
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -464,7 +464,7 @@ func handleSyncCloudItems(c echo.Context) error {
 	}
 	var res []any
 	for _, id := range allIDs {
-		err := syncItem(c, client, accesGrant, id, bucketName)
+		err := SyncItem(c, client, accesGrant, id, bucketName)
 		if err != nil {
 			res = append(res, map[string]any{"itemID": id, "success": false, "error": err})
 		} else {
@@ -474,7 +474,7 @@ func handleSyncCloudItems(c echo.Context) error {
 	return c.JSON(200, res)
 }
 
-func syncItem(c echo.Context, client *google.StorageClient, accessGrant, itemName, bucketName string) error {
+func SyncItem(c echo.Context, client *google.StorageClient, accessGrant, itemName, bucketName string) error {
 
 	obj, err := client.GetObject(c, bucketName, itemName)
 	if err != nil {

@@ -1,4 +1,4 @@
-package server
+package handler
 
 import (
 	"context"
@@ -18,56 +18,56 @@ import (
 )
 
 // Get all files names in a google drive even in folder
-func handleGetGoogleDriveFileNames(c echo.Context) error {
+func HandleGetGoogleDriveFileNames(c echo.Context) error {
 	fileNames, err := google.GetFileNames(c)
 	if err != nil {
-		return HandleError(c, err, "retrieve file names from Google Drive")
+		return HandleGoogleDriveError(c, err, "retrieve file names from Google Drive")
 	}
 	return c.JSON(http.StatusOK, fileNames)
 }
 
 // Get all files names in a google drive root
-func handleRootGoogleDriveFileNames(c echo.Context) error {
+func HandleRootGoogleDriveFileNames(c echo.Context) error {
 	response, err := google.GetFileNamesInRoot(c)
 	if err != nil {
-		return HandleError(c, err, "retrieve file names from Google Drive")
+		return HandleGoogleDriveError(c, err, "retrieve file names from Google Drive")
 	}
 	return c.JSON(http.StatusOK, response)
 }
 
 // Get all files names in a google drive root
-func handleSharedGoogleDriveFileNames(c echo.Context) error {
+func HandleSharedGoogleDriveFileNames(c echo.Context) error {
 	fileNames, err := google.GetSharedFiles(c)
 	if err != nil {
-		return HandleError(c, err, "retrieve shared files from Google Drive")
+		return HandleGoogleDriveError(c, err, "retrieve shared files from Google Drive")
 	}
 	return c.JSON(http.StatusOK, fileNames)
 }
 
 // List all files in a folder given the folder name
-func handleListAllFolderFiles(c echo.Context) error {
+func HandleListAllFolderFiles(c echo.Context) error {
 	folderName := c.Param("name")
 	fileNames, err := google.GetFilesInFolder(c, folderName)
 	if err != nil {
-		return HandleError(c, err, "retrieve files from Google Drive folder")
+		return HandleGoogleDriveError(c, err, "retrieve files from Google Drive folder")
 	}
 	return c.JSON(http.StatusOK, fileNames)
 }
 
 // List all files in a folder given the folder ID
-func handleListAllFolderFilesByID(c echo.Context) error {
+func HandleListAllFolderFilesByID(c echo.Context) error {
 	folderID := c.Param("id")
 	fileNames, err := google.GetFilesInFolderByID(c, folderID)
 	if err != nil {
-		return HandleError(c, err, "retrieve files from Google Drive folder by ID")
+		return HandleGoogleDriveError(c, err, "retrieve files from Google Drive folder by ID")
 	}
 	return c.JSON(http.StatusOK, fileNames)
 }
 
-func handleFolder(folderName, folderID string, c echo.Context) error {
+func HandleFolder(folderName, folderID string, c echo.Context) error {
 	fileNames, err := google.GetFilesInFolderByID(c, folderID)
 	if err != nil {
-		return err
+		return HandleGoogleDriveError(c, err, "retrieve files from Google Drive folder")
 	}
 	// If folder is empty, create an empty folder
 
@@ -77,37 +77,37 @@ func handleFolder(folderName, folderID string, c echo.Context) error {
 	}
 	err = satellite.UploadObject(context.Background(), accessGrant, "google-drive", folderName+"/.file_placeholder", nil)
 	if err != nil {
-		return err
+		return HandleGoogleDriveError(c, err, "upload file to Google Drive")
 	}
 
 	for _, file := range fileNames.Files {
 		name, data, err := google.GetFile(c, file.ID)
 		if err != nil {
 			if strings.Contains(err.Error(), "folder error") {
-				if err = handleFolder(path.Join(folderName, file.Name), file.ID, c); err != nil {
-					return err
+				if err = HandleFolder(path.Join(folderName, file.Name), file.ID, c); err != nil {
+					return HandleGoogleDriveError(c, err, "upload file to Google Drive")
 				}
 			} else if strings.Contains(err.Error(), "The requested conversion is not supported") || strings.Contains(err.Error(), "Export only supports Docs Editors files") {
 				// No conversion for this type
 				continue
 			} else {
 
-				return err
+				return HandleGoogleDriveError(c, err, "upload file to Google Drive")
 			}
 		} else {
 			err = satellite.UploadObject(context.Background(), accessGrant, "google-drive", path.Join(folderName, name), data)
 			if err != nil {
-				return err
+				return HandleGoogleDriveError(c, err, "upload file to Google Drive")
 			}
 		}
 	}
 	return nil
 }
 
-func handleSyncAllSharedFolderAndFiles(c echo.Context) error {
+func HandleSyncAllSharedFolderAndFiles(c echo.Context) error {
 	fileNames, err := google.GetSharedFiles(c)
 	if err != nil {
-		return HandleError(c, err, "retrieve shared files from Google Drive")
+		return HandleGoogleDriveError(c, err, "retrieve shared files from Google Drive")
 	}
 	// If folder is empty, create an empty folder
 
@@ -165,11 +165,11 @@ func handleSyncAllSharedFolderAndFiles(c echo.Context) error {
 	})
 }
 
-func handleSyncAllFolderFiles(c echo.Context) error {
+func HandleSyncAllFolderFiles(c echo.Context) error {
 	folderName := c.Param("name")
 	fileNames, err := google.GetFilesInFolder(c, folderName)
 	if err != nil {
-		return HandleError(c, err, "retrieve files from Google Drive folder")
+		return HandleGoogleDriveError(c, err, "retrieve files from Google Drive folder")
 	}
 	// If folder is empty, create an empty folder
 
@@ -228,7 +228,7 @@ func handleSyncAllFolderFiles(c echo.Context) error {
 
 }
 
-func handleSatelliteDrive(c echo.Context) error {
+func HandleSatelliteDrive(c echo.Context) error {
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -244,7 +244,7 @@ func handleSatelliteDrive(c echo.Context) error {
 	return c.JSON(http.StatusOK, o)
 }
 
-func handleSatelliteDriveFolder(c echo.Context) error {
+func HandleSatelliteDriveFolder(c echo.Context) error {
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -259,11 +259,11 @@ func handleSatelliteDriveFolder(c echo.Context) error {
 	}
 	return c.JSON(http.StatusOK, o)
 }
-func handleSyncAllFolderFilesByID(c echo.Context) error {
+func HandleSyncAllFolderFilesByID(c echo.Context) error {
 	folderID := c.Param("id")
 	folderName, fileNames, err := google.GetFolderNameAndFilesInFolderByID(c, folderID)
 	if err != nil {
-		return HandleError(c, err, "retrieve folder and files from Google Drive")
+		return HandleGoogleDriveError(c, err, "retrieve folder and files from Google Drive")
 	}
 	// If folder is empty, create an empty folder
 
@@ -322,12 +322,12 @@ func handleSyncAllFolderFilesByID(c echo.Context) error {
 }
 
 // Sends file from Google Drive to Satellite
-func handleSendFileFromGoogleDriveToSatellite(c echo.Context) error {
+func HandleSendFileFromGoogleDriveToSatellite(c echo.Context) error {
 	id := c.Param("ID")
 
 	name, data, err := google.GetFileAndPath(c, id)
 	if err != nil {
-		return HandleError(c, err, "retrieve file from Google Drive")
+		return HandleGoogleDriveError(c, err, "retrieve file from Google Drive")
 	}
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
@@ -348,7 +348,7 @@ func handleSendFileFromGoogleDriveToSatellite(c echo.Context) error {
 	})
 }
 
-func handleSendAllFilesFromGoogleDriveToSatellite(c echo.Context) error {
+func HandleSendAllFilesFromGoogleDriveToSatellite(c echo.Context) error {
 
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
@@ -365,7 +365,7 @@ func handleSendAllFilesFromGoogleDriveToSatellite(c echo.Context) error {
 	if shared == "true" {
 		fileNames, err := google.GetSharedFiles(c)
 		if err != nil {
-			return HandleError(c, err, "retrieve shared files from Google Drive")
+			return HandleGoogleDriveError(c, err, "retrieve shared files from Google Drive")
 		}
 		// If folder is empty, create an empty folder
 
@@ -401,7 +401,7 @@ func handleSendAllFilesFromGoogleDriveToSatellite(c echo.Context) error {
 	}
 	response, err := google.GetFileNamesInRoot(c)
 	if err != nil {
-		return HandleError(c, err, "retrieve files from Google Drive root")
+		return HandleGoogleDriveError(c, err, "retrieve files from Google Drive root")
 	}
 
 	for _, file := range response.Files {
@@ -442,7 +442,7 @@ func handleSendAllFilesFromGoogleDriveToSatellite(c echo.Context) error {
 }
 
 // Sends file from Satellite to Google Drive
-func handleSendFileFromSatelliteToGoogleDrive(c echo.Context) error {
+func HandleSendFileFromSatelliteToGoogleDrive(c echo.Context) error {
 	name := c.Param("name")
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
@@ -460,7 +460,7 @@ func handleSendFileFromSatelliteToGoogleDrive(c echo.Context) error {
 
 	err = google.UploadFile(c, name, data)
 	if err != nil {
-		return HandleError(c, err, "upload file to Google Drive")
+		return HandleGoogleDriveError(c, err, "upload file to Google Drive")
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
@@ -468,7 +468,7 @@ func handleSendFileFromSatelliteToGoogleDrive(c echo.Context) error {
 	})
 }
 
-func handleSendListFromGoogleDriveToSatellite(c echo.Context) error {
+func HandleSendListFromGoogleDriveToSatellite(c echo.Context) error {
 	// Parse request IDs
 	allIDs, err := parseRequestIDs(c)
 	if err != nil {
@@ -493,7 +493,7 @@ func handleSendListFromGoogleDriveToSatellite(c echo.Context) error {
 				name, data, err := google.GetFileAndPath(c, id)
 				if err != nil {
 					if strings.Contains(err.Error(), "folder error") {
-						if err = handleFolder(name, id, c); err != nil {
+						if err = HandleFolder(name, id, c); err != nil {
 							failedIDs.Add(id)
 							return nil
 						} else {
@@ -533,7 +533,7 @@ func handleSendListFromGoogleDriveToSatellite(c echo.Context) error {
 }
 
 // Helper function to handle Google Drive errors with consistent response format
-func HandleError(c echo.Context, err error, operation string) error {
+func HandleGoogleDriveError(c echo.Context, err error, operation string) error {
 	if err.Error() == "token error" {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
 			"error": "token expired",

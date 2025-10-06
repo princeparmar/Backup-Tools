@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -46,7 +47,7 @@ func Te1stAutentificate(t *testing.T) {
 
 	// Mock database
 	db := &mockDB{}
-	c.Set(dbContextKey, db)
+	c.Set(middleware.DbContextKey, db)
 
 	// Test case: valid google key
 	c.SetParamValues("google-key", "valid_token")
@@ -64,7 +65,7 @@ func Te1stAutentificate(t *testing.T) {
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	rec = httptest.NewRecorder()
 	c = e.NewContext(req, rec)
-	c.Set(dbContextKey, db)
+	c.Set(middleware.DbContextKey, db)
 	err = Autentificate(c)
 
 	// Assertions

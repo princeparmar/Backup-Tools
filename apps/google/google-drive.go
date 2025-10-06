@@ -17,7 +17,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
@@ -89,8 +91,14 @@ func createFilesJSON(file *drive.File, synced bool, path string) *FilesJSON {
 
 // GetFileNames retrieves all file names and their IDs from Google Drive
 func GetFileNames(c echo.Context) ([]*FilesJSON, error) {
+	start := time.Now()
+	defer func() {
+		prometheus.RecordOperation("drive_get_file_names", "success", time.Since(start), "service", "drive")
+	}()
+
 	srv, err := getDriveService(c)
 	if err != nil {
+		prometheus.RecordError("drive_service_error", "get_drive_service", "service", "drive")
 		return nil, err
 	}
 
@@ -101,6 +109,7 @@ func GetFileNames(c echo.Context) ([]*FilesJSON, error) {
 	for {
 		r, err := srv.Files.List().Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").PageToken(pageToken).Do()
 		if err != nil {
+			prometheus.RecordError("drive_api_error", "list_files", "service", "drive")
 			return nil, fmt.Errorf("failed to retrieve files: %v", err)
 		}
 
@@ -117,6 +126,7 @@ func GetFileNames(c echo.Context) ([]*FilesJSON, error) {
 		}
 	}
 
+	prometheus.RecordCounter("drive_files_retrieved", int64(len(fileResp)), "service", "drive")
 	return fileResp, nil
 }
 
@@ -139,9 +149,10 @@ func GetFileByID(c echo.Context) error {
 // client authenticates the client and returns an HTTP client
 func client(c echo.Context) (*http.Client, error) {
 	ctx := c.Request().Context()
-	database := c.Get(dbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 
 	b, err := os.ReadFile("credentials.json")
+	fmt.Println("credentials.json", b)
 	if err != nil {
 		return nil, fmt.Errorf("unable to read client secret file: %v", err)
 	}
@@ -272,6 +283,7 @@ func getDriveService(c echo.Context) (*drive.Service, error) {
 
 func clientUsingToken(token string) (*http.Client, error) {
 	b, err := os.ReadFile("credentials.json")
+	fmt.Println("credentials.json", b)
 	if err != nil {
 		return nil, fmt.Errorf("unable to read client secret file: %v", err)
 	}
@@ -287,13 +299,20 @@ func clientUsingToken(token string) (*http.Client, error) {
 
 // GetFile downloads file from Google Drive by ID
 func GetFile(c echo.Context, id string) (string, []byte, error) {
+	start := time.Now()
+	defer func() {
+		prometheus.RecordOperation("drive_get_file", "success", time.Since(start), "service", "drive")
+	}()
+
 	srv, err := getDriveService(c)
 	if err != nil {
+		prometheus.RecordError("drive_service_error", "get_drive_service", "service", "drive")
 		return "", nil, err
 	}
 
 	file, err := srv.Files.Get(id).Do()
 	if err != nil {
+		prometheus.RecordError("drive_api_error", "get_file_metadata", "service", "drive")
 		return "", nil, fmt.Errorf("unable to retrieve file metadata: %v", err)
 	}
 
@@ -305,12 +324,15 @@ func GetFile(c echo.Context, id string) (string, []byte, error) {
 			// handle folders
 			if mt != "application/vnd.google-apps.folder" {
 				if res, err = srv.Files.Export(id, mt).Download(); err != nil {
+					prometheus.RecordError("drive_api_error", "export_file", "service", "drive")
 					return "", nil, fmt.Errorf("unable to download file: %v", err)
 				}
 			} else {
+				prometheus.RecordError("drive_api_error", "folder_download", "service", "drive")
 				return file.Name, nil, errors.New("folder error")
 			}
 		} else {
+			prometheus.RecordError("drive_api_error", "download_file", "service", "drive")
 			return "", nil, fmt.Errorf("unable to download file: %v", err)
 		}
 	}
@@ -318,53 +340,75 @@ func GetFile(c echo.Context, id string) (string, []byte, error) {
 
 	data, err := io.ReadAll(res.Body)
 	if err != nil {
+		prometheus.RecordError("drive_io_error", "read_file_content", "service", "drive")
 		return "", nil, fmt.Errorf("unable to read file content: %v", err)
 	}
 
+	prometheus.RecordHistogram("drive_file_size_bytes", float64(len(data)), "service", "drive")
 	return file.Name, data, nil
 }
 
 // Uploads file to Google Drive.
 func UploadFile(c echo.Context, name string, data []byte) error {
+	start := time.Now()
+	defer func() {
+		prometheus.RecordOperation("drive_upload_file", "success", time.Since(start), "service", "drive")
+	}()
+
 	srv, err := getDriveService(c)
 	if err != nil {
+		prometheus.RecordError("drive_service_error", "get_drive_service", "service", "drive")
 		return err
 	}
 	_, err = srv.Files.Create(&drive.File{Name: name}).Media(bytes.NewReader(data)).Do()
 	if err != nil {
+		prometheus.RecordError("drive_api_error", "upload_file", "service", "drive")
 		return err
 	}
+
+	prometheus.RecordHistogram("drive_upload_size_bytes", float64(len(data)), "service", "drive")
 	return nil
 }
 
 // GetFilesInFolder retrieves all files within a specific folder from Google Drive
 func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
+	start := time.Now()
+	defer func() {
+		prometheus.RecordOperation("drive_get_files_in_folder", "success", time.Since(start), "service", "drive")
+	}()
+
 	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accessGrant == "" {
+		prometheus.RecordError("drive_validation_error", "missing_access_token", "service", "drive")
 		return nil, errors.New("access token is missing")
 	}
 	srv, err := getDriveService(c)
 	if err != nil {
+		prometheus.RecordError("drive_service_error", "get_drive_service", "service", "drive")
 		return nil, err
 	}
 
 	// Get folder ID by name
 	folderID, err := getFolderIDByName(srv, folderName)
 	if err != nil {
+		prometheus.RecordError("drive_api_error", "get_folder_id", "service", "drive")
 		return nil, fmt.Errorf("failed to get folder ID: %v", err)
 	}
 	folderName, err = GetFolderPathByID(context.Background(), srv, folderID)
 	if err != nil {
+		prometheus.RecordError("drive_api_error", "get_folder_path", "service", "drive")
 		return nil, fmt.Errorf("failed to get folder name: %v", err)
 	}
 	o, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", folderName+"/")
 	if err != nil {
+		prometheus.RecordError("drive_satellite_error", "get_satellite_files", "service", "drive")
 		return nil, errors.New("failed to get list from satellite with error:" + err.Error())
 	}
 	sortSatelliteObjects(o)
 	// List all files within the folder
 	r, err := srv.Files.List().Q(fmt.Sprintf("'%s' in parents", folderID)).Fields("files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").Do()
 	if err != nil {
+		prometheus.RecordError("drive_api_error", "list_files_in_folder", "service", "drive")
 		return nil, fmt.Errorf("failed to retrieve files: %v", err)
 	}
 
@@ -384,27 +428,37 @@ func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
 		}
 	}
 
+	prometheus.RecordCounter("drive_files_in_folder_retrieved", int64(len(files)), "service", "drive")
 	return files, nil
 }
 
 // func embeddedSynced(c echo.Context, folderID, folderName string)
 // GetFilesInFolder retrieves all files within a specific folder from Google Drive
 func GetFilesInFolderByID(c echo.Context, folderID string) (*PaginatedFilesResponse, error) {
+	start := time.Now()
+	defer func() {
+		prometheus.RecordOperation("drive_get_files_in_folder_by_id", "success", time.Since(start), "service", "drive")
+	}()
+
 	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accessGrant == "" {
+		prometheus.RecordError("drive_validation_error", "missing_access_token", "service", "drive")
 		return nil, errors.New("access token is missing")
 	}
 	srv, err := getDriveService(c)
 	if err != nil {
+		prometheus.RecordError("drive_service_error", "get_drive_service", "service", "drive")
 		return nil, err
 	}
 	//fpath, err :=
 	folderName, err := GetFolderPathByID(context.Background(), srv, folderID)
 	if err != nil {
+		prometheus.RecordError("drive_api_error", "get_folder_path", "service", "drive")
 		return nil, fmt.Errorf("failed to get folder name: %v", err)
 	}
 	o, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", folderName+"/")
 	if err != nil {
+		prometheus.RecordError("drive_satellite_error", "get_satellite_files", "service", "drive")
 		return nil, errors.New("failed to get list from satellite with error:" + err.Error())
 	}
 	sortSatelliteObjects(o)
@@ -412,6 +466,7 @@ func GetFilesInFolderByID(c echo.Context, folderID string) (*PaginatedFilesRespo
 	// Parse filter
 	filter, err := ParseFilter(c.QueryParam("filter"))
 	if err != nil {
+		prometheus.RecordError("drive_parse_error", "parse_filter", "service", "drive")
 		return nil, err
 	}
 
@@ -434,6 +489,7 @@ func GetFilesInFolderByID(c echo.Context, folderID string) (*PaginatedFilesRespo
 		PageSize(pageSize).
 		Do()
 	if err != nil {
+		prometheus.RecordError("drive_api_error", "list_files_in_folder_by_id", "service", "drive")
 		return nil, fmt.Errorf("failed to retrieve files: %v", err)
 	}
 
@@ -453,6 +509,7 @@ func GetFilesInFolderByID(c echo.Context, folderID string) (*PaginatedFilesRespo
 		}
 	}
 
+	prometheus.RecordCounter("drive_files_in_folder_by_id_retrieved", int64(len(files)), "service", "drive")
 	return &PaginatedFilesResponse{
 		Files:         files,
 		NextPageToken: r.NextPageToken,
@@ -463,18 +520,25 @@ func GetFilesInFolderByID(c echo.Context, folderID string) (*PaginatedFilesRespo
 
 // GetFilesInFolder retrieves all files within a specific folder from Google Drive
 func GetFolderNameAndFilesInFolderByID(c echo.Context, folderID string) (string, []*FilesJSON, error) {
+	start := time.Now()
+	defer func() {
+		prometheus.RecordOperation("drive_get_folder_name_and_files", "success", time.Since(start), "service", "drive")
+	}()
 
 	srv, err := getDriveService(c)
 	if err != nil {
+		prometheus.RecordError("drive_service_error", "get_drive_service", "service", "drive")
 		return "", nil, err
 	}
 	folderName, err := getFolderNameByID(srv, folderID)
 	if err != nil {
+		prometheus.RecordError("drive_api_error", "get_folder_name", "service", "drive")
 		return "", nil, fmt.Errorf("failed to get folder name: %v", err)
 	}
 	// List all files within the folder
 	r, err := srv.Files.List().Q(fmt.Sprintf("'%s' in parents", folderID)).Fields("files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").Do()
 	if err != nil {
+		prometheus.RecordError("drive_api_error", "list_files_in_folder", "service", "drive")
 		return folderName, nil, fmt.Errorf("failed to retrieve files: %v", err)
 	}
 
@@ -483,16 +547,24 @@ func GetFolderNameAndFilesInFolderByID(c echo.Context, folderID string) (string,
 		files = append(files, createFilesJSON(f, false, ""))
 	}
 
+	prometheus.RecordCounter("drive_folder_files_retrieved", int64(len(files)), "service", "drive")
 	return folderName, files, nil
 }
 
 // Helper function to get folder ID by name
 func getFolderIDByName(srv *drive.Service, folderName string) (string, error) {
+	start := time.Now()
+	defer func() {
+		prometheus.RecordOperation("drive_get_folder_id_by_name", "success", time.Since(start), "service", "drive")
+	}()
+
 	r, err := srv.Files.List().Q(fmt.Sprintf("name='%s' and mimeType='application/vnd.google-apps.folder'", folderName)).Fields("files(id)").Do()
 	if err != nil {
+		prometheus.RecordError("drive_api_error", "get_folder_id_by_name", "service", "drive")
 		return "", fmt.Errorf("failed to retrieve folder ID: %v", err)
 	}
 	if len(r.Files) == 0 {
+		prometheus.RecordError("drive_not_found_error", "folder_not_found", "service", "drive")
 		return "", fmt.Errorf("folder '%s' not found", folderName)
 	}
 	return r.Files[0].Id, nil
@@ -500,11 +572,18 @@ func getFolderIDByName(srv *drive.Service, folderName string) (string, error) {
 
 // Helper function to get folder ID by name
 func getFolderNameByID(srv *drive.Service, folderID string) (string, error) {
+	start := time.Now()
+	defer func() {
+		prometheus.RecordOperation("drive_get_folder_name_by_id", "success", time.Since(start), "service", "drive")
+	}()
+
 	r, err := srv.Files.List().Q(fmt.Sprintf("id='%s' and mimeType='application/vnd.google-apps.folder'", folderID)).Fields("files(name)").Do()
 	if err != nil {
+		prometheus.RecordError("drive_api_error", "get_folder_name_by_id", "service", "drive")
 		return "", fmt.Errorf("failed to retrieve folder ID: %v", err)
 	}
 	if len(r.Files) == 0 {
+		prometheus.RecordError("drive_not_found_error", "folder_not_found", "service", "drive")
 		return "", fmt.Errorf("folder '%s' not found", folderID)
 	}
 	return r.Files[0].Name, nil
@@ -858,7 +937,7 @@ func GetPaginationParams(filter *GoogleDriveFilter) (int64, string) {
 	pageSize, pageToken := int64(25), ""
 	if filter != nil {
 		if filter.Limit > 0 {
-			pageSize = min(filter.Limit, 1000)
+			pageSize = utils.Min(filter.Limit, 1000)
 		}
 		pageToken = filter.PageToken
 	}

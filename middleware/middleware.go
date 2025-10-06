@@ -1,12 +1,12 @@
-package server
+package middleware
 
 import (
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
 	"github.com/StorX2-0/Backup-Tools/storage"
@@ -14,14 +14,32 @@ import (
 	"github.com/dgrijalva/jwt-go"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	echomiddleware "github.com/labstack/echo/v4/middleware"
 )
 
-const dbContextKey = "__db"
+const DbContextKey = "__db"
+
+var (
+	JwtSecretKey    = "your-secret-key"
+	TokenExpiration = 24 * time.Hour
+)
+
+// InitializeAllMiddleware sets up all middleware for the Echo server
+func InitializeAllMiddleware(e *echo.Echo, db *storage.PosgresStore) {
+	if os.Getenv("HTTP_LOGGING") == "true" {
+		e.Use(echomiddleware.Logger())
+	}
+	e.Use(echomiddleware.Recover())
+	e.Use(TraceIDMiddleware())
+	e.Use(PrometheusMiddleware())
+	e.Use(DBMiddleware(db))
+	e.Use(echomiddleware.CORS())
+}
 
 func DBMiddleware(db *storage.PosgresStore) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			c.Set(dbContextKey, db)
+			c.Set(DbContextKey, db)
 			return next(c)
 		}
 	}
@@ -35,42 +53,29 @@ func JWTMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 		}
 
 		jwtToken, err := jwt.Parse(token, func(token *jwt.Token) (interface{}, error) {
-			// Check the token signing method
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, echo.NewHTTPError(http.StatusUnauthorized, "invalid token")
 			}
-			// Provide your JWT secret key here
-			return []byte(google.JwtSecretKey), nil
+			return []byte(JwtSecretKey), nil
 		})
 
-		if err != nil {
-			return echo.NewHTTPError(http.StatusUnauthorized, err.Error())
+		if err != nil || !jwtToken.Valid {
+			return echo.NewHTTPError(http.StatusUnauthorized, "invalid token")
 		}
 
-		if jwtToken.Valid {
-			// Token is valid, proceed with the next middleware
-			return next(c)
-		}
-
-		return echo.NewHTTPError(http.StatusUnauthorized, "invalid token")
+		return next(c)
 	}
 }
 
-// Alternative version with defer for completion log
 func TraceIDMiddleware() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c echo.Context) (err error) { // Named return value
-			// Generate a unique trace ID for this request
+		return func(c echo.Context) (err error) {
 			traceID := uuid.New().String()
-
-			// Store trace ID in Echo context
 			c.Set("trace_id", traceID)
 
-			// Add trace ID to the request context
 			ctx := logger.WithTraceID(c.Request().Context(), traceID)
 			c.SetRequest(c.Request().WithContext(ctx))
 
-			// Log the start of the request with trace ID
 			logger.Info(ctx, "Request started",
 				logger.String("method", c.Request().Method),
 				logger.String("path", c.Request().URL.Path),
@@ -79,11 +84,9 @@ func TraceIDMiddleware() echo.MiddlewareFunc {
 			)
 
 			start := time.Now()
-
 			defer func() {
 				duration := time.Since(start)
 				status := c.Response().Status
-
 				fields := []logger.Field{
 					logger.String("method", c.Request().Method),
 					logger.String("path", c.Request().URL.Path),
@@ -91,8 +94,6 @@ func TraceIDMiddleware() echo.MiddlewareFunc {
 					logger.Int("response_size", int(c.Response().Size)),
 					logger.String("duration", duration.String()),
 				}
-
-				// If there was an error, log it as error level
 				if err != nil {
 					logger.Error(ctx, "Request failed", append(fields, logger.ErrorField(err))...)
 				} else {
@@ -100,9 +101,7 @@ func TraceIDMiddleware() echo.MiddlewareFunc {
 				}
 			}()
 
-			// Process the request - error will be captured by named return value
-			err = next(c)
-			return err
+			return next(c)
 		}
 	}
 }
@@ -111,20 +110,11 @@ func PrometheusMiddleware() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			start := time.Now()
-
-			// Optional: panic recovery
-			defer func() {
-				if r := recover(); r != nil {
-					prometheus.RecordError("panic", "middleware")
-					panic(r)
-				}
-			}()
-
 			err := next(c)
 			duration := time.Since(start)
 
 			method := c.Request().Method
-			path := sanitizePath(c.Request().URL.Path) // Sanitize path
+			path := sanitizePath(c.Request().URL.Path)
 			status := c.Response().Status
 
 			prometheus.RecordTimer("request_duration_seconds", duration, "method", method, "path", path)
@@ -132,7 +122,6 @@ func PrometheusMiddleware() echo.MiddlewareFunc {
 
 			if err != nil {
 				prometheus.RecordError("handler_error", "middleware")
-				// Note: Echo might handle the error, we're just recording it
 			}
 
 			return err
@@ -141,47 +130,29 @@ func PrometheusMiddleware() echo.MiddlewareFunc {
 }
 
 func sanitizePath(path string) string {
-	// Remove query parameters
 	if idx := strings.Index(path, "?"); idx != -1 {
 		path = path[:idx]
 	}
-
-	// Remove trailing slashes except for root
 	if len(path) > 1 && strings.HasSuffix(path, "/") {
 		path = strings.TrimSuffix(path, "/")
 	}
-
-	// Replace dynamic path parameters with placeholders
-	path = replaceDynamicParams(path)
-
-	return path
+	return replaceDynamicParams(path)
 }
 
 func replaceDynamicParams(path string) string {
-	// Handle file extensions first (most specific)
 	path = replaceFileExtensions(path)
-
-	// Handle IDs
 	path = replaceIDs(path)
-
-	// Handle names
-	path = replaceNames(path)
-
-	return path
+	return replaceNames(path)
 }
 
 func replaceFileExtensions(path string) string {
-	// Replace file extensions with placeholder
 	extensions := []string{".jpg", ".jpeg", ".png", ".gif", ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".zip", ".rar", ".mp4", ".mp3", ".avi", ".mov"}
 	for _, ext := range extensions {
 		if strings.Contains(path, ext) {
-			// Find the last occurrence and replace the filename part
-			lastSlash := strings.LastIndex(path, "/")
-			if lastSlash != -1 {
+			if lastSlash := strings.LastIndex(path, "/"); lastSlash != -1 {
 				filename := path[lastSlash+1:]
 				if strings.Contains(filename, ext) {
-					path = path[:lastSlash+1] + "{filename}"
-					break
+					return path[:lastSlash+1] + "{filename}"
 				}
 			}
 		}
@@ -190,13 +161,9 @@ func replaceFileExtensions(path string) string {
 }
 
 func replaceIDs(path string) string {
-	// Replace UUIDs and numeric IDs
 	parts := strings.Split(path, "/")
 	for i, part := range parts {
-		// Check if it's a UUID (8-4-4-4-12 pattern)
-		if len(part) == 36 && strings.Count(part, "-") == 4 {
-			parts[i] = "{id}"
-		} else if len(part) > 0 && isNumeric(part) {
+		if (len(part) == 36 && strings.Count(part, "-") == 4) || (len(part) > 0 && isNumeric(part)) {
 			parts[i] = "{id}"
 		}
 	}
@@ -204,15 +171,9 @@ func replaceIDs(path string) string {
 }
 
 func replaceNames(path string) string {
-	// Replace dynamic names in common route patterns
 	parts := strings.Split(path, "/")
 	for i, part := range parts {
-		// Skip known static parts
-		if isStaticRoutePart(part) {
-			continue
-		}
-		// Replace if it looks like a dynamic name
-		if len(part) > 0 && !isNumeric(part) && !strings.Contains(part, ".") {
+		if !isStaticRoutePart(part) && len(part) > 0 && !isNumeric(part) && !strings.Contains(part, ".") {
 			parts[i] = "{name}"
 		}
 	}

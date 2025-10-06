@@ -1,4 +1,4 @@
-package server
+package handler
 
 import (
 	"encoding/base64"
@@ -75,7 +75,7 @@ func createOutlookClient(accessToken string) (*outlook.OutlookClient, error) {
 	return client, nil
 }
 
-func handleOutlookGetMessages(c echo.Context) error {
+func HandleOutlookGetMessages(c echo.Context) error {
 	ctx := c.Request().Context()
 
 	accessGrant, accessToken, err := getAccessTokens(c)
@@ -130,7 +130,7 @@ func handleOutlookGetMessages(c echo.Context) error {
 	})
 }
 
-func handleOutlookGetMessageById(c echo.Context) error {
+func HandleOutlookGetMessageById(c echo.Context) error {
 	// FIX: Use blank identifier for unused accessGrant
 	_, accessToken, err := getAccessTokens(c)
 	if err != nil {
@@ -153,7 +153,7 @@ func handleOutlookGetMessageById(c echo.Context) error {
 	})
 }
 
-func handleListOutlookMessagesToSatellite(c echo.Context) error {
+func HandleListOutlookMessagesToSatellite(c echo.Context) error {
 	accessGrant, accessToken, err := getAccessTokens(c)
 	if err != nil {
 		return err
@@ -210,7 +210,7 @@ func handleListOutlookMessagesToSatellite(c echo.Context) error {
 	})
 }
 
-func handleOutlookDownloadAndInsert(c echo.Context) error {
+func HandleOutlookDownloadAndInsert(c echo.Context) error {
 	accessGrant, accessToken, err := getAccessTokens(c)
 	if err != nil {
 		return err

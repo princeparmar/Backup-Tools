@@ -1,4 +1,4 @@
-package server
+package handler
 
 import (
 	"context"
@@ -237,7 +237,7 @@ func setupGmailHandler(c echo.Context) (string, *google.GmailClient, error) {
 	return accessGrant, gmailClient, nil
 }
 
-func handleListGmailMessagesToSatellite(c echo.Context) error {
+func HandleListGmailMessagesToSatellite(c echo.Context) error {
 	// Setup Gmail handler with all common validations
 	accessGrant, gmailClient, err := setupGmailHandler(c)
 	if err != nil {
@@ -246,13 +246,13 @@ func handleListGmailMessagesToSatellite(c echo.Context) error {
 				"error": err.Error(),
 			})
 		}
-		return HandleError(c, err, "setup Gmail handler")
+		return err
 	}
 
 	// Get user details
 	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
 	if err != nil {
-		return HandleError(c, err, "get Google account details")
+		return err
 	}
 
 	if userDetails.Email == "" {
@@ -285,7 +285,7 @@ func handleListGmailMessagesToSatellite(c echo.Context) error {
 
 // handleGmailGetThreadsIDsControlled - fetches threads IDs from Gmail and returns them in JSON format.
 // It uses pagination to fetch threads in chunks of 500.
-func handleGmailGetThreadsIDsControlled(c echo.Context) error {
+func HandleGmailGetThreadsIDsControlled(c echo.Context) error {
 	num := c.QueryParam("num")
 	var numInt int64
 	if num != "" {
@@ -314,14 +314,14 @@ func handleGmailGetThreadsIDsControlled(c echo.Context) error {
 
 	gmailClient, err := google.NewGmailClient(c)
 	if err != nil {
-		return HandleError(c, err, "create Gmail client")
+		return err
 	}
 
 	var threads []any
 
 	res, err := gmailClient.GetUserMessagesControlled(nextPageToken, "", numInt, filter)
 	if err != nil {
-		return HandleError(c, err, "get Gmail messages")
+		return err
 	}
 	//threads = append(threads, res.Messages...)
 
@@ -332,7 +332,7 @@ func handleGmailGetThreadsIDsControlled(c echo.Context) error {
 
 	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
 	if err != nil {
-		return HandleError(c, err, "get Google account details")
+		return err
 	}
 
 	emailListFromBucket, err := satellite.ListObjectsWithPrefix(context.Background(),
@@ -354,7 +354,7 @@ func handleGmailGetThreadsIDsControlled(c echo.Context) error {
 
 // handleGmailDownloadAndInsert - downloads emails from Satellite and inserts them into Gmail.
 // It uses pagination to download emails in chunks of 10.
-func handleGmailDownloadAndInsert(c echo.Context) error {
+func HandleGmailDownloadAndInsert(c echo.Context) error {
 	// Get access token from header
 	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accessGrant == "" {
@@ -374,7 +374,7 @@ func handleGmailDownloadAndInsert(c echo.Context) error {
 	// Get Gmail client
 	gmailClient, err := google.NewGmailClient(c)
 	if err != nil {
-		return HandleError(c, err, "create Gmail client")
+		return err
 	}
 
 	// Create Gmail service and download messages

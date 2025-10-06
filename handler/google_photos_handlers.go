@@ -1,4 +1,4 @@
-package server
+package handler
 
 import (
 	"context"
@@ -27,7 +27,7 @@ import (
 // Supports date range filtering via 'date_range' query parameter:
 // - today, yesterday, last_7_days, last_30_days, this_year, last_year
 // - Custom dates: "2024-01-01" or "2024-01-01,2024-12-31"
-func handleListGPhotosAlbums(c echo.Context) error {
+func HandleListGPhotosAlbums(c echo.Context) error {
 	client, err := google.NewGPhotosClient(c)
 	if err != nil {
 		if err.Error() == "token error" {
@@ -62,7 +62,7 @@ type PhotosJSON struct {
 // Supports filtering via query parameters:
 // - date_range: Filter by creation date (today, last_7_days, last_30_days, this_year, last_year, custom_date_range)
 // - media_type: Filter by media type (all, photos, videos)
-func handleListPhotosInAlbum(c echo.Context) error {
+func HandleListPhotosInAlbum(c echo.Context) error {
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -161,7 +161,7 @@ type AllPhotosJSON struct {
 	Synced       bool   `json:"synced"`
 }
 
-func handleListAllPhotos(c echo.Context) error {
+func HandleListAllPhotos(c echo.Context) error {
 	client, err := google.NewGPhotosClient(c)
 	if err != nil {
 		if err.Error() == "token error" {
@@ -243,7 +243,7 @@ func handleListAllPhotos(c echo.Context) error {
 }
 
 // Sends photo item from Satellite to Google Photos.
-func handleSendFileFromSatelliteToGooglePhotos(c echo.Context) error {
+func HandleSendFileFromSatelliteToGooglePhotos(c echo.Context) error {
 	name := c.Param("name")
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
@@ -300,7 +300,7 @@ func handleSendFileFromSatelliteToGooglePhotos(c echo.Context) error {
 }
 
 // Sends photo item from Google Photos to Satellite.
-func handleSendFileFromGooglePhotosToSatellite(c echo.Context) error {
+func HandleSendFileFromGooglePhotosToSatellite(c echo.Context) error {
 
 	ids := c.FormValue("ids")
 	if ids == "" {
@@ -385,7 +385,7 @@ func uploadSingleFileFromPhotosToSatellite(ctx context.Context, client *google.G
 
 }
 
-func handleSendAllFilesFromGooglePhotosToSatellite(c echo.Context) error {
+func HandleSendAllFilesFromGooglePhotosToSatellite(c echo.Context) error {
 	id := c.FormValue("album_id")
 
 	client, err := google.NewGPhotosClient(c)
@@ -434,7 +434,7 @@ func handleSendAllFilesFromGooglePhotosToSatellite(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]interface{}{"message": "all photos from album were successfully uploaded from Google Photos to Satellite"})
 }
 
-func handleSendListFilesFromGooglePhotosToSatellite(c echo.Context) error {
+func HandleSendListFilesFromGooglePhotosToSatellite(c echo.Context) error {
 	client, err := google.NewGPhotosClient(c)
 	if err != nil {
 		if err.Error() == "token error" {

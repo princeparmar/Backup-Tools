@@ -127,7 +127,7 @@ func (s *PosgresStore) WriteGoogleAuthToken(JWTtoken, accessToken string) error 
 
 func (s *PosgresStore) ReadGoogleAuthToken(JWTtoken string) (string, error) {
 	var res GoogleAuthStorage
-	if err := s.DB.Where("jwt_token = ?", JWTtoken).First(&res).Error; err != nil {
+	if err := s.DB.Where("jw_ttoken= ?", JWTtoken).First(&res).Error; err != nil {
 		return "", err
 	}
 	return res.AccessToken, nil

@@ -12,11 +12,13 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/middleware"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/storage"
 
 	rm "cloud.google.com/go/resourcemanager/apiv3"
-	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/dgrijalva/jwt-go"
 	"github.com/gphotosuploader/googlemirror/api/photoslibrary/v1"
 	"github.com/labstack/echo/v4"
@@ -26,9 +28,6 @@ import (
 	"google.golang.org/api/gmail/v1"
 	gs "google.golang.org/api/storage/v1"
 )
-
-// for middleware database purposes
-const dbContextKey = "__db"
 
 type CustomClaims struct {
 	GoogleAuthToken string `json:"google_token"`
@@ -44,11 +43,6 @@ type GoogleAuthResponse struct {
 	Error         string `json:"error"`
 }
 
-var (
-	JwtSecretKey    = "your-secret-key"
-	tokenExpiration = time.Duration(24 * time.Hour) // Example: expires in 24 hours
-)
-
 func CreateJWToken(googleToken string) string {
 	// Create the claims
 	token := jwt.NewWithClaims(
@@ -56,13 +50,13 @@ func CreateJWToken(googleToken string) string {
 		CustomClaims{
 			GoogleAuthToken: googleToken,
 			StandardClaims: jwt.StandardClaims{
-				ExpiresAt: time.Now().Add(tokenExpiration).Unix(),
+				ExpiresAt: time.Now().Add(middleware.TokenExpiration).Unix(),
 			},
 		},
 	)
 
 	// Sign the token with the secret key and get the complete, encoded token as a string
-	tokenString, err := token.SignedString([]byte(JwtSecretKey))
+	tokenString, err := token.SignedString([]byte(middleware.JwtSecretKey))
 	if err != nil {
 		logger.Info(context.Background(), "Error generating token:", logger.ErrorField(err))
 		return ""
@@ -78,7 +72,7 @@ func GetGoogleTokenFromJWT(c echo.Context) (string, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
-		return []byte(JwtSecretKey), nil
+		return []byte(middleware.JwtSecretKey), nil
 	})
 	if err != nil {
 		log.Print("Error parsing token:", err)
@@ -134,11 +128,17 @@ func verifyToken(idToken string) (*TokenInfo, error) {
 }
 
 func Autentificate(c echo.Context) error {
-	database := c.Get(dbContextKey).(*storage.PosgresStore)
+	start := time.Now()
+	defer func() {
+		prometheus.RecordOperation("auth_authenticate", "success", time.Since(start), "service", "auth")
+	}()
+
+	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 	authToken := c.FormValue("google-key")
 	// refreshToken := c.FormValue("refresh-key")
 
 	if authToken == "" {
+		prometheus.RecordError("auth_validation_error", "missing_token", "service", "auth")
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"error": "google-key is missing",
 		})
@@ -151,6 +151,7 @@ func Autentificate(c echo.Context) error {
 
 	_, err := verifyToken(authToken)
 	if err != nil {
+		prometheus.RecordError("auth_validation_error", "token_verification", "service", "auth")
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error validating google auth token": err.Error(),
 		})
@@ -168,6 +169,8 @@ func Autentificate(c echo.Context) error {
 	database.WriteGoogleAuthToken(googleExternalToken, authToken)
 	jwtString := CreateJWToken(googleExternalToken)
 	c.Response().Header().Add("Authorization", "Bearer "+jwtString)
+
+	prometheus.RecordCounter("auth_tokens_created", 1, "service", "auth")
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"google-auth": jwtString,
 	})
@@ -175,9 +178,10 @@ func Autentificate(c echo.Context) error {
 
 // Google authentication module, checks if you have auth token in database, if not - redirects to Google auth page.
 func Autentificateg(c echo.Context) error {
-	database := c.Get(dbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 	code := c.FormValue("code")
 	b, err := os.ReadFile("credentials.json")
+	fmt.Println("credentials.json", b)
 	if err != nil {
 		log.Printf("Unable to read client secret file: %v", err)
 	}
@@ -227,6 +231,7 @@ func AuthRequestChecker(c echo.Context) bool {
 
 func GetRefreshTokenFromCodeForEmail(code string) (*oauth2.Token, error) {
 	b, err := os.ReadFile("credentials.json")
+	fmt.Println("credentials.json", b)
 	if err != nil {
 		log.Printf("Unable to read client secret file: %v", err)
 	}
@@ -260,6 +265,7 @@ func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 	}
 
 	byteValue, err := os.ReadFile("credentials.json")
+	fmt.Println("credentials.json", byteValue)
 	if err != nil {
 		return "", fmt.Errorf("error reading credentials file: %v", err)
 	}
@@ -325,7 +331,7 @@ func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 }
 
 func GetGoogleAccountDetailsFromContext(c echo.Context) (*GoogleAuthResponse, error) {
-	database := c.Get(dbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 
 	googleToken, err := GetGoogleTokenFromJWT(c)
 	if err != nil {
@@ -344,23 +350,31 @@ func GetGoogleAccountDetailsFromContext(c echo.Context) (*GoogleAuthResponse, er
 }
 
 func GetGoogleAccountDetailsFromAccessToken(accessToken string) (*GoogleAuthResponse, error) {
+	start := time.Now()
+	defer func() {
+		prometheus.RecordOperation("auth_get_account_details", "success", time.Since(start), "service", "auth")
+	}()
+
 	// Token info endpoint with the provided token
 	url := fmt.Sprintf("https://oauth2.googleapis.com/tokeninfo?access_token=%s", accessToken)
 
 	// Send an HTTP GET request to the token info endpoint
 	resp, err := http.Get(url)
 	if err != nil {
+		prometheus.RecordError("auth_api_error", "http_request", "service", "auth")
 		return nil, fmt.Errorf("error sending HTTP request: %v", err)
 	}
 	defer resp.Body.Close()
 
 	var tokenInfo GoogleAuthResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tokenInfo); err != nil {
+		prometheus.RecordError("auth_parse_error", "decode_response", "service", "auth")
 		return nil, fmt.Errorf("error decoding response: %v", err)
 	}
 
 	// Check if the response contains an error
 	if tokenInfo.Error != "" {
+		prometheus.RecordError("auth_validation_error", "token_info_error", "service", "auth")
 		return nil, fmt.Errorf("error in response: %v", tokenInfo.Error)
 	}
 

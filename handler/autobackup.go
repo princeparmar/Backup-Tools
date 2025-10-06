@@ -1,4 +1,4 @@
-package server
+package handler
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
+	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
@@ -23,7 +24,7 @@ var intervalValues = map[string][]string{
 }
 
 // <<<<<------------ AUTOMATIC BACKUP ------------>>>>>
-func handleAutomaticSyncListForUser(c echo.Context) error {
+func HandleAutomaticSyncListForUser(c echo.Context) error {
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -32,7 +33,7 @@ func handleAutomaticSyncListForUser(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(dbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 	automaticSyncList, err := database.GetAllCronJobsForUser(userID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
@@ -47,7 +48,7 @@ func handleAutomaticSyncListForUser(c echo.Context) error {
 	})
 }
 
-func handleIntervalOnConfig(c echo.Context) error {
+func HandleIntervalOnConfig(c echo.Context) error {
 	c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Interval Values",
 		"data":    intervalValues,
@@ -55,7 +56,7 @@ func handleIntervalOnConfig(c echo.Context) error {
 	return nil
 }
 
-func handleAutomaticSyncDetails(c echo.Context) error {
+func HandleAutomaticSyncDetails(c echo.Context) error {
 	jobID, err := strconv.Atoi(c.Param("job_id"))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -64,7 +65,7 @@ func handleAutomaticSyncDetails(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(dbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 	jobDetails, err := database.GetCronJobByID(uint(jobID))
 	if err != nil {
 		if strings.Contains(err.Error(), "record not found") {
@@ -87,7 +88,7 @@ func handleAutomaticSyncDetails(c echo.Context) error {
 	})
 }
 
-func handleAutomaticSyncCreateGmail(c echo.Context) error {
+func HandleAutomaticSyncCreateGmail(c echo.Context) error {
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -137,7 +138,7 @@ func handleAutomaticSyncCreateGmail(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(dbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 	data, err := database.CreateCronJobForUser(userID, userDetails.Email, "gmail", map[string]interface{}{
 		"refresh_token": tok.RefreshToken,
 	})
@@ -160,7 +161,7 @@ func handleAutomaticSyncCreateGmail(c echo.Context) error {
 	})
 }
 
-func handleAutomaticSyncCreateOutlook(c echo.Context) error {
+func HandleAutomaticSyncCreateOutlook(c echo.Context) error {
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -219,7 +220,7 @@ func handleAutomaticSyncCreateOutlook(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(dbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 	data, err := database.CreateCronJobForUser(userID, userDetails.Mail, "outlook", map[string]interface{}{
 		"refresh_token": reqBody.RefreshToken,
 	})
@@ -242,7 +243,7 @@ func handleAutomaticSyncCreateOutlook(c echo.Context) error {
 	})
 }
 
-func handleAutomaticSyncCreateDatabase(c echo.Context) error {
+func HandleAutomaticSyncCreateDatabase(c echo.Context) error {
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -283,7 +284,7 @@ func handleAutomaticSyncCreateDatabase(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(dbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 	data, err := database.CreateCronJobForUser(userID, reqBody.Name, method, map[string]interface{}{
 		"database_name": reqBody.DatabaseName,
 		"host":          reqBody.Host,
@@ -305,7 +306,7 @@ func handleAutomaticSyncCreateDatabase(c echo.Context) error {
 	})
 }
 
-func handleAutomaticBackupUpdate(c echo.Context) error {
+func HandleAutomaticBackupUpdate(c echo.Context) error {
 
 	ctx := c.Request().Context()
 	logger.Info(ctx, "Starting automatic backup update request")
@@ -336,7 +337,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 		logger.String("user_id", userID),
 		logger.Int("job_id", jobID))
 
-	database := c.Get(dbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 
 	// Verify job exists and belongs to user
 	job, err := database.GetJobByIDForUser(userID, uint(jobID))
@@ -628,7 +629,7 @@ func handleAutomaticBackupUpdate(c echo.Context) error {
 	})
 }
 
-func handleAutomaticSyncDelete(c echo.Context) error {
+func HandleAutomaticSyncDelete(c echo.Context) error {
 	jobID, err := strconv.Atoi(c.Param("job_id"))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -645,7 +646,7 @@ func handleAutomaticSyncDelete(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(dbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 
 	if _, err := database.GetJobByIDForUser(userID, uint(jobID)); err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -667,7 +668,7 @@ func handleAutomaticSyncDelete(c echo.Context) error {
 	})
 }
 
-func handleAutomaticSyncTaskList(c echo.Context) error {
+func HandleAutomaticSyncTaskList(c echo.Context) error {
 	jobID, err := strconv.Atoi(c.Param("job_id"))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -693,7 +694,7 @@ func handleAutomaticSyncTaskList(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(dbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 
 	if _, err := database.GetJobByIDForUser(userID, uint(jobID)); err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -744,8 +745,8 @@ type DeleteJobsByEmailRequest struct {
 	Password string `json:"password" validate:"required"`
 }
 
-// handleDeleteJobsByEmail deletes all jobs and tasks for a user by email with password protection
-func handleDeleteJobsByEmail(c echo.Context) error {
+// HandleDeleteJobsByEmail deletes all jobs and tasks for a user by email with password protection
+func HandleDeleteJobsByEmail(c echo.Context) error {
 	var req DeleteJobsByEmailRequest
 
 	// Parse request body
@@ -778,7 +779,7 @@ func handleDeleteJobsByEmail(c echo.Context) error {
 	}
 
 	// Get database instance
-	database := c.Get(dbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 
 	// Delete all jobs and tasks for the user by email
 	deletedJobIDs, deletedTaskIDs, err := database.DeleteAllJobsAndTasksByEmail(req.Email)
