@@ -7,6 +7,7 @@ import (
 	googlepack "github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/handler"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
 
@@ -22,8 +23,9 @@ func StartServer(db *storage.PosgresStore, address string) {
 	// Initialize all middleware
 	middleware.InitializeAllMiddleware(e, db)
 
-	// Prometheus metrics endpoint
+	// Prometheus metrics endpoints
 	e.GET("/metrics", echo.WrapHandler(promhttp.Handler()))
+	e.GET("/monkit", echo.WrapHandler(prometheus.CreateMonkitHandler()))
 
 	e.POST("/satellite-auth", satellite.HandleSatelliteAuthentication)
 	e.POST("/google-auth", googlepack.Autentificate)

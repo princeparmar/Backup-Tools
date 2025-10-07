@@ -1,177 +1,130 @@
 {
   "dashboard": {
     "id": null,
-    "title": "Backup Tools - Cron Job Monitoring Dashboard",
-    "description": "Complete monitoring dashboard for Backup Tools application including cron job executions, task management, error tracking, and system metrics",
-    "tags": ["backup-tools", "monitoring", "cron-jobs", "prometheus"],
+    "title": "Backup Tools - Production Monitoring",
+    "description": "Enterprise-grade monitoring dashboard for Backup Tools application with comprehensive insights into performance, errors, resources, and business metrics",
+    "tags": ["backup-tools", "production", "monitoring", "prometheus", "enterprise"],
     "style": "dark",
     "timezone": "browser",
     "editable": true,
-    "graphTooltip": "default",
+    "graphTooltip": "shared-crosshair",
     "time": {
       "from": "now-1h",
       "to": "now"
     },
     "refresh": "30s",
     "timepicker": {
-      "refresh_intervals": ["5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h", "2h", "1d"],
+      "refresh_intervals": ["10s", "30s", "1m", "5m", "15m", "30m", "1h", "2h", "1d"],
       "time_options": ["5m", "15m", "1h", "6h", "12h", "24h", "2d", "7d", "30d"]
     },
     "panels": [
       {
         "id": 1,
-        "title": "Application Status Overview",
+        "title": "🚨 Error Rate & SLO Compliance",
         "type": "stat",
         "targets": [
           {
-            "expr": "up{job=\"backup-tools\"}",
-            "legendFormat": "Backup Tools Status",
-            "refId": "A"
-          },
-          {
-            "expr": "up{job=\"prometheus\"}",
-            "legendFormat": "Prometheus Status",
-            "refId": "B"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "color": {
-              "mode": "thresholds"
-            },
-            "mappings": [
-              {
-                "options": {
-                  "0": {
-                    "text": "DOWN"
-                  },
-                  "1": {
-                    "text": "UP"
-                  }
-                },
-                "type": "value"
-              }
-            ],
-            "thresholds": {
-              "steps": [
-                {
-                  "color": "red",
-                  "value": 0
-                },
-                {
-                  "color": "green",
-                  "value": 1
-                }
-              ]
-            }
-          }
-        },
-        "gridPos": {"h": 4, "w": 24, "x": 0, "y": 0},
-        "options": {
-          "colorMode": "background",
-          "graphMode": "area",
-          "justifyMode": "auto",
-          "orientation": "auto"
-        }
-      },
-      {
-        "id": 2,
-        "title": "HTTP Request Rate",
-        "type": "stat",
-        "targets": [
-          {
-            "expr": "rate(promhttp_metric_handler_requests_total{job=\"backup-tools\"}[5m])",
-            "legendFormat": "Requests/sec",
-            "refId": "A"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "reqps",
-            "color": {
-              "mode": "palette-classic"
-            }
-          }
-        },
-        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 4}
-      },
-      {
-        "id": 3,
-        "title": "HTTP Request Duration (95th percentile)",
-        "type": "stat",
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.95, rate(promhttp_metric_handler_request_duration_seconds_bucket{job=\"backup-tools\"}[5m]))",
-            "legendFormat": "95th percentile",
-            "refId": "A"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "s",
-            "color": {
-              "mode": "thresholds"
-            },
-            "thresholds": {
-              "steps": [
-                {
-                  "color": "green",
-                  "value": 0
-                },
-                {
-                  "color": "yellow",
-                  "value": 0.5
-                },
-                {
-                  "color": "red",
-                  "value": 1
-                }
-              ]
-            }
-          }
-        },
-        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 4}
-      },
-      {
-        "id": 4,
-        "title": "Error Rate",
-        "type": "stat",
-        "targets": [
-          {
-            "expr": "rate(promhttp_metric_handler_requests_total{job=\"backup-tools\",code!=\"200\"}[5m]) / rate(promhttp_metric_handler_requests_total{job=\"backup-tools\"}[5m]) * 100",
-            "legendFormat": "Error Rate %",
+            "expr": "sum(rate(promhttp_metric_handler_requests_total{job=\"backup-tools\",code=~\"5..\"}[5m])) / sum(rate(promhttp_metric_handler_requests_total{job=\"backup-tools\"}[5m])) * 100",
+            "legendFormat": "HTTP 5xx Error Rate",
             "refId": "A"
           }
         ],
         "fieldConfig": {
           "defaults": {
             "unit": "percent",
+            "decimals": 2,
             "color": {
               "mode": "thresholds"
             },
             "thresholds": {
               "steps": [
-                {
-                  "color": "green",
-                  "value": 0
-                },
-                {
-                  "color": "yellow",
-                  "value": 1
-                },
-                {
-                  "color": "red",
-                  "value": 5
-                }
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 1},
+                {"color": "red", "value": 5}
               ]
             }
           }
         },
-        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 4}
+        "gridPos": {"h": 6, "w": 6, "x": 0, "y": 0},
+        "options": {
+          "reduceOptions": {
+            "values": false,
+            "calcs": ["lastNotNull"]
+          },
+          "orientation": "horizontal",
+          "textMode": "value"
+        }
       },
       {
-        "id": 5,
-        "title": "Active Goroutines",
+        "id": 2,
+        "title": "📈 Request Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(rate(promhttp_metric_handler_requests_total{job=\"backup-tools\"}[5m]))",
+            "legendFormat": "Total Requests/s",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "reqps",
+            "decimals": 1,
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 6, "w": 6, "x": 6, "y": 0},
+        "options": {
+          "reduceOptions": {
+            "values": false,
+            "calcs": ["lastNotNull"]
+          },
+          "orientation": "horizontal",
+          "textMode": "value"
+        }
+      },
+      {
+        "id": 3,
+        "title": "⏱️ P95 Response Time",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(promhttp_metric_handler_request_duration_seconds_bucket{job=\"backup-tools\"}[5m])) * 1000",
+            "legendFormat": "P95 Latency",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ms",
+            "decimals": 1,
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 500},
+                {"color": "red", "value": 1000}
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 6, "w": 6, "x": 12, "y": 0},
+        "options": {
+          "reduceOptions": {
+            "values": false,
+            "calcs": ["lastNotNull"]
+          },
+          "orientation": "horizontal",
+          "textMode": "value"
+        }
+      },
+      {
+        "id": 4,
+        "title": "🔄 Active Goroutines",
         "type": "stat",
         "targets": [
           {
@@ -183,38 +136,120 @@
         "fieldConfig": {
           "defaults": {
             "unit": "short",
+            "decimals": 0,
             "color": {
               "mode": "thresholds"
             },
             "thresholds": {
               "steps": [
-                {
-                  "color": "green",
-                  "value": 0
-                },
-                {
-                  "color": "yellow",
-                  "value": 100
-                },
-                {
-                  "color": "red",
-                  "value": 1000
-                }
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 1000},
+                {"color": "red", "value": 5000}
               ]
             }
           }
         },
-        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 4}
+        "gridPos": {"h": 6, "w": 6, "x": 18, "y": 0},
+        "options": {
+          "reduceOptions": {
+            "values": false,
+            "calcs": ["lastNotNull"]
+          },
+          "orientation": "horizontal",
+          "textMode": "value"
+        }
       },
       {
-        "id": 6,
-        "title": "HTTP Request Rate Over Time",
+        "id": 5,
+        "title": "📊 API Performance & Latency",
         "type": "timeseries",
         "targets": [
           {
-            "expr": "rate(promhttp_metric_handler_requests_total{job=\"backup-tools\"}[5m])",
-            "legendFormat": "{{code}} - {{method}}",
+            "expr": "sum by (code) (rate(promhttp_metric_handler_requests_total{job=\"backup-tools\"}[5m]))",
+            "legendFormat": "{{code}}",
             "refId": "A"
+          },
+          {
+            "expr": "histogram_quantile(0.50, rate(promhttp_metric_handler_request_duration_seconds_bucket{job=\"backup-tools\"}[5m])) * 1000",
+            "legendFormat": "P50",
+            "refId": "B"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(promhttp_metric_handler_request_duration_seconds_bucket{job=\"backup-tools\"}[5m])) * 1000",
+            "legendFormat": "P95",
+            "refId": "C"
+          },
+          {
+            "expr": "histogram_quantile(0.99, rate(promhttp_metric_handler_request_duration_seconds_bucket{job=\"backup-tools\"}[5m])) * 1000",
+            "legendFormat": "P99",
+            "refId": "D"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ms",
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisLabel": "Latency (ms)",
+              "axisPlacement": "auto",
+              "barAlignment": 0,
+              "drawStyle": "line",
+              "fillOpacity": 10,
+              "gradientMode": "none",
+              "lineInterpolation": "linear",
+              "lineWidth": 1,
+              "pointSize": 2,
+              "showPoints": "auto",
+              "spanNulls": false,
+              "stacking": {
+                "group": "A",
+                "mode": "none"
+              },
+              "thresholdsStyle": {
+                "mode": "off"
+              }
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "bottom",
+            "calcs": []
+          },
+          "tooltip": {
+            "mode": "single",
+            "sort": "none"
+          }
+        }
+      },
+      {
+        "id": 6,
+        "title": "🚨 Error Breakdown",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "sum by (code) (rate(promhttp_metric_handler_requests_total{job=\"backup-tools\",code=~\"5..\"}[5m]))",
+            "legendFormat": "HTTP 5xx - {{code}}",
+            "refId": "A"
+          },
+          {
+            "expr": "sum by (code) (rate(promhttp_metric_handler_requests_total{job=\"backup-tools\",code=~\"4..\"}[5m]))",
+            "legendFormat": "HTTP 4xx - {{code}}",
+            "refId": "B"
+          },
+          {
+            "expr": "rate(satellite_request_errors_total{job=\"backup-tools\"}[5m])",
+            "legendFormat": "Satellite - {{error_type}}",
+            "refId": "C"
+          },
+          {
+            "expr": "rate(cron_job_errors_total{job=\"backup-tools\"}[5m])",
+            "legendFormat": "Cron - {{job_name}}",
+            "refId": "D"
           }
         ],
         "fieldConfig": {
@@ -222,10 +257,17 @@
             "unit": "reqps",
             "color": {
               "mode": "palette-classic"
+            },
+            "custom": {
+              "axisLabel": "Errors/s",
+              "axisPlacement": "auto",
+              "drawStyle": "line",
+              "fillOpacity": 10,
+              "lineWidth": 2
             }
           }
         },
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
         "options": {
           "legend": {
             "displayMode": "table",
@@ -235,38 +277,7 @@
       },
       {
         "id": 7,
-        "title": "HTTP Request Duration Distribution",
-        "type": "timeseries",
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.50, rate(promhttp_metric_handler_request_duration_seconds_bucket{job=\"backup-tools\"}[5m]))",
-            "legendFormat": "50th percentile",
-            "refId": "A"
-          },
-          {
-            "expr": "histogram_quantile(0.95, rate(promhttp_metric_handler_request_duration_seconds_bucket{job=\"backup-tools\"}[5m]))",
-            "legendFormat": "95th percentile",
-            "refId": "B"
-          },
-          {
-            "expr": "histogram_quantile(0.99, rate(promhttp_metric_handler_request_duration_seconds_bucket{job=\"backup-tools\"}[5m]))",
-            "legendFormat": "99th percentile",
-            "refId": "C"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "s",
-            "color": {
-              "mode": "palette-classic"
-            }
-          }
-        },
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
-      },
-      {
-        "id": 8,
-        "title": "Memory Usage",
+        "title": "💾 Memory Utilization",
         "type": "timeseries",
         "targets": [
           {
@@ -280,9 +291,14 @@
             "refId": "B"
           },
           {
-            "expr": "go_memstats_heap_idle_bytes{job=\"backup-tools\"}",
-            "legendFormat": "Heap Idle",
+            "expr": "go_memstats_stack_inuse_bytes{job=\"backup-tools\"}",
+            "legendFormat": "Stack In Use",
             "refId": "C"
+          },
+          {
+            "expr": "go_memstats_alloc_bytes_total{job=\"backup-tools\"}",
+            "legendFormat": "Total Allocated",
+            "refId": "D"
           }
         ],
         "fieldConfig": {
@@ -290,81 +306,26 @@
             "unit": "bytes",
             "color": {
               "mode": "palette-classic"
+            },
+            "custom": {
+              "axisLabel": "Memory Bytes",
+              "axisPlacement": "auto",
+              "drawStyle": "line",
+              "fillOpacity": 10
             }
           }
         },
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 14},
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "bottom"
+          }
+        }
       },
       {
-        "id": 9,
-        "title": "Garbage Collection",
-        "type": "timeseries",
-        "targets": [
-          {
-            "expr": "rate(go_gc_duration_seconds_sum{job=\"backup-tools\"}[5m])",
-            "legendFormat": "GC Duration/sec",
-            "refId": "A"
-          },
-          {
-            "expr": "rate(go_gc_duration_seconds_count{job=\"backup-tools\"}[5m])",
-            "legendFormat": "GC Count/sec",
-            "refId": "B"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "short",
-            "color": {
-              "mode": "palette-classic"
-            }
-          }
-        },
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}
-      },
-      {
-        "id": 10,
-        "title": "HTTP Status Codes",
-        "type": "timeseries",
-        "targets": [
-          {
-            "expr": "rate(promhttp_metric_handler_requests_total{job=\"backup-tools\",code=\"200\"}[5m])",
-            "legendFormat": "200 OK",
-            "refId": "A"
-          },
-          {
-            "expr": "rate(promhttp_metric_handler_requests_total{job=\"backup-tools\",code=\"400\"}[5m])",
-            "legendFormat": "400 Bad Request",
-            "refId": "B"
-          },
-          {
-            "expr": "rate(promhttp_metric_handler_requests_total{job=\"backup-tools\",code=\"401\"}[5m])",
-            "legendFormat": "401 Unauthorized",
-            "refId": "C"
-          },
-          {
-            "expr": "rate(promhttp_metric_handler_requests_total{job=\"backup-tools\",code=\"404\"}[5m])",
-            "legendFormat": "404 Not Found",
-            "refId": "D"
-          },
-          {
-            "expr": "rate(promhttp_metric_handler_requests_total{job=\"backup-tools\",code=\"500\"}[5m])",
-            "legendFormat": "500 Internal Server Error",
-            "refId": "E"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "reqps",
-            "color": {
-              "mode": "palette-classic"
-            }
-          }
-        },
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24}
-      },
-      {
-        "id": 11,
-        "title": "System Resources",
+        "id": 8,
+        "title": "⚙️ Goroutines & GC Activity",
         "type": "timeseries",
         "targets": [
           {
@@ -373,97 +334,19 @@
             "refId": "A"
           },
           {
-            "expr": "go_memstats_mallocs_total{job=\"backup-tools\"}",
-            "legendFormat": "Memory Allocations",
+            "expr": "rate(go_gc_duration_seconds_count{job=\"backup-tools\"}[5m])",
+            "legendFormat": "GC Cycles/s",
             "refId": "B"
           },
           {
-            "expr": "go_memstats_frees_total{job=\"backup-tools\"}",
-            "legendFormat": "Memory Frees",
+            "expr": "histogram_quantile(0.95, rate(go_gc_duration_seconds_bucket{job=\"backup-tools\"}[5m])) * 1000",
+            "legendFormat": "P95 GC Duration (ms)",
             "refId": "C"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "short",
-            "color": {
-              "mode": "palette-classic"
-            }
-          }
-        },
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24}
-      },
-      {
-        "id": 12,
-        "title": "Satellite Operations (Custom Metrics)",
-        "type": "timeseries",
-        "targets": [
-          {
-            "expr": "rate(satellite_upload_duration_seconds{job=\"backup-tools\"}[5m])",
-            "legendFormat": "Upload Duration - {{bucket}}",
-            "refId": "A"
           },
           {
-            "expr": "rate(satellite_download_duration_seconds{job=\"backup-tools\"}[5m])",
-            "legendFormat": "Download Duration - {{bucket}}",
-            "refId": "B"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "s",
-            "color": {
-              "mode": "palette-classic"
-            }
-          }
-        },
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32}
-      },
-      {
-        "id": 13,
-        "title": "Satellite Upload/Download Size",
-        "type": "timeseries",
-        "targets": [
-          {
-            "expr": "rate(satellite_upload_size_bytes{job=\"backup-tools\"}[5m])",
-            "legendFormat": "Upload Size/sec - {{bucket}}",
-            "refId": "A"
-          },
-          {
-            "expr": "rate(satellite_download_size_bytes{job=\"backup-tools\"}[5m])",
-            "legendFormat": "Download Size/sec - {{bucket}}",
-            "refId": "B"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "binBps",
-            "color": {
-              "mode": "palette-classic"
-            }
-          }
-        },
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32}
-      },
-      {
-        "id": 14,
-        "title": "Error Tracking",
-        "type": "timeseries",
-        "targets": [
-          {
-            "expr": "rate(satellite_request_errors_total{job=\"backup-tools\"}[5m])",
-            "legendFormat": "Request Errors - {{error_type}}",
-            "refId": "A"
-          },
-          {
-            "expr": "rate(satellite_upload_errors_total{job=\"backup-tools\"}[5m])",
-            "legendFormat": "Upload Errors - {{bucket}}",
-            "refId": "B"
-          },
-          {
-            "expr": "rate(satellite_download_errors_total{job=\"backup-tools\"}[5m])",
-            "legendFormat": "Download Errors - {{bucket}}",
-            "refId": "C"
+            "expr": "rate(go_memstats_mallocs_total{job=\"backup-tools\"}[5m])",
+            "legendFormat": "Allocations/s",
+            "refId": "D"
           }
         ],
         "fieldConfig": {
@@ -471,172 +354,41 @@
             "unit": "short",
             "color": {
               "mode": "palette-classic"
+            },
+            "custom": {
+              "axisLabel": "Count/Rate",
+              "axisPlacement": "auto",
+              "drawStyle": "line",
+              "fillOpacity": 10
             }
           }
         },
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40}
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14},
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "bottom"
+          }
+        }
       },
       {
-        "id": 15,
-        "title": "Bucket Operations",
-        "type": "table",
-        "targets": [
-          {
-            "expr": "rate(satellite_bucket_operations_total{job=\"backup-tools\"}[5m])",
-            "legendFormat": "{{bucket}} - {{operation}} - {{status}}",
-            "refId": "A",
-            "format": "table"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "short",
-            "color": {
-              "mode": "palette-classic"
-            }
-          }
-        },
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40}
-      },
-      {
-        "id": 16,
-        "title": "Object Operations",
-        "type": "table",
-        "targets": [
-          {
-            "expr": "rate(satellite_object_operations_total{job=\"backup-tools\"}[5m])",
-            "legendFormat": "{{bucket}} - {{operation}} - {{status}}",
-            "refId": "A",
-            "format": "table"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "short",
-            "color": {
-              "mode": "palette-classic"
-            }
-          }
-        },
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 48}
-      },
-      {
-        "id": 17,
-        "title": "Satellite Errors by Component",
+        "id": 9,
+        "title": "🔄 Cron Job Performance",
         "type": "timeseries",
         "targets": [
           {
-            "expr": "rate(satellite_errors_total{job=\"backup-tools\"}[5m])",
-            "legendFormat": "{{error_type}} - {{component}}",
-            "refId": "A"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "short",
-            "color": {
-              "mode": "palette-classic"
-            }
-          }
-        },
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 48}
-      },
-      {
-        "id": 18,
-        "title": "Cron Job Executions",
-        "type": "timeseries",
-        "targets": [
-          {
-            "expr": "rate(cron_job_executions_total{job=\"backup-tools\"}[5m])",
-            "legendFormat": "{{job_name}} - {{method}} - {{status}}",
-            "refId": "A"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "short",
-            "color": {
-              "mode": "palette-classic"
-            }
-          }
-        },
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 56}
-      },
-      {
-        "id": 19,
-        "title": "Cron Job Duration",
-        "type": "timeseries",
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.50, rate(cron_job_duration_seconds_bucket{job=\"backup-tools\"}[5m]))",
-            "legendFormat": "50th percentile - {{job_name}}",
+            "expr": "sum by (job_name, status) (rate(cron_job_executions_total{job=\"backup-tools\"}[5m]))",
+            "legendFormat": "{{job_name}} - {{status}}",
             "refId": "A"
           },
           {
             "expr": "histogram_quantile(0.95, rate(cron_job_duration_seconds_bucket{job=\"backup-tools\"}[5m]))",
-            "legendFormat": "95th percentile - {{job_name}}",
-            "refId": "B"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "s",
-            "color": {
-              "mode": "palette-classic"
-            }
-          }
-        },
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 56}
-      },
-      {
-        "id": 20,
-        "title": "Task Operations",
-        "type": "timeseries",
-        "targets": [
-          {
-            "expr": "rate(cron_task_creations_total{job=\"backup-tools\"}[5m])",
-            "legendFormat": "Task Creations - {{job_name}}",
-            "refId": "A"
-          },
-          {
-            "expr": "rate(cron_task_completions_total{job=\"backup-tools\"}[5m])",
-            "legendFormat": "Task Completions - {{job_name}}",
+            "legendFormat": "P95 Duration - {{job_name}}",
             "refId": "B"
           },
-          {
-            "expr": "rate(cron_task_failures_total{job=\"backup-tools\"}[5m])",
-            "legendFormat": "Task Failures - {{job_name}}",
-            "refId": "C"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "short",
-            "color": {
-              "mode": "palette-classic"
-            }
-          }
-        },
-        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 64}
-      },
-      {
-        "id": 21,
-        "title": "Error Tracking",
-        "type": "timeseries",
-        "targets": [
           {
             "expr": "rate(cron_job_errors_total{job=\"backup-tools\"}[5m])",
-            "legendFormat": "Job Errors - {{job_name}} - {{error_type}}",
-            "refId": "A"
-          },
-          {
-            "expr": "rate(cron_job_retries_total{job=\"backup-tools\"}[5m])",
-            "legendFormat": "Job Retries - {{job_name}}",
-            "refId": "B"
-          },
-          {
-            "expr": "rate(cron_heartbeat_misses_total{job=\"backup-tools\"}[5m])",
-            "legendFormat": "Heartbeat Misses - {{job_name}}",
+            "legendFormat": "Errors - {{job_name}}",
             "refId": "C"
           }
         ],
@@ -645,21 +397,47 @@
             "unit": "short",
             "color": {
               "mode": "palette-classic"
+            },
+            "custom": {
+              "axisLabel": "Executions/s & Duration",
+              "axisPlacement": "auto",
+              "drawStyle": "line",
+              "fillOpacity": 10
             }
           }
         },
-        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 64}
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 22},
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "bottom"
+          }
+        }
       },
       {
-        "id": 22,
-        "title": "Job Deactivations",
-        "type": "table",
+        "id": 10,
+        "title": "📡 Satellite Operations",
+        "type": "timeseries",
         "targets": [
           {
-            "expr": "rate(cron_job_deactivations_total{job=\"backup-tools\"}[5m])",
-            "legendFormat": "{{job_name}} - {{method}} - {{reason}}",
-            "refId": "A",
-            "format": "table"
+            "expr": "rate(satellite_upload_operations_total{job=\"backup-tools\"}[5m])",
+            "legendFormat": "Uploads/s - {{bucket}}",
+            "refId": "A"
+          },
+          {
+            "expr": "rate(satellite_download_operations_total{job=\"backup-tools\"}[5m])",
+            "legendFormat": "Downloads/s - {{bucket}}",
+            "refId": "B"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(satellite_upload_duration_seconds_bucket{job=\"backup-tools\"}[5m]))",
+            "legendFormat": "P95 Upload Duration",
+            "refId": "C"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(satellite_download_duration_seconds_bucket{job=\"backup-tools\"}[5m]))",
+            "legendFormat": "P95 Download Duration",
+            "refId": "D"
           }
         ],
         "fieldConfig": {
@@ -667,22 +445,117 @@
             "unit": "short",
             "color": {
               "mode": "palette-classic"
+            },
+            "custom": {
+              "axisLabel": "Operations/s & Duration",
+              "axisPlacement": "auto",
+              "drawStyle": "line",
+              "fillOpacity": 10
             }
           }
         },
-        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 72}
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 22},
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "bottom"
+          }
+        }
+      },
+      {
+        "id": 11,
+        "title": "📈 Business Metrics - Backup Operations",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "rate(backup_operations_total{job=\"backup-tools\"}[5m])",
+            "legendFormat": "Backup Operations/s - {{type}}",
+            "refId": "A"
+          },
+          {
+            "expr": "rate(restore_operations_total{job=\"backup-tools\"}[5m])",
+            "legendFormat": "Restore Operations/s - {{type}}",
+            "refId": "B"
+          },
+          {
+            "expr": "backup_data_size_bytes{job=\"backup-tools\"}",
+            "legendFormat": "Backup Data Size - {{bucket}}",
+            "refId": "C"
+          },
+          {
+            "expr": "rate(backup_success_total{job=\"backup-tools\"}[5m])",
+            "legendFormat": "Successful Backups/s",
+            "refId": "D"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "color": {
+              "mode": "palette-classic"
+            },
+            "custom": {
+              "axisLabel": "Operations/s & Bytes",
+              "axisPlacement": "auto",
+              "drawStyle": "line",
+              "fillOpacity": 10
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 30},
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "bottom"
+          }
+        }
+      },
+      {
+        "id": 12,
+        "title": "🔍 Detailed Error Analysis",
+        "type": "logs",
+        "targets": [
+          {
+            "expr": "rate(cron_job_errors_total{job=\"backup-tools\"}[5m]) > 0",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 38},
+        "options": {
+          "showTime": true,
+          "sortOrder": "Descending",
+          "enableLogDetails": true
+        }
       }
     ],
     "templating": {
       "list": [
         {
+          "name": "environment",
+          "type": "query",
+          "query": "label_values(up, environment)",
+          "refresh": 1,
+          "includeAll": true,
+          "multi": false,
+          "allValue": ".*",
+          "default": "production"
+        },
+        {
           "name": "job",
           "type": "query",
-          "query": "label_values(up, job)",
+          "query": "label_values(up{environment=~\"$environment\"}, job)",
           "refresh": 1,
           "includeAll": true,
           "multi": true,
-          "allValue": ".*"
+          "allValue": ".*",
+          "default": "backup-tools"
         },
         {
           "name": "instance",
@@ -692,6 +565,15 @@
           "includeAll": true,
           "multi": true,
           "allValue": ".*"
+        },
+        {
+          "name": "time_range",
+          "type": "interval",
+          "query": "1m,5m,15m,30m,1h,3h,6h,12h,1d,7d,30d",
+          "refresh": 1,
+          "includeAll": false,
+          "multi": false,
+          "default": "1h"
         }
       ]
     },
@@ -700,16 +582,39 @@
         {
           "name": "Deployments",
           "datasource": "Prometheus",
-          "expr": "changes(up{job=\"backup-tools\"}[5m])",
+          "expr": "changes(up{job=\"backup-tools\"}[5m]) > 0",
           "iconColor": "blue",
+          "enable": true,
+          "showIn": 0
+        },
+        {
+          "name": "High Error Rate",
+          "datasource": "Prometheus",
+          "expr": "sum(rate(promhttp_metric_handler_requests_total{job=\"backup-tools\",code=~\"5..\"}[5m])) / sum(rate(promhttp_metric_handler_requests_total{job=\"backup-tools\"}[5m])) > 0.05",
+          "iconColor": "red",
           "enable": true,
           "showIn": 0
         }
       ]
     },
-    "alerting": {
-      "alertRuleTags": {},
-      "notifications": []
-    }
+    "links": [
+      {
+        "title": "Application Logs",
+        "url": "/explore?left=%7B%22datasource%22:%22Loki%22,%22queries%22:%5B%7B%22refId%22:%22A%22,%22expr%22:%22%7Bjob%3D%5C%22backup-tools%5C%22%7D%22%7D%5D,%22range%22:%7B%22from%22:%22now-1h%22,%22to%22:%22now%22%7D%7D",
+        "icon": "external link",
+        "tags": ["logs"],
+        "type": "link",
+        "targetBlank": true
+      },
+      {
+        "title": "Alert Manager",
+        "url": "/alerting",
+        "icon": "bell",
+        "tags": ["alerts"],
+        "type": "dashboards"
+      }
+    ],
+    "version": 1,
+    "schemaVersion": 37
   }
 }
