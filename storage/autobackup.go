@@ -213,52 +213,121 @@ func (storage *PosgresStore) GetAllCronJobsForUser(userID string) ([]CronJobList
 	return res, nil
 }
 
-func (storage *PosgresStore) GetAllActiveCronJobsForUser(userID string) ([]CronJobListingDB, error) {
+type LiveCronJobListingDB struct {
+	ID               uint                `json:"id"`
+	Name             string              `json:"name"`
+	Method           string              `json:"method"`
+	Message          string              `json:"message"`
+	MessageStatus    string              `json:"message_status"`
+	Active           bool                `json:"active"`
+	GmailSyncCount   uint                `json:"gmail_sync_count"`
+	OutlookSyncCount uint                `json:"outlook_sync_count"`
+	Tasks            []LiveTaskListingDB `json:"tasks"`
+}
+
+type LiveTaskListingDB struct {
+	StartTime  *time.Time `json:"start_time"`
+	Status     string     `json:"status"`
+	RetryCount uint       `json:"retry_count"`
+	Execution  uint64     `json:"execution"`
+}
+
+func (storage *PosgresStore) GetAllActiveCronJobsForUser(userID string) ([]LiveCronJobListingDB, error) {
 	start := time.Now()
+	// Query to get active cron jobs with their failed/running tasks in one go
+	query := `
+		SELECT 
+			cj.id,cj.name,cj.method,cj.message,cj.message_status,cj.active,
+			COALESCE((cj.task_memory->>'gmail_sync_count')::int, 0) as gmail_sync_count,
+			COALESCE((cj.task_memory->>'outlook_sync_count')::int, 0) as outlook_sync_count,
+			t.start_time,t.status,t.retry_count,t.execution
+		FROM cron_job_listing_dbs cj
+		LEFT JOIN task_listing_dbs t ON cj.id = t.cron_job_id AND t.status IN ('failed', 'running')
+		WHERE cj.user_id = $1 
+		AND cj.deleted_at IS NULL
+		ORDER BY cj.id, t.start_time DESC`
 
-	// First get all cron job IDs where deleted_at IS NULL (active cron jobs)
-	var cronJobIDs []uint
-	cronJobQuery := storage.DB.Model(&CronJobListingDB{}).
-		Where("user_id = ? AND deleted_at IS NULL", userID).
-		Pluck("id", &cronJobIDs)
-	if cronJobQuery != nil && cronJobQuery.Error != nil {
-		prometheus.RecordError("postgres_get_active_cron_job_ids_failed", "storage")
-		return nil, fmt.Errorf("error getting active cron job IDs for user: %v", cronJobQuery.Error)
-	}
-
-	// If no active cron jobs found, return empty result
-	if len(cronJobIDs) == 0 {
-		duration := time.Since(start)
-		prometheus.RecordTimer("postgres_get_active_cron_jobs_for_user_duration", duration, "database", "postgres")
-		prometheus.RecordCounter("postgres_get_active_cron_jobs_for_user_total", 1, "database", "postgres", "status", "success")
-		prometheus.RecordCounter("postgres_user_active_cron_jobs_retrieved_total", 0, "database", "postgres")
-		return []CronJobListingDB{}, nil
-	}
-
-	// Now get all CronJobListingDB by IDs where they have tasks with status failed or running
-	var res []CronJobListingDB
-	db := storage.DB.Preload("Tasks", "status IN ?", []string{"failed", "running"}).
-		Where("id IN ?", cronJobIDs).
-		Find(&res)
-	if db != nil && db.Error != nil {
+	rows, err := storage.DB.Raw(query, userID).Rows()
+	if err != nil {
 		prometheus.RecordError("postgres_get_active_cron_jobs_for_user_failed", "storage")
-		return nil, fmt.Errorf("error getting cron jobs with failed/running tasks: %v", db.Error)
+		return nil, fmt.Errorf("error executing query: %v", err)
+	}
+	defer rows.Close()
+
+	// Map to group tasks by cron job
+	cronJobsMap := make(map[uint]*LiveCronJobListingDB)
+	var results []LiveCronJobListingDB
+
+	for rows.Next() {
+		var (
+			cronJobID        uint
+			name             string
+			method           string
+			message          string
+			messageStatus    string
+			active           bool
+			gmailSyncCount   uint
+			outlookSyncCount uint
+			startTime        *time.Time
+			status           *string
+			retryCount       *uint
+			execution        *uint64
+		)
+
+		err := rows.Scan(
+			&cronJobID, &name, &method, &message, &messageStatus, &active,
+			&gmailSyncCount, &outlookSyncCount, &startTime, &status, &retryCount, &execution,
+		)
+		if err != nil {
+			prometheus.RecordError("postgres_scan_active_cron_jobs_failed", "storage")
+			return nil, fmt.Errorf("error scanning row: %v", err)
+		}
+
+		// Create or get cron job entry
+		if _, exists := cronJobsMap[cronJobID]; !exists {
+			cronJobsMap[cronJobID] = &LiveCronJobListingDB{
+				ID:               cronJobID,
+				Name:             name,
+				Method:           method,
+				Message:          message,
+				MessageStatus:    messageStatus,
+				Active:           active,
+				GmailSyncCount:   gmailSyncCount,
+				OutlookSyncCount: outlookSyncCount,
+				Tasks:            []LiveTaskListingDB{},
+			}
+		}
+
+		// Add task if it exists (status will be non-null for failed/running tasks)
+		if status != nil && startTime != nil {
+			task := LiveTaskListingDB{
+				StartTime:  startTime,
+				Status:     *status,
+				RetryCount: *retryCount,
+				Execution:  *execution,
+			}
+			cronJobsMap[cronJobID].Tasks = append(cronJobsMap[cronJobID].Tasks, task)
+		}
 	}
 
-	// Filter out cron jobs that don't have any failed or running tasks
-	var filteredRes []CronJobListingDB
-	for _, cronJob := range res {
+	if err := rows.Err(); err != nil {
+		prometheus.RecordError("postgres_rows_iteration_failed", "storage")
+		return nil, fmt.Errorf("error iterating rows: %v", err)
+	}
+
+	// Convert map to slice and filter out cron jobs without tasks
+	for _, cronJob := range cronJobsMap {
 		if len(cronJob.Tasks) > 0 {
-			filteredRes = append(filteredRes, cronJob)
+			results = append(results, *cronJob)
 		}
 	}
 
 	duration := time.Since(start)
 	prometheus.RecordTimer("postgres_get_active_cron_jobs_for_user_duration", duration, "database", "postgres")
 	prometheus.RecordCounter("postgres_get_active_cron_jobs_for_user_total", 1, "database", "postgres", "status", "success")
-	prometheus.RecordCounter("postgres_user_active_cron_jobs_retrieved_total", int64(len(filteredRes)), "database", "postgres")
+	prometheus.RecordCounter("postgres_user_active_cron_jobs_retrieved_total", int64(len(results)), "database", "postgres")
 
-	return filteredRes, nil
+	return results, nil
 }
 
 func (storage *PosgresStore) UpdateHeartBeatForTask(ID uint) error {
