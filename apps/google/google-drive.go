@@ -152,7 +152,6 @@ func client(c echo.Context) (*http.Client, error) {
 	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 
 	b, err := os.ReadFile("credentials.json")
-	fmt.Println("credentials.json", b)
 	if err != nil {
 		return nil, fmt.Errorf("unable to read client secret file: %v", err)
 	}
@@ -283,7 +282,6 @@ func getDriveService(c echo.Context) (*drive.Service, error) {
 
 func clientUsingToken(token string) (*http.Client, error) {
 	b, err := os.ReadFile("credentials.json")
-	fmt.Println("credentials.json", b)
 	if err != nil {
 		return nil, fmt.Errorf("unable to read client secret file: %v", err)
 	}

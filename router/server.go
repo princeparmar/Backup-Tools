@@ -30,6 +30,8 @@ func StartServer(db *storage.PosgresStore, address string) {
 	e.GET("/google-auth", googlepack.Autentificateg)
 
 	autoSync := e.Group("/auto-sync")
+	autoSync.GET("/live", handler.HandleAutomaticSyncActiveJobsForUser)
+
 	job := autoSync.Group("/job")
 	job.GET("/", handler.HandleAutomaticSyncListForUser)
 	job.GET("/:job_id", handler.HandleAutomaticSyncDetails)

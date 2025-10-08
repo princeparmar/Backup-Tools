@@ -181,7 +181,6 @@ func Autentificateg(c echo.Context) error {
 	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 	code := c.FormValue("code")
 	b, err := os.ReadFile("credentials.json")
-	fmt.Println("credentials.json", b)
 	if err != nil {
 		log.Printf("Unable to read client secret file: %v", err)
 	}
@@ -231,7 +230,6 @@ func AuthRequestChecker(c echo.Context) bool {
 
 func GetRefreshTokenFromCodeForEmail(code string) (*oauth2.Token, error) {
 	b, err := os.ReadFile("credentials.json")
-	fmt.Println("credentials.json", b)
 	if err != nil {
 		log.Printf("Unable to read client secret file: %v", err)
 	}
@@ -265,7 +263,6 @@ func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 	}
 
 	byteValue, err := os.ReadFile("credentials.json")
-	fmt.Println("credentials.json", byteValue)
 	if err != nil {
 		return "", fmt.Errorf("error reading credentials file: %v", err)
 	}

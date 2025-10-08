@@ -48,6 +48,30 @@ func HandleAutomaticSyncListForUser(c echo.Context) error {
 	})
 }
 
+func HandleAutomaticSyncActiveJobsForUser(c echo.Context) error {
+	userID, err := getUserDetailsFromSatellite(c)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "not able to authenticate user",
+			"error":   err.Error(),
+		})
+	}
+
+	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
+	activeJobs, err := database.GetAllActiveCronJobsForUser(userID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"message": "internal server error",
+			"error":   err.Error(),
+		})
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "Active Automatic Backup Accounts List",
+		"data":    activeJobs,
+	})
+}
+
 func HandleIntervalOnConfig(c echo.Context) error {
 	c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Interval Values",

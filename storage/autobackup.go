@@ -213,6 +213,54 @@ func (storage *PosgresStore) GetAllCronJobsForUser(userID string) ([]CronJobList
 	return res, nil
 }
 
+func (storage *PosgresStore) GetAllActiveCronJobsForUser(userID string) ([]CronJobListingDB, error) {
+	start := time.Now()
+
+	// First get all cron job IDs where deleted_at IS NULL (active cron jobs)
+	var cronJobIDs []uint
+	cronJobQuery := storage.DB.Model(&CronJobListingDB{}).
+		Where("user_id = ? AND deleted_at IS NULL", userID).
+		Pluck("id", &cronJobIDs)
+	if cronJobQuery != nil && cronJobQuery.Error != nil {
+		prometheus.RecordError("postgres_get_active_cron_job_ids_failed", "storage")
+		return nil, fmt.Errorf("error getting active cron job IDs for user: %v", cronJobQuery.Error)
+	}
+
+	// If no active cron jobs found, return empty result
+	if len(cronJobIDs) == 0 {
+		duration := time.Since(start)
+		prometheus.RecordTimer("postgres_get_active_cron_jobs_for_user_duration", duration, "database", "postgres")
+		prometheus.RecordCounter("postgres_get_active_cron_jobs_for_user_total", 1, "database", "postgres", "status", "success")
+		prometheus.RecordCounter("postgres_user_active_cron_jobs_retrieved_total", 0, "database", "postgres")
+		return []CronJobListingDB{}, nil
+	}
+
+	// Now get all CronJobListingDB by IDs where they have tasks with status failed or running
+	var res []CronJobListingDB
+	db := storage.DB.Preload("Tasks", "status IN ?", []string{"failed", "running"}).
+		Where("id IN ?", cronJobIDs).
+		Find(&res)
+	if db != nil && db.Error != nil {
+		prometheus.RecordError("postgres_get_active_cron_jobs_for_user_failed", "storage")
+		return nil, fmt.Errorf("error getting cron jobs with failed/running tasks: %v", db.Error)
+	}
+
+	// Filter out cron jobs that don't have any failed or running tasks
+	var filteredRes []CronJobListingDB
+	for _, cronJob := range res {
+		if len(cronJob.Tasks) > 0 {
+			filteredRes = append(filteredRes, cronJob)
+		}
+	}
+
+	duration := time.Since(start)
+	prometheus.RecordTimer("postgres_get_active_cron_jobs_for_user_duration", duration, "database", "postgres")
+	prometheus.RecordCounter("postgres_get_active_cron_jobs_for_user_total", 1, "database", "postgres", "status", "success")
+	prometheus.RecordCounter("postgres_user_active_cron_jobs_retrieved_total", int64(len(filteredRes)), "database", "postgres")
+
+	return filteredRes, nil
+}
+
 func (storage *PosgresStore) UpdateHeartBeatForTask(ID uint) error {
 	start := time.Now()
 
