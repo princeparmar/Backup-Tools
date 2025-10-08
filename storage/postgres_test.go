@@ -2,14 +2,14 @@ package storage
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 )
 
 func TestConnect(t *testing.T) {
-	dsn := os.Getenv("POSTGRES_DSN")
+	dsn := utils.GetEnvWithKey("POSTGRES_DSN")
 
 	postgres, _ := NewPostgresStore(dsn, false)
 	var res GoogleAuthStorage

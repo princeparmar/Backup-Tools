@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 )
 
 type PushGatewayConfig struct {
@@ -31,7 +32,7 @@ func InitFromEnv(ctx context.Context) error {
 	InitMetrics()
 
 	// Initialize push gateway if configured
-	pushGatewayURL := os.Getenv("PROMETHEUS_PUSHGATEWAY_URL")
+	pushGatewayURL := utils.GetEnvWithKey("PROMETHEUS_PUSHGATEWAY_URL")
 	if pushGatewayURL == "" {
 		logger.Info(ctx, "No Prometheus push gateway URL configured, skipping push gateway setup")
 		return nil
@@ -49,8 +50,8 @@ func InitFromEnv(ctx context.Context) error {
 		URL:      pushGatewayURL,
 		JobName:  getEnvWithDefault("PROMETHEUS_JOB_NAME", "backup-tools"),
 		Instance: getEnvWithDefault("PROMETHEUS_INSTANCE", getHostname()),
-		Username: os.Getenv("PROMETHEUS_USERNAME"),
-		Password: os.Getenv("PROMETHEUS_PASSWORD"),
+		Username: utils.GetEnvWithKey("PROMETHEUS_USERNAME"),
+		Password: utils.GetEnvWithKey("PROMETHEUS_PASSWORD"),
 		Interval: getPushInterval(),
 	}
 
@@ -77,7 +78,7 @@ func InitFromEnv(ctx context.Context) error {
 
 // getEnvWithDefault gets environment variable with fallback to default value
 func getEnvWithDefault(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
+	if value := utils.GetEnvWithKey(key); value != "" {
 		return value
 	}
 	return defaultValue
@@ -85,7 +86,7 @@ func getEnvWithDefault(key, defaultValue string) string {
 
 // getPushInterval parses push interval from environment with default fallback
 func getPushInterval() time.Duration {
-	intervalStr := os.Getenv("PROMETHEUS_PUSH_INTERVAL")
+	intervalStr := utils.GetEnvWithKey("PROMETHEUS_PUSH_INTERVAL")
 	if intervalStr == "" {
 		return 30 * time.Second
 	}

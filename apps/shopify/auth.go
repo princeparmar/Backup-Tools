@@ -2,10 +2,10 @@ package shopify
 
 import (
 	"context"
-	"os"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	goshopify "github.com/bold-commerce/go-shopify/v4"
 )
 
@@ -19,8 +19,8 @@ var ShopifyInitApp *ShopifyApp
 func Init() {
 	start := time.Now()
 
-	apiKey := os.Getenv("SHOPIFY_API_KEY")
-	apiSecret := os.Getenv("SHOPIFY_API_SECRET")
+	apiKey := utils.GetEnvWithKey("SHOPIFY_API_KEY")
+	apiSecret := utils.GetEnvWithKey("SHOPIFY_API_SECRET")
 	ShopifyInitApp = &ShopifyApp{App: goshopify.App{
 		ApiKey:      apiKey,
 		ApiSecret:   apiSecret,

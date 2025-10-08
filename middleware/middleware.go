@@ -2,13 +2,13 @@ package middleware
 
 import (
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/storage"
 
 	"github.com/dgrijalva/jwt-go"
@@ -26,7 +26,7 @@ var (
 
 // InitializeAllMiddleware sets up all middleware for the Echo server
 func InitializeAllMiddleware(e *echo.Echo, db *storage.PosgresStore) {
-	if os.Getenv("HTTP_LOGGING") == "true" {
+	if utils.GetEnvWithKey("HTTP_LOGGING") == "true" {
 		e.Use(echomiddleware.Logger())
 	}
 	e.Use(echomiddleware.Recover())

@@ -7,11 +7,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 )
 
 type TokenResponse struct {
@@ -36,8 +36,8 @@ func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 
 	// Prepare the form data
 	data := url.Values{}
-	clientID := os.Getenv("OUTLOOK_CLIENT_ID")
-	clientSecret := os.Getenv("OUTLOOK_CLIENT_SECRET")
+	clientID := utils.GetEnvWithKey("OUTLOOK_CLIENT_ID")
+	clientSecret := utils.GetEnvWithKey("OUTLOOK_CLIENT_SECRET")
 
 	if clientID == "" {
 		prometheus.RecordError("outlook_auth_client_id_missing", "outlook")

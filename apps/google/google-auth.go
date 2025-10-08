@@ -192,7 +192,7 @@ func Autentificateg(c echo.Context) error {
 		log.Printf("Unable to parse client secret file to config: %v", err)
 	}
 
-	var redirectAddr = os.Getenv("FRONTEND_URL") // Add Frontend URL for redirect to file .env
+	var redirectAddr = utils.GetEnvWithKey("FRONTEND_URL") // Add Frontend URL for redirect to file .env
 	if AuthRequestChecker(c) {
 		return c.String(http.StatusAccepted, "you are already authenticated!") // if code 202 - means already authentificated
 	} else {

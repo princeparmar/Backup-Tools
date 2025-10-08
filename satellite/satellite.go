@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/dgrijalva/jwt-go"
 	"github.com/labstack/echo/v4"
 	"storj.io/common/grant"
@@ -374,7 +374,7 @@ func SendEmailForBackupFailure(ctx context.Context, email, errorMsg, method stri
 		return fmt.Errorf("STORX_SATELLITE_SERVICE not set")
 	}
 
-	emailAPIKey := os.Getenv("EMAIL_API_KEY")
+	emailAPIKey := utils.GetEnvWithKey("EMAIL_API_KEY")
 	if emailAPIKey == "" {
 		return fmt.Errorf("EMAIL_API_KEY not set")
 	}

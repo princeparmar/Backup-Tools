@@ -2,10 +2,10 @@ package dropbox
 
 import (
 	"io"
-	"os"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/dropbox/dropbox-sdk-go-unofficial/v6/dropbox"
 	"github.com/dropbox/dropbox-sdk-go-unofficial/v6/dropbox/files"
 )
@@ -23,7 +23,7 @@ func NewDropboxClient() (*DropboxClient, error) {
 	start := time.Now()
 
 	cfg := dropbox.Config{
-		Token: os.Getenv("DROPBOX_TOKEN"),
+		Token: utils.GetEnvWithKey("DROPBOX_TOKEN"),
 	}
 	dbx := files.New(cfg)
 

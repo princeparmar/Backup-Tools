@@ -9,6 +9,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger/newrelic"
 	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/router"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
@@ -56,10 +57,10 @@ func initApp(ctx context.Context) error {
 		}
 	}
 
-	satellite.StorxSatelliteService = os.Getenv("STORX_SATELLITE_SERVICE")
+	satellite.StorxSatelliteService = utils.GetEnvWithKey("STORX_SATELLITE_SERVICE")
 
 	// Initialize logger with New Relic integration
-	if apiKey := os.Getenv("NEWRELIC_API_KEY"); apiKey != "" || os.Getenv("NEWRELIC_ENABLED") == "true" {
+	if apiKey := utils.GetEnvWithKey("NEWRELIC_API_KEY"); apiKey != "" || utils.GetEnvWithKey("NEWRELIC_ENABLED") == "true" {
 		logger.InitWithNewRelic(newrelic.NewLogInterceptor(apiKey, true))
 	}
 
@@ -74,8 +75,8 @@ func initApp(ctx context.Context) error {
 
 func setupStorage(ctx context.Context) (*storage.PosgresStore, error) {
 	store, err := storage.NewPostgresStore(
-		os.Getenv("POSTGRES_DSN"),
-		os.Getenv("QUERY_LOGGING") == "true",
+		utils.GetEnvWithKey("POSTGRES_DSN"),
+		utils.GetEnvWithKey("QUERY_LOGGING") == "true",
 	)
 	if err != nil {
 		logger.Error(ctx, "failed to create postgres store", logger.ErrorField(err))
@@ -91,7 +92,7 @@ func setupStorage(ctx context.Context) (*storage.PosgresStore, error) {
 }
 
 func getAddress() string {
-	if port := os.Getenv("PORT"); port != "" {
+	if port := utils.GetEnvWithKey("PORT"); port != "" {
 		return ":" + port
 	}
 	return ":8005"
