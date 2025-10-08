@@ -2,10 +2,8 @@ package prometheus
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"runtime"
-	"strings"
 	"sync"
 	"time"
 
@@ -305,19 +303,6 @@ func InstrumentOperation(operationName string, tags ...monkit.SeriesTag) func(co
 	}
 }
 
-// CreateMonkitHandler creates an HTTP handler for Monkit metrics
-func CreateMonkitHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-
-		monkit.Default.Stats(func(key monkit.SeriesKey, field string, val float64) {
-			metricName := sanitizeMetricName(key.Measurement)
-			labels := makeLabels(key)
-			fmt.Fprintf(w, "%s%s %v\n", metricName, labels, val)
-		})
-	})
-}
-
 // CreateMetricsHandler creates a standard Prometheus metrics handler
 func CreateMetricsHandler() http.Handler {
 	return promhttp.Handler()
@@ -332,44 +317,4 @@ func labelsToTags(labels ...string) []monkit.SeriesTag {
 		}
 	}
 	return tags
-}
-
-func sanitizeMetricName(name string) string {
-	var result strings.Builder
-	for i, c := range name {
-		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' {
-			result.WriteRune(c)
-		} else if c >= '0' && c <= '9' {
-			if i == 0 {
-				result.WriteRune('_')
-			}
-			result.WriteRune(c)
-		} else {
-			result.WriteRune('_')
-		}
-	}
-
-	if result.Len() == 0 {
-		return "unnamed_metric"
-	}
-	return result.String()
-}
-
-func makeLabels(key monkit.SeriesKey) string {
-	if key.Tags.Len() == 0 {
-		return ""
-	}
-
-	var labels strings.Builder
-	labels.WriteString("{")
-	first := true
-	for k, v := range key.Tags.All() {
-		if !first {
-			labels.WriteString(",")
-		}
-		labels.WriteString(fmt.Sprintf("%s=%q", sanitizeMetricName(k), v))
-		first = false
-	}
-	labels.WriteString("}")
-	return labels.String()
 }

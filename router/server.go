@@ -13,7 +13,6 @@ import (
 
 	middleware "github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/labstack/echo/v4"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func StartServer(db *storage.PosgresStore, address string) {
@@ -24,8 +23,7 @@ func StartServer(db *storage.PosgresStore, address string) {
 	middleware.InitializeAllMiddleware(e, db)
 
 	// Prometheus metrics endpoints
-	e.GET("/metrics", echo.WrapHandler(promhttp.Handler()))
-	e.GET("/monkit", echo.WrapHandler(prometheus.CreateMonkitHandler()))
+	e.GET("/metrics", echo.WrapHandler(prometheus.CreateMetricsHandler()))
 
 	e.POST("/satellite-auth", satellite.HandleSatelliteAuthentication)
 	e.POST("/google-auth", googlepack.Autentificate)
