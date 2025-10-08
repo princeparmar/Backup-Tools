@@ -374,6 +374,15 @@ func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *sto
 		}
 	}
 
+	// Save task to database
+	if err := a.store.DB.Save(task).Error; err != nil {
+		logger.Error(ctx, "Failed to save task status",
+			logger.Int("task_id", int(task.ID)),
+			logger.ErrorField(err),
+		)
+		return fmt.Errorf("failed to save task: %w", err)
+	}
+
 	// Save job to database if job exists
 	if job != nil {
 		if err := a.store.DB.Save(job).Error; err != nil {
