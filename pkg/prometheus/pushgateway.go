@@ -181,8 +181,8 @@ func StartPushGateway(ctx context.Context, config PushGatewayConfig) error {
 func InitPushGateway(config PushGatewayConfig) error {
 	GlobalPushGateway = NewPushGatewayClient(config)
 
-	metricsMu.RLock()
-	defer metricsMu.RUnlock()
+	globalMu.RLock()
+	defer globalMu.RUnlock()
 	if GlobalMetrics != nil {
 		GlobalPushGateway.RegisterMetrics(GlobalMetrics)
 	}

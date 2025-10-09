@@ -8,12 +8,12 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	monkit "github.com/spacemonkeygo/monkit/v3"
 )
 
-// MetricType represents the type of metric
 type MetricType string
 
 const (
@@ -23,69 +23,67 @@ const (
 	TimerType     MetricType = "timer"
 )
 
-// MetricConfig holds configuration for a metric
-type MetricConfig struct {
-	Name        string
-	Type        MetricType
-	Help        string
-	Labels      []string
-	ConstLabels map[string]string
-}
-
-// Metrics holds all Prometheus metrics with Monkit integration
 type Metrics struct {
-	// Monkit registry for automatic instrumentation
 	monkitRegistry *monkit.Registry
+	promRegistry   *prometheus.Registry
+	metrics        map[string]prometheus.Collector
+	mu             sync.RWMutex
 
 	// System metrics
 	CPUUsage       prometheus.Gauge
 	MemoryUsage    prometheus.Gauge
 	GoroutineCount prometheus.Gauge
-
-	// Generic metric storage
-	metrics map[string]prometheus.Collector
-	mu      sync.RWMutex
 }
 
-// Global metrics instance
 var (
 	GlobalMetrics *Metrics
-	metricsMu     sync.RWMutex
 )
 
-// NewMetrics creates a new Metrics instance with Monkit integration
 func NewMetrics() *Metrics {
-	return &Metrics{
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+	)
+
+	m := &Metrics{
 		monkitRegistry: monkit.Default,
+		promRegistry:   registry,
 		metrics:        make(map[string]prometheus.Collector),
-
-		CPUUsage: promauto.NewGauge(prometheus.GaugeOpts{
-			Name: "system_cpu_usage_percent",
-			Help: "Current CPU usage percentage",
-		}),
-
-		MemoryUsage: promauto.NewGauge(prometheus.GaugeOpts{
-			Name: "system_memory_usage_bytes",
-			Help: "Current memory usage in bytes",
-		}),
-
-		GoroutineCount: promauto.NewGauge(prometheus.GaugeOpts{
-			Name: "system_goroutines_total",
-			Help: "Current number of goroutines",
-		}),
 	}
+
+	factory := promauto.With(registry)
+	m.CPUUsage = factory.NewGauge(prometheus.GaugeOpts{
+		Name: "system_cpu_usage_percent",
+		Help: "Current CPU usage percentage",
+	})
+	m.MemoryUsage = factory.NewGauge(prometheus.GaugeOpts{
+		Name: "system_memory_usage_bytes",
+		Help: "Current memory usage in bytes",
+	})
+	m.GoroutineCount = factory.NewGauge(prometheus.GaugeOpts{
+		Name: "system_goroutines_total",
+		Help: "Current number of goroutines",
+	})
+
+	return m
 }
 
-// InitMetrics initializes the global metrics instance
 func InitMetrics() {
-	metricsMu.Lock()
-	defer metricsMu.Unlock()
+	globalMu.Lock()
+	defer globalMu.Unlock()
 	if GlobalMetrics == nil {
 		GlobalMetrics = NewMetrics()
 	}
 }
 
-// GetMonkitRegistry returns the monkit registry for Prometheus collection
+func (m *Metrics) GetPrometheusRegistry() *prometheus.Registry {
+	if m == nil {
+		return prometheus.DefaultRegisterer.(*prometheus.Registry)
+	}
+	return m.promRegistry
+}
+
 func (m *Metrics) GetMonkitRegistry() *monkit.Registry {
 	if m == nil {
 		return monkit.Default
@@ -93,12 +91,40 @@ func (m *Metrics) GetMonkitRegistry() *monkit.Registry {
 	return m.monkitRegistry
 }
 
-// Generic instrumentation method using Monkit
+func CreateMetricsHandler() http.Handler {
+	globalMu.RLock()
+	defer globalMu.RUnlock()
+
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+	)
+
+	if GlobalMetrics != nil {
+		registry.MustRegister(
+			GlobalMetrics.CPUUsage,
+			GlobalMetrics.MemoryUsage,
+			GlobalMetrics.GoroutineCount,
+		)
+
+		GlobalMetrics.mu.RLock()
+		for _, collector := range GlobalMetrics.metrics {
+			registry.MustRegister(collector)
+		}
+		GlobalMetrics.mu.RUnlock()
+
+		if GlobalMetrics.monkitRegistry != nil {
+			registry.MustRegister(NewMonkitCollector(GlobalMetrics.monkitRegistry))
+		}
+	}
+
+	return promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
+}
+
 func (m *Metrics) InstrumentOperation(operationName string, tags ...monkit.SeriesTag) func(context.Context) func(error) {
 	if m == nil || m.monkitRegistry == nil {
-		return func(ctx context.Context) func(error) {
-			return func(err error) {}
-		}
+		return noOpInstrumentation
 	}
 
 	task := m.monkitRegistry.Package().Task(append(tags,
@@ -108,7 +134,6 @@ func (m *Metrics) InstrumentOperation(operationName string, tags ...monkit.Serie
 		return func(err error) {
 			duration := time.Since(start)
 			task(&ctx)(&err)
-			// Also record as a Prometheus metric
 			status := "success"
 			if err != nil {
 				status = "error"
@@ -118,27 +143,24 @@ func (m *Metrics) InstrumentOperation(operationName string, tags ...monkit.Serie
 	}
 }
 
-// Generic metric recording methods
 func (m *Metrics) RecordMetric(metricName string, metricType MetricType, value float64, labels ...string) {
 	if m == nil || m.monkitRegistry == nil {
 		return
 	}
 
 	tags := labelsToTags(labels...)
+	pkg := m.monkitRegistry.Package()
 
 	switch metricType {
 	case CounterType:
-		m.monkitRegistry.Package().Counter(metricName, tags...).Inc(int64(value))
+		pkg.Counter(metricName, tags...).Inc(int64(value))
 	case HistogramType, GaugeType:
-		m.monkitRegistry.Package().FloatVal(metricName, tags...).Observe(value)
+		pkg.FloatVal(metricName, tags...).Observe(value)
 	case TimerType:
-		// For TimerType, we record the duration value directly as a histogram
-		// This allows us to record pre-calculated durations
-		m.monkitRegistry.Package().FloatVal(metricName+"_duration_seconds", tags...).Observe(value)
+		pkg.FloatVal(metricName+"_duration_seconds", tags...).Observe(value)
 	}
 }
 
-// Convenience methods for specific metric types
 func (m *Metrics) RecordCounter(metricName string, value int64, labels ...string) {
 	if m != nil {
 		m.RecordMetric(metricName, CounterType, float64(value), labels...)
@@ -163,7 +185,6 @@ func (m *Metrics) RecordTimer(metricName string, duration time.Duration, labels 
 	}
 }
 
-// Generic operation recording methods
 func (m *Metrics) RecordOperation(operation, status string, duration time.Duration, labels ...string) {
 	if m != nil {
 		allLabels := append([]string{"operation", operation, "status", status}, labels...)
@@ -186,7 +207,6 @@ func (m *Metrics) RecordSize(operation string, size int64, labels ...string) {
 	}
 }
 
-// UpdateSystemMetrics updates system-level metrics
 func (m *Metrics) UpdateSystemMetrics() {
 	if m == nil {
 		return
@@ -198,8 +218,7 @@ func (m *Metrics) UpdateSystemMetrics() {
 	runtime.ReadMemStats(&memStats)
 	m.MemoryUsage.Set(float64(memStats.Alloc))
 
-	// CPU usage would require more complex implementation
-	// For now, we'll calculate a simple CPU usage based on goroutines
+	// Simple CPU estimate based on goroutines
 	cpuEstimate := float64(runtime.NumGoroutine()) * 0.1
 	if cpuEstimate > 100 {
 		cpuEstimate = 100
@@ -207,7 +226,6 @@ func (m *Metrics) UpdateSystemMetrics() {
 	m.CPUUsage.Set(cpuEstimate)
 }
 
-// StartSystemMetricsCollection starts periodic system metrics collection
 func (m *Metrics) StartSystemMetricsCollection(ctx context.Context) {
 	if m == nil {
 		return
@@ -226,89 +244,76 @@ func (m *Metrics) StartSystemMetricsCollection(ctx context.Context) {
 	}
 }
 
-// Global convenience functions for generic metrics
-func RecordMetric(metricName string, metricType MetricType, value float64, labels ...string) {
-	metricsMu.RLock()
-	defer metricsMu.RUnlock()
+// Global convenience functions
+func withGlobalMetrics(fn func(*Metrics)) {
+	globalMu.RLock()
+	defer globalMu.RUnlock()
 	if GlobalMetrics != nil {
-		GlobalMetrics.RecordMetric(metricName, metricType, value, labels...)
+		fn(GlobalMetrics)
 	}
+}
+
+func RecordMetric(metricName string, metricType MetricType, value float64, labels ...string) {
+	withGlobalMetrics(func(m *Metrics) {
+		m.RecordMetric(metricName, metricType, value, labels...)
+	})
 }
 
 func RecordCounter(metricName string, value int64, labels ...string) {
-	metricsMu.RLock()
-	defer metricsMu.RUnlock()
-	if GlobalMetrics != nil {
-		GlobalMetrics.RecordCounter(metricName, value, labels...)
-	}
+	withGlobalMetrics(func(m *Metrics) {
+		m.RecordCounter(metricName, value, labels...)
+	})
 }
 
 func RecordHistogram(metricName string, value float64, labels ...string) {
-	metricsMu.RLock()
-	defer metricsMu.RUnlock()
-	if GlobalMetrics != nil {
-		GlobalMetrics.RecordHistogram(metricName, value, labels...)
-	}
+	withGlobalMetrics(func(m *Metrics) {
+		m.RecordHistogram(metricName, value, labels...)
+	})
 }
 
 func RecordGauge(metricName string, value float64, labels ...string) {
-	metricsMu.RLock()
-	defer metricsMu.RUnlock()
-	if GlobalMetrics != nil {
-		GlobalMetrics.RecordGauge(metricName, value, labels...)
-	}
+	withGlobalMetrics(func(m *Metrics) {
+		m.RecordGauge(metricName, value, labels...)
+	})
 }
 
 func RecordTimer(metricName string, duration time.Duration, labels ...string) {
-	metricsMu.RLock()
-	defer metricsMu.RUnlock()
-	if GlobalMetrics != nil {
-		GlobalMetrics.RecordTimer(metricName, duration, labels...)
-	}
+	withGlobalMetrics(func(m *Metrics) {
+		m.RecordTimer(metricName, duration, labels...)
+	})
 }
 
 func RecordOperation(operation, status string, duration time.Duration, labels ...string) {
-	metricsMu.RLock()
-	defer metricsMu.RUnlock()
-	if GlobalMetrics != nil {
-		GlobalMetrics.RecordOperation(operation, status, duration, labels...)
-	}
+	withGlobalMetrics(func(m *Metrics) {
+		m.RecordOperation(operation, status, duration, labels...)
+	})
 }
 
 func RecordError(errorType, component string, labels ...string) {
-	metricsMu.RLock()
-	defer metricsMu.RUnlock()
-	if GlobalMetrics != nil {
-		GlobalMetrics.RecordError(errorType, component, labels...)
-	}
+	withGlobalMetrics(func(m *Metrics) {
+		m.RecordError(errorType, component, labels...)
+	})
 }
 
 func RecordSize(operation string, size int64, labels ...string) {
-	metricsMu.RLock()
-	defer metricsMu.RUnlock()
-	if GlobalMetrics != nil {
-		GlobalMetrics.RecordSize(operation, size, labels...)
-	}
+	withGlobalMetrics(func(m *Metrics) {
+		m.RecordSize(operation, size, labels...)
+	})
 }
 
-// InstrumentOperation provides global instrumentation
 func InstrumentOperation(operationName string, tags ...monkit.SeriesTag) func(context.Context) func(error) {
-	metricsMu.RLock()
-	defer metricsMu.RUnlock()
+	globalMu.RLock()
+	defer globalMu.RUnlock()
 	if GlobalMetrics != nil {
 		return GlobalMetrics.InstrumentOperation(operationName, tags...)
 	}
-	return func(ctx context.Context) func(error) {
-		return func(err error) {}
-	}
+	return noOpInstrumentation
 }
 
-// CreateMetricsHandler creates a standard Prometheus metrics handler
-func CreateMetricsHandler() http.Handler {
-	return promhttp.Handler()
+func noOpInstrumentation(ctx context.Context) func(error) {
+	return func(err error) {}
 }
 
-// Helper functions
 func labelsToTags(labels ...string) []monkit.SeriesTag {
 	tags := make([]monkit.SeriesTag, 0, len(labels)/2)
 	for i := 0; i < len(labels); i += 2 {
