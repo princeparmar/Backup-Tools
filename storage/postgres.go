@@ -5,7 +5,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
 	"golang.org/x/oauth2"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -33,7 +32,6 @@ type QuickbooksAuthStorage struct {
 
 // NewPostgresStore creates a new PostgreSQL store instance
 func NewPostgresStore(dsn string, queryLogging bool) (*PosgresStore, error) {
-	start := time.Now()
 
 	logLevel := logger.Silent
 	if queryLogging {
@@ -52,21 +50,14 @@ func NewPostgresStore(dsn string, queryLogging bool) (*PosgresStore, error) {
 
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: newLogger})
 	if err != nil {
-		prometheus.RecordError("postgres_connection_failed", "storage")
 		return nil, err
 	}
-
-	duration := time.Since(start)
-	prometheus.RecordTimer("postgres_connection_duration", duration, "database", "postgres")
-	prometheus.RecordCounter("postgres_connection_total", 1, "database", "postgres", "status", "success")
 
 	return &PosgresStore{DB: db}, nil
 }
 
 // Migrate runs database migrations
 func (s *PosgresStore) Migrate() error {
-	start := time.Now()
-
 	err := s.DB.AutoMigrate(
 		&GoogleAuthStorage{},
 		&ShopifyAuthStorage{},
@@ -75,13 +66,8 @@ func (s *PosgresStore) Migrate() error {
 		&TaskListingDB{},
 	)
 	if err != nil {
-		prometheus.RecordError("postgres_migration_failed", "storage")
 		return err
 	}
-
-	duration := time.Since(start)
-	prometheus.RecordTimer("postgres_migration_duration", duration, "database", "postgres")
-	prometheus.RecordCounter("postgres_migration_total", 1, "database", "postgres", "status", "success")
 
 	return nil
 }
