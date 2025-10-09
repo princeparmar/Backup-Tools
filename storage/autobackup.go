@@ -214,22 +214,17 @@ func (storage *PosgresStore) GetAllCronJobsForUser(userID string) ([]CronJobList
 }
 
 type LiveCronJobListingDB struct {
-	ID               uint                `json:"id"`
-	Name             string              `json:"name"`
-	Method           string              `json:"method"`
-	Message          string              `json:"message"`
-	MessageStatus    string              `json:"message_status"`
-	Active           bool                `json:"active"`
-	GmailSyncCount   uint                `json:"gmail_sync_count"`
-	OutlookSyncCount uint                `json:"outlook_sync_count"`
-	Tasks            []LiveTaskListingDB `json:"tasks"`
+	ID            uint                `json:"id"`
+	Name          string              `json:"name"`
+	Method        string              `json:"method"`
+	Message       string              `json:"message"`
+	MessageStatus string              `json:"message_status"`
+	Tasks         []LiveTaskListingDB `json:"tasks"`
 }
 
 type LiveTaskListingDB struct {
-	StartTime  *time.Time `json:"start_time"`
-	Status     string     `json:"status"`
-	RetryCount uint       `json:"retry_count"`
-	Execution  uint64     `json:"execution"`
+	StartTime *time.Time `json:"start_time"`
+	Status    string     `json:"status"`
 }
 
 func (storage *PosgresStore) GetAllActiveCronJobsForUser(userID string) ([]LiveCronJobListingDB, error) {
@@ -237,10 +232,8 @@ func (storage *PosgresStore) GetAllActiveCronJobsForUser(userID string) ([]LiveC
 	// Query to get active cron jobs with their failed/running tasks in one go
 	query := `
 		SELECT 
-			cj.id,cj.name,cj.method,cj.message,cj.message_status,cj.active,
-			COALESCE((cj.task_memory->>'gmail_sync_count')::int, 0) as gmail_sync_count,
-			COALESCE((cj.task_memory->>'outlook_sync_count')::int, 0) as outlook_sync_count,
-			t.start_time,t.status,t.retry_count,t.execution
+			cj.id,cj.name,cj.method,cj.message,cj.message_status,
+			t.start_time,t.status
 		FROM cron_job_listing_dbs cj
 		LEFT JOIN task_listing_dbs t ON cj.id = t.cron_job_id AND t.status IN ('failed', 'running')
 		WHERE cj.user_id = $1 
@@ -260,23 +253,18 @@ func (storage *PosgresStore) GetAllActiveCronJobsForUser(userID string) ([]LiveC
 
 	for rows.Next() {
 		var (
-			cronJobID        uint
-			name             string
-			method           string
-			message          string
-			messageStatus    string
-			active           bool
-			gmailSyncCount   uint
-			outlookSyncCount uint
-			startTime        *time.Time
-			status           *string
-			retryCount       *uint
-			execution        *uint64
+			cronJobID     uint
+			name          string
+			method        string
+			message       string
+			messageStatus string
+			startTime     *time.Time
+			status        *string
 		)
 
 		err := rows.Scan(
-			&cronJobID, &name, &method, &message, &messageStatus, &active,
-			&gmailSyncCount, &outlookSyncCount, &startTime, &status, &retryCount, &execution,
+			&cronJobID, &name, &method, &message, &messageStatus,
+			&startTime, &status,
 		)
 		if err != nil {
 			prometheus.RecordError("postgres_scan_active_cron_jobs_failed", "storage")
@@ -286,25 +274,20 @@ func (storage *PosgresStore) GetAllActiveCronJobsForUser(userID string) ([]LiveC
 		// Create or get cron job entry
 		if _, exists := cronJobsMap[cronJobID]; !exists {
 			cronJobsMap[cronJobID] = &LiveCronJobListingDB{
-				ID:               cronJobID,
-				Name:             name,
-				Method:           method,
-				Message:          message,
-				MessageStatus:    messageStatus,
-				Active:           active,
-				GmailSyncCount:   gmailSyncCount,
-				OutlookSyncCount: outlookSyncCount,
-				Tasks:            []LiveTaskListingDB{},
+				ID:            cronJobID,
+				Name:          name,
+				Method:        method,
+				Message:       message,
+				MessageStatus: messageStatus,
+				Tasks:         []LiveTaskListingDB{},
 			}
 		}
 
 		// Add task if it exists (status will be non-null for failed/running tasks)
 		if status != nil && startTime != nil {
 			task := LiveTaskListingDB{
-				StartTime:  startTime,
-				Status:     *status,
-				RetryCount: *retryCount,
-				Execution:  *execution,
+				StartTime: startTime,
+				Status:    *status,
 			}
 			cronJobsMap[cronJobID].Tasks = append(cronJobsMap[cronJobID].Tasks, task)
 		}
