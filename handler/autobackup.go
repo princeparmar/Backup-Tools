@@ -10,10 +10,13 @@ import (
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/labstack/echo/v4"
 )
+
+var Err error
 
 var intervalValues = map[string][]string{
 	"monthly": {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13",
@@ -25,6 +28,8 @@ var intervalValues = map[string][]string{
 
 // <<<<<------------ AUTOMATIC BACKUP ------------>>>>>
 func HandleAutomaticSyncListForUser(c echo.Context) error {
+	ctx := c.Request().Context()
+	defer prometheus.Mon.Task()(&ctx)(&Err)
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -49,6 +54,10 @@ func HandleAutomaticSyncListForUser(c echo.Context) error {
 }
 
 func HandleAutomaticSyncActiveJobsForUser(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer prometheus.Mon.Task()(&ctx)(&err)
+
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -73,6 +82,11 @@ func HandleAutomaticSyncActiveJobsForUser(c echo.Context) error {
 }
 
 func HandleIntervalOnConfig(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+
+	defer prometheus.Mon.Task()(&ctx)(&err)
+
 	c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Interval Values",
 		"data":    intervalValues,

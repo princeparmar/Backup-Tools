@@ -37,6 +37,7 @@ type Metrics struct {
 
 var (
 	GlobalMetrics *Metrics
+	Mon           = monkit.Package()
 )
 
 func NewMetrics() *Metrics {
