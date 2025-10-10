@@ -1,9 +1,6 @@
 package quickbooks
 
 import (
-	"time"
-
-	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	quickbooks "github.com/rwestlund/quickbooks-go"
 )
@@ -14,21 +11,14 @@ type QBClient struct {
 
 // Create an app.
 func CreateClient() (*QBClient, error) {
-	start := time.Now()
-
 	clientId := utils.GetEnvWithKey("QUICKBOOKS_API_KEY")
 	clientSecret := utils.GetEnvWithKey("QUICKBOOKS_API_SECRET")
 	realmId := utils.GetEnvWithKey("QUICKBOOKS_REALM_ID")
 
 	client, err := quickbooks.NewQuickbooksClient(clientId, clientSecret, realmId, false, nil)
 	if err != nil {
-		prometheus.RecordError("quickbooks_client_creation_failed", "quickbooks")
 		return nil, err
 	}
-
-	duration := time.Since(start)
-	prometheus.RecordTimer("quickbooks_client_creation_duration", duration, "service", "quickbooks")
-	prometheus.RecordCounter("quickbooks_client_creation_total", 1, "service", "quickbooks", "status", "success")
 
 	return &QBClient{Client: client}, nil
 }

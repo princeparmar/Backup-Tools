@@ -14,7 +14,6 @@ import (
 
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
-	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/storage"
 
@@ -128,17 +127,12 @@ func verifyToken(idToken string) (*TokenInfo, error) {
 }
 
 func Autentificate(c echo.Context) error {
-	start := time.Now()
-	defer func() {
-		prometheus.RecordOperation("auth_authenticate", "success", time.Since(start), "service", "auth")
-	}()
 
 	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 	authToken := c.FormValue("google-key")
 	// refreshToken := c.FormValue("refresh-key")
 
 	if authToken == "" {
-		prometheus.RecordError("auth_validation_error", "missing_token", "service", "auth")
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"error": "google-key is missing",
 		})
@@ -151,7 +145,6 @@ func Autentificate(c echo.Context) error {
 
 	_, err := verifyToken(authToken)
 	if err != nil {
-		prometheus.RecordError("auth_validation_error", "token_verification", "service", "auth")
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error validating google auth token": err.Error(),
 		})
@@ -170,7 +163,6 @@ func Autentificate(c echo.Context) error {
 	jwtString := CreateJWToken(googleExternalToken)
 	c.Response().Header().Add("Authorization", "Bearer "+jwtString)
 
-	prometheus.RecordCounter("auth_tokens_created", 1, "service", "auth")
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"google-auth": jwtString,
 	})
@@ -347,10 +339,6 @@ func GetGoogleAccountDetailsFromContext(c echo.Context) (*GoogleAuthResponse, er
 }
 
 func GetGoogleAccountDetailsFromAccessToken(accessToken string) (*GoogleAuthResponse, error) {
-	start := time.Now()
-	defer func() {
-		prometheus.RecordOperation("auth_get_account_details", "success", time.Since(start), "service", "auth")
-	}()
 
 	// Token info endpoint with the provided token
 	url := fmt.Sprintf("https://oauth2.googleapis.com/tokeninfo?access_token=%s", accessToken)
@@ -358,20 +346,17 @@ func GetGoogleAccountDetailsFromAccessToken(accessToken string) (*GoogleAuthResp
 	// Send an HTTP GET request to the token info endpoint
 	resp, err := http.Get(url)
 	if err != nil {
-		prometheus.RecordError("auth_api_error", "http_request", "service", "auth")
 		return nil, fmt.Errorf("error sending HTTP request: %v", err)
 	}
 	defer resp.Body.Close()
 
 	var tokenInfo GoogleAuthResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tokenInfo); err != nil {
-		prometheus.RecordError("auth_parse_error", "decode_response", "service", "auth")
 		return nil, fmt.Errorf("error decoding response: %v", err)
 	}
 
 	// Check if the response contains an error
 	if tokenInfo.Error != "" {
-		prometheus.RecordError("auth_validation_error", "token_info_error", "service", "auth")
 		return nil, fmt.Errorf("error in response: %v", tokenInfo.Error)
 	}
 

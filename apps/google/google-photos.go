@@ -17,7 +17,6 @@ import (
 	photoslibrary "github.com/gphotosuploader/googlemirror/api/photoslibrary/v1"
 	"github.com/labstack/echo/v4"
 
-	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 )
 
@@ -72,26 +71,19 @@ func (f *PhotosFilters) IsEmpty() bool {
 }
 
 func NewGPhotosClient(c echo.Context) (*GPotosClient, error) {
-	start := time.Now()
-	defer func() {
-		prometheus.RecordOperation("photos_client_creation", "success", time.Since(start), "service", "photos")
-	}()
 
 	httpClient, err := client(c)
 	if err != nil {
-		prometheus.RecordError("photos_auth_error", "get_client", "service", "photos")
 		return nil, err
 	}
 
 	gpclient, err := gphotos.NewClient(httpClient)
 	if err != nil {
-		prometheus.RecordError("photos_client_error", "create_client", "service", "photos")
 		return nil, err
 	}
 
 	service, err := photoslibrary.New(httpClient)
 	if err != nil {
-		prometheus.RecordError("photos_service_error", "create_service", "service", "photos")
 		return nil, err
 	}
 
@@ -103,10 +95,6 @@ func NewGPhotosClient(c echo.Context) (*GPotosClient, error) {
 }
 
 func (gpclient *GPotosClient) ListAlbums(c echo.Context) (*PaginatedAlbumsResponse, error) {
-	start := time.Now()
-	defer func() {
-		prometheus.RecordOperation("photos_list_albums", "success", time.Since(start), "service", "photos")
-	}()
 
 	// Parse filter parameter
 	filterParam := c.QueryParam("filter")
@@ -116,7 +104,6 @@ func (gpclient *GPotosClient) ListAlbums(c echo.Context) (*PaginatedAlbumsRespon
 	if filterParam != "" {
 		filters, err = DecodeURLPhotosFilter(filterParam)
 		if err != nil {
-			prometheus.RecordError("photos_filter_error", "decode_filter", "service", "photos")
 			return nil, fmt.Errorf("failed to decode URL photos filter: %w", err)
 		}
 	}
@@ -145,11 +132,9 @@ func (gpclient *GPotosClient) ListAlbums(c echo.Context) (*PaginatedAlbumsRespon
 	// Execute the API call
 	response, err := call.Do()
 	if err != nil {
-		prometheus.RecordError("photos_api_error", "list_albums", "service", "photos")
 		return nil, fmt.Errorf("failed to list albums: %w", err)
 	}
 
-	prometheus.RecordCounter("photos_albums_retrieved", int64(len(response.Albums)), "service", "photos")
 	return &PaginatedAlbumsResponse{
 		Albums:        convertToAlbumType(response.Albums),
 		NextPageToken: response.NextPageToken,
@@ -191,17 +176,12 @@ func convertToAlbumType(apiAlbums []*photoslibrary.Album) []albums.Album {
 }
 
 func (gpclient *GPotosClient) UploadFileToGPhotos(c echo.Context, filename, albumName string) error {
-	start := time.Now()
-	defer func() {
-		prometheus.RecordOperation("photos_upload_file", "success", time.Since(start), "service", "photos")
-	}()
 
 	ctx := context.Background()
 	alb, err := gpclient.Albums.GetByTitle(ctx, albumName)
 	if err != nil {
 		alb, err = gpclient.Albums.Create(ctx, albumName)
 		if err != nil {
-			prometheus.RecordError("photos_api_error", "create_album", "service", "photos")
 			return fmt.Errorf("failed to create album: %w", err)
 		}
 	}
@@ -209,19 +189,13 @@ func (gpclient *GPotosClient) UploadFileToGPhotos(c echo.Context, filename, albu
 	filepath := path.Join("./cache", filename)
 	_, err = gpclient.UploadFileToAlbum(ctx, alb.ID, filepath)
 	if err != nil {
-		prometheus.RecordError("photos_api_error", "upload_file", "service", "photos")
 		return fmt.Errorf("failed to upload file: %w", err)
 	}
 
-	prometheus.RecordCounter("photos_files_uploaded", 1, "service", "photos")
 	return nil
 }
 
 func (gpclient *GPotosClient) ListFilesFromAlbum(ctx context.Context, albumID string, filters *PhotosFilters) (*PaginatedMediaItemsResponse, error) {
-	start := time.Now()
-	defer func() {
-		prometheus.RecordOperation("photos_list_files_from_album", "success", time.Since(start), "service", "photos")
-	}()
 
 	limit := parseIntWithLimits("", 25, 1, 100)
 	if filters != nil && filters.Limit > 0 {
@@ -240,13 +214,11 @@ func (gpclient *GPotosClient) ListFilesFromAlbum(ctx context.Context, albumID st
 
 	response, err := gpclient.Service.MediaItems.Search(searchReq).Do()
 	if err != nil {
-		prometheus.RecordError("photos_api_error", "search_media_items", "service", "photos")
 		return nil, fmt.Errorf("failed to search media items: %w", err)
 	}
 
 	filteredItems := filterMediaItems(response.MediaItems, filters)
 
-	prometheus.RecordCounter("photos_media_items_retrieved", int64(len(filteredItems)), "service", "photos")
 	return &PaginatedMediaItemsResponse{
 		MediaItems:    filteredItems,
 		NextPageToken: response.NextPageToken,

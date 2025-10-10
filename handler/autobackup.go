@@ -10,7 +10,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
-	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
+	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/labstack/echo/v4"
@@ -29,7 +29,7 @@ var intervalValues = map[string][]string{
 // <<<<<------------ AUTOMATIC BACKUP ------------>>>>>
 func HandleAutomaticSyncListForUser(c echo.Context) error {
 	ctx := c.Request().Context()
-	defer prometheus.Mon.Task()(&ctx)(&Err)
+	defer monitor.Mon.Task()(&ctx)(&Err)
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -56,7 +56,7 @@ func HandleAutomaticSyncListForUser(c echo.Context) error {
 func HandleAutomaticSyncActiveJobsForUser(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
-	defer prometheus.Mon.Task()(&ctx)(&err)
+	defer monitor.Mon.Task()(&ctx)(&err)
 
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
@@ -84,8 +84,7 @@ func HandleAutomaticSyncActiveJobsForUser(c echo.Context) error {
 func HandleIntervalOnConfig(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
-
-	defer prometheus.Mon.Task()(&ctx)(&err)
+	defer monitor.Mon.Task()(&ctx)(&err)
 
 	c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Interval Values",
@@ -348,6 +347,7 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 
 	ctx := c.Request().Context()
 	logger.Info(ctx, "Starting automatic backup update request")
+	defer monitor.Mon.Task()(&ctx)(&Err)
 
 	// Validate jobID
 	jobID, err := strconv.Atoi(c.Param("job_id"))

@@ -4,11 +4,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/StorX2-0/Backup-Tools/crons"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger/newrelic"
-	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
+	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/router"
 	"github.com/StorX2-0/Backup-Tools/satellite"
@@ -64,12 +65,19 @@ func initApp(ctx context.Context) error {
 		logger.InitWithNewRelic(newrelic.NewLogInterceptor(apiKey, true))
 	}
 
-	// Initialize Prometheus metrics and push gateway from environment
-	if err := prometheus.InitFromEnv(ctx); err != nil {
-		// Don't exit, just log the error and continue without metrics pushing
-		logger.Error(ctx, "Failed to initialize Prometheus", logger.ErrorField(err))
+	// Initialize Prometheus metrics
+	if err := monitor.InitializeGlobalManager(); err != nil {
+		logger.Error(ctx, "Failed to initialize Prometheus metrics, retrying...", logger.ErrorField(err))
+		// Simple retry
+		time.Sleep(2 * time.Second)
+		if err := monitor.InitializeGlobalManager(); err != nil {
+			logger.Error(ctx, "Metrics initialization failed after retry, continuing without metrics", logger.ErrorField(err))
+		}
 	}
 
+	// Start system metrics updater (updates every 30 seconds)
+	monitor.StartSystemMetricsUpdater(30 * time.Second)
+	logger.Info(ctx, "System metrics updater started")
 	return nil
 }
 

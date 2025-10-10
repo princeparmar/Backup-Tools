@@ -9,10 +9,8 @@ import (
 	"mime/quotedprintable"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/StorX2-0/Backup-Tools/middleware"
-	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/storage"
 
@@ -72,21 +70,15 @@ type Attachment struct {
 }
 
 func NewGmailClient(c echo.Context) (*GmailClient, error) {
-	start := time.Now()
-	defer func() {
-		prometheus.RecordOperation("gmail_client_creation", "success", time.Since(start), "service", "gmail")
-	}()
 
 	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 
 	googleToken, err := GetGoogleTokenFromJWT(c)
 	if err != nil {
-		prometheus.RecordError("gmail_auth_error", "jwt_retrieval", "service", "gmail")
 		return nil, fmt.Errorf("unable to retrieve google-auth token from JWT: %v", err)
 	}
 	token, err := database.ReadGoogleAuthToken(googleToken)
 	if err != nil {
-		prometheus.RecordError("gmail_auth_error", "database_retrieval", "service", "gmail")
 		return nil, fmt.Errorf("unable to retrieve google-auth token from database: %v", err)
 	}
 
@@ -94,21 +86,14 @@ func NewGmailClient(c echo.Context) (*GmailClient, error) {
 }
 
 func NewGmailClientUsingToken(token string) (*GmailClient, error) {
-	start := time.Now()
-	defer func() {
-		prometheus.RecordOperation("gmail_client_creation_token", "success", time.Since(start), "service", "gmail")
-	}()
-
 	client, err := clientUsingToken(token)
 
 	if err != nil {
-		prometheus.RecordError("gmail_auth_error", "token_client", "service", "gmail")
 		return nil, err
 	}
 
 	serv, err := gmail.NewService(context.Background(), option.WithHTTPClient(client))
 	if err != nil {
-		prometheus.RecordError("gmail_service_error", "service_creation", "service", "gmail")
 		return nil, err
 	}
 
@@ -118,10 +103,6 @@ func NewGmailClientUsingToken(token string) (*GmailClient, error) {
 // Function takes nextPageToken and returns 100 results of User's threads.
 // (Pass `""` if you don't want to specify nextPageToken and get latest threads).
 func (client *GmailClient) GetUserThreads(nextPageToken string) (*ThreadsResponse, error) {
-	start := time.Now()
-	defer func() {
-		prometheus.RecordOperation("gmail_get_threads", "success", time.Since(start), "service", "gmail")
-	}()
 
 	req := client.Users.Threads.List("me").MaxResults(500)
 	if nextPageToken != "" {
@@ -130,7 +111,6 @@ func (client *GmailClient) GetUserThreads(nextPageToken string) (*ThreadsRespons
 
 	threads, err := req.Do()
 	if err != nil {
-		prometheus.RecordError("gmail_api_error", "get_threads", "service", "gmail")
 		return nil, err
 	}
 
@@ -141,7 +121,6 @@ func (client *GmailClient) GetUserThreads(nextPageToken string) (*ThreadsRespons
 		}
 	}
 
-	prometheus.RecordCounter("gmail_threads_retrieved", int64(len(ts)), "service", "gmail")
 	return &ThreadsResponse{
 		NextPageToken:      threads.NextPageToken,
 		ResultSizeEstimate: int(threads.ResultSizeEstimate),
@@ -175,10 +154,6 @@ func (client *GmailClient) GetUserThreadsIDs(nextPageToken string) (*gmail.ListT
 // Function takes nextPageToken and returns 100 results of User's messages.
 // (Pass `""` if you don't want to specify nextPageToken and get latest messages).
 func (client *GmailClient) GetUserMessages(nextPageToken string) (*MessagesResponse, error) {
-	start := time.Now()
-	defer func() {
-		prometheus.RecordOperation("gmail_get_messages", "success", time.Since(start), "service", "gmail")
-	}()
 
 	req := client.Users.Messages.List("me").MaxResults(500)
 	if nextPageToken != "" {
@@ -187,7 +162,6 @@ func (client *GmailClient) GetUserMessages(nextPageToken string) (*MessagesRespo
 
 	res, err := req.Do()
 	if err != nil {
-		prometheus.RecordError("gmail_api_error", "get_messages", "service", "gmail")
 		return nil, err
 	}
 
@@ -198,7 +172,6 @@ func (client *GmailClient) GetUserMessages(nextPageToken string) (*MessagesRespo
 		}
 	}
 
-	prometheus.RecordCounter("gmail_messages_retrieved", int64(len(messages)), "service", "gmail")
 	return &MessagesResponse{
 		Messages:      messages,
 		NextPageToken: res.NextPageToken,
@@ -206,10 +179,6 @@ func (client *GmailClient) GetUserMessages(nextPageToken string) (*MessagesRespo
 }
 
 func (client *GmailClient) GetUserMessagesIDs(nextPageToken string) (*gmail.ListMessagesResponse, error) {
-	start := time.Now()
-	defer func() {
-		prometheus.RecordOperation("gmail_get_message_ids", "success", time.Since(start), "service", "gmail")
-	}()
 
 	req := client.Users.Messages.List("me").MaxResults(500)
 	if nextPageToken != "" {
@@ -218,34 +187,25 @@ func (client *GmailClient) GetUserMessagesIDs(nextPageToken string) (*gmail.List
 
 	resp, err := req.Do()
 	if err != nil {
-		prometheus.RecordError("gmail_api_error", "get_message_ids", "service", "gmail")
 		return nil, err
 	}
 
-	prometheus.RecordCounter("gmail_message_ids_retrieved", int64(len(resp.Messages)), "service", "gmail")
 	return resp, nil
 }
 
 func (client *GmailClient) GetMessageDirect(msgID string) (*gmail.Message, error) {
-	start := time.Now()
-	defer func() {
-		prometheus.RecordOperation("gmail_get_message_direct", "success", time.Since(start), "service", "gmail")
-	}()
 
 	if strings.TrimSpace(msgID) == "" {
-		prometheus.RecordError("gmail_validation_error", "empty_message_id", "service", "gmail")
 		return nil, fmt.Errorf("message ID cannot be empty")
 	}
 
 	msg, err := client.Users.Messages.Get("me", msgID).Format("full").Do()
 	if err != nil {
-		prometheus.RecordError("gmail_api_error", "get_message_direct", "service", "gmail")
 		return nil, err
 	}
 
 	if msg.Payload != nil {
 		if err := client.updateAttachment(msgID, msg.Payload); err != nil {
-			prometheus.RecordError("gmail_processing_error", "update_attachment", "service", "gmail")
 			return nil, err
 		}
 	}
@@ -281,14 +241,9 @@ func (client *GmailClient) updateAttachment(msgID string, part *gmail.MessagePar
 }
 
 func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
-	start := time.Now()
-	defer func() {
-		prometheus.RecordOperation("gmail_get_message", "success", time.Since(start), "service", "gmail")
-	}()
 
 	msg, err := client.GetMessageDirect(msgID)
 	if err != nil {
-		prometheus.RecordError("gmail_api_error", "get_message", "service", "gmail")
 		return nil, err
 	}
 
@@ -305,7 +260,6 @@ func (client *GmailClient) GetMessage(msgID string) (*GmailMessage, error) {
 		}
 	}
 
-	prometheus.RecordCounter("gmail_messages_processed", 1, "service", "gmail")
 	return gmailMsg, nil
 }
 
@@ -397,14 +351,9 @@ func (client *GmailClient) processAttachment(part *gmail.MessagePart, gmailMsg *
 }
 
 func (client *GmailClient) GetThread(threadID string) (*gmail.Thread, error) {
-	start := time.Now()
-	defer func() {
-		prometheus.RecordOperation("gmail_get_thread", "success", time.Since(start), "service", "gmail")
-	}()
 
 	thread, err := client.Users.Threads.Get("me", threadID).Format("full").Do()
 	if err != nil {
-		prometheus.RecordError("gmail_api_error", "get_thread", "service", "gmail")
 		return nil, err
 	}
 
@@ -412,18 +361,12 @@ func (client *GmailClient) GetThread(threadID string) (*gmail.Thread, error) {
 }
 
 func (client *GmailClient) GetAttachment(msgID, attachmentID string) (*gmail.MessagePartBody, error) {
-	start := time.Now()
-	defer func() {
-		prometheus.RecordOperation("gmail_get_attachment", "success", time.Since(start), "service", "gmail")
-	}()
 
 	msg, err := client.Users.Messages.Attachments.Get("me", msgID, attachmentID).Do()
 	if err != nil {
-		prometheus.RecordError("gmail_api_error", "get_attachment", "service", "gmail")
 		return nil, err
 	}
 
-	prometheus.RecordCounter("gmail_attachments_retrieved", 1, "service", "gmail")
 	return msg, nil
 }
 
@@ -474,10 +417,6 @@ func (filter *GmailFilter) buildGmailQuery() string {
 }
 
 func (client *GmailClient) GetUserMessagesControlled(nextPageToken, label string, num int64, filter *GmailFilter) (*MessagesResponse, error) {
-	start := time.Now()
-	defer func() {
-		prometheus.RecordOperation("gmail_get_messages_controlled", "success", time.Since(start), "service", "gmail")
-	}()
 
 	req := client.Users.Messages.List("me").MaxResults(num)
 	if nextPageToken != "" {
@@ -494,7 +433,6 @@ func (client *GmailClient) GetUserMessagesControlled(nextPageToken, label string
 
 	res, err := req.Do()
 	if err != nil {
-		prometheus.RecordError("gmail_api_error", "get_messages_controlled", "service", "gmail")
 		return nil, err
 	}
 
@@ -505,7 +443,6 @@ func (client *GmailClient) GetUserMessagesControlled(nextPageToken, label string
 		}
 	}
 
-	prometheus.RecordCounter("gmail_messages_controlled_retrieved", int64(len(messages)), "service", "gmail")
 	return &MessagesResponse{
 		Messages:      messages,
 		NextPageToken: res.NextPageToken,
@@ -513,10 +450,6 @@ func (client *GmailClient) GetUserMessagesControlled(nextPageToken, label string
 }
 
 func (client *GmailClient) GetUserMessagesUsingWorkers(nextPageToken string, workerCount int) (*MessagesResponse, error) {
-	start := time.Now()
-	defer func() {
-		prometheus.RecordOperation("gmail_get_messages_workers", "success", time.Since(start), "service", "gmail")
-	}()
 
 	// Fetch list of message IDs
 	req := client.Users.Messages.List("me").MaxResults(500)
@@ -526,7 +459,6 @@ func (client *GmailClient) GetUserMessagesUsingWorkers(nextPageToken string, wor
 
 	res, err := req.Do()
 	if err != nil {
-		prometheus.RecordError("gmail_api_error", "get_messages_workers", "service", "gmail")
 		return nil, err
 	}
 
@@ -572,8 +504,6 @@ func (client *GmailClient) GetUserMessagesUsingWorkers(nextPageToken string, wor
 		mu.Unlock()
 	}
 
-	prometheus.RecordCounter("gmail_messages_workers_retrieved", int64(len(messages)), "service", "gmail")
-	prometheus.RecordGauge("gmail_worker_count", float64(workerCount), "service", "gmail")
 	return &MessagesResponse{
 		Messages:      messages,
 		NextPageToken: res.NextPageToken,

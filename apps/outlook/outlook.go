@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
 	abs "github.com/microsoft/kiota-abstractions-go"
 	msgraph "github.com/microsoftgraph/msgraph-sdk-go"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
@@ -29,25 +28,17 @@ func (b *BearerTokenAuthenticationProvider) AuthenticateRequest(ctx context.Cont
 }
 
 func NewOutlookClientUsingToken(accessToken string) (*OutlookClient, error) {
-	start := time.Now()
-
 	authProvider := &BearerTokenAuthenticationProvider{accessToken: accessToken}
 	adapter, err := msgraph.NewGraphRequestAdapter(authProvider)
 	if err != nil {
-		prometheus.RecordError("outlook_client_adapter_creation_failed", "outlook")
 		return nil, fmt.Errorf("failed to create Graph request adapter: %w", err)
 	}
 	client := msgraph.NewGraphServiceClient(adapter)
-
-	duration := time.Since(start)
-	prometheus.RecordTimer("outlook_client_creation_duration_seconds", duration, "component", "outlook")
-	prometheus.RecordCounter("outlook_client_created_total", 1, "component", "outlook", "status", "success")
 
 	return &OutlookClient{client}, nil
 }
 
 func (client *OutlookClient) GetCurrentUser() (*OutlookUser, error) {
-	start := time.Now()
 
 	user, err := client.Me().Get(context.Background(), &users.UserItemRequestBuilderGetRequestConfiguration{
 		QueryParameters: &users.UserItemRequestBuilderGetQueryParameters{
@@ -55,34 +46,25 @@ func (client *OutlookClient) GetCurrentUser() (*OutlookUser, error) {
 		},
 	})
 	if err != nil {
-		prometheus.RecordError("outlook_get_current_user_failed", "outlook")
 		return nil, fmt.Errorf("failed to get user from Microsoft Graph API: %w", err)
 	}
 
 	u := NewOutlookUser(user)
 	if u == nil {
-		prometheus.RecordError("outlook_user_creation_failed", "outlook")
 		return nil, errors.New("NewOutlookUser returned nil")
 	}
 	if u.ID == "" {
-		prometheus.RecordError("outlook_user_id_empty", "outlook")
 		return nil, errors.New("user ID is empty")
 	}
 	if u.Mail == "" {
-		prometheus.RecordError("outlook_user_email_empty", "outlook")
 		return nil, errors.New("user email is empty")
 	}
-
-	duration := time.Since(start)
-	prometheus.RecordTimer("outlook_get_current_user_duration_seconds", duration, "component", "outlook")
-	prometheus.RecordCounter("outlook_get_current_user_total", 1, "component", "outlook", "status", "success")
 
 	return u, nil
 }
 
 // GetUserMessages retrieves messages from Outlook with pagination support
 func (client *OutlookClient) GetUserMessages(skip, limit int32) ([]*OutlookMinimalMessage, error) {
-	start := time.Now()
 
 	if limit > 100 || limit < 1 {
 		limit = 100
@@ -104,7 +86,6 @@ func (client *OutlookClient) GetUserMessages(skip, limit int32) ([]*OutlookMinim
 
 	result, err := client.Me().Messages().Get(context.Background(), &configuration)
 	if err != nil {
-		prometheus.RecordError("outlook_get_user_messages_failed", "outlook")
 		return nil, fmt.Errorf("failed to get user messages: %w", err)
 	}
 
@@ -113,17 +94,11 @@ func (client *OutlookClient) GetUserMessages(skip, limit int32) ([]*OutlookMinim
 		outlookMessages = append(outlookMessages, NewOutlookMinimalMessage(message))
 	}
 
-	duration := time.Since(start)
-	prometheus.RecordTimer("outlook_get_user_messages_duration_seconds", duration, "component", "outlook")
-	prometheus.RecordCounter("outlook_get_user_messages_total", 1, "component", "outlook", "status", "success")
-	prometheus.RecordCounter("outlook_messages_retrieved_total", int64(len(outlookMessages)), "component", "outlook", "type", "minimal")
-
 	return outlookMessages, nil
 }
 
 // GetMessageWithDetails retrieves detailed messages with attachments
 func (client *OutlookClient) GetMessageWithDetails(skip, limit int32) ([]*OutlookMessage, error) {
-	start := time.Now()
 
 	if limit > 50 || limit < 1 { // Reduced limit for detailed requests
 		limit = 50
@@ -146,7 +121,6 @@ func (client *OutlookClient) GetMessageWithDetails(skip, limit int32) ([]*Outloo
 
 	result, err := client.Me().Messages().Get(context.Background(), &configuration)
 	if err != nil {
-		prometheus.RecordError("outlook_get_detailed_messages_failed", "outlook")
 		return nil, fmt.Errorf("failed to get detailed messages: %w", err)
 	}
 
@@ -155,20 +129,13 @@ func (client *OutlookClient) GetMessageWithDetails(skip, limit int32) ([]*Outloo
 		outlookMessages = append(outlookMessages, NewOutlookMessage(message))
 	}
 
-	duration := time.Since(start)
-	prometheus.RecordTimer("outlook_get_detailed_messages_duration_seconds", duration, "component", "outlook")
-	prometheus.RecordCounter("outlook_get_detailed_messages_total", 1, "component", "outlook", "status", "success")
-	prometheus.RecordCounter("outlook_messages_retrieved_total", int64(len(outlookMessages)), "component", "outlook", "type", "detailed")
-
 	return outlookMessages, nil
 }
 
 // GetMessage retrieves a specific message by ID
 func (client *OutlookClient) GetMessage(msgID string) (*OutlookMessage, error) {
-	start := time.Now()
 
 	if msgID == "" {
-		prometheus.RecordError("outlook_get_message_empty_id", "outlook")
 		return nil, errors.New("message ID cannot be empty")
 	}
 
@@ -183,45 +150,31 @@ func (client *OutlookClient) GetMessage(msgID string) (*OutlookMessage, error) {
 		},
 	})
 	if err != nil {
-		prometheus.RecordError("outlook_get_message_failed", "outlook")
 		return nil, fmt.Errorf("failed to get message %s: %w", msgID, err)
 	}
-
-	duration := time.Since(start)
-	prometheus.RecordTimer("outlook_get_message_duration_seconds", duration, "component", "outlook")
-	prometheus.RecordCounter("outlook_get_message_total", 1, "component", "outlook", "status", "success")
 
 	return NewOutlookMessage(msg), nil
 }
 
 // GetAttachment retrieves a specific attachment
 func (client *OutlookClient) GetAttachment(msgID, attID string) (*OutlookAttachment, error) {
-	start := time.Now()
 
 	if msgID == "" || attID == "" {
-		prometheus.RecordError("outlook_get_attachment_empty_ids", "outlook")
 		return nil, errors.New("message ID and attachment ID cannot be empty")
 	}
 
 	att, err := client.Me().Messages().ByMessageId(msgID).Attachments().ByAttachmentId(attID).Get(context.Background(), nil)
 	if err != nil {
-		prometheus.RecordError("outlook_get_attachment_failed", "outlook")
 		return nil, fmt.Errorf("failed to get attachment %s for message %s: %w", attID, msgID, err)
 	}
-
-	duration := time.Since(start)
-	prometheus.RecordTimer("outlook_get_attachment_duration_seconds", duration, "component", "outlook")
-	prometheus.RecordCounter("outlook_get_attachment_total", 1, "component", "outlook", "status", "success")
 
 	return NewOutlookAttachment(att), nil
 }
 
 // InsertMessage inserts a message into Outlook
 func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Messageable, error) {
-	start := time.Now()
 
 	if message == nil {
-		prometheus.RecordError("outlook_insert_message_nil", "outlook")
 		return nil, errors.New("message cannot be nil")
 	}
 
@@ -267,7 +220,6 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 			}
 		}
 		messageRequest.SetToRecipients(toRecipients)
-		prometheus.RecordCounter("outlook_insert_message_to_recipients_total", int64(len(toRecipients)), "component", "outlook")
 	}
 
 	// Set CC recipients
@@ -283,7 +235,6 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 			}
 		}
 		messageRequest.SetCcRecipients(ccRecipients)
-		prometheus.RecordCounter("outlook_insert_message_cc_recipients_total", int64(len(ccRecipients)), "component", "outlook")
 	}
 
 	// Set BCC recipients
@@ -299,7 +250,6 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 			}
 		}
 		messageRequest.SetBccRecipients(bccRecipients)
-		prometheus.RecordCounter("outlook_insert_message_bcc_recipients_total", int64(len(bccRecipients)), "component", "outlook")
 	}
 
 	// Add attachments
@@ -310,7 +260,6 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 
 		for _, attachment := range message.Attachments {
 			if attachment.Name == "" || len(attachment.Data) == 0 {
-				prometheus.RecordCounter("outlook_insert_message_invalid_attachments_total", 1, "component", "outlook", "reason", "empty_name_or_data")
 				continue // Skip invalid attachments
 			}
 
@@ -333,30 +282,22 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 			validAttachments++
 		}
 		messageRequest.SetAttachments(attachments)
-
-		prometheus.RecordCounter("outlook_insert_message_attachments_total", validAttachments, "component", "outlook")
-		prometheus.RecordSize("outlook_insert_message_attachment_size_bytes", totalAttachmentSize, "component", "outlook")
 	}
 
 	// Set received date time if available
 	if message.ReceivedDateTime != "" {
 		receivedDateTime, err := time.Parse(time.RFC3339, message.ReceivedDateTime)
 		if err != nil {
-			prometheus.RecordError("outlook_insert_message_datetime_parse_failed", "outlook")
 			return nil, fmt.Errorf("failed to parse received date time: %w", err)
 		}
 		messageRequest.SetReceivedDateTime(&receivedDateTime)
-		prometheus.RecordCounter("outlook_insert_message_with_datetime_total", 1, "component", "outlook")
 	}
 
 	// Create the message in drafts
 	createdMessage, err := client.Me().Messages().Post(context.Background(), messageRequest, nil)
 	if err != nil {
-		prometheus.RecordError("outlook_insert_message_creation_failed", "outlook")
 		return nil, fmt.Errorf("failed to create message: %w", err)
 	}
-
-	prometheus.RecordCounter("outlook_insert_message_draft_created_total", 1, "component", "outlook", "status", "success")
 
 	// Move the message to inbox to make it appear as received
 	req := users.NewItemMailFoldersItemMovePostRequestBody()
@@ -367,32 +308,22 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 	if err != nil {
 		// Log the error but don't fail the entire operation
 		// The message was created successfully, just not moved
-		prometheus.RecordError("outlook_insert_message_move_failed", "outlook")
-		prometheus.RecordCounter("outlook_insert_message_total", 1, "component", "outlook", "status", "partial_success")
 		return createdMessage, fmt.Errorf("message created but failed to move to inbox: %w", err)
 	}
-
-	duration := time.Since(start)
-	prometheus.RecordTimer("outlook_insert_message_duration_seconds", duration, "component", "outlook")
-	prometheus.RecordCounter("outlook_insert_message_total", 1, "component", "outlook", "status", "success")
-	prometheus.RecordCounter("outlook_insert_message_moved_to_inbox_total", 1, "component", "outlook")
 
 	return createdMessage, nil
 }
 
 // SendMessage sends a message immediately (without saving to drafts)
 func (client *OutlookClient) SendMessage(message *OutlookMessage) error {
-	start := time.Now()
 
 	if message == nil {
-		prometheus.RecordError("outlook_send_message_nil", "outlook")
 		return errors.New("message cannot be nil")
 	}
 
 	// First create the message in drafts
 	createdMessage, err := client.InsertMessage(message)
 	if err != nil {
-		prometheus.RecordError("outlook_send_message_creation_failed", "outlook")
 		return fmt.Errorf("failed to create message for sending: %w", err)
 	}
 
@@ -400,13 +331,8 @@ func (client *OutlookClient) SendMessage(message *OutlookMessage) error {
 	err = client.Me().Messages().ByMessageId(*createdMessage.GetId()).
 		Send().Post(context.Background(), nil)
 	if err != nil {
-		prometheus.RecordError("outlook_send_message_failed", "outlook")
 		return fmt.Errorf("failed to send message: %w", err)
 	}
-
-	duration := time.Since(start)
-	prometheus.RecordTimer("outlook_send_message_duration_seconds", duration, "component", "outlook")
-	prometheus.RecordCounter("outlook_send_message_total", 1, "component", "outlook", "status", "success")
 
 	return nil
 }

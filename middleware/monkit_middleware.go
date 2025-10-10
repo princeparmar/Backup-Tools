@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"strconv"
 	"strings"
 	"time"
 
@@ -12,13 +11,11 @@ import (
 var monkitRegistry = monkit.Default
 
 // MonkitMiddleware records HTTP request metrics using Monkit.
-// It captures:
-// - Request duration (overall and by path/method/status)
-// - Request counts (total and by various dimensions)
+// It captures essential metrics with controlled cardinality:
+// - Request duration and count by method, path, and status class
 // - Response sizes
-// - Error counts and types
-// - User agent and remote address categorization
-// All metrics are tagged with method, path, status code, and status class.
+// - Error counts
+// All metrics are tagged with method, path, status class (not individual status codes).
 func MonkitMiddleware() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
@@ -27,8 +24,6 @@ func MonkitMiddleware() echo.MiddlewareFunc {
 			// Get request details
 			method := c.Request().Method
 			path := sanitizePath(c.Request().URL.Path)
-			userAgent := c.Request().UserAgent()
-			remoteAddr := c.Request().RemoteAddr
 
 			// Execute the next handler
 			err := next(c)
@@ -43,47 +38,26 @@ func MonkitMiddleware() echo.MiddlewareFunc {
 			// Create Monkit package for HTTP requests
 			pkg := monkitRegistry.Package()
 
-			// Create tags for metrics
+			// Create base tags with controlled cardinality
 			baseTags := []monkit.SeriesTag{
 				monkit.NewSeriesTag("method", method),
 				monkit.NewSeriesTag("path", path),
-				monkit.NewSeriesTag("status_code", strconv.Itoa(statusCode)),
 				monkit.NewSeriesTag("status_class", getStatusClass(statusCode)),
 			}
 
-			// Record timing metrics
+			// Record essential timing metrics (reduced cardinality)
 			pkg.FloatVal("http_request_duration_seconds", baseTags...).Observe(duration.Seconds())
-			pkg.FloatVal("http_request_duration_by_path", baseTags...).Observe(duration.Seconds())
-			pkg.FloatVal("http_request_duration_by_method", baseTags...).Observe(duration.Seconds())
-			pkg.FloatVal("http_request_duration_by_status", baseTags...).Observe(duration.Seconds())
 
-			// Record counter metrics
+			// Record essential counter metrics (reduced cardinality)
 			pkg.Counter("http_requests_total", baseTags...).Inc(1)
-			pkg.Counter("http_requests_by_method", baseTags...).Inc(1)
-			pkg.Counter("http_requests_by_path", baseTags...).Inc(1)
-			pkg.Counter("http_requests_by_status", baseTags...).Inc(1)
 
 			// Record response size metrics
 			pkg.FloatVal("http_response_size_bytes", baseTags...).Observe(float64(responseSize))
-			pkg.FloatVal("http_response_size_by_path", baseTags...).Observe(float64(responseSize))
 
-			// Record error metrics if there was an error
+			// Record error metrics if there was an error (simplified)
 			if err != nil {
 				errorTags := append(baseTags, monkit.NewSeriesTag("error_type", getErrorType(err)))
 				pkg.Counter("http_request_errors_total", errorTags...).Inc(1)
-				pkg.Counter("http_request_errors_by_path", errorTags...).Inc(1)
-			}
-
-			// Record user agent metrics (for monitoring client types)
-			if userAgent != "" {
-				uaTags := append(baseTags, monkit.NewSeriesTag("user_agent", getUserAgentType(userAgent)))
-				pkg.Counter("http_requests_by_user_agent", uaTags...).Inc(1)
-			}
-
-			// Record remote address metrics (for monitoring traffic sources)
-			if remoteAddr != "" {
-				addrTags := append(baseTags, monkit.NewSeriesTag("remote_addr", getRemoteAddrType(remoteAddr)))
-				pkg.Counter("http_requests_by_remote_addr", addrTags...).Inc(1)
 			}
 
 			return err
@@ -132,54 +106,6 @@ func getErrorType(err error) string {
 	}
 
 	return "unknown_error"
-}
-
-// getUserAgentType categorizes user agents
-func getUserAgentType(userAgent string) string {
-	userAgent = strings.ToLower(userAgent)
-
-	switch {
-	case strings.Contains(userAgent, "chrome"):
-		return "chrome"
-	case strings.Contains(userAgent, "firefox"):
-		return "firefox"
-	case strings.Contains(userAgent, "safari"):
-		return "safari"
-	case strings.Contains(userAgent, "edge"):
-		return "edge"
-	case strings.Contains(userAgent, "curl"):
-		return "curl"
-	case strings.Contains(userAgent, "wget"):
-		return "wget"
-	case strings.Contains(userAgent, "postman"):
-		return "postman"
-	case strings.Contains(userAgent, "insomnia"):
-		return "insomnia"
-	default:
-		return "other"
-	}
-}
-
-// getRemoteAddrType categorizes remote addresses
-func getRemoteAddrType(remoteAddr string) string {
-	// Extract IP from remote address (format: "IP:port")
-	if idx := strings.LastIndex(remoteAddr, ":"); idx != -1 {
-		ip := remoteAddr[:idx]
-
-		// Check for localhost/loopback
-		if ip == "127.0.0.1" || ip == "::1" || ip == "localhost" {
-			return "localhost"
-		}
-
-		// Check for private IP ranges
-		if strings.HasPrefix(ip, "192.168.") || strings.HasPrefix(ip, "10.") || strings.HasPrefix(ip, "172.") {
-			return "private"
-		}
-
-		return "public"
-	}
-
-	return "unknown"
 }
 
 // sanitizePath normalizes the path for consistent metrics

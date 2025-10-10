@@ -3,7 +3,6 @@ package outlook
 import (
 	"time"
 
-	"github.com/StorX2-0/Backup-Tools/pkg/prometheus"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 )
 
@@ -16,7 +15,6 @@ type OutlookMinimalMessage struct {
 
 func NewOutlookMinimalMessage(message models.Messageable) *OutlookMinimalMessage {
 	if message == nil {
-		prometheus.RecordError("outlook_minimal_message_nil_input", "outlook")
 		return nil
 	}
 
@@ -26,8 +24,6 @@ func NewOutlookMinimalMessage(message models.Messageable) *OutlookMinimalMessage
 		From:             stringValue(message.GetFrom().GetEmailAddress().GetAddress()),
 		ReceivedDateTime: timeValue(message.GetReceivedDateTime()),
 	}
-
-	prometheus.RecordCounter("outlook_minimal_message_created_total", 1, "component", "outlook", "status", "success")
 
 	return result
 }
@@ -41,7 +37,6 @@ type OutlookUser struct {
 
 func NewOutlookUser(user models.Userable) *OutlookUser {
 	if user == nil {
-		prometheus.RecordError("outlook_user_nil_input", "outlook")
 		return nil
 	}
 
@@ -51,8 +46,6 @@ func NewOutlookUser(user models.Userable) *OutlookUser {
 		Mail:              stringValue(user.GetMail()),
 		UserPrincipalName: stringValue(user.GetUserPrincipalName()),
 	}
-
-	prometheus.RecordCounter("outlook_user_created_total", 1, "component", "outlook", "status", "success")
 
 	return result
 }
@@ -90,7 +83,6 @@ type OutlookAttachment struct {
 
 func NewOutlookAttachment(attachment models.Attachmentable) *OutlookAttachment {
 	if attachment == nil {
-		prometheus.RecordError("outlook_attachment_nil_input", "outlook")
 		return nil
 	}
 
@@ -104,17 +96,12 @@ func NewOutlookAttachment(attachment models.Attachmentable) *OutlookAttachment {
 		AdditionalData: attachment.GetAdditionalData(),
 	}
 
-	prometheus.RecordSize("outlook_attachment_created", out.Size, "component", "outlook")
-
 	if fileData, ok := attachment.(models.FileAttachmentable); ok {
 		if contentID := fileData.GetContentId(); contentID != nil {
 			out.ContentID = stringValue(contentID)
 		}
 		out.Data = fileData.GetContentBytes()
-		prometheus.RecordSize("outlook_file_attachment_data", int64(len(out.Data)), "component", "outlook")
 	}
-
-	prometheus.RecordCounter("outlook_attachment_created_total", 1, "component", "outlook", "status", "success")
 
 	return out
 
@@ -122,7 +109,6 @@ func NewOutlookAttachment(attachment models.Attachmentable) *OutlookAttachment {
 
 func NewOutlookMessage(message models.Messageable) *OutlookMessage {
 	if message == nil {
-		prometheus.RecordError("outlook_message_nil_input", "outlook")
 		return nil
 	}
 
@@ -154,11 +140,6 @@ func NewOutlookMessage(message models.Messageable) *OutlookMessage {
 		SentDateTime:           timeValue(message.GetSentDateTime()),
 	}
 
-	// Record message size metrics
-	bodySize := int64(len(msg.Body))
-	prometheus.RecordSize("outlook_message_body_size", bodySize, "component", "outlook")
-	prometheus.RecordCounter("outlook_message_headers_total", int64(len(internetMessageHeaders)), "component", "outlook")
-
 	// Set From address
 	if from := message.GetFrom(); from != nil && from.GetEmailAddress() != nil {
 		msg.From = stringValue(from.GetEmailAddress().GetAddress())
@@ -183,10 +164,7 @@ func NewOutlookMessage(message models.Messageable) *OutlookMessage {
 		for i, att := range attachments {
 			msg.Attachments[i] = NewOutlookAttachment(att)
 		}
-		prometheus.RecordCounter("outlook_message_attachments_total", int64(len(attachments)), "component", "outlook")
 	}
-
-	prometheus.RecordCounter("outlook_message_created_total", 1, "component", "outlook", "status", "success")
 
 	return msg
 }
@@ -237,8 +215,6 @@ func getRecipients(recipients []models.Recipientable) []string {
 			}
 		}
 	}
-
-	prometheus.RecordCounter("outlook_recipients_processed_total", int64(len(emails)), "component", "outlook")
 
 	return emails
 }
