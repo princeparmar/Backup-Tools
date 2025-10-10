@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/StorX2-0/Backup-Tools/apps/aws"
+	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 
@@ -17,6 +18,10 @@ import (
 
 // HandleListAWSs3BucketFiles lists all files in an AWS S3 bucket
 func HandleListAWSs3BucketFiles(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	bucketName := c.Param("bucketName")
 
 	s3sess := aws.ConnectAws()
@@ -32,6 +37,10 @@ func HandleListAWSs3BucketFiles(c echo.Context) error {
 
 // HandleS3toSatellite downloads a file from AWS S3 and uploads it to Satellite
 func HandleS3toSatellite(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	bucketName := c.Param("bucketName")
 	itemName := c.Param("itemName")
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
@@ -79,6 +88,10 @@ func HandleS3toSatellite(c echo.Context) error {
 
 // HandleSatelliteToS3 downloads a file from Satellite and uploads it to AWS S3
 func HandleSatelliteToS3(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	bucketName := c.Param("bucketName")
 	itemName := c.Param("itemName")
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")

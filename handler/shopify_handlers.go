@@ -7,6 +7,7 @@ import (
 
 	"github.com/StorX2-0/Backup-Tools/apps/shopify"
 	"github.com/StorX2-0/Backup-Tools/middleware"
+	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
@@ -45,6 +46,10 @@ func createShopifyCleint(c echo.Context, shopname string) *shopify.ShopifyClient
 
 // HandleShopifyProductsToSatellite uploads Shopify products to Satellite
 func HandleShopifyProductsToSatellite(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -138,6 +143,10 @@ func HandleShopifyProductsToSatellite(c echo.Context) error {
 
 // HandleShopifyCustomersToSatellite uploads Shopify customers to Satellite
 func HandleShopifyCustomersToSatellite(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -232,6 +241,10 @@ func HandleShopifyCustomersToSatellite(c echo.Context) error {
 
 // HandleShopifyOrdersToSatellite uploads Shopify orders to Satellite
 func HandleShopifyOrdersToSatellite(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -325,6 +338,10 @@ func HandleShopifyOrdersToSatellite(c echo.Context) error {
 
 // HandleShopifyAuth initiates Shopify OAuth authentication
 func HandleShopifyAuth(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	shopName := c.QueryParam("shop")
 	state := c.QueryParam("state")
 
@@ -335,6 +352,10 @@ func HandleShopifyAuth(c echo.Context) error {
 
 // HandleShopifyAuthRedirect handles Shopify OAuth callback
 func HandleShopifyAuthRedirect(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	// Check that the callback signature is valid
 	if ok, err := shopify.ShopifyInitApp.App.VerifyAuthorizationURL(c.Request().URL); !ok {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{

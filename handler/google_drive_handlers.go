@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 
@@ -19,6 +20,10 @@ import (
 
 // Get all files names in a google drive even in folder
 func HandleGetGoogleDriveFileNames(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	fileNames, err := google.GetFileNames(c)
 	if err != nil {
 		return HandleGoogleDriveError(c, err, "retrieve file names from Google Drive")
@@ -28,6 +33,10 @@ func HandleGetGoogleDriveFileNames(c echo.Context) error {
 
 // Get all files names in a google drive root
 func HandleRootGoogleDriveFileNames(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	response, err := google.GetFileNamesInRoot(c)
 	if err != nil {
 		return HandleGoogleDriveError(c, err, "retrieve file names from Google Drive")
@@ -37,6 +46,10 @@ func HandleRootGoogleDriveFileNames(c echo.Context) error {
 
 // Get all files names in a google drive root
 func HandleSharedGoogleDriveFileNames(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	fileNames, err := google.GetSharedFiles(c)
 	if err != nil {
 		return HandleGoogleDriveError(c, err, "retrieve shared files from Google Drive")
@@ -46,6 +59,10 @@ func HandleSharedGoogleDriveFileNames(c echo.Context) error {
 
 // List all files in a folder given the folder name
 func HandleListAllFolderFiles(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	folderName := c.Param("name")
 	fileNames, err := google.GetFilesInFolder(c, folderName)
 	if err != nil {
@@ -56,6 +73,10 @@ func HandleListAllFolderFiles(c echo.Context) error {
 
 // List all files in a folder given the folder ID
 func HandleListAllFolderFilesByID(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	folderID := c.Param("id")
 	fileNames, err := google.GetFilesInFolderByID(c, folderID)
 	if err != nil {
@@ -65,6 +86,10 @@ func HandleListAllFolderFilesByID(c echo.Context) error {
 }
 
 func HandleFolder(folderName, folderID string, c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	fileNames, err := google.GetFilesInFolderByID(c, folderID)
 	if err != nil {
 		return HandleGoogleDriveError(c, err, "retrieve files from Google Drive folder")
@@ -105,6 +130,10 @@ func HandleFolder(folderName, folderID string, c echo.Context) error {
 }
 
 func HandleSyncAllSharedFolderAndFiles(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	fileNames, err := google.GetSharedFiles(c)
 	if err != nil {
 		return HandleGoogleDriveError(c, err, "retrieve shared files from Google Drive")
@@ -166,6 +195,10 @@ func HandleSyncAllSharedFolderAndFiles(c echo.Context) error {
 }
 
 func HandleSyncAllFolderFiles(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	folderName := c.Param("name")
 	fileNames, err := google.GetFilesInFolder(c, folderName)
 	if err != nil {
@@ -229,6 +262,10 @@ func HandleSyncAllFolderFiles(c echo.Context) error {
 }
 
 func HandleSatelliteDrive(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -245,6 +282,10 @@ func HandleSatelliteDrive(c echo.Context) error {
 }
 
 func HandleSatelliteDriveFolder(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -260,6 +301,10 @@ func HandleSatelliteDriveFolder(c echo.Context) error {
 	return c.JSON(http.StatusOK, o)
 }
 func HandleSyncAllFolderFilesByID(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	folderID := c.Param("id")
 	folderName, fileNames, err := google.GetFolderNameAndFilesInFolderByID(c, folderID)
 	if err != nil {
@@ -323,6 +368,10 @@ func HandleSyncAllFolderFilesByID(c echo.Context) error {
 
 // Sends file from Google Drive to Satellite
 func HandleSendFileFromGoogleDriveToSatellite(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	id := c.Param("ID")
 
 	name, data, err := google.GetFileAndPath(c, id)
@@ -349,6 +398,9 @@ func HandleSendFileFromGoogleDriveToSatellite(c echo.Context) error {
 }
 
 func HandleSendAllFilesFromGoogleDriveToSatellite(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
 
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
@@ -443,6 +495,10 @@ func HandleSendAllFilesFromGoogleDriveToSatellite(c echo.Context) error {
 
 // Sends file from Satellite to Google Drive
 func HandleSendFileFromSatelliteToGoogleDrive(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	name := c.Param("name")
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
@@ -469,6 +525,10 @@ func HandleSendFileFromSatelliteToGoogleDrive(c echo.Context) error {
 }
 
 func HandleSendListFromGoogleDriveToSatellite(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	// Parse request IDs
 	allIDs, err := parseRequestIDs(c)
 	if err != nil {

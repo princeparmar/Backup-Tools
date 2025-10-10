@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/StorX2-0/Backup-Tools/apps/dropbox"
+	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 
 	"github.com/labstack/echo/v4"
@@ -15,6 +16,10 @@ import (
 
 // HandleDropboxToSatellite uploads a file from Dropbox to Satellite
 func HandleDropboxToSatellite(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	filePath := c.Param("filePath")
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
@@ -55,6 +60,10 @@ func HandleDropboxToSatellite(c echo.Context) error {
 
 // HandleSatelliteToDropbox downloads a file from Satellite and uploads it to Dropbox
 func HandleSatelliteToDropbox(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	filePath := c.Param("filePath")
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {

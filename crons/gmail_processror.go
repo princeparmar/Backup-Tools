@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 )
@@ -17,7 +18,12 @@ func NewGmailProcessor() *gmailProcessor {
 	return &gmailProcessor{}
 }
 
+var Err error
+
 func (g *gmailProcessor) Run(input ProcessorInput) error {
+
+	ctx := context.Background()
+	defer monitor.Mon.Task()(&ctx)(&Err)
 
 	err := input.HeartBeatFunc()
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/dgrijalva/jwt-go"
 	"github.com/labstack/echo/v4"
@@ -35,6 +36,9 @@ var StorxSatelliteService string
 
 // HandleSatelliteAuthentication authenticates app with satellite account
 func HandleSatelliteAuthentication(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
 
 	accessToken := c.FormValue("satellite")
 	if accessToken == "" {
@@ -55,6 +59,7 @@ func HandleSatelliteAuthentication(c echo.Context) error {
 
 // GetUploader creates an uploader for the specified bucket and object
 func GetUploader(ctx context.Context, accessGrant, bucketName, objectKey string) (*uplink.Upload, error) {
+
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
 		return nil, fmt.Errorf("parse access grant: %w", err)

@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 
@@ -28,6 +29,10 @@ import (
 // - today, yesterday, last_7_days, last_30_days, this_year, last_year
 // - Custom dates: "2024-01-01" or "2024-01-01,2024-12-31"
 func HandleListGPhotosAlbums(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	client, err := google.NewGPhotosClient(c)
 	if err != nil {
 		if err.Error() == "token error" {
@@ -63,6 +68,10 @@ type PhotosJSON struct {
 // - date_range: Filter by creation date (today, last_7_days, last_30_days, this_year, last_year, custom_date_range)
 // - media_type: Filter by media type (all, photos, videos)
 func HandleListPhotosInAlbum(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -162,6 +171,10 @@ type AllPhotosJSON struct {
 }
 
 func HandleListAllPhotos(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	client, err := google.NewGPhotosClient(c)
 	if err != nil {
 		if err.Error() == "token error" {
@@ -244,6 +257,10 @@ func HandleListAllPhotos(c echo.Context) error {
 
 // Sends photo item from Satellite to Google Photos.
 func HandleSendFileFromSatelliteToGooglePhotos(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	name := c.Param("name")
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
@@ -301,6 +318,9 @@ func HandleSendFileFromSatelliteToGooglePhotos(c echo.Context) error {
 
 // Sends photo item from Google Photos to Satellite.
 func HandleSendFileFromGooglePhotosToSatellite(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
 
 	ids := c.FormValue("ids")
 	if ids == "" {
@@ -386,6 +406,10 @@ func uploadSingleFileFromPhotosToSatellite(ctx context.Context, client *google.G
 }
 
 func HandleSendAllFilesFromGooglePhotosToSatellite(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	id := c.FormValue("album_id")
 
 	client, err := google.NewGPhotosClient(c)
@@ -435,6 +459,10 @@ func HandleSendAllFilesFromGooglePhotosToSatellite(c echo.Context) error {
 }
 
 func HandleSendListFilesFromGooglePhotosToSatellite(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	client, err := google.NewGPhotosClient(c)
 	if err != nil {
 		if err.Error() == "token error" {

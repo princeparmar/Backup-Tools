@@ -12,6 +12,7 @@ import (
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 
 	"github.com/labstack/echo/v4"
@@ -20,6 +21,10 @@ import (
 
 // Takes Google Cloud project name as a parameter, returns JSON responce with all the buckets in this project.
 func HandleStorageListBuckets(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	projectName := c.Param("projectName")
 
 	client, err := google.NewGoogleStorageClient(c)
@@ -44,6 +49,10 @@ func HandleStorageListBuckets(c echo.Context) error {
 }
 
 func HandleStorageListProjects(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	client, err := google.ListProjects(c)
 	if err != nil {
 		if err.Error() == "token error" {
@@ -60,6 +69,10 @@ func HandleStorageListProjects(c echo.Context) error {
 }
 
 func HandleStorageListOrganizations(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	client, err := google.ListOrganizations(c)
 	if err != nil {
 		if err.Error() == "token error" {
@@ -77,6 +90,10 @@ func HandleStorageListOrganizations(c echo.Context) error {
 
 // Takes Google Cloud bucket name as a parameter, returns JSON responce with all the items in this bucket.
 func HandleStorageListObjects(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	bucketName := c.Param("bucketName")
 
 	client, err := google.NewGoogleStorageClient(c)
@@ -132,6 +149,10 @@ func HandleStorageListObjects(c echo.Context) error {
 
 // Takes bucket name and item name as a parameters, downloads the object from Google Cloud Storage and uploads it into SATELLITE "google-cloud" bucket.
 func HandleGoogleCloudItemToSatellite(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	bucketName := c.Param("bucketName")
 	itemName := c.Param("itemName")
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
@@ -173,6 +194,10 @@ func HandleGoogleCloudItemToSatellite(c echo.Context) error {
 
 // Takes bucket name and item name as a parameters, downloads the object from Satellite bucket and uploads it into Google Cloud Storage bucket.
 func HandleSatelliteToGoogleCloud(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	bucketName := c.Param("bucketName")
 	itemName := c.Param("itemName")
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
@@ -217,8 +242,11 @@ func HandleSatelliteToGoogleCloud(c echo.Context) error {
 }
 
 func HandleAllFilesFromGoogleCloudBucketToSatellite(c echo.Context) error {
-	bucketName := c.Param("bucketName")
 	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	bucketName := c.Param("bucketName")
 
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
@@ -275,6 +303,10 @@ func HandleAllFilesFromGoogleCloudBucketToSatellite(c echo.Context) error {
 }
 
 func HandleBucketMetadata(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	bucketName := c.Param("bucketName")
 	client, err := google.NewGoogleStorageClient(c)
 	if err != nil {
@@ -375,6 +407,10 @@ func SyncCloudProject(c echo.Context, projectName string) (res *ProjectSyncRespo
 }
 
 func HandleListProjects(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	var allIDs []string
 	if strings.Contains(c.Request().Header.Get(echo.HeaderContentType), echo.MIMEApplicationJSON) {
 		// Decode JSON array from request body
@@ -397,6 +433,10 @@ func HandleListProjects(c echo.Context) error {
 }
 
 func HandleListBuckets(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	var allIDs []string
 	if strings.Contains(c.Request().Header.Get(echo.HeaderContentType), echo.MIMEApplicationJSON) {
 		// Decode JSON array from request body
@@ -423,6 +463,10 @@ func HandleListBuckets(c echo.Context) error {
 }
 
 func HandleSyncCloudItems(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{

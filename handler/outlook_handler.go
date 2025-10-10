@@ -10,6 +10,7 @@ import (
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/labstack/echo/v4"
@@ -77,6 +78,8 @@ func createOutlookClient(accessToken string) (*outlook.OutlookClient, error) {
 
 func HandleOutlookGetMessages(c echo.Context) error {
 	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
 
 	accessGrant, accessToken, err := getAccessTokens(c)
 	if err != nil {
@@ -131,6 +134,10 @@ func HandleOutlookGetMessages(c echo.Context) error {
 }
 
 func HandleOutlookGetMessageById(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	// FIX: Use blank identifier for unused accessGrant
 	_, accessToken, err := getAccessTokens(c)
 	if err != nil {
@@ -154,6 +161,10 @@ func HandleOutlookGetMessageById(c echo.Context) error {
 }
 
 func HandleListOutlookMessagesToSatellite(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	accessGrant, accessToken, err := getAccessTokens(c)
 	if err != nil {
 		return err
@@ -211,6 +222,10 @@ func HandleListOutlookMessagesToSatellite(c echo.Context) error {
 }
 
 func HandleOutlookDownloadAndInsert(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	accessGrant, accessToken, err := getAccessTokens(c)
 	if err != nil {
 		return err

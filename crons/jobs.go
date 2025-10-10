@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/google/uuid"
@@ -103,6 +104,9 @@ func (a *AutosyncManager) Start() {
 }
 
 func (a *AutosyncManager) CreateTaskForAllPendingJobs(ctx context.Context) error {
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	jobIDs, err := a.store.GetJobsToProcess()
 	if err != nil {
 		return fmt.Errorf("failed to get jobs to process: %w", err)
@@ -188,6 +192,9 @@ func (a *AutosyncManager) CreateTaskForAllPendingJobs(ctx context.Context) error
 // }
 
 func (a *AutosyncManager) ProcessTask(ctx context.Context) error {
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	processedCount := 0
 	errorCount := 0
 
@@ -254,6 +261,8 @@ func (a *AutosyncManager) ProcessTask(ctx context.Context) error {
 }
 
 func (a *AutosyncManager) processTask(ctx context.Context, task *storage.TaskListingDB, job *storage.CronJobListingDB) error {
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
 
 	processor, ok := processorMap[job.Method]
 	if !ok {
@@ -267,7 +276,7 @@ func (a *AutosyncManager) processTask(ctx context.Context, task *storage.TaskLis
 
 	// Record job execution start
 
-	err := processor.Run(ProcessorInput{
+	err = processor.Run(ProcessorInput{
 		InputData: job.InputData,
 		Job:       job,
 		Task:      task,
@@ -303,6 +312,8 @@ func (a *AutosyncManager) processTask(ctx context.Context, task *storage.TaskLis
 
 func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *storage.CronJobListingDB, processErr error) error {
 	ctx := context.Background() // You might want to pass context here
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
 
 	// Initialize default values for success case
 	task.Status = storage.TaskStatusSuccess

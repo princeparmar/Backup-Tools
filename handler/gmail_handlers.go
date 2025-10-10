@@ -13,6 +13,7 @@ import (
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"golang.org/x/sync/errgroup"
@@ -238,6 +239,10 @@ func setupGmailHandler(c echo.Context) (string, *google.GmailClient, error) {
 }
 
 func HandleListGmailMessagesToSatellite(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	// Setup Gmail handler with all common validations
 	accessGrant, gmailClient, err := setupGmailHandler(c)
 	if err != nil {
@@ -286,6 +291,10 @@ func HandleListGmailMessagesToSatellite(c echo.Context) error {
 // handleGmailGetThreadsIDsControlled - fetches threads IDs from Gmail and returns them in JSON format.
 // It uses pagination to fetch threads in chunks of 500.
 func HandleGmailGetThreadsIDsControlled(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	num := c.QueryParam("num")
 	var numInt int64
 	if num != "" {
@@ -355,6 +364,10 @@ func HandleGmailGetThreadsIDsControlled(c echo.Context) error {
 // handleGmailDownloadAndInsert - downloads emails from Satellite and inserts them into Gmail.
 // It uses pagination to download emails in chunks of 10.
 func HandleGmailDownloadAndInsert(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	// Get access token from header
 	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accessGrant == "" {

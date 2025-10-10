@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
+	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 )
@@ -22,8 +23,11 @@ func NewOutlookProcessor() *outlookProcessor {
 }
 
 func (o *outlookProcessor) Run(input ProcessorInput) error {
+	ctx := context.Background()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
 
-	err := input.HeartBeatFunc()
+	err = input.HeartBeatFunc()
 	if err != nil {
 		return err
 	}

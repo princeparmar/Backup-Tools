@@ -14,6 +14,7 @@ import (
 
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/storage"
 
@@ -127,6 +128,9 @@ func verifyToken(idToken string) (*TokenInfo, error) {
 }
 
 func Autentificate(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
 
 	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 	authToken := c.FormValue("google-key")
@@ -143,7 +147,7 @@ func Autentificate(c echo.Context) error {
 	// 	})
 	// }
 
-	_, err := verifyToken(authToken)
+	_, err = verifyToken(authToken)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error validating google auth token": err.Error(),
@@ -170,6 +174,10 @@ func Autentificate(c echo.Context) error {
 
 // Google authentication module, checks if you have auth token in database, if not - redirects to Google auth page.
 func Autentificateg(c echo.Context) error {
+	var err error
+	ctx := c.Request().Context()
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 	code := c.FormValue("code")
 	b, err := os.ReadFile("credentials.json")

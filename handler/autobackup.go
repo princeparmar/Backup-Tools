@@ -94,6 +94,10 @@ func HandleIntervalOnConfig(c echo.Context) error {
 }
 
 func HandleAutomaticSyncDetails(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	jobID, err := strconv.Atoi(c.Param("job_id"))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -126,6 +130,10 @@ func HandleAutomaticSyncDetails(c echo.Context) error {
 }
 
 func HandleAutomaticSyncCreateGmail(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -199,6 +207,10 @@ func HandleAutomaticSyncCreateGmail(c echo.Context) error {
 }
 
 func HandleAutomaticSyncCreateOutlook(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -281,6 +293,10 @@ func HandleAutomaticSyncCreateOutlook(c echo.Context) error {
 }
 
 func HandleAutomaticSyncCreateDatabase(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	userID, err := getUserDetailsFromSatellite(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -668,6 +684,10 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 }
 
 func HandleAutomaticSyncDelete(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	jobID, err := strconv.Atoi(c.Param("job_id"))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -707,6 +727,10 @@ func HandleAutomaticSyncDelete(c echo.Context) error {
 }
 
 func HandleAutomaticSyncTaskList(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	jobID, err := strconv.Atoi(c.Param("job_id"))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -785,6 +809,10 @@ type DeleteJobsByEmailRequest struct {
 
 // HandleDeleteJobsByEmail deletes all jobs and tasks for a user by email with password protection
 func HandleDeleteJobsByEmail(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	var req DeleteJobsByEmailRequest
 
 	// Parse request body

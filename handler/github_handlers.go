@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	gthb "github.com/StorX2-0/Backup-Tools/apps/github"
+	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 
@@ -20,11 +21,19 @@ import (
 
 // HandleGithubLogin initiates GitHub authentication
 func HandleGithubLogin(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	return gthb.AuthenticateGithub(c)
 }
 
 // HandleGithubCallback handles GitHub OAuth callback
 func HandleGithubCallback(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	code := c.QueryParam("code")
 
 	githubAccessToken := gthb.GetGithubAccessToken(code)
@@ -38,6 +47,10 @@ func HandleGithubCallback(c echo.Context) error {
 
 // HandleListRepos lists all repositories for the authenticated user
 func HandleListRepos(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	accessToken, err := c.Cookie("github-auth")
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -66,6 +79,10 @@ func HandleListRepos(c echo.Context) error {
 
 // HandleGetRepository downloads a specific repository
 func HandleGetRepository(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	accessToken, err := c.Cookie("github-auth")
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -102,6 +119,10 @@ func HandleGetRepository(c echo.Context) error {
 
 // HandleGithubRepositoryToSatellite uploads a GitHub repository to Satellite
 func HandleGithubRepositoryToSatellite(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	accessToken, err := c.Cookie("github-auth")
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -166,6 +187,10 @@ func HandleGithubRepositoryToSatellite(c echo.Context) error {
 
 // HandleRepositoryFromSatelliteToGithub downloads a repository from Satellite and uploads it to GitHub
 func HandleRepositoryFromSatelliteToGithub(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	accessToken, err := c.Cookie("github-auth")
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{

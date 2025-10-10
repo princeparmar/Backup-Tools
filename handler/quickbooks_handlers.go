@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/StorX2-0/Backup-Tools/apps/quickbooks"
+	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
@@ -15,6 +16,10 @@ import (
 
 // HandleQuickbooksCustomersToSatellite uploads QuickBooks customers to Satellite
 func HandleQuickbooksCustomersToSatellite(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -105,6 +110,10 @@ func HandleQuickbooksCustomersToSatellite(c echo.Context) error {
 
 // HandleQuickbooksItemsToSatellite uploads QuickBooks items to Satellite
 func HandleQuickbooksItemsToSatellite(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -195,6 +204,10 @@ func HandleQuickbooksItemsToSatellite(c echo.Context) error {
 
 // HandleQuickbooksInvoicesToSatellite uploads QuickBooks invoices to Satellite
 func HandleQuickbooksInvoicesToSatellite(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
 	if accesGrant == "" {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{

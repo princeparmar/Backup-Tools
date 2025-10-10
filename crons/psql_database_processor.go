@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 )
 
@@ -17,9 +18,11 @@ func NewPsqlDatabaseProcessor() *psqlDatabaseProcessor {
 }
 
 func (d *psqlDatabaseProcessor) Run(input ProcessorInput) error {
-	
+	ctx := context.Background()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
 
-	err := input.HeartBeatFunc()
+	err = input.HeartBeatFunc()
 	if err != nil {
 		return err
 	}

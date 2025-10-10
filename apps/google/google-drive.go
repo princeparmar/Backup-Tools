@@ -19,6 +19,7 @@ import (
 
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
@@ -124,6 +125,10 @@ func GetFileNames(c echo.Context) ([]*FilesJSON, error) {
 
 // GetFileByID returns file by ID as attachment
 func GetFileByID(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
 	name, data, err := GetFile(c, c.Param("ID"))
 	if err != nil {
 		return c.String(http.StatusForbidden, "error")
