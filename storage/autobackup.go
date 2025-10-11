@@ -92,6 +92,8 @@ type CronJobListingDB struct {
 
 	// Tasks associated with the cron job
 	Tasks []TaskListingDB `gorm:"foreignKey:CronJobID"`
+
+	SyncType string `json:"sync_type"`
 }
 
 // Add a Scanner interface implementation for InputData if needed
@@ -132,6 +134,11 @@ type TaskMemory struct {
 
 	OutlookSyncCount uint `json:"outlook_sync_count"`
 	OutlookSkipCount uint `json:"outlook_skip_count"`
+
+	// Sync completion flags for one-time syncs
+	GmailSyncComplete    bool `json:"gmail_sync_complete"`
+	OutlookSyncComplete  bool `json:"outlook_sync_complete"`
+	DatabaseSyncComplete bool `json:"database_sync_complete"`
 }
 
 // Scan implements the sql.Scanner interface
