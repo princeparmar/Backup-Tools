@@ -128,6 +128,10 @@ func (o *outlookProcessor) Run(input ProcessorInput) error {
 		if emptyLoopCount > 20 {
 			// If we get 20 empty loops, we can break
 			input.Job.TaskMemory.OutlookSkipCount = 0
+			// Mark as complete for one-time sync
+			if input.Job.SyncType == "one_time" {
+				input.Job.TaskMemory.OutlookSyncComplete = true
+			}
 			break
 		}
 
@@ -135,6 +139,10 @@ func (o *outlookProcessor) Run(input ProcessorInput) error {
 		if len(messages) < OutlookLimit {
 			// If we get fewer messages than the limit, we've reached the end
 			input.Job.TaskMemory.OutlookSkipCount = 0
+			// Mark as complete for one-time sync
+			if input.Job.SyncType == "one_time" {
+				input.Job.TaskMemory.OutlookSyncComplete = true
+			}
 			break
 		}
 	}

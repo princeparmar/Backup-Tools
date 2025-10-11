@@ -90,6 +90,11 @@ type CronJobListingDB struct {
 	// Memory will be used to store the state of the task. this will be json field
 	TaskMemory TaskMemory `json:"task_memory" gorm:"type:jsonb"`
 
+	// SyncType determines if this is a daily sync or one-time sync
+	// "daily" - continues to sync new emails (default behavior)
+	// "one_time" - syncs all existing emails once and then stops
+	SyncType string `json:"sync_type" gorm:"default:'daily'"`
+
 	// Tasks associated with the cron job
 	Tasks []TaskListingDB `gorm:"foreignKey:CronJobID"`
 }
@@ -127,11 +132,15 @@ func MastTokenForCronJobDB(cronJob *CronJobListingDB) {
 }
 
 type TaskMemory struct {
-	GmailNextToken *string `json:"gmail_next_token"`
-	GmailSyncCount uint    `json:"gmail_sync_count"`
+	GmailNextToken    *string `json:"gmail_next_token"`
+	GmailSyncCount    uint    `json:"gmail_sync_count"`
+	GmailSyncComplete bool    `json:"gmail_sync_complete"`
 
-	OutlookSyncCount uint `json:"outlook_sync_count"`
-	OutlookSkipCount uint `json:"outlook_skip_count"`
+	OutlookSyncCount    uint `json:"outlook_sync_count"`
+	OutlookSkipCount    uint `json:"outlook_skip_count"`
+	OutlookSyncComplete bool `json:"outlook_sync_complete"`
+
+	DatabaseSyncComplete bool `json:"database_sync_complete"`
 }
 
 // Scan implements the sql.Scanner interface
@@ -430,10 +439,17 @@ func (storage *PosgresStore) GetPushedTask() (*TaskListingDB, error) {
 	tx := storage.DB.Begin()
 	// lock table tasks for update and select and return the first row with status pushed
 	// or status 'failed' and retry count less than 3
+	// Exclude one-time sync jobs that are already complete
 	db := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Joins("JOIN cron_job_listing_dbs ON task_listing_dbs.cron_job_id = cron_job_listing_dbs.id").
 		Where("cron_job_listing_dbs.active = ? AND (task_listing_dbs.status = ? OR (task_listing_dbs.status = ? AND task_listing_dbs.retry_count < ?))",
 			true, TaskStatusPushed, TaskStatusFailed, MaxRetryCount).
+		Where("NOT (cron_job_listing_dbs.sync_type = ? AND cron_job_listing_dbs.task_memory->>'gmail_sync_complete' = 'true')",
+			"one_time").
+		Where("NOT (cron_job_listing_dbs.sync_type = ? AND cron_job_listing_dbs.task_memory->>'outlook_sync_complete' = 'true')",
+			"one_time").
+		Where("NOT (cron_job_listing_dbs.sync_type = ? AND cron_job_listing_dbs.task_memory->>'database_sync_complete' = 'true')",
+			"one_time").
 		First(&res)
 	if db.Error != nil {
 		tx.Rollback()
@@ -543,13 +559,26 @@ func (storage *PosgresStore) GetCronJobByID(ID uint) (*CronJobListingDB, error) 
 	return &res, nil
 }
 
-func (storage *PosgresStore) CreateCronJobForUser(userID, name, method string, inputData map[string]interface{}) (*CronJobListingDB, error) {
+func (storage *PosgresStore) CreateCronJobForUser(userID, name, method string, inputData map[string]interface{}, syncType string) (*CronJobListingDB, error) {
+
+	// Validate and set default sync_type
+	if syncType == "" {
+		syncType = "daily" // Default to daily sync
+	}
+	if syncType != "daily" && syncType != "one_time" {
+		return nil, fmt.Errorf("invalid sync_type. Must be 'daily' or 'one_time'")
+	}
+
+	if syncType == "one_time" {
+		name = name + "_" + time.Now().Format("20060102150405")
+	}
 
 	data := CronJobListingDB{
 		UserID:    userID,
 		Name:      name,
 		Method:    method,
 		InputData: inputData,
+		SyncType:  syncType,
 	}
 	// create new entry in database and return newly created cron job
 	res := storage.DB.Create(&data)

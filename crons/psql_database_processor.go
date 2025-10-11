@@ -67,6 +67,11 @@ func (d *psqlDatabaseProcessor) Run(input ProcessorInput) error {
 		return err
 	}
 
+	// Mark as complete for one-time sync
+	if input.Job.SyncType == "one_time" {
+		input.Job.TaskMemory.DatabaseSyncComplete = true
+	}
+
 	return nil
 }
 

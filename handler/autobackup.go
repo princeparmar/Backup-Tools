@@ -143,7 +143,8 @@ func HandleAutomaticSyncCreateGmail(c echo.Context) error {
 	}
 
 	var reqBody struct {
-		Code string `json:"code"`
+		Code     string `json:"code"`
+		SyncType string `json:"sync_type"`
 	}
 
 	if err := c.Bind(&reqBody); err != nil {
@@ -186,7 +187,7 @@ func HandleAutomaticSyncCreateGmail(c echo.Context) error {
 	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 	data, err := database.CreateCronJobForUser(userID, userDetails.Email, "gmail", map[string]interface{}{
 		"refresh_token": tok.RefreshToken,
-	})
+	}, reqBody.SyncType)
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate key value") {
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -221,6 +222,7 @@ func HandleAutomaticSyncCreateOutlook(c echo.Context) error {
 
 	var reqBody struct {
 		RefreshToken string `json:"refresh_token"`
+		SyncType     string `json:"sync_type"`
 	}
 
 	if err := c.Bind(&reqBody); err != nil {
@@ -272,7 +274,7 @@ func HandleAutomaticSyncCreateOutlook(c echo.Context) error {
 	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
 	data, err := database.CreateCronJobForUser(userID, userDetails.Mail, "outlook", map[string]interface{}{
 		"refresh_token": reqBody.RefreshToken,
-	})
+	}, reqBody.SyncType)
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate key value") {
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -321,6 +323,7 @@ func HandleAutomaticSyncCreateDatabase(c echo.Context) error {
 		Port         string `json:"port"`
 		Username     string `json:"username"`
 		Password     string `json:"password"`
+		SyncType     string `json:"sync_type"`
 	}
 
 	if err := c.Bind(&reqBody); err != nil {
@@ -344,7 +347,7 @@ func HandleAutomaticSyncCreateDatabase(c echo.Context) error {
 		"port":          reqBody.Port,
 		"username":      reqBody.Username,
 		"password":      reqBody.Password,
-	})
+	}, reqBody.SyncType)
 
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{

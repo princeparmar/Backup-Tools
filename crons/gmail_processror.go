@@ -111,13 +111,21 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 		}
 
 		if emptyLoopCount > 20 {
-			// if we get 5 empty loops, we can break
+			// if we get 20 empty loops, we can break
 			*input.Job.TaskMemory.GmailNextToken = ""
+			// Mark as complete for one-time sync
+			if input.Job.SyncType == "one_time" {
+				input.Job.TaskMemory.GmailSyncComplete = true
+			}
 			break
 		}
 
 		*input.Job.TaskMemory.GmailNextToken = res.NextPageToken
 		if *input.Job.TaskMemory.GmailNextToken == "" {
+			// No more pages, mark as complete for one-time sync
+			if input.Job.SyncType == "one_time" {
+				input.Job.TaskMemory.GmailSyncComplete = true
+			}
 			break
 		}
 	}
