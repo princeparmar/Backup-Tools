@@ -62,11 +62,11 @@ func (m *JSONMap) Scan(value interface{}) error {
 type CronJobListingDB struct {
 	gorm.Model
 
-	UserID string `json:"user_id" gorm:"uniqueIndex:idx_name_method_user"`
+	UserID string `json:"user_id" gorm:"uniqueIndex:idx_name_sync_type_user"`
 
-	// In this table Name + Method + UserID should be unique
-	Name     string    `json:"name" gorm:"uniqueIndex:idx_name_method_user"`
-	Method   string    `json:"method" gorm:"uniqueIndex:idx_name_method_user"`
+	// In this table Name + SyncType + UserID should be unique
+	Name     string    `json:"name" gorm:"uniqueIndex:idx_name_sync_type_user"`
+	Method   string    `json:"method"`
 	Interval string    `json:"interval"`
 	On       string    `json:"on"`
 	LastRun  time.Time `json:"last_run"`
@@ -93,7 +93,7 @@ type CronJobListingDB struct {
 	// Tasks associated with the cron job
 	Tasks []TaskListingDB `gorm:"foreignKey:CronJobID"`
 
-	SyncType string `json:"sync_type"`
+	SyncType string `json:"sync_type" gorm:"uniqueIndex:idx_name_sync_type_user"`
 }
 
 // Add a Scanner interface implementation for InputData if needed
@@ -378,7 +378,7 @@ func (storage *PosgresStore) GetJobsToProcess() ([]CronJobListingDB, error) {
 		AND (message is null or message != ?)
 		AND DATE(last_run) != ?
 		AND (interval = 'daily'
-			OR (interval = 'weekly' AND "on" = ?)
+				OR (interval = 'weekly' AND "on" = ?)
 			OR (interval = 'monthly' AND "on" = ?))
 		AND id not in (
 			SELECT DISTINCT cron_job_id FROM task_listing_dbs
@@ -550,12 +550,13 @@ func (storage *PosgresStore) GetCronJobByID(ID uint) (*CronJobListingDB, error) 
 	return &res, nil
 }
 
-func (storage *PosgresStore) CreateCronJobForUser(userID, name, method string, inputData map[string]interface{}) (*CronJobListingDB, error) {
+func (storage *PosgresStore) CreateCronJobForUser(userID, name, method string, syncType string, inputData map[string]interface{}) (*CronJobListingDB, error) {
 
 	data := CronJobListingDB{
 		UserID:    userID,
 		Name:      name,
 		Method:    method,
+		SyncType:  syncType,
 		InputData: inputData,
 	}
 	// create new entry in database and return newly created cron job
