@@ -5,6 +5,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/repo"
 	"golang.org/x/oauth2"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -64,6 +65,7 @@ func (s *PosgresStore) Migrate() error {
 		&QuickbooksAuthStorage{},
 		&CronJobListingDB{},
 		&TaskListingDB{},
+		&repo.ScheduledTasks{},
 	)
 	if err != nil {
 		return err

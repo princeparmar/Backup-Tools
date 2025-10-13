@@ -273,7 +273,8 @@ func DeleteObject(ctx context.Context, accessGrant, bucketName, objectKey string
 }
 
 // GetUserdetails retrieves user details from satellite service
-func GetUserdetails(token string) (string, error) {
+func GetUserdetails(c echo.Context) (string, error) {
+	tokenKey := c.Request().Header.Get("token_key")
 	url := StorxSatelliteService + "/api/v0/auth/account"
 
 	req, err := http.NewRequest(http.MethodGet, url, nil)
@@ -282,7 +283,7 @@ func GetUserdetails(token string) (string, error) {
 	}
 
 	req.Header.Set("accept", "application/json")
-	req.Header.Set("cookie", "_tokenKey="+token)
+	req.Header.Set("cookie", "_tokenKey="+tokenKey)
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	res, err := client.Do(req)

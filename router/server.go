@@ -174,6 +174,11 @@ func StartServer(db *storage.PosgresStore, address string) {
 	quickbooks.GET("/items-to-satellite", handler.HandleQuickbooksItemsToSatellite)
 	quickbooks.GET("/invoices-to-satellite", handler.HandleQuickbooksInvoicesToSatellite)
 
+	// Scheduled tasks
+	scheduledTasks := e.Group("/tasks")
+	scheduledTasks.POST("/:method", handler.HandleCreateScheduledTask)
+	scheduledTasks.GET("", handler.HandleGetScheduledTasksByUserID)
+
 	err := e.Start(address)
 	if err != nil {
 		logger.Info(context.Background(), "Error starting server", logger.ErrorField(err))

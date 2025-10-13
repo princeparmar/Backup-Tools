@@ -40,7 +40,7 @@ type DatabaseConnection struct {
 func HandleAutomaticSyncListForUser(c echo.Context) error {
 	ctx := c.Request().Context()
 	defer monitor.Mon.Task()(&ctx)(&Err)
-	userID, err := getUserDetailsFromSatellite(c)
+	userID, err := satellite.GetUserdetails(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
 			"message": "not able to authenticate user",
@@ -68,7 +68,7 @@ func HandleAutomaticSyncActiveJobsForUser(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	userID, err := getUserDetailsFromSatellite(c)
+	userID, err := satellite.GetUserdetails(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
 			"message": "not able to authenticate user",
@@ -144,7 +144,7 @@ func HandleAutomaticSyncCreate(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	userID, err := getUserDetailsFromSatellite(c)
+	userID, err := satellite.GetUserdetails(c)
 	if err != nil {
 		return jsonError(http.StatusUnauthorized, "Invalid Request", err)
 	}
@@ -443,7 +443,7 @@ func HandleAutomaticSyncCreateTask(c echo.Context) error {
 		return sendJSONError(c, http.StatusBadRequest, "Invalid Job ID", err)
 	}
 
-	userID, err := getUserDetailsFromSatellite(c)
+	userID, err := satellite.GetUserdetails(c)
 	if err != nil {
 		return sendJSONError(c, http.StatusUnauthorized, "Invalid Request", err)
 	}
@@ -508,7 +508,7 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 	}
 	logger.Info(ctx, "Job ID validated", logger.Int("job_id", jobID))
 
-	userID, err := getUserDetailsFromSatellite(c)
+	userID, err := satellite.GetUserdetails(c)
 	if err != nil {
 		logger.Error(ctx, "Authentication failed for backup update",
 			logger.Int("job_id", jobID),
@@ -827,7 +827,7 @@ func HandleAutomaticSyncDelete(c echo.Context) error {
 		})
 	}
 
-	userID, err := getUserDetailsFromSatellite(c)
+	userID, err := satellite.GetUserdetails(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
 			"message": "Invalid Request",
@@ -879,7 +879,7 @@ func HandleAutomaticSyncTaskList(c echo.Context) error {
 		offset = 0
 	}
 
-	userID, err := getUserDetailsFromSatellite(c)
+	userID, err := satellite.GetUserdetails(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
 			"message": "Invalid Request",
@@ -908,11 +908,6 @@ func HandleAutomaticSyncTaskList(c echo.Context) error {
 		"message": "Logs for Automatic Backup",
 		"data":    data,
 	})
-}
-
-func getUserDetailsFromSatellite(c echo.Context) (string, error) {
-	tokenKey := c.Request().Header.Get("token_key")
-	return satellite.GetUserdetails(tokenKey)
 }
 
 func validateInterval(interval, on string) bool {

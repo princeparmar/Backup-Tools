@@ -18,14 +18,13 @@ func NewGmailProcessor() *gmailProcessor {
 	return &gmailProcessor{}
 }
 
-var Err error
-
 func (g *gmailProcessor) Run(input ProcessorInput) error {
 
 	ctx := context.Background()
-	defer monitor.Mon.Task()(&ctx)(&Err)
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
 
-	err := input.HeartBeatFunc()
+	err = input.HeartBeatFunc()
 	if err != nil {
 		return err
 	}
