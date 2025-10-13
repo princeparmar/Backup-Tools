@@ -36,13 +36,13 @@ func StartServer(db *storage.PosgresStore, address string) {
 	job.GET("/", handler.HandleAutomaticSyncListForUser)
 	job.GET("/:job_id", handler.HandleAutomaticSyncDetails)
 	job.POST("/:method", handler.HandleAutomaticSyncCreate)
-	job.POST("/:job_id/task", handler.HandleAutomaticSyncCreateTask)
 	job.PUT("/:job_id", handler.HandleAutomaticBackupUpdate)
 	job.DELETE("/:job_id", handler.HandleAutomaticSyncDelete)
 
 	job.GET("/interval", handler.HandleIntervalOnConfig)
 
 	task := autoSync.Group("/task")
+	task.POST("/:job_id", handler.HandleAutomaticSyncCreateTask)
 	task.GET("/:job_id", handler.HandleAutomaticSyncTaskList)
 
 	// Admin endpoint for deleting jobs by email
