@@ -3,26 +3,25 @@ package repo
 import (
 	"github.com/StorX2-0/Backup-Tools/pkg/gorm"
 	"golang.org/x/oauth2"
-	gormdb "gorm.io/gorm"
 )
 
 // GoogleAuthStorage represents Google authentication storage
 type GoogleAuthStorage struct {
-	gormdb.Model
+	gorm.GormModel
 	JWTtoken string
 	oauth2.Token
 }
 
 // ShopifyAuthStorage represents Shopify authentication storage
 type ShopifyAuthStorage struct {
-	gormdb.Model
+	gorm.GormModel
 	Cookie string
 	Token  string
 }
 
 // QuickbooksAuthStorage represents Quickbooks authentication storage
 type QuickbooksAuthStorage struct {
-	gormdb.Model
+	gorm.GormModel
 	Cookie string
 	Token  string
 }

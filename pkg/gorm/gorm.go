@@ -2,6 +2,10 @@ package gorm
 
 import "gorm.io/gorm"
 
+type GormModel struct {
+	gorm.Model
+}
+
 type DB struct{ *gorm.DB }
 
 func NewDB(gormDB *gorm.DB) *DB { return &DB{DB: gormDB} }

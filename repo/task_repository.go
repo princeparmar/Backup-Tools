@@ -13,7 +13,7 @@ import (
 
 // TaskListingDB represents a task in the database
 type TaskListingDB struct {
-	gormdb.Model
+	gorm.GormModel
 
 	CronJobID uint `gorm:"constraint:OnDelete:CASCADE;" json:"cron_job_id"` // Add delete cascade here
 

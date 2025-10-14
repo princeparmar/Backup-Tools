@@ -8,7 +8,6 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/gorm"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
-	gormdb "gorm.io/gorm"
 )
 
 // Job message status constants
@@ -35,7 +34,7 @@ const (
 
 // CronJobListingDB represents a cron job in the database
 type CronJobListingDB struct {
-	gormdb.Model
+	gorm.GormModel
 
 	UserID string `json:"user_id" gorm:"uniqueIndex:idx_name_sync_type_user"`
 

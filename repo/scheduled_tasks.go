@@ -6,11 +6,10 @@ import (
 
 	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/gorm"
-	gormdb "gorm.io/gorm"
 )
 
 type ScheduledTasks struct {
-	gormdb.Model
+	gorm.GormModel
 	UserID       string                                   `json:"user_id"`
 	LoginId      string                                   `json:"login_id"`
 	Method       string                                   `json:"method"`
