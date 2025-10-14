@@ -15,66 +15,115 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
+// TaskProcessorDeps contains all dependencies for task processing
+type TaskProcessorDeps struct {
+	Store *db.PosgresDb
+	Repo  *repo.ScheduledTasksRepository
+}
+
+// ScheduledTaskProcessorInput defines the input for processor execution
 type ScheduledTaskProcessorInput struct {
 	InputData     map[string]interface{}
 	Memory        map[string]string
 	Task          *repo.ScheduledTasks
 	HeartBeatFunc func() error
+	Deps          *TaskProcessorDeps
 }
 
 type ScheduledTaskProcessor interface {
 	Run(ScheduledTaskProcessorInput) error
 }
 
-var scheduledTaskProcessorMap = map[string]ScheduledTaskProcessor{
-	"gmail":   NewScheduledGmailProcessor(),
-	"outlook": NewScheduledOutlookProcessor(),
+// BaseProcessor provides common functionality for all processors
+type BaseProcessor struct {
+	Deps *TaskProcessorDeps
 }
 
+func (b *BaseProcessor) handleError(task *repo.ScheduledTasks, errMsg string, existingErrors []string) error {
+	if task.Errors.Json() != nil {
+		existingErrors = *task.Errors.Json()
+	}
+	existingErrors = append(existingErrors, errMsg)
+	task.Errors = *database.NewDbJsonFromValue(existingErrors)
+	return fmt.Errorf("%s", errMsg)
+}
+
+func (b *BaseProcessor) updateTaskStats(input *ScheduledTaskProcessorInput, successCount, failedCount int, failedEmails []string) error {
+	input.Task.SuccessCount = uint(successCount)
+	input.Task.FailedCount = uint(failedCount)
+
+	var existingErrors []string
+	if input.Task.Errors.Json() != nil {
+		existingErrors = *input.Task.Errors.Json()
+	}
+	existingErrors = append(existingErrors, failedEmails...)
+
+	if failedCount > 0 {
+		if successCount > 0 {
+			existingErrors = append(existingErrors, fmt.Sprintf("Warning: %d out of %d email IDs failed to sync", failedCount, failedCount+successCount))
+		} else {
+			existingErrors = append(existingErrors, fmt.Sprintf("Error: All %d email IDs failed to sync", failedCount))
+		}
+	}
+
+	input.Task.Errors = *database.NewDbJsonFromValue(existingErrors)
+
+	if failedCount > 0 && successCount == 0 {
+		return fmt.Errorf("failed to process %d emails", failedCount)
+	}
+	return nil
+}
+
+// ScheduledTaskManager manages scheduled task processing
 type ScheduledTaskManager struct {
-	store *db.PosgresDb
+	Deps      *TaskProcessorDeps
+	processor map[string]ScheduledTaskProcessor
 }
 
 func NewScheduledTaskManager(store *db.PosgresDb) *ScheduledTaskManager {
-	return &ScheduledTaskManager{store: store}
+	deps := &TaskProcessorDeps{
+		Store: store,
+		Repo:  repo.NewScheduledTasksRepository(store.DB),
+	}
+	return &ScheduledTaskManager{
+		Deps: deps,
+		processor: map[string]ScheduledTaskProcessor{
+			"gmail":   NewScheduledGmailProcessor(deps),
+			"outlook": NewScheduledOutlookProcessor(deps),
+		},
+	}
 }
 
-// createScheduledTaskContext creates a context with trace ID for scheduled task processing
-func createScheduledTaskContext(operation string) context.Context {
+func (s *ScheduledTaskManager) Start() {
+	c := cron.New()
+	c.AddFunc("@every 30s", func() {
+		ctx := s.createScheduledTaskContext("process_scheduled_tasks")
+		logger.Info(ctx, "Processing scheduled tasks")
+		if err := s.ProcessScheduledTasks(ctx); err != nil {
+			logger.Error(ctx, "Failed to process scheduled tasks", logger.ErrorField(err))
+		} else {
+			logger.Info(ctx, "Successfully processed scheduled tasks")
+		}
+	})
+	c.Start()
+	logger.Info(context.Background(), "Scheduled task processor started successfully")
+}
+
+func (s *ScheduledTaskManager) createScheduledTaskContext(operation string) context.Context {
 	traceID := uuid.New().String()
 	ctx := logger.WithTraceID(context.Background(), traceID)
 	logger.Info(ctx, "Scheduled task processing started", logger.String("operation", operation))
 	return ctx
 }
 
-func (s *ScheduledTaskManager) Start() {
-	c := cron.New()
-
-	// Process scheduled tasks
-	c.AddFunc("@every 30s", func() {
-		ctx := createScheduledTaskContext("process_scheduled_tasks")
-		logger.Info(ctx, "Processing scheduled tasks")
-		err := s.ProcessScheduledTasks(ctx)
-		if err != nil {
-			logger.Error(ctx, "Failed to process scheduled tasks", logger.ErrorField(err))
-		} else {
-			logger.Info(ctx, "Successfully processed scheduled tasks")
-		}
-	})
-
-	c.Start()
-	logger.Info(context.Background(), "Scheduled task processor started successfully")
-}
-
 func (s *ScheduledTaskManager) ProcessScheduledTasks(ctx context.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	processedCount := 0
-	errorCount := 0
+	processedCount, errorCount := 0, 0
 
 	for {
-		task, err := s.store.ScheduledTasksRepo.GetNextScheduledTask()
+		task, err := s.Deps.Repo.GetNextScheduledTask()
 		if err != nil {
 			if strings.Contains(err.Error(), "record not found") {
 				logger.Info(ctx, "No scheduled tasks to process")
@@ -92,7 +141,7 @@ func (s *ScheduledTaskManager) ProcessScheduledTasks(ctx context.Context) error 
 		task.Status = "running"
 		now := time.Now()
 		task.StartTime = &now
-		if err := s.store.DB.Save(task).Error; err != nil {
+		if err := s.Deps.Store.DB.Save(task).Error; err != nil {
 			logger.Error(ctx, "Failed to update task status to running",
 				logger.Int("task_id", int(task.ID)),
 				logger.ErrorField(err),
@@ -100,20 +149,12 @@ func (s *ScheduledTaskManager) ProcessScheduledTasks(ctx context.Context) error 
 			continue
 		}
 
-		logger.Info(ctx, "Task status updated to running",
-			logger.Int("task_id", int(task.ID)),
-			logger.String("status", task.Status))
-
-		// Process the scheduled task
 		processErr := s.processScheduledTask(ctx, task)
-
-		// Update task status
 		if updateErr := s.UpdateScheduledTaskStatus(task, processErr); updateErr != nil {
 			logger.Error(ctx, "Failed to update scheduled task status",
 				logger.Int("task_id", int(task.ID)),
 				logger.ErrorField(updateErr),
 			)
-			// Continue with next task even if status update fails
 			continue
 		}
 
@@ -127,7 +168,6 @@ func (s *ScheduledTaskManager) ProcessScheduledTasks(ctx context.Context) error 
 		logger.Int("processed", processedCount),
 		logger.Int("errors", errorCount),
 	)
-
 	return nil
 }
 
@@ -135,7 +175,7 @@ func (s *ScheduledTaskManager) processScheduledTask(ctx context.Context, task *r
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	processor, ok := scheduledTaskProcessorMap[task.Method]
+	processor, ok := s.processor[task.Method]
 	if !ok {
 		return fmt.Errorf("processor for method '%s' not found", task.Method)
 	}
@@ -145,10 +185,7 @@ func (s *ScheduledTaskManager) processScheduledTask(ctx context.Context, task *r
 		logger.String("method", task.Method),
 	)
 
-	// Get input data and memory from the task
-	var inputData map[string]interface{}
-	var memory map[string]string
-
+	inputData, memory := make(map[string]interface{}), make(map[string]string)
 	if task.InputData != nil {
 		inputData = *task.InputData.Json()
 	}
@@ -160,31 +197,25 @@ func (s *ScheduledTaskManager) processScheduledTask(ctx context.Context, task *r
 		InputData: inputData,
 		Memory:    memory,
 		Task:      task,
+		Deps:      s.Deps,
 		HeartBeatFunc: func() error {
-			// Check if task is still running
-			currentTask, err := s.store.ScheduledTasksRepo.GetScheduledTaskByID(task.ID)
+			currentTask, err := s.Deps.Repo.GetScheduledTaskByID(task.ID)
 			if err != nil {
 				return fmt.Errorf("failed to get task status: %w", err)
 			}
-
 			if currentTask.Status != "running" {
 				return fmt.Errorf("task status changed to '%s', stopping execution", currentTask.Status)
 			}
-
-			// Update heartbeat
-			if err := s.store.ScheduledTasksRepo.UpdateHeartBeatForScheduledTask(task.ID); err != nil {
+			if err := s.Deps.Repo.UpdateHeartBeatForScheduledTask(task.ID); err != nil {
 				return fmt.Errorf("failed to update heartbeat: %w", err)
 			}
-
 			return nil
 		},
 	})
 
-	// Update memory in the task after processing
 	if memory != nil {
 		task.Memory = database.NewDbJsonFromValue(memory)
 	}
-
 	return err
 }
 
@@ -193,12 +224,10 @@ func (s *ScheduledTaskManager) UpdateScheduledTaskStatus(task *repo.ScheduledTas
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	// Set execution time
 	if task.StartTime != nil {
 		task.Execution = uint64(time.Since(*task.StartTime).Seconds())
 	}
 
-	// Check memory status for different completion states
 	var hasError, hasSuccess bool
 	var errorCount, successCount int
 
@@ -215,25 +244,21 @@ func (s *ScheduledTaskManager) UpdateScheduledTaskStatus(task *repo.ScheduledTas
 		}
 	}
 
-	// Determine task status based on results
-	if processErr != nil {
-		// If there's a processor error, mark as failed
+	// Determine task status
+	switch {
+	case processErr != nil:
 		task.Status = "failed"
-	} else if hasError && hasSuccess {
-		// Some succeeded, some failed - partially completed
+	case hasError && hasSuccess:
 		task.Status = "partially_completed"
-	} else if hasError && !hasSuccess {
-		// All failed - failed
+	case hasError && !hasSuccess:
 		task.Status = "failed"
-	} else if hasSuccess && !hasError {
-		// All succeeded - completed
+	case hasSuccess && !hasError:
 		task.Status = "completed"
-	} else {
-		// No processing occurred - keep as created/running
+	default:
 		task.Status = "completed"
 	}
 
-	// Update errors if there are any
+	// Update errors if any
 	if processErr != nil || hasError {
 		var existingErrors []string
 		if task.Errors.Json() != nil {
@@ -246,15 +271,11 @@ func (s *ScheduledTaskManager) UpdateScheduledTaskStatus(task *repo.ScheduledTas
 			existingErrors = append(existingErrors, fmt.Sprintf("%d IDs failed to sync", errorCount))
 		}
 		task.Errors = *database.NewDbJsonFromValue(existingErrors)
-	} else {
-		// Ensure Errors field is properly initialized even when no errors
-		if task.Errors.Json() == nil {
-			task.Errors = *database.NewDbJsonFromValue([]string{})
-		}
+	} else if task.Errors.Json() == nil {
+		task.Errors = *database.NewDbJsonFromValue([]string{})
 	}
 
-	// Save task to database
-	if err := s.store.DB.Save(task).Error; err != nil {
+	if err := s.Deps.Store.DB.Save(task).Error; err != nil {
 		logger.Error(ctx, "Failed to save scheduled task status",
 			logger.Int("task_id", int(task.ID)),
 			logger.ErrorField(err),
@@ -268,6 +289,5 @@ func (s *ScheduledTaskManager) UpdateScheduledTaskStatus(task *repo.ScheduledTas
 		logger.Int("success_count", int(task.SuccessCount)),
 		logger.Int("failed_count", int(task.FailedCount)),
 	)
-
 	return nil
 }

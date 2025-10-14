@@ -7,127 +7,78 @@ import (
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
-	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
+	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 )
 
-type scheduledOutlookProcessor struct{}
-
-func NewScheduledOutlookProcessor() *scheduledOutlookProcessor {
-	return &scheduledOutlookProcessor{}
+// OutlookProcessor handles Outlook scheduled tasks
+type OutlookProcessor struct {
+	BaseProcessor
 }
 
-func (o *scheduledOutlookProcessor) Run(input ScheduledTaskProcessorInput) error {
+func NewScheduledOutlookProcessor(deps *TaskProcessorDeps) *OutlookProcessor {
+	return &OutlookProcessor{BaseProcessor{Deps: deps}}
+}
+
+func (o *OutlookProcessor) Run(input ScheduledTaskProcessorInput) error {
 	ctx := context.Background()
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	err = input.HeartBeatFunc()
-	if err != nil {
+	if err = input.HeartBeatFunc(); err != nil {
 		return err
 	}
 
 	refreshToken, ok := input.InputData["refresh_token"].(string)
 	if !ok {
-		// Store error in task and return
-		var existingErrors []string
-		if input.Task.Errors.Json() != nil {
-			existingErrors = *input.Task.Errors.Json()
-		}
-		existingErrors = append(existingErrors, "Refresh token not found for Outlook method")
-		input.Task.Errors = *database.NewDbJsonFromValue(existingErrors)
-		return fmt.Errorf("code not found for Outlook method")
+		return o.handleError(input.Task, "Refresh token not found for Outlook method", nil)
 	}
 
-	// Get new access token using code
 	accessToken, err := outlook.AuthTokenUsingRefreshToken(refreshToken)
 	if err != nil {
-		// Store authentication error
-		var existingErrors []string
-		if input.Task.Errors.Json() != nil {
-			existingErrors = *input.Task.Errors.Json()
-		}
-		existingErrors = append(existingErrors, fmt.Sprintf("Authentication failed: %s", err))
-		input.Task.Errors = *database.NewDbJsonFromValue(existingErrors)
-		return fmt.Errorf("error while generating access token: %s", err)
+		return o.handleError(input.Task, fmt.Sprintf("Authentication failed: %s", err), nil)
 	}
 
-	// Create Outlook client
 	outlookClient, err := outlook.NewOutlookClientUsingToken(accessToken)
 	if err != nil {
-		// Store client creation error
-		var existingErrors []string
-		if input.Task.Errors.Json() != nil {
-			existingErrors = *input.Task.Errors.Json()
-		}
-		existingErrors = append(existingErrors, fmt.Sprintf("Failed to create Outlook client: %s", err))
-		input.Task.Errors = *database.NewDbJsonFromValue(existingErrors)
-		return fmt.Errorf("error while creating outlook client: %s", err)
+		return o.handleError(input.Task, fmt.Sprintf("Failed to create Outlook client: %s", err), nil)
 	}
 
-	// Create placeholder file
-	err = satellite.UploadObject(context.Background(), input.Task.StorxToken, satellite.ReserveBucket_Outlook, input.Task.LoginId+"/.file_placeholder", nil)
-	if err != nil {
-		// Store storage error
-		var existingErrors []string
-		if input.Task.Errors.Json() != nil {
-			existingErrors = *input.Task.Errors.Json()
-		}
-		existingErrors = append(existingErrors, fmt.Sprintf("Failed to create placeholder file: %s", err))
-		input.Task.Errors = *database.NewDbJsonFromValue(existingErrors)
+	// Create placeholder and get existing emails
+	if err := o.setupStorage(input.Task, satellite.ReserveBucket_Outlook); err != nil {
 		return err
 	}
 
-	// Get existing emails from bucket
-	emailListFromBucket, err := satellite.ListObjectsWithPrefix(context.Background(), input.Task.StorxToken, satellite.ReserveBucket_Outlook, input.Task.LoginId+"/")
+	emailListFromBucket, err := satellite.ListObjectsWithPrefix(ctx, input.Task.StorxToken, satellite.ReserveBucket_Outlook, input.Task.LoginId+"/")
 	if err != nil && !strings.Contains(err.Error(), "object not found") {
-		// Store bucket listing error
-		var existingErrors []string
-		if input.Task.Errors.Json() != nil {
-			existingErrors = *input.Task.Errors.Json()
-		}
-		existingErrors = append(existingErrors, fmt.Sprintf("Failed to list existing emails: %s", err))
-		input.Task.Errors = *database.NewDbJsonFromValue(existingErrors)
-		return err
+		return o.handleError(input.Task, fmt.Sprintf("Failed to list existing emails: %s", err), nil)
 	}
 
-	err = input.HeartBeatFunc()
-	if err != nil {
-		return err
-	}
+	return o.processEmails(input, outlookClient, emailListFromBucket)
+}
 
-	// Track success and failure counts
-	successCount := 0
-	failedCount := 0
+func (o *OutlookProcessor) setupStorage(task *repo.ScheduledTasks, bucket string) error {
+	return satellite.UploadObject(context.Background(), task.StorxToken, bucket, task.LoginId+"/.file_placeholder", nil)
+}
+
+func (o *OutlookProcessor) processEmails(input ScheduledTaskProcessorInput, client *outlook.OutlookClient, existingEmails map[string]bool) error {
+	successCount, failedCount := 0, 0
 	var failedEmails []string
 
-	// Add heartbeat before processing emails
-	err = input.HeartBeatFunc()
-	if err != nil {
-		return err
-	}
-
-	// Process each email ID from memory
 	for emailID, status := range input.Memory {
-		if status == "synced" || strings.HasPrefix(status, "error:") {
-			continue // Skip already processed emails
+		if status == "synced" || status == "skipped" || strings.HasPrefix(status, "error:") {
+			continue
 		}
 
-		err = input.HeartBeatFunc()
-		if err != nil {
+		if err := input.HeartBeatFunc(); err != nil {
 			return err
 		}
 
-		// Get the specific email by ID
-		message, err := outlookClient.GetMessage(emailID)
+		message, err := client.GetMessage(emailID)
 		if err != nil {
-			// Log error and track failure
-			fmt.Printf("Failed to get email %s: %v\n", emailID, err)
-			failedEmails = append(failedEmails, fmt.Sprintf("Email ID %s: %v", emailID, err))
-			failedCount++
-			input.Memory[emailID] = fmt.Sprintf("error: %v", err)
+			failedEmails, failedCount = o.trackFailure(emailID, err, failedEmails, failedCount, input)
 			continue
 		}
 
@@ -137,68 +88,35 @@ func (o *scheduledOutlookProcessor) Run(input ScheduledTaskProcessorInput) error
 			From:             message.From,
 			ReceivedDateTime: message.ReceivedDateTime,
 		})
-		_, synced := emailListFromBucket[messagePath]
-		if synced {
-			// Mark as processed if already synced
-			input.Memory[emailID] = "synced"
+
+		if _, exists := existingEmails[messagePath]; exists {
+			input.Memory[emailID] = "skipped: already exists in storage"
 			successCount++
 			continue
 		}
 
-		// Upload the email
-		b, err := json.Marshal(message)
-		if err != nil {
-			failedEmails = append(failedEmails, fmt.Sprintf("Email ID %s: Failed to marshal - %v", emailID, err))
-			failedCount++
-			input.Memory[emailID] = fmt.Sprintf("error: Failed to marshal - %v", err)
-			continue
-		}
-
-		err = satellite.UploadObject(context.TODO(), input.Task.StorxToken, "outlook", messagePath, b)
-		if err != nil {
-			failedEmails = append(failedEmails, fmt.Sprintf("Email ID %s: Failed to upload - %v", emailID, err))
-			failedCount++
-			input.Memory[emailID] = fmt.Sprintf("error: Failed to upload - %v", err)
-			continue
-		}
-
-		// Mark as processed and increment success count
-		input.Memory[emailID] = "synced"
-		successCount++
-	}
-
-	// Add heartbeat after processing all emails
-	err = input.HeartBeatFunc()
-	if err != nil {
-		return err
-	}
-
-	// Update task with counts and errors
-	input.Task.SuccessCount = uint(successCount)
-	input.Task.FailedCount = uint(failedCount)
-
-	// Get existing errors and append new ones
-	var existingErrors []string
-	if input.Task.Errors.Json() != nil {
-		existingErrors = *input.Task.Errors.Json()
-	}
-	existingErrors = append(existingErrors, failedEmails...)
-
-	// Add summary message if some IDs failed
-	if failedCount > 0 {
-		if successCount > 0 {
-			existingErrors = append(existingErrors, fmt.Sprintf("Warning: %d out of %d email IDs failed to sync", failedCount, failedCount+successCount))
+		if err := o.uploadEmail(input, message, messagePath, "outlook"); err != nil {
+			failedEmails, failedCount = o.trackFailure(emailID, err, failedEmails, failedCount, input)
 		} else {
-			existingErrors = append(existingErrors, fmt.Sprintf("Error: All %d email IDs failed to sync", failedCount))
+			input.Memory[emailID] = "synced"
+			successCount++
 		}
 	}
 
-	input.Task.Errors = *database.NewDbJsonFromValue(existingErrors)
+	return o.updateTaskStats(&input, successCount, failedCount, failedEmails)
+}
 
-	// Only return error if ALL emails failed
-	if failedCount > 0 && successCount == 0 {
-		return fmt.Errorf("failed to process %d emails: %v", failedCount, failedEmails)
+func (o *OutlookProcessor) trackFailure(emailID string, err error, failedEmails []string, failedCount int, input ScheduledTaskProcessorInput) ([]string, int) {
+	failedEmails = append(failedEmails, fmt.Sprintf("Email ID %s: %v", emailID, err))
+	failedCount++
+	input.Memory[emailID] = fmt.Sprintf("error: %v", err)
+	return failedEmails, failedCount
+}
+
+func (o *OutlookProcessor) uploadEmail(input ScheduledTaskProcessorInput, message interface{}, messagePath, bucket string) error {
+	b, err := json.Marshal(message)
+	if err != nil {
+		return fmt.Errorf("failed to marshal: %v", err)
 	}
-
-	return nil
+	return satellite.UploadObject(context.TODO(), input.Task.StorxToken, bucket, messagePath, b)
 }
