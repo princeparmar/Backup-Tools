@@ -132,7 +132,7 @@ func Autentificate(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
 	authToken := c.FormValue("google-key")
 	// refreshToken := c.FormValue("refresh-key")
 
@@ -163,7 +163,7 @@ func Autentificate(c echo.Context) error {
 	// }
 
 	googleExternalToken := utils.RandStringRunes(50)
-	database.WriteGoogleAuthToken(googleExternalToken, authToken)
+	database.AuthRepo.WriteGoogleAuthToken(googleExternalToken, authToken)
 	jwtString := CreateJWToken(googleExternalToken)
 	c.Response().Header().Add("Authorization", "Bearer "+jwtString)
 
@@ -178,7 +178,7 @@ func Autentificateg(c echo.Context) error {
 	ctx := c.Request().Context()
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
 	code := c.FormValue("code")
 	b, err := os.ReadFile("credentials.json")
 	if err != nil {
@@ -205,7 +205,7 @@ func Autentificateg(c echo.Context) error {
 			}
 
 			googleExternalToken := utils.RandStringRunes(50)
-			database.WriteGoogleAuthToken(googleExternalToken, tok.AccessToken)
+			database.AuthRepo.WriteGoogleAuthToken(googleExternalToken, tok.AccessToken)
 			jwtString := CreateJWToken(googleExternalToken)
 			c.Response().Header().Add("Authorization", "Bearer "+jwtString)
 		}
@@ -328,13 +328,13 @@ func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 }
 
 func GetGoogleAccountDetailsFromContext(c echo.Context) (*GoogleAuthResponse, error) {
-	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
 
 	googleToken, err := GetGoogleTokenFromJWT(c)
 	if err != nil {
 		return nil, fmt.Errorf("unable to retrieve google-auth token from JWT: %v", err)
 	}
-	token, err := database.ReadGoogleAuthToken(googleToken)
+	token, err := database.AuthRepo.ReadGoogleAuthToken(googleToken)
 	if err != nil {
 		return nil, fmt.Errorf("unable to retrieve google-auth token from database: %v", err)
 	}

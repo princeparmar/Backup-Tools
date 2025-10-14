@@ -4,10 +4,9 @@ import (
 	"context"
 	"os"
 
+	"github.com/StorX2-0/Backup-Tools/pkg/gorm"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
-	"github.com/glebarez/sqlite"
-	"gorm.io/gorm"
 )
 
 type GmailMessageSQL struct {
@@ -25,7 +24,6 @@ type SQLiteEmailDatabase struct {
 }
 
 func ConnectToEmailDB(dbPath string) (*SQLiteEmailDatabase, error) {
-
 	// TODO check if db exists locally
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		// Database file does not exist, create new file
@@ -37,30 +35,27 @@ func ConnectToEmailDB(dbPath string) (*SQLiteEmailDatabase, error) {
 		file.Close()
 	}
 
-	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	config := gorm.SQLiteConfig(dbPath)
+	db, err := gorm.NewDatabase(config)
 	if err != nil {
 		return nil, err
 	}
 
-	err = db.AutoMigrate(&GmailMessageSQL{})
+	err = db.DB.AutoMigrate(&GmailMessageSQL{})
 	if err != nil {
 		return nil, err
 	}
 
-	return &SQLiteEmailDatabase{db}, nil
+	return &SQLiteEmailDatabase{DB: db}, nil
 }
 
 func (db *SQLiteEmailDatabase) WriteEmailToDB(msg *GmailMessageSQL) error {
-	resp := db.Create(&msg)
-	if resp.Error != nil {
-		return resp.Error
-	}
-	return nil
+	return db.DB.Create(&msg).Error
 }
 
 func (db *SQLiteEmailDatabase) GetAllEmailsFromDB() ([]*GmailMessageSQL, error) {
 	var messages []*GmailMessageSQL
-	if err := db.Order("id asc").Find(&messages).Error; err != nil {
+	if err := db.DB.Order("id asc").Find(&messages).Error; err != nil {
 		return nil, err
 	}
 

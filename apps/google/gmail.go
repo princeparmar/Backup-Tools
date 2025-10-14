@@ -71,13 +71,13 @@ type Attachment struct {
 
 func NewGmailClient(c echo.Context) (*GmailClient, error) {
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
 
 	googleToken, err := GetGoogleTokenFromJWT(c)
 	if err != nil {
 		return nil, fmt.Errorf("unable to retrieve google-auth token from JWT: %v", err)
 	}
-	token, err := database.ReadGoogleAuthToken(googleToken)
+	token, err := database.AuthRepo.ReadGoogleAuthToken(googleToken)
 	if err != nil {
 		return nil, fmt.Errorf("unable to retrieve google-auth token from database: %v", err)
 	}

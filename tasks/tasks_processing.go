@@ -32,10 +32,10 @@ var scheduledTaskProcessorMap = map[string]ScheduledTaskProcessor{
 }
 
 type ScheduledTaskManager struct {
-	store *db.PosgresStore
+	store *db.PosgresDb
 }
 
-func NewScheduledTaskManager(store *db.PosgresStore) *ScheduledTaskManager {
+func NewScheduledTaskManager(store *db.PosgresDb) *ScheduledTaskManager {
 	return &ScheduledTaskManager{store: store}
 }
 
@@ -74,7 +74,7 @@ func (s *ScheduledTaskManager) ProcessScheduledTasks(ctx context.Context) error 
 	errorCount := 0
 
 	for {
-		task, err := s.store.GetNextScheduledTask()
+		task, err := s.store.ScheduledTasksRepo.GetNextScheduledTask()
 		if err != nil {
 			if strings.Contains(err.Error(), "record not found") {
 				logger.Info(ctx, "No scheduled tasks to process")
@@ -162,7 +162,7 @@ func (s *ScheduledTaskManager) processScheduledTask(ctx context.Context, task *r
 		Task:      task,
 		HeartBeatFunc: func() error {
 			// Check if task is still running
-			currentTask, err := s.store.GetScheduledTaskByID(task.ID)
+			currentTask, err := s.store.ScheduledTasksRepo.GetScheduledTaskByID(task.ID)
 			if err != nil {
 				return fmt.Errorf("failed to get task status: %w", err)
 			}
@@ -172,7 +172,7 @@ func (s *ScheduledTaskManager) processScheduledTask(ctx context.Context, task *r
 			}
 
 			// Update heartbeat
-			if err := s.store.UpdateHeartBeatForScheduledTask(task.ID); err != nil {
+			if err := s.store.ScheduledTasksRepo.UpdateHeartBeatForScheduledTask(task.ID); err != nil {
 				return fmt.Errorf("failed to update heartbeat: %w", err)
 			}
 

@@ -6,8 +6,9 @@ import (
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/database"
+	"github.com/StorX2-0/Backup-Tools/pkg/gorm"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
-	"gorm.io/gorm"
+	gormdb "gorm.io/gorm"
 )
 
 // Job message status constants
@@ -34,7 +35,7 @@ const (
 
 // CronJobListingDB represents a cron job in the database
 type CronJobListingDB struct {
-	gorm.Model
+	gormdb.Model
 
 	UserID string `json:"user_id" gorm:"uniqueIndex:idx_name_sync_type_user"`
 
@@ -246,13 +247,15 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 	`
 
 	// Execute the raw SQL query and store the result in the cronJobs slice
-	db := tx.Raw(sqlQuery, JobMessagePushToQueue, time.Now().Format("2006-01-02"),
+	rawQuery := tx.Raw(sqlQuery, JobMessagePushToQueue, time.Now().Format("2006-01-02"),
 		time.Now().Weekday().String(),
 		fmt.Sprint(time.Now().Day()),
-		TaskStatusRunning, TaskStatusPushed).Scan(&res)
-	if db.Error != nil {
+		TaskStatusRunning, TaskStatusPushed)
+
+	scanResult := rawQuery.Scan(&res)
+	if scanResult.Error != nil {
 		tx.Rollback()
-		return nil, fmt.Errorf("error getting jobs to process: %v", db.Error)
+		return nil, fmt.Errorf("error getting jobs to process: %v", scanResult.Error)
 	}
 
 	// update message to "push to queue" and message status to "info"
@@ -260,16 +263,14 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 		res[i].Message = JobMessagePushToQueue
 		res[i].MessageStatus = JobMessageStatusInfo
 
-		db = tx.Save(&res[i])
-		if db != nil && db.Error != nil {
+		if err := tx.Save(&res[i]).Error; err != nil {
 			tx.Rollback()
-			return nil, fmt.Errorf("error updating cron job: %v", db.Error)
+			return nil, fmt.Errorf("error updating cron job: %w", err)
 		}
 	}
 
-	err := tx.Commit()
-	if err != nil && err.Error != nil {
-		return nil, fmt.Errorf("error committing transaction: %v", err.Error)
+	if err := tx.Commit().Error; err != nil {
+		return nil, fmt.Errorf("error committing transaction: %w", err)
 	}
 
 	return res, nil

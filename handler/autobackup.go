@@ -49,7 +49,7 @@ func HandleAutomaticSyncListForUser(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
 	automaticSyncList, err := database.CronJobRepo.GetAllCronJobsForUser(userID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
@@ -77,7 +77,7 @@ func HandleAutomaticSyncActiveJobsForUser(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
 	activeJobs, err := database.CronJobRepo.GetAllActiveCronJobsForUser(userID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
@@ -117,7 +117,7 @@ func HandleAutomaticSyncDetails(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
 	jobDetails, err := database.CronJobRepo.GetCronJobByID(uint(jobID))
 	if err != nil {
 		if strings.Contains(err.Error(), "record not found") {
@@ -290,7 +290,7 @@ func processDatabaseMethod(reqBody DatabaseConnection, syncType string) (string,
 
 // Helper functions
 func createSyncJob(userID, name, method, syncType string, config map[string]interface{}, c echo.Context) (interface{}, error) {
-	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
 
 	// Check for existing jobs using original name (before adding timestamp)
 	if err := checkExistingJobs(userID, syncType, method, database); err != nil {
@@ -305,7 +305,7 @@ func createSyncJob(userID, name, method, syncType string, config map[string]inte
 	return data, nil
 }
 
-func checkExistingJobs(userID, syncType, method string, db *db.PosgresStore) error {
+func checkExistingJobs(userID, syncType, method string, db *db.PosgresDb) error {
 	existingJobs, err := db.CronJobRepo.GetAllCronJobsForUser(userID)
 	if err != nil {
 		return jsonError(http.StatusInternalServerError, "Failed to check existing jobs", err)
@@ -402,7 +402,7 @@ func sendSyncResponse(c echo.Context, syncType string, data interface{}) error {
 			return jsonErrorMsg(http.StatusInternalServerError, "Invalid data type returned")
 		}
 
-		database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+		database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
 		task, err := database.TaskRepo.CreateTaskForCronJob(cronJobData.ID)
 		if err != nil {
 			return jsonError(http.StatusInternalServerError, "Failed to create task for one-time backup", err)
@@ -456,7 +456,7 @@ func HandleAutomaticSyncCreateTask(c echo.Context) error {
 		return sendJSONError(c, http.StatusUnauthorized, "Invalid Request", err)
 	}
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
 
 	job, err := database.CronJobRepo.GetJobByIDForUser(userID, uint(jobID))
 	if err != nil {
@@ -530,7 +530,7 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 		logger.String("user_id", userID),
 		logger.Int("job_id", jobID))
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
 
 	// Verify job exists and belongs to user
 	job, err := database.CronJobRepo.GetJobByIDForUser(userID, uint(jobID))
@@ -843,7 +843,7 @@ func HandleAutomaticSyncDelete(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
 
 	if _, err := database.CronJobRepo.GetJobByIDForUser(userID, uint(jobID)); err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -895,7 +895,7 @@ func HandleAutomaticSyncTaskList(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
 
 	if _, err := database.CronJobRepo.GetJobByIDForUser(userID, uint(jobID)); err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -979,7 +979,7 @@ func HandleDeleteJobsByEmail(c echo.Context) error {
 	}
 
 	// Get database instance
-	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
 
 	// Delete all jobs and tasks for the user by email
 	deletedJobIDs, deletedTaskIDs, err := database.CronJobRepo.DeleteAllJobsAndTasksByEmail(req.Email)

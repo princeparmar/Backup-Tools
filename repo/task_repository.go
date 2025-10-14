@@ -5,14 +5,15 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/pkg/gorm"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
-	"gorm.io/gorm"
+	gormdb "gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
 // TaskListingDB represents a task in the database
 type TaskListingDB struct {
-	gorm.Model
+	gormdb.Model
 
 	CronJobID uint `gorm:"constraint:OnDelete:CASCADE;" json:"cron_job_id"` // Add delete cascade here
 
@@ -136,26 +137,23 @@ func (r *TaskRepository) GetPushedTask() (*TaskListingDB, error) {
 	res.LastHeartBeat = &startTime
 	res.Message = "Automatic backup started"
 
-	db = tx.Save(&res)
-	if db != nil && db.Error != nil {
+	if err := tx.Save(&res).Error; err != nil {
 		tx.Rollback()
-		return nil, fmt.Errorf("error updating pushed task status: %v", db.Error)
+		return nil, fmt.Errorf("error updating pushed task status: %v", err)
 	}
 
 	var job CronJobListingDB
-	db = tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=?", res.CronJobID).First(&job)
-	if db.Error != nil {
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=?", res.CronJobID).First(&job).Error; err != nil {
 		tx.Rollback()
-		return nil, fmt.Errorf("error getting job: %v", db.Error)
+		return nil, fmt.Errorf("error getting job: %v", err)
 	}
 
 	job.Message = "Automatic backup started"
 	job.MessageStatus = JobMessageStatusInfo
 
-	db = tx.Save(&job)
-	if db != nil && db.Error != nil {
+	if err := tx.Save(&job).Error; err != nil {
 		tx.Rollback()
-		return nil, fmt.Errorf("error updating pushed task status: %v", db.Error)
+		return nil, fmt.Errorf("error updating pushed task status: %v", err)
 	}
 
 	err := tx.Commit()
@@ -206,10 +204,9 @@ func (r *TaskRepository) UpdateTaskByID(ID uint, m map[string]interface{}) error
 	}
 
 	if m["status"] == TaskStatusFailed {
-		db = tx.Model(&TaskListingDB{}).Where("id = ?", ID).Update("retry_count", gorm.Expr("retry_count + 1"))
-		if db != nil && db.Error != nil {
+		if err := tx.Model(&TaskListingDB{}).Where("id = ?", ID).Update("retry_count", gormdb.Expr("retry_count + 1")).Error; err != nil {
 			tx.Rollback()
-			return fmt.Errorf("error updating task by ID: %v", db.Error)
+			return fmt.Errorf("error updating task by ID: %v", err)
 		}
 	}
 

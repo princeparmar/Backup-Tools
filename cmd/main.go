@@ -81,7 +81,7 @@ func initApp(ctx context.Context) error {
 	return nil
 }
 
-func setupStorage(ctx context.Context) (*db.PosgresStore, error) {
+func setupStorage(ctx context.Context) (*db.PosgresDb, error) {
 	store, err := db.NewPostgresStore(
 		utils.GetEnvWithKey("POSTGRES_DSN"),
 		utils.GetEnvWithKey("QUERY_LOGGING") == "true",

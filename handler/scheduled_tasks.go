@@ -80,7 +80,7 @@ func HandleCreateScheduledTask(c echo.Context) error {
 	}
 
 	// Get database connection
-	db := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+	db := c.Get(middleware.DbContextKey).(*db.PosgresDb)
 
 	// Create scheduled task
 	task := &repo.ScheduledTasks{
@@ -123,7 +123,7 @@ func HandleGetScheduledTasksByUserID(c echo.Context) error {
 	filter := parseFilterParams(c)
 
 	// Get database connection
-	db := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+	db := c.Get(middleware.DbContextKey).(*db.PosgresDb)
 
 	// Get scheduled tasks by user ID
 	taskRepo := &repo.ScheduledTasks{}

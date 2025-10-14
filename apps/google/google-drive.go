@@ -146,7 +146,7 @@ func GetFileByID(c echo.Context) error {
 // client authenticates the client and returns an HTTP client
 func client(c echo.Context) (*http.Client, error) {
 	ctx := c.Request().Context()
-	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
 
 	b, err := os.ReadFile("credentials.json")
 	if err != nil {
@@ -164,7 +164,7 @@ func client(c echo.Context) (*http.Client, error) {
 
 	logger.Info(ctx, "processing google token"+googleToken)
 
-	tok, err := database.ReadGoogleAuthToken(googleToken)
+	tok, err := database.AuthRepo.ReadGoogleAuthToken(googleToken)
 	if err != nil {
 		return nil, echo.NewHTTPError(http.StatusUnauthorized, "user is not authorized")
 	}

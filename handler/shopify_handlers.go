@@ -24,8 +24,8 @@ func createShopifyCleint(c echo.Context, shopname string) *shopify.ShopifyClient
 		})
 		return nil
 	}
-	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
-	token, err := database.ReadShopifyAuthToken(cookieToken.Value)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
+	token, err := database.AuthRepo.ReadShopifyAuthToken(cookieToken.Value)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"message": "Error reading token from database",
@@ -374,12 +374,12 @@ func HandleShopifyAuthRedirect(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
 
 	cookieNew := new(http.Cookie)
 	cookieNew.Name = "shopify-auth"
 	cookieNew.Value = utils.RandStringRunes(50)
-	database.WriteShopifyAuthToken(cookieNew.Value, token)
+	database.AuthRepo.WriteShopifyAuthToken(cookieNew.Value, token)
 
 	c.SetCookie(cookieNew)
 

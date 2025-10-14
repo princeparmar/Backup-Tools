@@ -1,14 +1,16 @@
 package repo
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/database"
-	"gorm.io/gorm"
+	"github.com/StorX2-0/Backup-Tools/pkg/gorm"
+	gormdb "gorm.io/gorm"
 )
 
 type ScheduledTasks struct {
-	gorm.Model
+	gormdb.Model
 	UserID       string                                   `json:"user_id"`
 	LoginId      string                                   `json:"login_id"`
 	Method       string                                   `json:"method"`
@@ -70,4 +72,59 @@ func (st *ScheduledTasks) GetTasksForCurrentUser(db *gorm.DB, filter ScheduledTa
 
 	err := query.Order(orderClause).Find(&tasks).Error
 	return tasks, err
+}
+
+// ScheduledTasksRepository handles all database operations for scheduled tasks
+type ScheduledTasksRepository struct {
+	db *gorm.DB
+}
+
+// NewScheduledTasksRepository creates a new scheduled tasks repository
+func NewScheduledTasksRepository(db *gorm.DB) *ScheduledTasksRepository {
+	return &ScheduledTasksRepository{db: db}
+}
+
+// GetNextScheduledTask gets the next scheduled task to process
+func (r *ScheduledTasksRepository) GetNextScheduledTask() (*ScheduledTasks, error) {
+	var task ScheduledTasks
+	err := r.db.Where("status = ?", "created").First(&task).Error
+	return &task, err
+}
+
+// GetScheduledTaskByID gets a scheduled task by ID
+func (r *ScheduledTasksRepository) GetScheduledTaskByID(id uint) (*ScheduledTasks, error) {
+	var task ScheduledTasks
+	err := r.db.First(&task, id).Error
+	return &task, err
+}
+
+// UpdateHeartBeatForScheduledTask updates the heartbeat for a scheduled task
+func (r *ScheduledTasksRepository) UpdateHeartBeatForScheduledTask(id uint) error {
+	now := time.Now()
+	err := r.db.Model(&ScheduledTasks{}).Where("id = ?", id).Update("heart_beat", &now).Error
+	return err
+}
+
+// MissedHeartbeatForScheduledTask checks for scheduled tasks with missed heartbeats
+func (r *ScheduledTasksRepository) MissedHeartbeatForScheduledTask() error {
+	// Find scheduled tasks that are running but haven't updated heartbeat in 10 minutes
+	var tasks []ScheduledTasks
+	err := r.db.Where("status = ? AND (heart_beat < ? OR heart_beat IS NULL)",
+		"running", time.Now().Add(-10*time.Minute)).Find(&tasks).Error
+	if err != nil {
+		return fmt.Errorf("error getting scheduled tasks with missed heartbeat: %v", err)
+	}
+
+	for _, task := range tasks {
+		// Update task status to failed
+		err := r.db.Model(&ScheduledTasks{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
+			"status": "failed",
+			"errors": `["Process got stuck because of server restart or crash. Marked as failed"]`,
+		}).Error
+		if err != nil {
+			return fmt.Errorf("error updating scheduled task %d: %v", task.ID, err)
+		}
+	}
+
+	return nil
 }

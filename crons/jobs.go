@@ -35,10 +35,10 @@ var processorMap = map[string]Processor{
 }
 
 type AutosyncManager struct {
-	store *db.PosgresStore
+	store *db.PosgresDb
 }
 
-func NewAutosyncManager(store *db.PosgresStore) *AutosyncManager {
+func NewAutosyncManager(store *db.PosgresDb) *AutosyncManager {
 	return &AutosyncManager{store: store}
 }
 
@@ -96,7 +96,7 @@ func (a *AutosyncManager) Start() {
 		ctx := createCronContext("missed_scheduled_task_heartbeat_check")
 		logger.Info(ctx, "Checking for missed scheduled task heartbeats")
 
-		err := a.store.MissedHeartbeatForScheduledTask()
+		err := a.store.ScheduledTasksRepo.MissedHeartbeatForScheduledTask()
 		if err != nil {
 			logger.Error(ctx, "Failed to check for missed scheduled task heartbeats", logger.ErrorField(err))
 		} else {

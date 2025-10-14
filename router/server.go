@@ -15,7 +15,7 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-func StartServer(db *db.PosgresStore, address string) {
+func StartServer(db *db.PosgresDb, address string) {
 	e := echo.New()
 	e.HideBanner = true
 
