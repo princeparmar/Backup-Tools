@@ -4,9 +4,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
-	"github.com/StorX2-0/Backup-Tools/storage"
 
 	"github.com/dgrijalva/jwt-go"
 	"github.com/google/uuid"
@@ -22,7 +22,7 @@ var (
 )
 
 // InitializeAllMiddleware sets up all middleware for the Echo server
-func InitializeAllMiddleware(e *echo.Echo, db *storage.PosgresStore) {
+func InitializeAllMiddleware(e *echo.Echo, db *db.PosgresStore) {
 	if utils.GetEnvWithKey("HTTP_LOGGING") == "true" {
 		e.Use(echomiddleware.Logger())
 	}
@@ -33,7 +33,7 @@ func InitializeAllMiddleware(e *echo.Echo, db *storage.PosgresStore) {
 	e.Use(echomiddleware.CORS())
 }
 
-func DBMiddleware(db *storage.PosgresStore) echo.MiddlewareFunc {
+func DBMiddleware(db *db.PosgresStore) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			c.Set(DbContextKey, db)

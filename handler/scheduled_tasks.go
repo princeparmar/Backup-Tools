@@ -4,13 +4,13 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
-	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/labstack/echo/v4"
 )
 
@@ -80,7 +80,7 @@ func HandleCreateScheduledTask(c echo.Context) error {
 	}
 
 	// Get database connection
-	db := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
+	db := c.Get(middleware.DbContextKey).(*db.PosgresStore)
 
 	// Create scheduled task
 	task := &repo.ScheduledTasks{
@@ -123,7 +123,7 @@ func HandleGetScheduledTasksByUserID(c echo.Context) error {
 	filter := parseFilterParams(c)
 
 	// Get database connection
-	db := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
+	db := c.Get(middleware.DbContextKey).(*db.PosgresStore)
 
 	// Get scheduled tasks by user ID
 	taskRepo := &repo.ScheduledTasks{}

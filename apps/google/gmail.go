@@ -10,9 +10,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
-	"github.com/StorX2-0/Backup-Tools/storage"
 
 	"github.com/labstack/echo/v4"
 	"google.golang.org/api/gmail/v1"
@@ -71,7 +71,7 @@ type Attachment struct {
 
 func NewGmailClient(c echo.Context) (*GmailClient, error) {
 
-	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
 
 	googleToken, err := GetGoogleTokenFromJWT(c)
 	if err != nil {

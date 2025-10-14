@@ -7,13 +7,13 @@ import (
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/crons"
+	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger/newrelic"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/router"
 	"github.com/StorX2-0/Backup-Tools/satellite"
-	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/joho/godotenv"
 )
 
@@ -28,16 +28,16 @@ func main() {
 	}
 
 	// Setup storage
-	storage, err := setupStorage(ctx)
+	store, err := setupStorage(ctx)
 	if err != nil {
 		os.Exit(1)
 	}
 
 	// Start background jobs
-	crons.NewAutosyncManager(storage).Start()
+	crons.NewAutosyncManager(store).Start()
 
 	// Start server
-	router.StartServer(storage, getAddress())
+	router.StartServer(store, getAddress())
 }
 
 func initApp(ctx context.Context) error {
@@ -81,8 +81,8 @@ func initApp(ctx context.Context) error {
 	return nil
 }
 
-func setupStorage(ctx context.Context) (*storage.PosgresStore, error) {
-	store, err := storage.NewPostgresStore(
+func setupStorage(ctx context.Context) (*db.PosgresStore, error) {
+	store, err := db.NewPostgresStore(
 		utils.GetEnvWithKey("POSTGRES_DSN"),
 		utils.GetEnvWithKey("QUERY_LOGGING") == "true",
 	)

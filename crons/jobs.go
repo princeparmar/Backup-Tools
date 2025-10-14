@@ -6,11 +6,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
+	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
-	"github.com/StorX2-0/Backup-Tools/storage"
 	tasks "github.com/StorX2-0/Backup-Tools/tasks"
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
@@ -18,8 +19,8 @@ import (
 
 type ProcessorInput struct {
 	InputData     *database.DbJson[map[string]interface{}]
-	Task          *storage.TaskListingDB
-	Job           *storage.CronJobListingDB
+	Task          *repo.TaskListingDB
+	Job           *repo.CronJobListingDB
 	HeartBeatFunc func() error
 }
 
@@ -34,10 +35,10 @@ var processorMap = map[string]Processor{
 }
 
 type AutosyncManager struct {
-	store *storage.PosgresStore
+	store *db.PosgresStore
 }
 
-func NewAutosyncManager(store *storage.PosgresStore) *AutosyncManager {
+func NewAutosyncManager(store *db.PosgresStore) *AutosyncManager {
 	return &AutosyncManager{store: store}
 }
 
@@ -81,7 +82,7 @@ func (a *AutosyncManager) Start() {
 		ctx := createCronContext("missed_heartbeat_check")
 		logger.Info(ctx, "Checking for missed heartbeats")
 
-		err := a.store.MissedHeartbeatForTask()
+		err := a.store.TaskRepo.MissedHeartbeatForTask()
 		if err != nil {
 			logger.Error(ctx, "Failed to check for missed heartbeats", logger.ErrorField(err))
 		} else {
@@ -135,7 +136,7 @@ func (a *AutosyncManager) CreateTaskForAllPendingJobs(ctx context.Context) error
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	jobIDs, err := a.store.GetJobsToProcess()
+	jobIDs, err := a.store.CronJobRepo.GetJobsToProcess()
 	if err != nil {
 		return fmt.Errorf("failed to get jobs to process: %w", err)
 	}
@@ -154,7 +155,7 @@ func (a *AutosyncManager) CreateTaskForAllPendingJobs(ctx context.Context) error
 			logger.String("job_name", jobID.Name),
 		)
 
-		_, err := a.store.CreateTaskForCronJob(jobID.ID)
+		_, err := a.store.TaskRepo.CreateTaskForCronJob(jobID.ID)
 		if err != nil {
 			// Log error but continue with other jobs
 			logger.Error(ctx, "Failed to create task for job",
@@ -227,7 +228,7 @@ func (a *AutosyncManager) ProcessTask(ctx context.Context) error {
 	errorCount := 0
 
 	for {
-		task, err := a.store.GetPushedTask()
+		task, err := a.store.TaskRepo.GetPushedTask()
 		if err != nil {
 			if strings.Contains(err.Error(), "record not found") {
 				logger.Info(ctx, "No tasks to process")
@@ -241,7 +242,7 @@ func (a *AutosyncManager) ProcessTask(ctx context.Context) error {
 			logger.Int("job_id", int(task.CronJobID)),
 		)
 
-		job, err := a.store.GetCronJobByID(task.CronJobID)
+		job, err := a.store.CronJobRepo.GetCronJobByID(task.CronJobID)
 		if err != nil {
 			logger.Error(ctx, "Failed to get cron job for task",
 				logger.Int("task_id", int(task.ID)),
@@ -288,7 +289,7 @@ func (a *AutosyncManager) ProcessTask(ctx context.Context) error {
 	return nil
 }
 
-func (a *AutosyncManager) processTask(ctx context.Context, task *storage.TaskListingDB, job *storage.CronJobListingDB) error {
+func (a *AutosyncManager) processTask(ctx context.Context, task *repo.TaskListingDB, job *repo.CronJobListingDB) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
@@ -310,17 +311,17 @@ func (a *AutosyncManager) processTask(ctx context.Context, task *storage.TaskLis
 		Task:      task,
 		HeartBeatFunc: func() error {
 			// Check if task is still running
-			currentTask, err := a.store.GetTaskByID(task.ID)
+			currentTask, err := a.store.TaskRepo.GetTaskByID(task.ID)
 			if err != nil {
 				return fmt.Errorf("failed to get task status: %w", err)
 			}
 
-			if currentTask.Status != storage.TaskStatusRunning {
+			if currentTask.Status != repo.TaskStatusRunning {
 				return fmt.Errorf("task status changed to '%s', stopping execution", currentTask.Status)
 			}
 
 			// Update heartbeat
-			if err := a.store.UpdateHeartBeatForTask(task.ID); err != nil {
+			if err := a.store.TaskRepo.UpdateHeartBeatForTask(task.ID); err != nil {
 				return fmt.Errorf("failed to update heartbeat: %w", err)
 			}
 
@@ -338,13 +339,13 @@ func (a *AutosyncManager) processTask(ctx context.Context, task *storage.TaskLis
 	return err
 }
 
-func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *storage.CronJobListingDB, processErr error) error {
+func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.CronJobListingDB, processErr error) error {
 	ctx := context.Background() // You might want to pass context here
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
 	// Initialize default values for success case
-	task.Status = storage.TaskStatusSuccess
+	task.Status = repo.TaskStatusSuccess
 	task.Message = "Automatic backup completed successfully"
 
 	if task.StartTime != nil {
@@ -353,20 +354,20 @@ func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *sto
 
 	if job != nil {
 		job.Message = "Automatic backup completed successfully"
-		job.MessageStatus = storage.JobMessageStatusInfo
+		job.MessageStatus = repo.JobMessageStatusInfo
 		job.LastRun = time.Now()
 	}
 
 	// Handle error case
 	if processErr != nil {
-		task.Status = storage.TaskStatusFailed
+		task.Status = repo.TaskStatusFailed
 		task.Message = processErr.Error()
 		task.RetryCount++
 
 		// Record task failure
 		if job != nil {
 			job.Message = "Last task execution failed"
-			job.MessageStatus = storage.JobMessageStatusError
+			job.MessageStatus = repo.JobMessageStatusError
 			job.LastRun = time.Now()
 
 			emailMessage := a.determineErrorMessage(processErr, job, task)
@@ -378,7 +379,11 @@ func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *sto
 	}
 
 	// Save task to database
-	if err := a.store.DB.Save(task).Error; err != nil {
+	if err := a.store.TaskRepo.UpdateTaskByID(task.ID, map[string]interface{}{
+		"status":    task.Status,
+		"message":   task.Message,
+		"execution": task.Execution,
+	}); err != nil {
 		logger.Error(ctx, "Failed to save task status",
 			logger.Int("task_id", int(task.ID)),
 			logger.ErrorField(err),
@@ -388,7 +393,11 @@ func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *sto
 
 	// Save job to database if job exists
 	if job != nil {
-		if err := a.store.DB.Save(job).Error; err != nil {
+		if err := a.store.CronJobRepo.UpdateCronJobByID(job.ID, map[string]interface{}{
+			"message":        job.Message,
+			"message_status": job.MessageStatus,
+			"last_run":       job.LastRun,
+		}); err != nil {
 			logger.Error(ctx, "Failed to save job status",
 				logger.Int("job_id", int(job.ID)),
 				logger.ErrorField(err),
@@ -406,7 +415,7 @@ func (a *AutosyncManager) UpdateTaskStatus(task *storage.TaskListingDB, job *sto
 	return nil
 }
 
-func (a *AutosyncManager) determineErrorMessage(processErr error, job *storage.CronJobListingDB, task *storage.TaskListingDB) string {
+func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.CronJobListingDB, task *repo.TaskListingDB) string {
 	errMsg := processErr.Error()
 
 	switch {
@@ -414,7 +423,7 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *storage.C
 		return "Your automatic backup has been temporarily disabled due to insufficient permissions. Please update your StorX permissions and reactivate the backup from your dashboard."
 
 	case strings.Contains(errMsg, "googleapi: Error 401"):
-		if task.RetryCount == storage.MaxRetryCount-1 {
+		if task.RetryCount == repo.MaxRetryCount-1 {
 			return "Your automatic backup has been temporarily disabled due to invalid Google credentials. Please update your Google account permissions and reactivate the backup from your dashboard."
 		}
 		return "Your automatic backup encountered an authentication issue with Google. We're retrying the backup automatically."
@@ -432,7 +441,7 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *storage.C
 	}
 }
 
-func (a *AutosyncManager) handleErrorScenarios(processErr error, job *storage.CronJobListingDB, task *storage.TaskListingDB) {
+func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJobListingDB, task *repo.TaskListingDB) {
 	errMsg := processErr.Error()
 
 	switch {
@@ -442,7 +451,7 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *storage.Cr
 		task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
 
 	case strings.Contains(errMsg, "googleapi: Error 401"):
-		if task.RetryCount == storage.MaxRetryCount-1 {
+		if task.RetryCount == repo.MaxRetryCount-1 {
 			(*job.InputData.Json())["refresh_token"] = ""
 			job.Active = false
 			job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"

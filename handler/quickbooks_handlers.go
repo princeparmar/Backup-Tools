@@ -6,10 +6,10 @@ import (
 	"os"
 
 	"github.com/StorX2-0/Backup-Tools/apps/quickbooks"
+	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
-	"github.com/StorX2-0/Backup-Tools/storage"
 
 	"github.com/labstack/echo/v4"
 )
@@ -56,7 +56,7 @@ func HandleQuickbooksCustomersToSatellite(c echo.Context) error {
 		dbFile.Close()
 	}
 
-	db, err := storage.ConnectToQuickbooksDB()
+	db, err := db.ConnectToQuickbooksDB()
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -150,7 +150,7 @@ func HandleQuickbooksItemsToSatellite(c echo.Context) error {
 		dbFile.Close()
 	}
 
-	db, err := storage.ConnectToQuickbooksDB()
+	db, err := db.ConnectToQuickbooksDB()
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -244,7 +244,7 @@ func HandleQuickbooksInvoicesToSatellite(c echo.Context) error {
 		dbFile.Close()
 	}
 
-	db, err := storage.ConnectToQuickbooksDB()
+	db, err := db.ConnectToQuickbooksDB()
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),

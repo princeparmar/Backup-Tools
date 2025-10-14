@@ -6,11 +6,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/repo"
-	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
 )
@@ -32,10 +32,10 @@ var scheduledTaskProcessorMap = map[string]ScheduledTaskProcessor{
 }
 
 type ScheduledTaskManager struct {
-	store *storage.PosgresStore
+	store *db.PosgresStore
 }
 
-func NewScheduledTaskManager(store *storage.PosgresStore) *ScheduledTaskManager {
+func NewScheduledTaskManager(store *db.PosgresStore) *ScheduledTaskManager {
 	return &ScheduledTaskManager{store: store}
 }
 

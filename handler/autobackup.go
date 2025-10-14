@@ -9,11 +9,12 @@ import (
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
+	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
+	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
-	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/labstack/echo/v4"
 )
 
@@ -48,8 +49,8 @@ func HandleAutomaticSyncListForUser(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
-	automaticSyncList, err := database.GetAllCronJobsForUser(userID)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+	automaticSyncList, err := database.CronJobRepo.GetAllCronJobsForUser(userID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"message": "internal server error",
@@ -59,7 +60,7 @@ func HandleAutomaticSyncListForUser(c echo.Context) error {
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Automatic Backup Accounts List",
-		"data":    storage.MastTokenForCronJobListingDB(automaticSyncList),
+		"data":    repo.MaskTokenForCronJobListingDB(automaticSyncList),
 	})
 }
 
@@ -76,8 +77,8 @@ func HandleAutomaticSyncActiveJobsForUser(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
-	activeJobs, err := database.GetAllActiveCronJobsForUser(userID)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+	activeJobs, err := database.CronJobRepo.GetAllActiveCronJobsForUser(userID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"message": "internal server error",
@@ -116,8 +117,8 @@ func HandleAutomaticSyncDetails(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
-	jobDetails, err := database.GetCronJobByID(uint(jobID))
+	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+	jobDetails, err := database.CronJobRepo.GetCronJobByID(uint(jobID))
 	if err != nil {
 		if strings.Contains(err.Error(), "record not found") {
 			return c.JSON(http.StatusNotFound, map[string]interface{}{
@@ -131,7 +132,7 @@ func HandleAutomaticSyncDetails(c echo.Context) error {
 		})
 	}
 
-	storage.MastTokenForCronJobDB(jobDetails)
+	repo.MaskTokenForCronJobDB(jobDetails)
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Automatic Backup Account Details",
@@ -289,14 +290,14 @@ func processDatabaseMethod(reqBody DatabaseConnection, syncType string) (string,
 
 // Helper functions
 func createSyncJob(userID, name, method, syncType string, config map[string]interface{}, c echo.Context) (interface{}, error) {
-	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
 
 	// Check for existing jobs using original name (before adding timestamp)
 	if err := checkExistingJobs(userID, syncType, method, database); err != nil {
 		return nil, err
 	}
 
-	data, err := database.CreateCronJobForUser(userID, name, method, syncType, config)
+	data, err := database.CronJobRepo.CreateCronJobForUser(userID, name, method, syncType, config)
 	if err != nil {
 		return nil, handleDBError(err)
 	}
@@ -304,8 +305,8 @@ func createSyncJob(userID, name, method, syncType string, config map[string]inte
 	return data, nil
 }
 
-func checkExistingJobs(userID, syncType, method string, db *storage.PosgresStore) error {
-	existingJobs, err := db.GetAllCronJobsForUser(userID)
+func checkExistingJobs(userID, syncType, method string, db *db.PosgresStore) error {
+	existingJobs, err := db.CronJobRepo.GetAllCronJobsForUser(userID)
 	if err != nil {
 		return jsonError(http.StatusInternalServerError, "Failed to check existing jobs", err)
 	}
@@ -314,7 +315,7 @@ func checkExistingJobs(userID, syncType, method string, db *storage.PosgresStore
 
 	for _, job := range existingJobs {
 		// Check if there are running tasks for this job
-		hasRunningTasks, err := hasRunningTasksForJob(db, job.ID)
+		hasRunningTasks, err := hasRunningTasksForJob(db.TaskRepo, job.ID)
 		if err != nil {
 			return jsonError(http.StatusInternalServerError, "Failed to check task status", err)
 		}
@@ -328,7 +329,7 @@ func checkExistingJobs(userID, syncType, method string, db *storage.PosgresStore
 	return nil
 }
 
-func handleJobTypeConflicts(job *storage.CronJobListingDB, syncType, serviceName string, hasRunningTasks bool) error {
+func handleJobTypeConflicts(job *repo.CronJobListingDB, syncType, serviceName string, hasRunningTasks bool) error {
 	// Check for running tasks first (applies to both job types)
 	if hasRunningTasks {
 		errorMsg := fmt.Sprintf("A backup job for this %s is currently running. Cannot create %s backup.", serviceName, syncType)
@@ -360,12 +361,19 @@ func handleJobTypeConflicts(job *storage.CronJobListingDB, syncType, serviceName
 	return nil
 }
 
-func hasRunningTasksForJob(db *storage.PosgresStore, jobID uint) (bool, error) {
-	var count int64
-	err := db.DB.Model(&storage.TaskListingDB{}).
-		Where("cron_job_id = ? AND status IN (?, ?)", jobID, "running", "pushed").
-		Count(&count).Error
-	return count > 0, err
+func hasRunningTasksForJob(taskRepo *repo.TaskRepository, jobID uint) (bool, error) {
+	// Get all tasks for the job and check if any are running or pushed
+	tasks, err := taskRepo.ListAllTasksByJobID(jobID, 100, 0)
+	if err != nil {
+		return false, err
+	}
+
+	for _, task := range tasks {
+		if task.Status == "running" || task.Status == "pushed" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func getServiceName(method string) string {
@@ -389,13 +397,13 @@ func sendSyncResponse(c echo.Context, syncType string, data interface{}) error {
 	}
 
 	if syncType == "one_time" {
-		cronJobData, ok := data.(*storage.CronJobListingDB)
+		cronJobData, ok := data.(*repo.CronJobListingDB)
 		if !ok {
 			return jsonErrorMsg(http.StatusInternalServerError, "Invalid data type returned")
 		}
 
-		database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
-		task, err := database.CreateTaskForCronJob(cronJobData.ID)
+		database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
+		task, err := database.TaskRepo.CreateTaskForCronJob(cronJobData.ID)
 		if err != nil {
 			return jsonError(http.StatusInternalServerError, "Failed to create task for one-time backup", err)
 		}
@@ -448,9 +456,9 @@ func HandleAutomaticSyncCreateTask(c echo.Context) error {
 		return sendJSONError(c, http.StatusUnauthorized, "Invalid Request", err)
 	}
 
-	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
 
-	job, err := database.GetJobByIDForUser(userID, uint(jobID))
+	job, err := database.CronJobRepo.GetJobByIDForUser(userID, uint(jobID))
 	if err != nil {
 		return sendJSONError(c, http.StatusNotFound, "Job not found", err)
 	}
@@ -459,7 +467,7 @@ func HandleAutomaticSyncCreateTask(c echo.Context) error {
 		return sendJSONError(c, http.StatusBadRequest, "Job is not a one-time job", nil)
 	}
 
-	hasRunningTasks, err := hasRunningTasksForJob(database, job.ID)
+	hasRunningTasks, err := hasRunningTasksForJob(database.TaskRepo, job.ID)
 	if err != nil {
 		return sendJSONError(c, http.StatusInternalServerError, "Failed to check task status", err)
 	}
@@ -468,7 +476,7 @@ func HandleAutomaticSyncCreateTask(c echo.Context) error {
 		return sendJSONError(c, http.StatusBadRequest, "one time backup is already running wait for it to complete", nil)
 	}
 
-	task, err := database.CreateTaskForCronJob(job.ID)
+	task, err := database.TaskRepo.CreateTaskForCronJob(job.ID)
 	if err != nil {
 		return sendJSONError(c, http.StatusInternalServerError, "Failed to create task", err)
 	}
@@ -522,10 +530,10 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 		logger.String("user_id", userID),
 		logger.Int("job_id", jobID))
 
-	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
 
 	// Verify job exists and belongs to user
-	job, err := database.GetJobByIDForUser(userID, uint(jobID))
+	job, err := database.CronJobRepo.GetJobByIDForUser(userID, uint(jobID))
 	if err != nil {
 		logger.Error(ctx, "Job not found or access denied",
 			logger.String("user_id", userID),
@@ -768,11 +776,11 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 		updateRequest["active"] = *reqBody.Active
 		if *reqBody.Active {
 			updateRequest["message"] = "You Automatic backup is activated. it will start processing first backup soon"
-			updateRequest["message_status"] = storage.JobMessageStatusInfo
+			updateRequest["message_status"] = repo.JobMessageStatusInfo
 			logger.Info(ctx, "Job activated", logger.Int("job_id", jobID))
 		} else {
 			updateRequest["message"] = "You Automatic backup is deactivated. it will not process any backup"
-			updateRequest["message_status"] = storage.JobMessageStatusInfo
+			updateRequest["message_status"] = repo.JobMessageStatusInfo
 			logger.Info(ctx, "Job deactivated", logger.Int("job_id", jobID))
 		}
 	}
@@ -781,7 +789,7 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 		logger.Int("job_id", jobID),
 		logger.Int("update_fields_count", len(updateRequest)))
 
-	err = database.UpdateCronJobByID(uint(jobID), updateRequest)
+	err = database.CronJobRepo.UpdateCronJobByID(uint(jobID), updateRequest)
 	if err != nil {
 		logger.Error(ctx, "Failed to update job in database",
 			logger.Int("job_id", jobID),
@@ -792,7 +800,7 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 		})
 	}
 
-	data, err := database.GetCronJobByID(uint(jobID))
+	data, err := database.CronJobRepo.GetCronJobByID(uint(jobID))
 	if err != nil {
 		logger.Error(ctx, "Failed to retrieve updated job data",
 			logger.Int("job_id", jobID),
@@ -835,16 +843,16 @@ func HandleAutomaticSyncDelete(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
 
-	if _, err := database.GetJobByIDForUser(userID, uint(jobID)); err != nil {
+	if _, err := database.CronJobRepo.GetJobByIDForUser(userID, uint(jobID)); err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
 			"message": "Invalid Request",
 			"error":   err.Error(),
 		})
 	}
 
-	err = database.DeleteCronJobByID(uint(jobID))
+	err = database.CronJobRepo.DeleteCronJobByID(uint(jobID))
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"message": "internal server error",
@@ -887,16 +895,16 @@ func HandleAutomaticSyncTaskList(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
 
-	if _, err := database.GetJobByIDForUser(userID, uint(jobID)); err != nil {
+	if _, err := database.CronJobRepo.GetJobByIDForUser(userID, uint(jobID)); err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
 			"message": "Invalid Request",
 			"error":   err.Error(),
 		})
 	}
 
-	data, err := database.ListAllTasksByJobID(uint(jobID), uint(limit), uint(offset))
+	data, err := database.TaskRepo.ListAllTasksByJobID(uint(jobID), uint(limit), uint(offset))
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"message": "internal server error",
@@ -971,10 +979,10 @@ func HandleDeleteJobsByEmail(c echo.Context) error {
 	}
 
 	// Get database instance
-	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
 
 	// Delete all jobs and tasks for the user by email
-	deletedJobIDs, deletedTaskIDs, err := database.DeleteAllJobsAndTasksByEmail(req.Email)
+	deletedJobIDs, deletedTaskIDs, err := database.CronJobRepo.DeleteAllJobsAndTasksByEmail(req.Email)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"message": "Failed to delete jobs and tasks",

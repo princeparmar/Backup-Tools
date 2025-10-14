@@ -5,17 +5,17 @@ import (
 	"net/http"
 
 	googlepack "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/handler"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/satellite"
-	"github.com/StorX2-0/Backup-Tools/storage"
 
 	middleware "github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/labstack/echo/v4"
 )
 
-func StartServer(db *storage.PosgresStore, address string) {
+func StartServer(db *db.PosgresStore, address string) {
 	e := echo.New()
 	e.HideBanner = true
 

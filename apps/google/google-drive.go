@@ -17,12 +17,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
-	"github.com/StorX2-0/Backup-Tools/storage"
 	"github.com/gphotosuploader/googlemirror/api/photoslibrary/v1"
 
 	"github.com/labstack/echo/v4"
@@ -146,7 +146,7 @@ func GetFileByID(c echo.Context) error {
 // client authenticates the client and returns an HTTP client
 func client(c echo.Context) (*http.Client, error) {
 	ctx := c.Request().Context()
-	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
 
 	b, err := os.ReadFile("credentials.json")
 	if err != nil {

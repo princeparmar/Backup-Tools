@@ -12,11 +12,11 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
-	"github.com/StorX2-0/Backup-Tools/storage"
 
 	rm "cloud.google.com/go/resourcemanager/apiv3"
 	"github.com/dgrijalva/jwt-go"
@@ -132,7 +132,7 @@ func Autentificate(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
 	authToken := c.FormValue("google-key")
 	// refreshToken := c.FormValue("refresh-key")
 
@@ -178,7 +178,7 @@ func Autentificateg(c echo.Context) error {
 	ctx := c.Request().Context()
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
 	code := c.FormValue("code")
 	b, err := os.ReadFile("credentials.json")
 	if err != nil {
@@ -328,7 +328,7 @@ func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 }
 
 func GetGoogleAccountDetailsFromContext(c echo.Context) (*GoogleAuthResponse, error) {
-	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
 
 	googleToken, err := GetGoogleTokenFromJWT(c)
 	if err != nil {

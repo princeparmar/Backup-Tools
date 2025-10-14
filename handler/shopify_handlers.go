@@ -6,11 +6,11 @@ import (
 	"os"
 
 	"github.com/StorX2-0/Backup-Tools/apps/shopify"
+	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
-	"github.com/StorX2-0/Backup-Tools/storage"
 
 	"github.com/labstack/echo/v4"
 )
@@ -24,7 +24,7 @@ func createShopifyCleint(c echo.Context, shopname string) *shopify.ShopifyClient
 		})
 		return nil
 	}
-	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
 	token, err := database.ReadShopifyAuthToken(cookieToken.Value)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -89,7 +89,7 @@ func HandleShopifyProductsToSatellite(c echo.Context) error {
 		dbFile.Close()
 	}
 
-	db, err := storage.ConnectToShopifyDB()
+	db, err := db.ConnectToShopifyDB()
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -186,7 +186,7 @@ func HandleShopifyCustomersToSatellite(c echo.Context) error {
 		dbFile.Close()
 	}
 
-	db, err := storage.ConnectToShopifyDB()
+	db, err := db.ConnectToShopifyDB()
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -284,7 +284,7 @@ func HandleShopifyOrdersToSatellite(c echo.Context) error {
 		dbFile.Close()
 	}
 
-	db, err := storage.ConnectToShopifyDB()
+	db, err := db.ConnectToShopifyDB()
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": err.Error(),
@@ -374,7 +374,7 @@ func HandleShopifyAuthRedirect(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(middleware.DbContextKey).(*storage.PosgresStore)
+	database := c.Get(middleware.DbContextKey).(*db.PosgresStore)
 
 	cookieNew := new(http.Cookie)
 	cookieNew.Name = "shopify-auth"
