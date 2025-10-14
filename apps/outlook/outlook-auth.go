@@ -85,3 +85,69 @@ func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 
 	return tokenResponse.AccessToken, nil
 }
+
+func AuthTokenUsingCode(code string) (string, error) {
+	if code == "" {
+		return "", fmt.Errorf("code is empty")
+	}
+
+	// Prepare the form data
+	data := url.Values{}
+	clientID := utils.GetEnvWithKey("OUTLOOK_CLIENT_ID")
+	clientSecret := utils.GetEnvWithKey("OUTLOOK_CLIENT_SECRET")
+	redirectURI := utils.GetEnvWithKey("OUTLOOK_REDIRECT_URI")
+
+	if clientID == "" {
+		return "", fmt.Errorf("OUTLOOK_CLIENT_ID environment variable is not set")
+	}
+	if clientSecret == "" {
+		return "", fmt.Errorf("OUTLOOK_CLIENT_SECRET environment variable is not set")
+	}
+	if redirectURI == "" {
+		return "", fmt.Errorf("OUTLOOK_REDIRECT_URI environment variable is not set")
+	}
+
+	data.Set("client_id", clientID)
+	data.Set("client_secret", clientSecret)
+	data.Set("code", code)
+	data.Set("redirect_uri", redirectURI)
+	data.Set("grant_type", "authorization_code")
+
+	// Create the request
+	req, err := http.NewRequestWithContext(context.Background(), "POST", tokenURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("error creating request: %v", err)
+	}
+
+	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+
+	// Send the request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("error sending request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Read the response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("error reading response: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("error response from server: %s", string(body))
+	}
+
+	// Parse the response
+	var tokenResponse TokenResponse
+	if err := json.Unmarshal(body, &tokenResponse); err != nil {
+		return "", fmt.Errorf("error parsing response: %v", err)
+	}
+
+	if tokenResponse.AccessToken == "" {
+		return "", fmt.Errorf("received empty access token")
+	}
+
+	return tokenResponse.AccessToken, nil
+}

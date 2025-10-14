@@ -3,10 +3,10 @@ package storage
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"gorm.io/gorm"
@@ -35,29 +35,6 @@ const (
 	MaxRetryCount = 3
 )
 
-// Add this type to handle the InputData field
-type JSONMap map[string]interface{}
-
-// Add Scanner implementation for JSONMap
-func (m *JSONMap) Scan(value interface{}) error {
-	if value == nil {
-		*m = nil
-		return nil
-	}
-
-	var data []byte
-	switch v := value.(type) {
-	case []byte:
-		data = v
-	case string:
-		data = []byte(v)
-	default:
-		return fmt.Errorf("unsupported type for JSONMap: %T", value)
-	}
-
-	return json.Unmarshal(data, m)
-}
-
 // Models for automated storage
 type CronJobListingDB struct {
 	gorm.Model
@@ -71,16 +48,11 @@ type CronJobListingDB struct {
 	On       string    `json:"on"`
 	LastRun  time.Time `json:"last_run"`
 
-	// Change the type from map[string]interface{} to JSONMap
-	InputData JSONMap `json:"input_data" gorm:"type:jsonb"`
+	// Change the type from map[string]interface{} to *database.DbJson[map[string]interface{}]
+	InputData *database.DbJson[map[string]interface{}] `json:"input_data" gorm:"type:jsonb"`
 
 	StorxToken string `json:"storx_token"`
 
-	// Message will be the message to be displayed to the user
-	// push to queue
-	// task is running
-	// task is completed for %d email|photos|files for (today|this week|this month)
-	// task failed with error %s
 	Message string `json:"message"`
 
 	// MessageStatus will be one of the following: "info", "warning", "error"
@@ -96,23 +68,6 @@ type CronJobListingDB struct {
 	SyncType string `json:"sync_type" gorm:"uniqueIndex:idx_name_sync_type_user"`
 }
 
-// Add a Scanner interface implementation for InputData if needed
-func (c *CronJobListingDB) ScanJSON(value interface{}) error {
-	bytes, ok := value.([]byte)
-	if !ok {
-		return errors.New("failed to unmarshal JSONB value")
-	}
-
-	var temp map[string]interface{}
-	err := json.Unmarshal(bytes, &temp)
-	if err != nil {
-		return err
-	}
-
-	c.InputData = temp
-	return nil
-}
-
 func MastTokenForCronJobListingDB(cronJobs []CronJobListingDB) []CronJobListingDB {
 	for i := range cronJobs {
 		MastTokenForCronJobDB(&cronJobs[i])
@@ -123,8 +78,10 @@ func MastTokenForCronJobListingDB(cronJobs []CronJobListingDB) []CronJobListingD
 
 func MastTokenForCronJobDB(cronJob *CronJobListingDB) {
 	cronJob.StorxToken = utils.MaskString(cronJob.StorxToken)
-	if cronJob.InputData != nil && cronJob.InputData["refresh_token"] != nil {
-		cronJob.InputData["refresh_token"] = utils.MaskString(cronJob.InputData["refresh_token"].(string))
+	if cronJob.InputData != nil && cronJob.InputData.Json() != nil {
+		if refreshToken, exists := (*cronJob.InputData.Json())["refresh_token"]; exists {
+			(*cronJob.InputData.Json())["refresh_token"] = utils.MaskString(refreshToken.(string))
+		}
 	}
 }
 
@@ -557,7 +514,7 @@ func (storage *PosgresStore) CreateCronJobForUser(userID, name, method string, s
 		Name:      name,
 		Method:    method,
 		SyncType:  syncType,
-		InputData: inputData,
+		InputData: database.NewDbJsonFromValue(inputData),
 	}
 	// create new entry in database and return newly created cron job
 	res := storage.DB.Create(&data)
@@ -711,7 +668,10 @@ func (storage *PosgresStore) validateJobForActivation(job *CronJobListingDB) err
 	}
 
 	// Parse existing input_data to check for authentication tokens
-	inputData := job.InputData
+	var inputData map[string]interface{}
+	if job.InputData != nil && job.InputData.Json() != nil {
+		inputData = *job.InputData.Json()
+	}
 
 	switch job.Method {
 	case "gmail":

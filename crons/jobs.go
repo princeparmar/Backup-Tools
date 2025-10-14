@@ -6,16 +6,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/StorX2-0/Backup-Tools/storage"
+	tasks "github.com/StorX2-0/Backup-Tools/tasks"
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
 )
 
 type ProcessorInput struct {
-	InputData     map[string]interface{}
+	InputData     *database.DbJson[map[string]interface{}]
 	Task          *storage.TaskListingDB
 	Job           *storage.CronJobListingDB
 	HeartBeatFunc func() error
@@ -86,6 +88,19 @@ func (a *AutosyncManager) Start() {
 			logger.Info(ctx, "Successfully checked for missed heartbeats")
 		}
 
+	})
+
+	// Process scheduled tasks
+	c.AddFunc("@every 30s", func() {
+		ctx := createCronContext("process_scheduled_tasks")
+		logger.Info(ctx, "Processing scheduled tasks")
+		scheduledTaskManager := tasks.NewScheduledTaskManager(a.store)
+		err := scheduledTaskManager.ProcessScheduledTasks(ctx)
+		if err != nil {
+			logger.Error(ctx, "Failed to process scheduled tasks", logger.ErrorField(err))
+		} else {
+			logger.Info(ctx, "Successfully processed scheduled tasks")
+		}
 	})
 
 	// c.AddFunc("@every 1m", func() {
@@ -415,7 +430,7 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *storage.Cr
 
 	case strings.Contains(errMsg, "googleapi: Error 401"):
 		if task.RetryCount == storage.MaxRetryCount-1 {
-			job.InputData["refresh_token"] = ""
+			(*job.InputData.Json())["refresh_token"] = ""
 			job.Active = false
 			job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
 			task.Message = "Google Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"

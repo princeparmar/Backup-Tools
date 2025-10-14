@@ -29,7 +29,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 		return err
 	}
 
-	refreshToken, ok := input.Job.InputData["refresh_token"].(string)
+	refreshToken, ok := (*input.Job.InputData.Json())["refresh_token"].(string)
 	if !ok {
 		return fmt.Errorf("refresh token not found")
 	}

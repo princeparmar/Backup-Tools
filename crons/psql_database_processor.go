@@ -27,7 +27,7 @@ func (d *psqlDatabaseProcessor) Run(input ProcessorInput) error {
 		return err
 	}
 
-	databaseName, ok := input.InputData["database_name"].(string)
+	databaseName, ok := (*input.InputData.Json())["database_name"].(string)
 	if !ok {
 		return fmt.Errorf("database_name is required")
 	}
@@ -71,27 +71,27 @@ func (d *psqlDatabaseProcessor) Run(input ProcessorInput) error {
 }
 
 func (p *psqlDatabaseProcessor) GetCommand(input ProcessorInput) (*exec.Cmd, error) {
-	username, ok := input.InputData["username"].(string)
+	username, ok := (*input.InputData.Json())["username"].(string)
 	if !ok {
 		return nil, fmt.Errorf("username is required")
 	}
 
-	host, ok := input.InputData["host"].(string)
+	host, ok := (*input.InputData.Json())["host"].(string)
 	if !ok {
 		return nil, fmt.Errorf("host is required")
 	}
 
-	port, ok := input.InputData["port"].(string)
+	port, ok := (*input.InputData.Json())["port"].(string)
 	if !ok {
 		return nil, fmt.Errorf("port is required")
 	}
 
-	password, ok := input.InputData["password"].(string)
+	password, ok := (*input.InputData.Json())["password"].(string)
 	if !ok {
 		return nil, fmt.Errorf("password is required")
 	}
 
-	databaseName, ok := input.InputData["database_name"].(string)
+	databaseName, ok := (*input.InputData.Json())["database_name"].(string)
 	if !ok {
 		return nil, fmt.Errorf("database_name is required")
 	}

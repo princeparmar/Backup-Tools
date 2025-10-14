@@ -146,3 +146,23 @@ func (s *PosgresStore) ReadQuickbooksAuthToken(cookie string) (string, error) {
 	}
 	return res.Token, nil
 }
+
+// GetNextScheduledTask gets the next scheduled task to process
+func (s *PosgresStore) GetNextScheduledTask() (*repo.ScheduledTasks, error) {
+	var task repo.ScheduledTasks
+	err := s.DB.Where("status = ?", "created").First(&task).Error
+	return &task, err
+}
+
+// GetScheduledTaskByID gets a scheduled task by ID
+func (s *PosgresStore) GetScheduledTaskByID(id uint) (*repo.ScheduledTasks, error) {
+	var task repo.ScheduledTasks
+	err := s.DB.First(&task, id).Error
+	return &task, err
+}
+
+// UpdateHeartBeatForScheduledTask updates the heartbeat for a scheduled task
+func (s *PosgresStore) UpdateHeartBeatForScheduledTask(id uint) error {
+	now := time.Now()
+	return s.DB.Model(&repo.ScheduledTasks{}).Where("id = ?", id).Update("heart_beat", &now).Error
+}
