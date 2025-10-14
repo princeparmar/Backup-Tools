@@ -100,6 +100,10 @@ func (s *ScheduledTaskManager) ProcessScheduledTasks(ctx context.Context) error 
 			continue
 		}
 
+		logger.Info(ctx, "Task status updated to running",
+			logger.Int("task_id", int(task.ID)),
+			logger.String("status", task.Status))
+
 		// Process the scheduled task
 		processErr := s.processScheduledTask(ctx, task)
 

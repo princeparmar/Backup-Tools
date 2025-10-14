@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -164,5 +165,30 @@ func (s *PosgresStore) GetScheduledTaskByID(id uint) (*repo.ScheduledTasks, erro
 // UpdateHeartBeatForScheduledTask updates the heartbeat for a scheduled task
 func (s *PosgresStore) UpdateHeartBeatForScheduledTask(id uint) error {
 	now := time.Now()
-	return s.DB.Model(&repo.ScheduledTasks{}).Where("id = ?", id).Update("heart_beat", &now).Error
+	err := s.DB.Model(&repo.ScheduledTasks{}).Where("id = ?", id).Update("heart_beat", &now).Error
+	return err
+}
+
+// MissedHeartbeatForScheduledTask checks for scheduled tasks with missed heartbeats
+func (s *PosgresStore) MissedHeartbeatForScheduledTask() error {
+	// Find scheduled tasks that are running but haven't updated heartbeat in 10 minutes
+	var tasks []repo.ScheduledTasks
+	err := s.DB.Where("status = ? AND (heart_beat < ? OR heart_beat IS NULL)",
+		"running", time.Now().Add(-10*time.Minute)).Find(&tasks).Error
+	if err != nil {
+		return fmt.Errorf("error getting scheduled tasks with missed heartbeat: %v", err)
+	}
+
+	for _, task := range tasks {
+		// Update task status to failed
+		err := s.DB.Model(&repo.ScheduledTasks{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
+			"status": "failed",
+			"errors": `["Process got stuck because of server restart or crash. Marked as failed"]`,
+		}).Error
+		if err != nil {
+			return fmt.Errorf("error updating scheduled task %d: %v", task.ID, err)
+		}
+	}
+
+	return nil
 }

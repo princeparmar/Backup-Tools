@@ -90,6 +90,19 @@ func (a *AutosyncManager) Start() {
 
 	})
 
+	// Check for missed heartbeats for scheduled tasks
+	c.AddFunc("@every 1m", func() {
+		ctx := createCronContext("missed_scheduled_task_heartbeat_check")
+		logger.Info(ctx, "Checking for missed scheduled task heartbeats")
+
+		err := a.store.MissedHeartbeatForScheduledTask()
+		if err != nil {
+			logger.Error(ctx, "Failed to check for missed scheduled task heartbeats", logger.ErrorField(err))
+		} else {
+			logger.Info(ctx, "Successfully checked for missed scheduled task heartbeats")
+		}
+	})
+
 	// Process scheduled tasks
 	c.AddFunc("@every 30s", func() {
 		ctx := createCronContext("process_scheduled_tasks")

@@ -103,6 +103,12 @@ func (o *scheduledOutlookProcessor) Run(input ScheduledTaskProcessorInput) error
 	failedCount := 0
 	var failedEmails []string
 
+	// Add heartbeat before processing emails
+	err = input.HeartBeatFunc()
+	if err != nil {
+		return err
+	}
+
 	// Process each email ID from memory
 	for emailID, status := range input.Memory {
 		if status == "synced" || strings.HasPrefix(status, "error:") {
@@ -159,6 +165,12 @@ func (o *scheduledOutlookProcessor) Run(input ScheduledTaskProcessorInput) error
 		// Mark as processed and increment success count
 		input.Memory[emailID] = "synced"
 		successCount++
+	}
+
+	// Add heartbeat after processing all emails
+	err = input.HeartBeatFunc()
+	if err != nil {
+		return err
 	}
 
 	// Update task with counts and errors
