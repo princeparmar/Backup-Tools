@@ -314,6 +314,11 @@ func checkExistingJobs(userID, syncType, method string, db *db.PosgresDb) error 
 	serviceName := getServiceName(method)
 
 	for _, job := range existingJobs {
+		// Only check conflicts for jobs of the same method
+		if job.Method != method {
+			continue
+		}
+
 		// Check if there are running tasks for this job
 		hasRunningTasks, err := hasRunningTasksForJob(db.TaskRepo, job.ID)
 		if err != nil {
