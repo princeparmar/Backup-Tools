@@ -1,0 +1,2652 @@
+openapi: 3.0.3
+info:
+  title: Backup Tools API
+  description: |
+    A comprehensive backup and synchronization API that allows users to backup data from various cloud services 
+    (Google Drive, Google Photos, Gmail, Google Cloud Storage, Dropbox, Office 365, AWS S3, GitHub, Shopify, QuickBooks) 
+    to a satellite storage system and vice versa.
+    
+    ## Features
+    - **Multi-Platform Support**: Integrate with major cloud providers
+    - **Automatic Backup**: Schedule and manage automated backup jobs
+    - **Satellite Storage**: Store and retrieve data from satellite storage
+    - **Real-time Sync**: Live synchronization capabilities
+    - **Authentication**: JWT-based authentication with OAuth2 flows
+    
+    ## Authentication
+    Most endpoints require authentication via JWT token in the Authorization header:
+    ```
+    Authorization: Bearer <your-jwt-token>
+    ```
+    
+    Some endpoints also require an ACCESS_TOKEN header for satellite operations:
+    ```
+    ACCESS_TOKEN: <your-satellite-access-token>
+    ```
+  version: 1.0.0
+  contact:
+    name: Backup Tools Support
+    email: support@backuptools.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8005
+    description: Development server
+  - url: https://backup.storx.io
+    description: Production server
+
+tags:
+  - name: Authentication
+    description: Authentication and authorization endpoints
+  - name: Auto Sync
+    description: Automatic backup and synchronization management
+  - name: Google Drive
+    description: Google Drive file operations
+  - name: Google Photos
+    description: Google Photos album and media operations
+  - name: Gmail
+    description: Gmail message operations
+  - name: Google Cloud Storage
+    description: Google Cloud Storage bucket and object operations
+  - name: Dropbox
+    description: Dropbox file operations
+  - name: Office 365
+    description: Office 365 Outlook message operations
+  - name: AWS S3
+    description: AWS S3 bucket and object operations
+  - name: GitHub
+    description: GitHub repository operations
+  - name: Shopify
+    description: Shopify store data operations
+  - name: QuickBooks
+    description: QuickBooks business data operations
+  - name: Satellite
+    description: Satellite storage operations
+  - name: Scheduled Tasks
+    description: Scheduled task management
+  - name: Monitoring
+    description: System monitoring and metrics
+
+paths:
+  # Authentication Endpoints
+  /satellite-auth:
+    post:
+      tags:
+        - Authentication
+      summary: Authenticate with Satellite
+      description: Authenticate user with satellite storage system
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                token:
+                  type: string
+                  description: Satellite authentication token
+              required:
+                - token
+      responses:
+        '200':
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /google-auth:
+    post:
+      tags:
+        - Authentication
+      summary: Google OAuth Authentication
+      description: Authenticate with Google services using OAuth2
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code:
+                  type: string
+                  description: OAuth2 authorization code
+                refresh_token:
+                  type: string
+                  description: OAuth2 refresh token
+              required:
+                - code
+      responses:
+        '200':
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    get:
+      tags:
+        - Authentication
+      summary: Google OAuth Authentication (GET)
+      description: Alternative Google OAuth authentication endpoint
+      responses:
+        '200':
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  # Auto Sync Endpoints
+  /auto-sync/live:
+    get:
+      tags:
+        - Auto Sync
+      summary: Get Active Jobs
+      description: Get all active automatic sync jobs for the authenticated user
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of active jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ActiveJob'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auto-sync/job:
+    get:
+      tags:
+        - Auto Sync
+      summary: List All Jobs
+      description: Get all automatic sync jobs for the authenticated user
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of all jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CronJob'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auto-sync/job/{job_id}:
+    get:
+      tags:
+        - Auto Sync
+      summary: Get Job Details
+      description: Get details of a specific automatic sync job
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Job ID
+      responses:
+        '200':
+          description: Job details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CronJob'
+        '404':
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      tags:
+        - Auto Sync
+      summary: Update Job
+      description: Update an existing automatic sync job
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Job ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JobUpdateRequest'
+      responses:
+        '200':
+          description: Job updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      tags:
+        - Auto Sync
+      summary: Delete Job
+      description: Delete an automatic sync job
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Job ID
+      responses:
+        '200':
+          description: Job deleted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '404':
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auto-sync/job/{method}:
+    post:
+      tags:
+        - Auto Sync
+      summary: Create Job
+      description: Create a new automatic sync job
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: method
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [gmail, outlook, database]
+          description: Job method type
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JobCreateRequest'
+      responses:
+        '201':
+          description: Job created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auto-sync/job/interval:
+    get:
+      tags:
+        - Auto Sync
+      summary: Get Interval Configuration
+      description: Get available interval configuration options
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Interval configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  monthly:
+                    type: array
+                    items:
+                      type: string
+                  weekly:
+                    type: array
+                    items:
+                      type: string
+                  daily:
+                    type: array
+                    items:
+                      type: string
+
+  /auto-sync/task/{job_id}:
+    post:
+      tags:
+        - Auto Sync
+      summary: Create Task
+      description: Create a new task for a specific job
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Job ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskCreateRequest'
+      responses:
+        '201':
+          description: Task created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+    get:
+      tags:
+        - Auto Sync
+      summary: List Tasks
+      description: Get all tasks for a specific job
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: Job ID
+      responses:
+        '200':
+          description: List of tasks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Task'
+
+  /auto-sync/delete-jobs-by-email:
+    delete:
+      tags:
+        - Auto Sync
+      summary: Delete Jobs by Email
+      description: Admin endpoint to delete jobs by email address
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                  description: Email address
+              required:
+                - email
+      responses:
+        '200':
+          description: Jobs deleted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  # Google Drive Endpoints
+  /google/drive-to-satellite/{ID}:
+    get:
+      tags:
+        - Google Drive
+      summary: Send File to Satellite
+      description: Send a specific file from Google Drive to satellite storage
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ID
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Google Drive file ID
+      responses:
+        '200':
+          description: File sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '404':
+          description: File not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /google/satellite-to-drive/{name}:
+    get:
+      tags:
+        - Google Drive
+      summary: Send File from Satellite
+      description: Send a file from satellite storage to Google Drive
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: File name in satellite storage
+      responses:
+        '200':
+          description: File sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /google/drive-root-file-names:
+    get:
+      tags:
+        - Google Drive
+      summary: List Root Files
+      description: List all files in Google Drive root directory
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of root files
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DriveFile'
+
+  /google/drive-get-file-names:
+    get:
+      tags:
+        - Google Drive
+      summary: List All Files
+      description: List all files in Google Drive (including subdirectories)
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of all files
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DriveFile'
+
+  /google/drive-get-file/{ID}:
+    get:
+      tags:
+        - Google Drive
+      summary: Get File by ID
+      description: Get file details by Google Drive file ID
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ID
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Google Drive file ID
+      responses:
+        '200':
+          description: File details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DriveFile'
+
+  /google/satellite-drive:
+    get:
+      tags:
+        - Google Drive
+      summary: List Satellite Drive Files
+      description: List all Google Drive files stored in satellite
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of satellite drive files
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SatelliteFile'
+
+  /google/satellite-drive-folder/{name}:
+    get:
+      tags:
+        - Google Drive
+      summary: List Folder Files in Satellite
+      description: List files in a specific folder stored in satellite
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Folder name
+      responses:
+        '200':
+          description: List of folder files
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SatelliteFile'
+
+  /google/all-drive-to-satellite:
+    get:
+      tags:
+        - Google Drive
+      summary: Sync All Files to Satellite
+      description: Sync all Google Drive files to satellite storage
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: All files synced successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /google/folder/{name}/list:
+    get:
+      tags:
+        - Google Drive
+      summary: List Folder Files
+      description: List all files in a specific Google Drive folder
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Folder name
+      responses:
+        '200':
+          description: List of folder files
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DriveFile'
+
+  /google/folder/{name}/sync:
+    post:
+      tags:
+        - Google Drive
+      summary: Sync Folder Files
+      description: Sync all files from a Google Drive folder to satellite
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Folder name
+      responses:
+        '200':
+          description: Folder files synced successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /google/folder/{id}:
+    get:
+      tags:
+        - Google Drive
+      summary: List Folder Files by ID
+      description: List all files in a Google Drive folder by folder ID
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Folder ID
+      responses:
+        '200':
+          description: List of folder files
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DriveFile'
+
+    post:
+      tags:
+        - Google Drive
+      summary: Sync Folder Files by ID
+      description: Sync all files from a Google Drive folder to satellite by folder ID
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Folder ID
+      responses:
+        '200':
+          description: Folder files synced successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /google/get-shared-filenames:
+    get:
+      tags:
+        - Google Drive
+      summary: List Shared Files
+      description: Get all shared files from Google Drive
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of shared files
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DriveFile'
+
+  /google/sync-shared:
+    post:
+      tags:
+        - Google Drive
+      summary: Sync Shared Files
+      description: Sync all shared files from Google Drive to satellite
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Shared files synced successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /google/sync-list-from-drive:
+    post:
+      tags:
+        - Google Drive
+      summary: Sync File List from Drive
+      description: Sync a specific list of files from Google Drive to satellite
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                file_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: List of Google Drive file IDs
+              required:
+                - file_ids
+      responses:
+        '200':
+          description: Files synced successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  # Google Photos Endpoints
+  /google/photos-list-albums:
+    get:
+      tags:
+        - Google Photos
+      summary: List Albums
+      description: List all Google Photos albums for the authenticated user
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: date_range
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [today, yesterday, last_7_days, last_30_days, this_year, last_year]
+          description: Filter albums by date range
+      responses:
+        '200':
+          description: List of albums
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PhotoAlbum'
+
+  /google/photos-list-photos-in-album/{ID}:
+    get:
+      tags:
+        - Google Photos
+      summary: List Photos in Album
+      description: List all photos in a specific Google Photos album
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ID
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Album ID
+        - name: date_range
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [today, yesterday, last_7_days, last_30_days, this_year, last_year]
+          description: Filter photos by date range
+        - name: media_type
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [all, photos, videos]
+            default: all
+          description: Filter by media type
+      responses:
+        '200':
+          description: List of photos in album
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PhotoItem'
+
+  /google/photos-list-all:
+    get:
+      tags:
+        - Google Photos
+      summary: List All Photos
+      description: List all photos for the authenticated user
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: date_range
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [today, yesterday, last_7_days, last_30_days, this_year, last_year]
+          description: Filter photos by date range
+        - name: media_type
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [all, photos, videos]
+            default: all
+          description: Filter by media type
+      responses:
+        '200':
+          description: List of all photos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PhotoItem'
+
+  /google/satellite-to-photos/{name}:
+    get:
+      tags:
+        - Google Photos
+      summary: Send File to Photos
+      description: Send a file from satellite storage to Google Photos
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: File name in satellite storage
+      responses:
+        '200':
+          description: File sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /google/photos-to-satellite:
+    post:
+      tags:
+        - Google Photos
+      summary: Send Photos to Satellite
+      description: Send specific photos from Google Photos to satellite storage
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                photo_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: List of photo IDs
+              required:
+                - photo_ids
+      responses:
+        '200':
+          description: Photos sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /google/all-photos-from-album-to-satellite:
+    post:
+      tags:
+        - Google Photos
+      summary: Sync Album to Satellite
+      description: Sync all photos from a specific album to satellite storage
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                album_id:
+                  type: string
+                  description: Album ID
+              required:
+                - album_id
+      responses:
+        '200':
+          description: Album photos synced successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /google/list-photos-to-satellite:
+    post:
+      tags:
+        - Google Photos
+      summary: Sync Photo List to Satellite
+      description: Sync a specific list of photos to satellite storage
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                photo_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: List of photo IDs
+              required:
+                - photo_ids
+      responses:
+        '200':
+          description: Photos synced successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  # Gmail Endpoints
+  /google/gmail/insert-mail:
+    post:
+      tags:
+        - Gmail
+      summary: Download and Insert Mail
+      description: Download Gmail messages and insert them into satellite storage
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: List of Gmail message IDs
+              required:
+                - message_ids
+      responses:
+        '200':
+          description: Messages downloaded and inserted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /google/gmail-list-to-satellite:
+    post:
+      tags:
+        - Gmail
+      summary: List Messages to Satellite
+      description: List Gmail messages and send them to satellite storage
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: List of Gmail message IDs
+              required:
+                - message_ids
+      responses:
+        '200':
+          description: Messages sent to satellite successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /google/query-messages:
+    get:
+      tags:
+        - Gmail
+      summary: Query Messages
+      description: Query Gmail messages with controlled parameters
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: query
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Gmail search query
+        - name: max_results
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 10
+          description: Maximum number of results
+      responses:
+        '200':
+          description: List of messages matching query
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GmailMessage'
+
+  # Google Cloud Storage Endpoints
+  /google/storage-list-buckets/{projectName}:
+    get:
+      tags:
+        - Google Cloud Storage
+      summary: List Buckets
+      description: List all buckets in a Google Cloud project
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: projectName
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Google Cloud project name
+      responses:
+        '200':
+          description: List of buckets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/StorageBucket'
+
+  /google/storage-list-items/{bucketName}:
+    get:
+      tags:
+        - Google Cloud Storage
+      summary: List Bucket Items
+      description: List all items in a Google Cloud Storage bucket
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: bucketName
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Bucket name
+      responses:
+        '200':
+          description: List of bucket items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/StorageItem'
+
+  /google/bucket-metadata/{bucketName}:
+    get:
+      tags:
+        - Google Cloud Storage
+      summary: Get Bucket Metadata
+      description: Get metadata for a specific bucket
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: bucketName
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Bucket name
+      responses:
+        '200':
+          description: Bucket metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BucketMetadata'
+
+  /google/storage-item-to-satellite/{bucketName}/{itemName}:
+    get:
+      tags:
+        - Google Cloud Storage
+      summary: Send Item to Satellite
+      description: Send a specific item from Google Cloud Storage to satellite
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: bucketName
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Bucket name
+        - name: itemName
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Item name
+      responses:
+        '200':
+          description: Item sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /google/storage-item-from-satellite-to-google-cloud/{bucketName}/{itemName}:
+    get:
+      tags:
+        - Google Cloud Storage
+      summary: Send Item from Satellite
+      description: Send an item from satellite storage to Google Cloud Storage
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: bucketName
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Bucket name
+        - name: itemName
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Item name
+      responses:
+        '200':
+          description: Item sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /google/storage-all-items-to-satellite/{bucketName}:
+    post:
+      tags:
+        - Google Cloud Storage
+      summary: Sync All Items to Satellite
+      description: Sync all items from a bucket to satellite storage
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: bucketName
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Bucket name
+      responses:
+        '200':
+          description: All items synced successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /google/list-projects-to-satellite:
+    post:
+      tags:
+        - Google Cloud Storage
+      summary: List Projects to Satellite
+      description: List Google Cloud projects and sync to satellite
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                project_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: List of project IDs
+              required:
+                - project_ids
+      responses:
+        '200':
+          description: Projects synced successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /google/list-buckets-to-satellite:
+    post:
+      tags:
+        - Google Cloud Storage
+      summary: List Buckets to Satellite
+      description: List buckets and sync to satellite
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                bucket_names:
+                  type: array
+                  items:
+                    type: string
+                  description: List of bucket names
+              required:
+                - bucket_names
+      responses:
+        '200':
+          description: Buckets synced successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /google/list-items-to-satellite:
+    post:
+      tags:
+        - Google Cloud Storage
+      summary: Sync Cloud Items
+      description: Sync cloud storage items to satellite
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      bucket_name:
+                        type: string
+                      item_name:
+                        type: string
+              required:
+                - items
+      responses:
+        '200':
+          description: Items synced successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /google/cloud/list-projects:
+    get:
+      tags:
+        - Google Cloud Storage
+      summary: List Projects
+      description: List all Google Cloud projects
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of projects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CloudProject'
+
+  /google/cloud/list-organizations:
+    get:
+      tags:
+        - Google Cloud Storage
+      summary: List Organizations
+      description: List all Google Cloud organizations
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of organizations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CloudOrganization'
+
+  # Satellite Endpoints
+  /satellite/{bucketName}:
+    get:
+      tags:
+        - Satellite
+      summary: List Satellite Objects
+      description: List all objects in a satellite bucket
+      parameters:
+        - name: bucketName
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Bucket name
+        - name: ACCESS_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Satellite access token
+      responses:
+        '200':
+          description: List of objects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SatelliteObject'
+        '403':
+          description: Access denied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # Dropbox Endpoints
+  /dropbox/file-to-satellite/{filePath}:
+    get:
+      tags:
+        - Dropbox
+      summary: Send File to Satellite
+      description: Send a file from Dropbox to satellite storage
+      parameters:
+        - name: filePath
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Dropbox file path
+      responses:
+        '200':
+          description: File sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /dropbox/file-from-satellite/{filePath}:
+    get:
+      tags:
+        - Dropbox
+      summary: Send File from Satellite
+      description: Send a file from satellite storage to Dropbox
+      parameters:
+        - name: filePath
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Dropbox file path
+      responses:
+        '200':
+          description: File sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  # Office 365 Endpoints
+  /office365/get-outlook-messages:
+    get:
+      tags:
+        - Office 365
+      summary: Get Outlook Messages
+      description: Get Outlook messages for the authenticated user
+      parameters:
+        - name: ACCESS_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Satellite access token
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Outlook authorization token
+      responses:
+        '200':
+          description: List of Outlook messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OutlookMessage'
+
+  /office365/get-outlook-message/{id}:
+    get:
+      tags:
+        - Office 365
+      summary: Get Outlook Message by ID
+      description: Get a specific Outlook message by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Message ID
+        - name: ACCESS_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Satellite access token
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Outlook authorization token
+      responses:
+        '200':
+          description: Outlook message details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OutlookMessage'
+
+  /office365/outlook-messages-to-satellite:
+    post:
+      tags:
+        - Office 365
+      summary: Send Messages to Satellite
+      description: Send Outlook messages to satellite storage
+      parameters:
+        - name: ACCESS_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Satellite access token
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Outlook authorization token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: List of message IDs
+              required:
+                - message_ids
+      responses:
+        '200':
+          description: Messages sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /office365/satellite-to-outlook:
+    post:
+      tags:
+        - Office 365
+      summary: Send from Satellite to Outlook
+      description: Send messages from satellite storage to Outlook
+      parameters:
+        - name: ACCESS_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Satellite access token
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Outlook authorization token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: List of message IDs
+              required:
+                - message_ids
+      responses:
+        '200':
+          description: Messages sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  # AWS S3 Endpoints
+  /aws/list-files-in-bucket/{bucketName}:
+    get:
+      tags:
+        - AWS S3
+      summary: List S3 Bucket Files
+      description: List all files in an AWS S3 bucket
+      parameters:
+        - name: bucketName
+          in: path
+          required: true
+          schema:
+            type: string
+          description: S3 bucket name
+      responses:
+        '200':
+          description: List of S3 files
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "S3 bucket files listed successfully"
+
+  /aws/file-from-aws-to-satellite/{bucketName}/{itemName}:
+    get:
+      tags:
+        - AWS S3
+      summary: Send S3 File to Satellite
+      description: Send a file from AWS S3 to satellite storage
+      parameters:
+        - name: bucketName
+          in: path
+          required: true
+          schema:
+            type: string
+          description: S3 bucket name
+        - name: itemName
+          in: path
+          required: true
+          schema:
+            type: string
+          description: S3 object name
+        - name: ACCESS_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Satellite access token
+      responses:
+        '200':
+          description: File sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /aws/file-from-satellite-to-aws/{bucketName}/{itemName}:
+    get:
+      tags:
+        - AWS S3
+      summary: Send File from Satellite to S3
+      description: Send a file from satellite storage to AWS S3
+      parameters:
+        - name: bucketName
+          in: path
+          required: true
+          schema:
+            type: string
+          description: S3 bucket name
+        - name: itemName
+          in: path
+          required: true
+          schema:
+            type: string
+          description: S3 object name
+        - name: ACCESS_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Satellite access token
+      responses:
+        '200':
+          description: File sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  # GitHub Endpoints
+  /github/login:
+    get:
+      tags:
+        - GitHub
+      summary: GitHub Login
+      description: Initiate GitHub OAuth authentication
+      responses:
+        '302':
+          description: Redirect to GitHub OAuth
+        '200':
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /github/callback:
+    get:
+      tags:
+        - GitHub
+      summary: GitHub OAuth Callback
+      description: Handle GitHub OAuth callback
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+          description: OAuth authorization code
+      responses:
+        '200':
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /github/list-repos:
+    get:
+      tags:
+        - GitHub
+      summary: List Repositories
+      description: List all repositories for the authenticated user
+      responses:
+        '200':
+          description: List of repositories
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GitHubRepository'
+
+  /github/get-repo:
+    get:
+      tags:
+        - GitHub
+      summary: Get Repository
+      description: Get details of a specific repository
+      parameters:
+        - name: repo_name
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Repository name
+      responses:
+        '200':
+          description: Repository details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GitHubRepository'
+
+  /github/repo-to-satellite:
+    get:
+      tags:
+        - GitHub
+      summary: Send Repository to Satellite
+      description: Send a repository from GitHub to satellite storage
+      parameters:
+        - name: repo_name
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Repository name
+        - name: ACCESS_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Satellite access token
+      responses:
+        '200':
+          description: Repository sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /github/recover-repo-to-github:
+    get:
+      tags:
+        - GitHub
+      summary: Recover Repository from Satellite
+      description: Recover a repository from satellite storage to GitHub
+      parameters:
+        - name: repo_name
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Repository name
+        - name: ACCESS_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Satellite access token
+      responses:
+        '200':
+          description: Repository recovered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  # Shopify Endpoints
+  /shopify/login:
+    get:
+      tags:
+        - Shopify
+      summary: Shopify Login
+      description: Initiate Shopify OAuth authentication
+      responses:
+        '302':
+          description: Redirect to Shopify OAuth
+        '200':
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /shopify/callback:
+    get:
+      tags:
+        - Shopify
+      summary: Shopify OAuth Callback
+      description: Handle Shopify OAuth callback
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+          description: OAuth authorization code
+        - name: shop
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Shop name
+      responses:
+        '200':
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /shopify/products-to-satellite/{shopname}:
+    get:
+      tags:
+        - Shopify
+      summary: Send Products to Satellite
+      description: Send Shopify products to satellite storage
+      parameters:
+        - name: shopname
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Shopify shop name
+        - name: ACCESS_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Satellite access token
+      responses:
+        '200':
+          description: Products sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /shopify/customers-to-satellite/{shopname}:
+    get:
+      tags:
+        - Shopify
+      summary: Send Customers to Satellite
+      description: Send Shopify customers to satellite storage
+      parameters:
+        - name: shopname
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Shopify shop name
+        - name: ACCESS_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Satellite access token
+      responses:
+        '200':
+          description: Customers sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /shopify/orders-to-satellite/{shopname}:
+    get:
+      tags:
+        - Shopify
+      summary: Send Orders to Satellite
+      description: Send Shopify orders to satellite storage
+      parameters:
+        - name: shopname
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Shopify shop name
+        - name: ACCESS_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Satellite access token
+      responses:
+        '200':
+          description: Orders sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  # QuickBooks Endpoints
+  /quickbooks/customers-to-satellite:
+    get:
+      tags:
+        - QuickBooks
+      summary: Send Customers to Satellite
+      description: Send QuickBooks customers to satellite storage
+      parameters:
+        - name: ACCESS_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Satellite access token
+      responses:
+        '200':
+          description: Customers sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /quickbooks/items-to-satellite:
+    get:
+      tags:
+        - QuickBooks
+      summary: Send Items to Satellite
+      description: Send QuickBooks items to satellite storage
+      parameters:
+        - name: ACCESS_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Satellite access token
+      responses:
+        '200':
+          description: Items sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  /quickbooks/invoices-to-satellite:
+    get:
+      tags:
+        - QuickBooks
+      summary: Send Invoices to Satellite
+      description: Send QuickBooks invoices to satellite storage
+      parameters:
+        - name: ACCESS_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Satellite access token
+      responses:
+        '200':
+          description: Invoices sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+
+  # Scheduled Tasks Endpoints
+  /tasks/{method}:
+    post:
+      tags:
+        - Scheduled Tasks
+      summary: Create Scheduled Task
+      description: Create a new scheduled task
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: method
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [gmail, outlook, database]
+          description: Task method type
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScheduledTaskRequest'
+      responses:
+        '201':
+          description: Task created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /tasks:
+    get:
+      tags:
+        - Scheduled Tasks
+      summary: Get Scheduled Tasks
+      description: Get all scheduled tasks for the authenticated user
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of scheduled tasks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ScheduledTask'
+
+  # Monitoring Endpoints
+  /metrics:
+    get:
+      tags:
+        - Monitoring
+      summary: Prometheus Metrics
+      description: Get Prometheus metrics for monitoring
+      responses:
+        '200':
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: |
+                  # HELP http_requests_total Total number of HTTP requests
+                  # TYPE http_requests_total counter
+                  http_requests_total{method="GET",endpoint="/api/health"} 100
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token for authentication
+
+  schemas:
+    # Common Response Schemas
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "Operation completed successfully"
+        data:
+          type: object
+          description: Response data
+
+    ErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: string
+          example: "Error message"
+        message:
+          type: string
+          example: "Error description"
+
+    # Auto Sync Schemas
+    ActiveJob:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        user_id:
+          type: string
+          example: "user123"
+        method:
+          type: string
+          example: "gmail"
+        active:
+          type: boolean
+          example: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CronJob:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        user_id:
+          type: string
+          example: "user123"
+        method:
+          type: string
+          example: "gmail"
+        interval:
+          type: string
+          example: "daily"
+        on:
+          type: string
+          example: "12am"
+        active:
+          type: boolean
+          example: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    JobCreateRequest:
+      type: object
+      properties:
+        login_id:
+          type: string
+          example: "user@example.com"
+        storx_token:
+          type: string
+          example: "storx_access_token"
+        email_ids:
+          type: array
+          items:
+            type: string
+          example: ["email1@example.com", "email2@example.com"]
+        code:
+          type: string
+          example: "oauth_code"
+        refresh_token:
+          type: string
+          example: "refresh_token"
+      required:
+        - login_id
+        - storx_token
+        - email_ids
+
+    JobUpdateRequest:
+      type: object
+      properties:
+        interval:
+          type: string
+          example: "weekly"
+        on:
+          type: string
+          example: "Monday"
+        code:
+          type: string
+          example: "oauth_code"
+        refresh_token:
+          type: string
+          example: "refresh_token"
+        database_connection:
+          $ref: '#/components/schemas/DatabaseConnection'
+        storx_token:
+          type: string
+          example: "storx_access_token"
+        active:
+          type: boolean
+          example: true
+
+    DatabaseConnection:
+      type: object
+      properties:
+        name:
+          type: string
+          example: "My Database"
+        database_name:
+          type: string
+          example: "mydb"
+        host:
+          type: string
+          example: "localhost"
+        port:
+          type: string
+          example: "5432"
+        username:
+          type: string
+          example: "user"
+        password:
+          type: string
+          example: "password"
+
+    TaskCreateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          example: "Backup Task"
+        description:
+          type: string
+          example: "Daily backup task"
+        schedule:
+          type: string
+          example: "0 0 * * *"
+
+    Task:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        job_id:
+          type: integer
+          example: 1
+        name:
+          type: string
+          example: "Backup Task"
+        description:
+          type: string
+          example: "Daily backup task"
+        schedule:
+          type: string
+          example: "0 0 * * *"
+        status:
+          type: string
+          example: "active"
+        created_at:
+          type: string
+          format: date-time
+
+    # Google Drive Schemas
+    DriveFile:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
+        name:
+          type: string
+          example: "document.pdf"
+        mime_type:
+          type: string
+          example: "application/pdf"
+        size:
+          type: integer
+          example: 1024
+        created_time:
+          type: string
+          format: date-time
+        modified_time:
+          type: string
+          format: date-time
+        parents:
+          type: array
+          items:
+            type: string
+          example: ["0BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"]
+
+    SatelliteFile:
+      type: object
+      properties:
+        name:
+          type: string
+          example: "document.pdf"
+        size:
+          type: integer
+          example: 1024
+        last_modified:
+          type: string
+          format: date-time
+        path:
+          type: string
+          example: "/google-drive/document.pdf"
+
+    # Google Photos Schemas
+    PhotoAlbum:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "album123"
+        title:
+          type: string
+          example: "My Photos"
+        product_url:
+          type: string
+          example: "https://photos.google.com/album/album123"
+        media_items_count:
+          type: integer
+          example: 50
+        cover_photo_base_url:
+          type: string
+          example: "https://lh3.googleusercontent.com/..."
+
+    PhotoItem:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "photo123"
+        filename:
+          type: string
+          example: "IMG_001.jpg"
+        mime_type:
+          type: string
+          example: "image/jpeg"
+        base_url:
+          type: string
+          example: "https://lh3.googleusercontent.com/..."
+        product_url:
+          type: string
+          example: "https://photos.google.com/photo/photo123"
+        media_metadata:
+          type: object
+          properties:
+            creation_time:
+              type: string
+              format: date-time
+            width:
+              type: string
+              example: "1920"
+            height:
+              type: string
+              example: "1080"
+
+    # Gmail Schemas
+    GmailMessage:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "message123"
+        thread_id:
+          type: string
+          example: "thread123"
+        snippet:
+          type: string
+          example: "This is a message snippet..."
+        subject:
+          type: string
+          example: "Important Email"
+        from:
+          type: string
+          example: "sender@example.com"
+        to:
+          type: string
+          example: "recipient@example.com"
+        date:
+          type: string
+          format: date-time
+
+    # Google Cloud Storage Schemas
+    StorageBucket:
+      type: object
+      properties:
+        name:
+          type: string
+          example: "my-bucket"
+        location:
+          type: string
+          example: "US"
+        storage_class:
+          type: string
+          example: "STANDARD"
+        time_created:
+          type: string
+          format: date-time
+        updated:
+          type: string
+          format: date-time
+
+    StorageItem:
+      type: object
+      properties:
+        name:
+          type: string
+          example: "folder/file.txt"
+        size:
+          type: integer
+          example: 1024
+        content_type:
+          type: string
+          example: "text/plain"
+        time_created:
+          type: string
+          format: date-time
+        updated:
+          type: string
+          format: date-time
+        md5_hash:
+          type: string
+          example: "d41d8cd98f00b204e9800998ecf8427e"
+
+    BucketMetadata:
+      type: object
+      properties:
+        name:
+          type: string
+          example: "my-bucket"
+        location:
+          type: string
+          example: "US"
+        storage_class:
+          type: string
+          example: "STANDARD"
+        versioning:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+              example: false
+        lifecycle:
+          type: object
+          properties:
+            rule:
+              type: array
+              items:
+                type: object
+
+    CloudProject:
+      type: object
+      properties:
+        project_id:
+          type: string
+          example: "my-project-123"
+        name:
+          type: string
+          example: "My Project"
+        project_number:
+          type: string
+          example: "123456789"
+        lifecycle_state:
+          type: string
+          example: "ACTIVE"
+
+    CloudOrganization:
+      type: object
+      properties:
+        name:
+          type: string
+          example: "organizations/123456789"
+        display_name:
+          type: string
+          example: "My Organization"
+        lifecycle_state:
+          type: string
+          example: "ACTIVE"
+
+    # Satellite Schemas
+    SatelliteObject:
+      type: object
+      properties:
+        key:
+          type: string
+          example: "folder/file.txt"
+        size:
+          type: integer
+          example: 1024
+        last_modified:
+          type: string
+          format: date-time
+        etag:
+          type: string
+          example: "d41d8cd98f00b204e9800998ecf8427e"
+
+    # Outlook Schemas
+    OutlookMessage:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "message123"
+        subject:
+          type: string
+          example: "Important Email"
+        from:
+          type: object
+          properties:
+            email_address:
+              type: string
+              example: "sender@example.com"
+            name:
+              type: string
+              example: "John Doe"
+        to_recipients:
+          type: array
+          items:
+            type: object
+            properties:
+              email_address:
+                type: string
+                example: "recipient@example.com"
+              name:
+                type: string
+                example: "Jane Doe"
+        body:
+          type: object
+          properties:
+            content:
+              type: string
+              example: "This is the email body..."
+            content_type:
+              type: string
+              example: "text"
+        received_date_time:
+          type: string
+          format: date-time
+        sent_date_time:
+          type: string
+          format: date-time
+
+    # GitHub Schemas
+    GitHubRepository:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 123456
+        name:
+          type: string
+          example: "my-repo"
+        full_name:
+          type: string
+          example: "username/my-repo"
+        description:
+          type: string
+          example: "My awesome repository"
+        html_url:
+          type: string
+          example: "https://github.com/username/my-repo"
+        clone_url:
+          type: string
+          example: "https://github.com/username/my-repo.git"
+        ssh_url:
+          type: string
+          example: "git@github.com:username/my-repo.git"
+        default_branch:
+          type: string
+          example: "main"
+        size:
+          type: integer
+          example: 1024
+        language:
+          type: string
+          example: "Go"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    # Scheduled Task Schemas
+    ScheduledTaskRequest:
+      type: object
+      properties:
+        login_id:
+          type: string
+          example: "user@example.com"
+        storx_token:
+          type: string
+          example: "storx_access_token"
+        email_ids:
+          type: array
+          items:
+            type: string
+          example: ["email1@example.com", "email2@example.com"]
+        code:
+          type: string
+          example: "oauth_code"
+        refresh_token:
+          type: string
+          example: "refresh_token"
+      required:
+        - login_id
+        - storx_token
+        - email_ids
+
+    ScheduledTask:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        user_id:
+          type: string
+          example: "user123"
+        method:
+          type: string
+          example: "gmail"
+        login_id:
+          type: string
+          example: "user@example.com"
+        active:
+          type: boolean
+          example: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+security:
+  - bearerAuth: []

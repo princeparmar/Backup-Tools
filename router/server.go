@@ -25,6 +25,9 @@ func StartServer(db *db.PosgresDb, address string) {
 	// Prometheus metrics endpoints
 	e.GET("/metrics", echo.WrapHandler(monitor.CreateMetricsHandler()))
 
+	// Swagger documentation endpoints
+	e.GET("/swagger", handler.SwaggerUIHandler)
+
 	e.POST("/satellite-auth", satellite.HandleSatelliteAuthentication)
 	e.POST("/google-auth", googlepack.Autentificate)
 	e.GET("/google-auth", googlepack.Autentificateg)
