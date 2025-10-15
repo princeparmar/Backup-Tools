@@ -1,0 +1,75 @@
+name: Deploy to Windows Server
+
+on:
+  push:
+    branches: ['main']
+  workflow_dispatch: # Manual trigger
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+          
+      - name: Build application
+        run: |
+          go mod download
+          go build -o backuptools-windows-amd64.exe -ldflags="-s -w" ./cmd
+          
+      - name: Create deployment directory
+        run: |
+          if (!(Test-Path "D:\bin")) {
+            New-Item -ItemType Directory -Path "D:\bin" -Force
+          }
+          
+      - name: Stop service
+        run: |
+          try {
+            Stop-Service -Name "backuptools" -Force -ErrorAction SilentlyContinue
+            Write-Host "Service stopped successfully"
+          } catch {
+            Write-Host "Service was not running or failed to stop: $($_.Exception.Message)"
+          }
+          
+      - name: Backup current version
+        run: |
+          if (Test-Path "D:\bin\backuptools-windows-amd64.exe") {
+            Copy-Item "D:\bin\backuptools-windows-amd64.exe" "D:\bin\backuptools-windows-amd64.exe.backup" -Force
+            Write-Host "Current version backed up"
+          }
+          
+      - name: Deploy new version
+        run: |
+          Copy-Item "backuptools-windows-amd64.exe" "D:\bin\" -Force
+          Copy-Item ".env" "D:\bin\" -Force -ErrorAction SilentlyContinue
+          Write-Host "New version deployed"
+          
+      - name: Start service
+        run: |
+          try {
+            Start-Service -Name "backuptools"
+            Write-Host "Service started successfully"
+          } catch {
+            Write-Host "Failed to start service: $($_.Exception.Message)"
+            # Try to start manually if service fails
+            Start-Process "D:\bin\backuptools-windows-amd64.exe" -WorkingDirectory "D:\bin"
+          }
+          
+      - name: Verify deployment
+        run: |
+          Start-Sleep -Seconds 5
+          $process = Get-Process -Name "backup-tools" -ErrorAction SilentlyContinue
+          if ($process) {
+            Write-Host "Application is running successfully"
+            Write-Host "Process ID: $($process.Id)"
+          } else {
+            Write-Host "Application failed to start"
+            exit 1
+          }
