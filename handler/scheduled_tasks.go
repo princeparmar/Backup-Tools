@@ -141,10 +141,9 @@ func HandleGetScheduledTasksByUserID(c echo.Context) error {
 		logger.Int("task_count", len(tasks)))
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":       "Scheduled tasks retrieved successfully",
-		"tasks":         tasks,
-		"updatemessage": "runner is working ",
-		"count":         len(tasks),
+		"message": "Scheduled tasks retrieved successfully",
+		"tasks":   tasks,
+		"count":   len(tasks),
 	})
 }
 
