@@ -16,7 +16,8 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v4
         with:
-          go-version: '1.21'
+          go-version: '1.21.13'
+          cache: false
           
       - name: Build application
         run: |
