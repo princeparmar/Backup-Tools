@@ -2,8 +2,15 @@ name: Deploy to Windows Server
 
 on:
   push:
-    branches: ['main']
-  workflow_dispatch: # Manual trigger
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  APP_NAME: 'backuptools-windows-amd64.exe'
+  APP_PROCESS_NAME: 'backuptools-windows-amd64'
+  DEPLOY_DIR: 'D:\bin'
+  SERVICE_NAME: 'backuptools'
+  GO_VERSION: '1.21.13'
 
 jobs:
   deploy:
@@ -16,69 +23,73 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v4
         with:
-          go-version: '1.21.13'
+          go-version: ${{ env.GO_VERSION }}
           cache: false
           
       - name: Build application
         run: |
           go mod download
-          go build -o backuptools-windows-amd64.exe -ldflags="-s -w" ./cmd
+          go build -o ${{ env.APP_NAME }} -ldflags="-s -w" ./cmd
           
-      - name: Create deployment directory
+      - name: Prepare deployment directory
         run: |
-          if (!(Test-Path "D:\bin")) {
-            New-Item -ItemType Directory -Path "D:\bin" -Force
+          if (!(Test-Path "${{ env.DEPLOY_DIR }}")) {
+            New-Item -ItemType Directory -Path "${{ env.DEPLOY_DIR }}" -Force
           }
           
-      - name: Stop service
+      - name: Stop and backup current version
         run: |
-          try {
-            Stop-Service -Name "backuptools" -Force -ErrorAction SilentlyContinue
-            Write-Host "Service stopped successfully"
-          } catch {
-            Write-Host "Service was not running or failed to stop: $($_.Exception.Message)"
+          # Stop service if running
+          $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
+          if ($service -and $service.Status -eq 'Running') {
+            Stop-Service -Name "${{ env.SERVICE_NAME }}" -Force
+            Write-Host "Service stopped"
           }
           
-      - name: Backup current version
-        run: |
-          if (Test-Path "D:\bin\backuptools-windows-amd64.exe") {
-            Copy-Item "D:\bin\backuptools-windows-amd64.exe" "D:\bin\backuptools-windows-amd64.exe.backup" -Force
-            Write-Host "Current version backed up"
+          # Backup existing application
+          $appPath = "${{ env.DEPLOY_DIR }}\${{ env.APP_NAME }}"
+          if (Test-Path $appPath) {
+            $backupName = "${{ env.APP_NAME }}.backup.$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+            Copy-Item $appPath "${{ env.DEPLOY_DIR }}\$backupName" -Force
+            Write-Host "Backup created: $backupName"
           }
           
       - name: Deploy new version
         run: |
-          Copy-Item "backuptools-windows-amd64.exe" "D:\bin\" -Force
-          Copy-Item ".env" "D:\bin\" -Force -ErrorAction SilentlyContinue
-          Write-Host "New version deployed"
+          Copy-Item "${{ env.APP_NAME }}" "${{ env.DEPLOY_DIR }}\" -Force
+          # Copy environment file if it exists
+          if (Test-Path ".env") {
+            Copy-Item ".env" "${{ env.DEPLOY_DIR }}\" -Force -ErrorAction SilentlyContinue
+          }
+          Write-Host "New version deployed to ${{ env.DEPLOY_DIR }}"
           
-      - name: Start service
+      - name: Start service and verify
         run: |
-          try {
-            Start-Service -Name "backuptools"
-            Write-Host "Service started successfully"
-          } catch {
-            Write-Host "Failed to start service: $($_.Exception.Message)"
-            # Try to start manually if service fails
-            Start-Process "D:\bin\backuptools-windows-amd64.exe" -WorkingDirectory "D:\bin"
+          # Try to start as service first
+          $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
+          if ($service) {
+            try {
+              Start-Service -Name "${{ env.SERVICE_NAME }}"
+              Write-Host "Service started successfully"
+            } catch {
+              Write-Host "Service start failed: $($_.Exception.Message)"
+            }
           }
           
-      - name: Verify deployment
-        run: |
-          Start-Sleep -Seconds 5
-          $process = Get-Process -Name "backuptools-windows-amd64" -ErrorAction SilentlyContinue
+          # Fallback: Start application directly
+          Start-Sleep -Seconds 3
+          $process = Get-Process -Name "${{ env.APP_PROCESS_NAME }}" -ErrorAction SilentlyContinue
+          if (!$process) {
+            Write-Host "Starting application directly..."
+            Start-Process "${{ env.DEPLOY_DIR }}\${{ env.APP_NAME }}" -WorkingDirectory "${{ env.DEPLOY_DIR }}"
+            Start-Sleep -Seconds 2
+          }
+          
+          # Verification
+          $process = Get-Process -Name "${{ env.APP_PROCESS_NAME }}" -ErrorAction SilentlyContinue
           if ($process) {
-            Write-Host "Application is running successfully"
-            Write-Host "Process ID: $($process.Id)"
+            Write-Host "✅ Deployment successful - PID: $($process.Id)"
           } else {
-            Write-Host "Application failed to start - checking service status..."
-            $service = Get-Service -Name "backuptools" -ErrorAction SilentlyContinue
-            if ($service) {
-              Write-Host "Service status: $($service.Status)"
-            } else {
-              Write-Host "Service not found"
-            }
-            Write-Host "Checking for any backuptools processes..."
-            Get-Process | Where-Object {$_.ProcessName -like "*backup*"} | ForEach-Object { Write-Host "Found: $($_.ProcessName) (ID: $($_.Id))" }
+            Write-Host "❌ Deployment failed - application not running"
             exit 1
           }

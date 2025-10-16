@@ -59,7 +59,7 @@ func (r *AuthRepository) WriteGoogleAuthToken(JWTtoken, accessToken string) erro
 
 func (r *AuthRepository) ReadGoogleAuthToken(JWTtoken string) (string, error) {
 	var res GoogleAuthStorage
-	if err := r.db.Where("jwt_token = ?", JWTtoken).First(&res).Error; err != nil {
+	if err := r.db.Where("jw_ttoken = ?", JWTtoken).First(&res).Error; err != nil {
 		return "", err
 	}
 	return res.AccessToken, nil
