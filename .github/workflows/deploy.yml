@@ -66,11 +66,19 @@ jobs:
       - name: Verify deployment
         run: |
           Start-Sleep -Seconds 5
-          $process = Get-Process -Name "backup-tools" -ErrorAction SilentlyContinue
+          $process = Get-Process -Name "backuptools-windows-amd64" -ErrorAction SilentlyContinue
           if ($process) {
             Write-Host "Application is running successfully"
             Write-Host "Process ID: $($process.Id)"
           } else {
-            Write-Host "Application failed to start"
+            Write-Host "Application failed to start - checking service status..."
+            $service = Get-Service -Name "backuptools" -ErrorAction SilentlyContinue
+            if ($service) {
+              Write-Host "Service status: $($service.Status)"
+            } else {
+              Write-Host "Service not found"
+            }
+            Write-Host "Checking for any backuptools processes..."
+            Get-Process | Where-Object {$_.ProcessName -like "*backup*"} | ForEach-Object { Write-Host "Found: $($_.ProcessName) (ID: $($_.Id))" }
             exit 1
           }
