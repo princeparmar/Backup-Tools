@@ -71,7 +71,7 @@ type Attachment struct {
 
 func NewGmailClient(c echo.Context) (*GmailClient, error) {
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
 	googleToken, err := GetGoogleTokenFromJWT(c)
 	if err != nil {

@@ -49,7 +49,7 @@ func HandleAutomaticSyncListForUser(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	automaticSyncList, err := database.CronJobRepo.GetAllCronJobsForUser(userID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
@@ -77,7 +77,7 @@ func HandleAutomaticSyncActiveJobsForUser(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	activeJobs, err := database.CronJobRepo.GetAllActiveCronJobsForUser(userID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
@@ -117,7 +117,7 @@ func HandleAutomaticSyncDetails(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	jobDetails, err := database.CronJobRepo.GetCronJobByID(uint(jobID))
 	if err != nil {
 		if strings.Contains(err.Error(), "record not found") {
@@ -287,7 +287,7 @@ func ProcessDatabaseMethod(reqBody DatabaseConnection) (string, map[string]inter
 
 // Helper functions
 func createSyncJob(userID, name, method, syncType string, config map[string]interface{}, c echo.Context) (interface{}, error) {
-	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
 	// Check for existing jobs using original name (before adding timestamp)
 	if err := checkExistingJobs(userID, syncType, method, database); err != nil {
@@ -302,7 +302,7 @@ func createSyncJob(userID, name, method, syncType string, config map[string]inte
 	return data, nil
 }
 
-func checkExistingJobs(userID, syncType, method string, db *db.PosgresDb) error {
+func checkExistingJobs(userID, syncType, method string, db *db.PostgresDb) error {
 	existingJobs, err := db.CronJobRepo.GetAllCronJobsForUser(userID)
 	if err != nil {
 		return jsonError(http.StatusInternalServerError, "Failed to check existing jobs", err)
@@ -322,42 +322,11 @@ func checkExistingJobs(userID, syncType, method string, db *db.PosgresDb) error 
 			return jsonError(http.StatusInternalServerError, "Failed to check task status", err)
 		}
 
-		// Handle job type conflicts
-		if err := handleJobTypeConflicts(&job, syncType, serviceName, hasRunningTasks); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func handleJobTypeConflicts(job *repo.CronJobListingDB, syncType, serviceName string, hasRunningTasks bool) error {
-	// Check for running tasks first (applies to both job types)
-	if hasRunningTasks {
-		errorMsg := fmt.Sprintf("A backup job for this %s is currently running. Cannot create %s backup.", serviceName, syncType)
-		return jsonErrorMsg(http.StatusBadRequest, errorMsg, errorMsg)
-	}
-
-	// Handle daily job conflicts
-	if job.SyncType == "daily" {
-		if syncType == "daily" {
-			errorMsg := fmt.Sprintf("A daily backup job for this %s already exists", serviceName)
-			return jsonErrorMsg(http.StatusBadRequest, errorMsg, errorMsg)
-		} else if syncType == "one_time" && job.Active {
-			errorMsg := fmt.Sprintf("A daily backup job for this %s is already active. Cannot create one-time backup.", serviceName)
+		if hasRunningTasks {
+			errorMsg := fmt.Sprintf("A backup job for this %s is currently running. Cannot create %s backup.", serviceName, syncType)
 			return jsonErrorMsg(http.StatusBadRequest, errorMsg, errorMsg)
 		}
-	}
 
-	// Handle one-time job conflicts
-	if job.SyncType == "one_time" {
-		if syncType == "one_time" {
-			errorMsg := fmt.Sprintf("A one-time backup job for this %s already exists", serviceName)
-			return jsonErrorMsg(http.StatusBadRequest, errorMsg, errorMsg)
-		} else if syncType == "daily" && job.Active {
-			errorMsg := fmt.Sprintf("A one-time backup job for this %s is already active. Cannot create daily backup.", serviceName)
-			return jsonErrorMsg(http.StatusBadRequest, errorMsg, errorMsg)
-		}
 	}
 
 	return nil
@@ -404,7 +373,7 @@ func sendSyncResponse(c echo.Context, syncType string, data interface{}) error {
 			return jsonErrorMsg(http.StatusInternalServerError, "Invalid data type returned")
 		}
 
-		database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
+		database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 		task, err := database.TaskRepo.CreateTaskForCronJob(cronJobData.ID)
 		if err != nil {
 			return jsonError(http.StatusInternalServerError, "Failed to create task for one-time backup", err)
@@ -458,7 +427,7 @@ func HandleAutomaticSyncCreateTask(c echo.Context) error {
 		return sendJSONError(c, http.StatusUnauthorized, "Invalid Request", err)
 	}
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
 	job, err := database.CronJobRepo.GetJobByIDForUser(userID, uint(jobID))
 	if err != nil {
@@ -532,7 +501,7 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 		logger.String("user_id", userID),
 		logger.Int("job_id", jobID))
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
 	// Verify job exists and belongs to user
 	job, err := database.CronJobRepo.GetJobByIDForUser(userID, uint(jobID))
@@ -845,7 +814,7 @@ func HandleAutomaticSyncDelete(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
 	if _, err := database.CronJobRepo.GetJobByIDForUser(userID, uint(jobID)); err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -897,7 +866,7 @@ func HandleAutomaticSyncTaskList(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
 	if _, err := database.CronJobRepo.GetJobByIDForUser(userID, uint(jobID)); err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -981,7 +950,7 @@ func HandleDeleteJobsByEmail(c echo.Context) error {
 	}
 
 	// Get database instance
-	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
 	// Delete all jobs and tasks for the user by email
 	deletedJobIDs, deletedTaskIDs, err := database.CronJobRepo.DeleteAllJobsAndTasksByEmail(req.Email)

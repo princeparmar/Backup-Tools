@@ -132,7 +132,7 @@ func Autentificate(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	authToken := c.FormValue("google-key")
 	// refreshToken := c.FormValue("refresh-key")
 
@@ -178,7 +178,7 @@ func Autentificateg(c echo.Context) error {
 	ctx := c.Request().Context()
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	code := c.FormValue("code")
 	b, err := os.ReadFile("credentials.json")
 	if err != nil {
@@ -328,7 +328,7 @@ func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 }
 
 func GetGoogleAccountDetailsFromContext(c echo.Context) (*GoogleAuthResponse, error) {
-	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
 	googleToken, err := GetGoogleTokenFromJWT(c)
 	if err != nil {

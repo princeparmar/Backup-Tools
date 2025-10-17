@@ -146,7 +146,7 @@ func GetFileByID(c echo.Context) error {
 // client authenticates the client and returns an HTTP client
 func client(c echo.Context) (*http.Client, error) {
 	ctx := c.Request().Context()
-	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
 	b, err := os.ReadFile("credentials.json")
 	if err != nil {

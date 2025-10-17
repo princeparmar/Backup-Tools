@@ -22,7 +22,7 @@ var (
 )
 
 // InitializeAllMiddleware sets up all middleware for the Echo server
-func InitializeAllMiddleware(e *echo.Echo, db *db.PosgresDb) {
+func InitializeAllMiddleware(e *echo.Echo, db *db.PostgresDb) {
 	if utils.GetEnvWithKey("HTTP_LOGGING") == "true" {
 		e.Use(echomiddleware.Logger())
 	}
@@ -33,7 +33,7 @@ func InitializeAllMiddleware(e *echo.Echo, db *db.PosgresDb) {
 	e.Use(echomiddleware.CORS())
 }
 
-func DBMiddleware(db *db.PosgresDb) echo.MiddlewareFunc {
+func DBMiddleware(db *db.PostgresDb) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			c.Set(DbContextKey, db)

@@ -5,24 +5,22 @@ import (
 	"github.com/StorX2-0/Backup-Tools/repo"
 )
 
-type PosgresDb struct {
+type PostgresDb struct {
 	*gorm.DB
-	// Repository instances
 	CronJobRepo        *repo.CronJobRepository
 	TaskRepo           *repo.TaskRepository
 	ScheduledTasksRepo *repo.ScheduledTasksRepository
 	AuthRepo           *repo.AuthRepository
 }
 
-// NewPostgresStore creates a new PostgreSQL store instance
-func NewPostgresStore(dsn string, queryLogging bool) (*PosgresDb, error) {
+func NewPostgresStore(dsn string, queryLogging bool) (*PostgresDb, error) {
 	config := gorm.PostgresConfig(dsn, queryLogging)
 	db, err := gorm.NewDatabase(config)
 	if err != nil {
 		return nil, err
 	}
 
-	return &PosgresDb{
+	return &PostgresDb{
 		DB:                 db,
 		CronJobRepo:        repo.NewCronJobRepository(db),
 		TaskRepo:           repo.NewTaskRepository(db),
@@ -31,14 +29,17 @@ func NewPostgresStore(dsn string, queryLogging bool) (*PosgresDb, error) {
 	}, nil
 }
 
-// Migrate runs database migrations
-func (s *PosgresDb) Migrate() error {
-	return s.DB.Migrate(
+func (s *PostgresDb) Migrate() error {
+	if err := s.DB.Migrate(
 		&repo.GoogleAuthStorage{},
 		&repo.ShopifyAuthStorage{},
 		&repo.QuickbooksAuthStorage{},
 		&repo.CronJobListingDB{},
 		&repo.TaskListingDB{},
 		&repo.ScheduledTasks{},
-	)
+	); err != nil {
+		return err
+	}
+
+	return NewMigrationRunner(s.DB).RunMigrations()
 }

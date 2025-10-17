@@ -36,10 +36,10 @@ const (
 type CronJobListingDB struct {
 	gorm.GormModel
 
-	UserID string `json:"user_id" gorm:"uniqueIndex:idx_name_sync_type_user"`
+	UserID string `json:"user_id"`
 
-	// In this table Name + SyncType + UserID should be unique
-	Name     string    `json:"name" gorm:"uniqueIndex:idx_name_sync_type_user"`
+	// Name + SyncType should be unique
+	Name     string    `json:"name" gorm:"uniqueIndex:idx_name_sync_type"`
 	Method   string    `json:"method"`
 	Interval string    `json:"interval"`
 	On       string    `json:"on"`
@@ -62,7 +62,7 @@ type CronJobListingDB struct {
 	// Tasks associated with the cron job
 	Tasks []TaskListingDB `gorm:"foreignKey:CronJobID"`
 
-	SyncType string `json:"sync_type" gorm:"uniqueIndex:idx_name_sync_type_user"`
+	SyncType string `json:"sync_type" gorm:"uniqueIndex:idx_name_sync_type"`
 }
 
 // TaskMemory represents the memory state of a task

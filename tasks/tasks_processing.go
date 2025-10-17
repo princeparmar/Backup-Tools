@@ -17,7 +17,7 @@ import (
 
 // TaskProcessorDeps contains all dependencies for task processing
 type TaskProcessorDeps struct {
-	Store *db.PosgresDb
+	Store *db.PostgresDb
 	Repo  *repo.ScheduledTasksRepository
 }
 
@@ -80,7 +80,7 @@ type ScheduledTaskManager struct {
 	processor map[string]ScheduledTaskProcessor
 }
 
-func NewScheduledTaskManager(store *db.PosgresDb) *ScheduledTaskManager {
+func NewScheduledTaskManager(store *db.PostgresDb) *ScheduledTaskManager {
 	deps := &TaskProcessorDeps{
 		Store: store,
 		Repo:  repo.NewScheduledTasksRepository(store.DB),

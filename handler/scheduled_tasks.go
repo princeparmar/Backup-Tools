@@ -63,7 +63,7 @@ func HandleCreateScheduledTask(c echo.Context) error {
 		emailStatusMap[emailID] = "pending"
 	}
 
-	db := c.Get(middleware.DbContextKey).(*db.PosgresDb)
+	db := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	task := &repo.ScheduledTasks{
 		UserID:    userID,
 		LoginId:   email,
@@ -101,7 +101,7 @@ func HandleGetScheduledTasksByUserID(c echo.Context) error {
 	filter := parseFilterParams(c)
 
 	// Get database connection
-	db := c.Get(middleware.DbContextKey).(*db.PosgresDb)
+	db := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
 	// Get scheduled tasks by user ID
 	taskRepo := &repo.ScheduledTasks{}

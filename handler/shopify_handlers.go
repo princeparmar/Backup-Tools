@@ -24,7 +24,7 @@ func createShopifyCleint(c echo.Context, shopname string) *shopify.ShopifyClient
 		})
 		return nil
 	}
-	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	token, err := database.AuthRepo.ReadShopifyAuthToken(cookieToken.Value)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -374,7 +374,7 @@ func HandleShopifyAuthRedirect(c echo.Context) error {
 		})
 	}
 
-	database := c.Get(middleware.DbContextKey).(*db.PosgresDb)
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
 	cookieNew := new(http.Cookie)
 	cookieNew.Name = "shopify-auth"

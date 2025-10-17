@@ -35,10 +35,10 @@ var processorMap = map[string]Processor{
 }
 
 type AutosyncManager struct {
-	store *db.PosgresDb
+	store *db.PostgresDb
 }
 
-func NewAutosyncManager(store *db.PosgresDb) *AutosyncManager {
+func NewAutosyncManager(store *db.PostgresDb) *AutosyncManager {
 	return &AutosyncManager{store: store}
 }
 

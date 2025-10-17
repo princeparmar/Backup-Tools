@@ -39,7 +39,7 @@ check-env-credentials:
 	@echo "✅ Environment configuration check passed"
 
 # Primary targets
-.PHONY: build-all build-windows setup clean test deps info check-env-credentials check-go-env
+.PHONY: build-all build-windows setup clean test deps info check-env-credentials check-go-env create-migration migrate-up migrate-down migrate-status
 
 # Build for multiple platforms
 build-all: check-go-env check-env-credentials
@@ -97,6 +97,27 @@ deps:
 	@echo "📥 Checking dependencies..."
 	@$(GO) mod tidy
 
+# Migration Commands
+create-migration:
+	@if [ -z "$(name)" ]; then \
+		echo "Error: name parameter is required"; \
+		echo "Usage: make create-migration name=\"your migration description\""; \
+		exit 1; \
+	fi
+	@./scripts/create_migration.sh "$(name)"
+
+migrate-up:
+	@echo "🚀 Running database migrations..."
+	@./scripts/run_migrations.sh up
+
+migrate-down:
+	@echo "⬇️  Rolling back database migrations..."
+	@./scripts/run_migrations.sh down
+
+migrate-status:
+	@echo "📊 Checking migration status..."
+	@./scripts/run_migrations.sh status
+
 # Remove installed binary
 remove: check-go-env
 	@INSTALL_PATH=$(shell $(GO) env GOBIN); \
@@ -142,3 +163,7 @@ help:
 	@echo "  info         - Show project information"
 	@echo "  deps         - Install/update dependencies"
 	@echo "  go-env       - Show Go environment details"
+	@echo "  create-migration - Create a new database migration (requires name parameter)"
+	@echo "  migrate-up      - Run all pending database migrations"
+	@echo "  migrate-down    - Roll back database migrations"
+	@echo "  migrate-status  - Show migration status"
