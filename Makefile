@@ -97,26 +97,7 @@ deps:
 	@echo "📥 Checking dependencies..."
 	@$(GO) mod tidy
 
-# Migration Commands
-create-migration:
-	@if [ -z "$(name)" ]; then \
-		echo "Error: name parameter is required"; \
-		echo "Usage: make create-migration name=\"your migration description\""; \
-		exit 1; \
-	fi
-	@./scripts/create_migration.sh "$(name)"
 
-migrate-up:
-	@echo "🚀 Running database migrations..."
-	@./scripts/run_migrations.sh up
-
-migrate-down:
-	@echo "⬇️  Rolling back database migrations..."
-	@./scripts/run_migrations.sh down
-
-migrate-status:
-	@echo "📊 Checking migration status..."
-	@./scripts/run_migrations.sh status
 
 # Remove installed binary
 remove: check-go-env

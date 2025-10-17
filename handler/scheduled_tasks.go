@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/database"
@@ -34,13 +35,13 @@ func HandleCreateScheduledTask(c echo.Context) error {
 		return jsonErrorMsg(http.StatusBadRequest, "email_ids are required")
 	}
 
-	var reqBody struct{ Code string }
+	var reqBody struct{ AccessToken string }
 	if err := c.Bind(&reqBody); err != nil {
 		logger.Error(ctx, "Failed to bind request body", logger.ErrorField(err))
 		return jsonError(http.StatusBadRequest, "Invalid request body", err)
 	}
 
-	if method == "" || reqBody.Code == "" {
+	if method == "" || reqBody.AccessToken == "" {
 		return jsonErrorMsg(http.StatusBadRequest, "method and code are required")
 	}
 
@@ -48,9 +49,9 @@ func HandleCreateScheduledTask(c echo.Context) error {
 	var config map[string]interface{}
 	switch method {
 	case "gmail":
-		email, config, err = ProcessGmailMethod(reqBody.Code)
+		email, config, err = processGmailAccessToken(reqBody.AccessToken)
 	case "outlook":
-		email, config, err = ProcessOutlookMethod(reqBody.Code)
+		email, config, err = ProcessOutlookMethod(reqBody.AccessToken)
 	default:
 		return jsonErrorMsg(http.StatusBadRequest, "Unsupported method. Supported methods: gmail")
 	}
@@ -161,4 +162,23 @@ func parseFilterParams(c echo.Context) *repo.ScheduledTasksFilter {
 	}
 
 	return filter
+}
+
+// Method processing functions
+func processGmailAccessToken(accessToken string) (string, map[string]interface{}, error) {
+	if accessToken == "" {
+		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Access Token is required")
+	}
+
+	userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(accessToken)
+	if err != nil || userDetails.Email == "" {
+		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid")
+	}
+
+	config := map[string]interface{}{
+		"access_token": accessToken,
+		"email":        userDetails.Email,
+	}
+
+	return userDetails.Email, config, nil
 }

@@ -41,5 +41,5 @@ func (s *PostgresDb) Migrate() error {
 		return err
 	}
 
-	return NewMigrationRunner(s.DB).RunMigrations()
+	return nil
 }

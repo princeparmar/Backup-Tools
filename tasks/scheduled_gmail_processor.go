@@ -30,17 +30,12 @@ func (g *GmailProcessor) Run(input ScheduledTaskProcessorInput) error {
 		return err
 	}
 
-	refreshToken, ok := input.InputData["refresh_token"].(string)
+	accessToken, ok := input.InputData["access_token"].(string)
 	if !ok {
 		return g.handleError(input.Task, "Refresh token not found for Gmail method", nil)
 	}
 
-	newToken, err := google.AuthTokenUsingRefreshToken(refreshToken)
-	if err != nil {
-		return g.handleError(input.Task, fmt.Sprintf("Authentication failed: %s", err), nil)
-	}
-
-	gmailClient, err := google.NewGmailClientUsingToken(newToken)
+	gmailClient, err := google.NewGmailClientUsingToken(accessToken)
 	if err != nil {
 		return g.handleError(input.Task, fmt.Sprintf("Failed to create Gmail client: %s", err), nil)
 	}
