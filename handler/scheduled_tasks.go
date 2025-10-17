@@ -20,7 +20,6 @@ func HandleCreateScheduledTask(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	// Get user details from token
 	userID, err := satellite.GetUserdetails(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
@@ -30,87 +29,66 @@ func HandleCreateScheduledTask(c echo.Context) error {
 	}
 
 	method := c.Param("method")
-
-	// Parse request body
-	var reqBody struct {
-		LoginId      string   `json:"login_id" validate:"required"`
-		StorxToken   string   `json:"storx_token" validate:"required"`
-		EmailIds     []string `json:"email_ids" validate:"required"`
-		Code         string   `json:"code"`
-		RefreshToken string   `json:"refresh_token"`
+	emailIds := c.Request().Form["email_ids"]
+	if len(emailIds) == 0 {
+		return jsonErrorMsg(http.StatusBadRequest, "email_ids are required")
 	}
 
+	var reqBody struct{ Code string }
 	if err := c.Bind(&reqBody); err != nil {
 		logger.Error(ctx, "Failed to bind request body", logger.ErrorField(err))
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "Invalid request body",
-			"error":   err.Error(),
-		})
+		return jsonError(http.StatusBadRequest, "Invalid request body", err)
 	}
 
-	// Validate required fields
-	if reqBody.LoginId == "" || method == "" || reqBody.StorxToken == "" {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "login_id, method, and storx_token are required",
-		})
+	if method == "" || reqBody.Code == "" {
+		return jsonErrorMsg(http.StatusBadRequest, "method and code are required")
 	}
 
-	var inputData *database.DbJson[map[string]interface{}]
-	var memory *database.DbJson[map[string]string]
-
-	if reqBody.Code != "" || reqBody.RefreshToken != "" {
-		//store into input_data
-		inputDataMap := make(map[string]any)
-		if reqBody.Code != "" {
-			inputDataMap["code"] = reqBody.Code
-		}
-		if reqBody.RefreshToken != "" {
-			inputDataMap["refresh_token"] = reqBody.RefreshToken
-		}
-		inputData = database.NewDbJsonFromValue(inputDataMap)
+	var email string
+	var config map[string]interface{}
+	switch method {
+	case "gmail":
+		email, config, err = ProcessGmailMethod(reqBody.Code)
+	case "outlook":
+		email, config, err = ProcessOutlookMethod(reqBody.Code)
+	default:
+		return jsonErrorMsg(http.StatusBadRequest, "Unsupported method. Supported methods: gmail")
+	}
+	if err != nil {
+		return err
 	}
 
-	if reqBody.EmailIds != nil {
-		// Create a map of email_ids with "pending" status
-		emailStatusMap := make(map[string]string)
-		for _, emailID := range reqBody.EmailIds {
-			emailStatusMap[emailID] = "pending" // Initial status for each email
-		}
-		memory = database.NewDbJsonFromValue(emailStatusMap)
+	emailStatusMap := make(map[string]string)
+	for _, emailID := range emailIds {
+		emailStatusMap[emailID] = "pending"
 	}
 
-	// Get database connection
 	db := c.Get(middleware.DbContextKey).(*db.PosgresDb)
-
-	// Create scheduled task
 	task := &repo.ScheduledTasks{
-		UserID:     userID,
-		LoginId:    reqBody.LoginId,
-		Method:     method,
-		StorxToken: reqBody.StorxToken,
-		Memory:     memory,
-		Status:     "created",
-		InputData:  inputData,
-		Errors:     *database.NewDbJsonFromValue([]string{}),
+		UserID:    userID,
+		LoginId:   email,
+		Method:    method,
+		Memory:    database.NewDbJsonFromValue(emailStatusMap),
+		Status:    "created",
+		InputData: database.NewDbJsonFromValue(config),
+		Errors:    *database.NewDbJsonFromValue([]string{}),
 	}
 
-	// Save to database
 	if err := task.Create(db.DB); err != nil {
 		logger.Error(ctx, "Failed to create scheduled task", logger.ErrorField(err))
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"message": "Failed to create scheduled task",
-			"error":   err.Error(),
-		})
+		return jsonError(http.StatusInternalServerError, "Failed to create scheduled task", err)
 	}
 
 	logger.Info(ctx, "Scheduled task created successfully",
 		logger.String("user_id", userID),
-		logger.String("login_id", reqBody.LoginId),
+		logger.String("login_id", email),
 		logger.String("method", method))
 
 	return c.JSON(http.StatusCreated, map[string]interface{}{
+		"success": true,
 		"message": "Scheduled task created successfully",
-		"task_id": task,
+		"task_id": task.ID,
+		"email":   email,
 	})
 }
 

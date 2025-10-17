@@ -188,18 +188,18 @@ func HandleAutomaticSyncCreate(c echo.Context) error {
 
 	switch method {
 	case "gmail":
-		name, config, err = processGmailMethod(reqBody.Code, syncType)
+		name, config, err = ProcessGmailMethod(reqBody.Code)
 	case "outlook":
-		name, config, err = processOutlookMethod(reqBody.RefreshToken, syncType)
+		name, config, err = ProcessOutlookMethod(reqBody.RefreshToken)
 	case "psql_database", "mysql_database":
-		name, config, err = processDatabaseMethod(DatabaseConnection{
+		name, config, err = ProcessDatabaseMethod(DatabaseConnection{
 			Name:         reqBody.Name,
 			DatabaseName: reqBody.DatabaseName,
 			Host:         reqBody.Host,
 			Port:         reqBody.Port,
 			Username:     reqBody.Username,
 			Password:     reqBody.Password,
-		}, syncType)
+		})
 	}
 
 	if err != nil {
@@ -216,7 +216,7 @@ func HandleAutomaticSyncCreate(c echo.Context) error {
 }
 
 // Method processing functions
-func processGmailMethod(code string, syncType string) (string, map[string]interface{}, error) {
+func ProcessGmailMethod(code string) (string, map[string]interface{}, error) {
 	if code == "" {
 		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Code is required")
 	}
@@ -233,14 +233,13 @@ func processGmailMethod(code string, syncType string) (string, map[string]interf
 
 	config := map[string]interface{}{
 		"refresh_token": tok.RefreshToken,
-		"sync_type":     syncType,
 		"email":         userDetails.Email,
 	}
 
 	return userDetails.Email, config, nil
 }
 
-func processOutlookMethod(refreshToken, syncType string) (string, map[string]interface{}, error) {
+func ProcessOutlookMethod(refreshToken string) (string, map[string]interface{}, error) {
 	if refreshToken == "" {
 		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Refresh Token Required")
 	}
@@ -262,14 +261,13 @@ func processOutlookMethod(refreshToken, syncType string) (string, map[string]int
 
 	config := map[string]interface{}{
 		"refresh_token": refreshToken,
-		"sync_type":     syncType,
 		"email":         userDetails.Mail,
 	}
 
 	return userDetails.Mail, config, nil
 }
 
-func processDatabaseMethod(reqBody DatabaseConnection, syncType string) (string, map[string]interface{}, error) {
+func ProcessDatabaseMethod(reqBody DatabaseConnection) (string, map[string]interface{}, error) {
 	if reqBody.Name == "" || reqBody.DatabaseName == "" || reqBody.Host == "" ||
 		reqBody.Port == "" || reqBody.Username == "" || reqBody.Password == "" {
 		return "", nil, jsonErrorMsg(http.StatusBadRequest, "All fields are required")
@@ -281,7 +279,6 @@ func processDatabaseMethod(reqBody DatabaseConnection, syncType string) (string,
 		"port":          reqBody.Port,
 		"username":      reqBody.Username,
 		"password":      reqBody.Password,
-		"sync_type":     syncType,
 		"email":         reqBody.Name,
 	}
 
