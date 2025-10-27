@@ -49,26 +49,23 @@ func HandleCreateScheduledTask(c echo.Context) error {
 		return jsonErrorMsg(http.StatusBadRequest, "email_ids cannot be empty")
 	}
 
-	// Get access_token from request body (raw JSON)
-	var reqBody struct {
-		AccessToken string `json:"access_token"`
-	}
-	if err := c.Bind(&reqBody); err != nil {
-		logger.Error(ctx, "Failed to bind request body", logger.ErrorField(err))
-		return jsonError(http.StatusBadRequest, "Invalid request body", err)
+	// Get access_token from header
+	accessToken := c.Request().Header.Get("ACCESS_TOKEN")
+	if accessToken == "" {
+		return jsonErrorMsg(http.StatusBadRequest, "ACCESS_TOKEN header is required")
 	}
 
-	if method == "" || reqBody.AccessToken == "" {
-		return jsonErrorMsg(http.StatusBadRequest, "method and access_token are required")
+	if method == "" {
+		return jsonErrorMsg(http.StatusBadRequest, "method is required")
 	}
 
 	var email string
 	var config map[string]interface{}
 	switch method {
 	case "gmail":
-		email, config, err = processGmailAccessToken(reqBody.AccessToken)
+		email, config, err = processGmailAccessToken(accessToken)
 	case "outlook":
-		email, config, err = ProcessOutlookMethod(reqBody.AccessToken)
+		email, config, err = ProcessOutlookMethod(accessToken)
 	default:
 		return jsonErrorMsg(http.StatusBadRequest, "Unsupported method. Supported methods: gmail")
 	}
