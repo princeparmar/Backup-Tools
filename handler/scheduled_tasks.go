@@ -49,6 +49,12 @@ func HandleCreateScheduledTask(c echo.Context) error {
 		return jsonErrorMsg(http.StatusBadRequest, "email_ids cannot be empty")
 	}
 
+	// Get storx_token from token_key header (required for storage access)
+	storxToken := c.Request().Header.Get("token_key")
+	if storxToken == "" {
+		return jsonErrorMsg(http.StatusBadRequest, "token_key header is required for storage access")
+	}
+
 	// Get access_token from header
 	accessToken := c.Request().Header.Get("ACCESS_TOKEN")
 	if accessToken == "" {
@@ -80,13 +86,14 @@ func HandleCreateScheduledTask(c echo.Context) error {
 
 	db := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	task := &repo.ScheduledTasks{
-		UserID:    userID,
-		LoginId:   email,
-		Method:    method,
-		Memory:    database.NewDbJsonFromValue(emailStatusMap),
-		Status:    "created",
-		InputData: database.NewDbJsonFromValue(config),
-		Errors:    *database.NewDbJsonFromValue([]string{}),
+		UserID:     userID,
+		LoginId:    email,
+		Method:     method,
+		StorxToken: storxToken,
+		Memory:     database.NewDbJsonFromValue(emailStatusMap),
+		Status:     "created",
+		InputData:  database.NewDbJsonFromValue(config),
+		Errors:     *database.NewDbJsonFromValue([]string{}),
 	}
 
 	if err := task.Create(db.DB); err != nil {
@@ -185,8 +192,11 @@ func processGmailAccessToken(accessToken string) (string, map[string]interface{}
 	}
 
 	userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(accessToken)
-	if err != nil || userDetails.Email == "" {
-		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid")
+	if err != nil {
+		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Invalid Access Token: "+err.Error())
+	}
+	if userDetails == nil || userDetails.Email == "" {
+		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Email not found in token validation")
 	}
 
 	config := map[string]interface{}{
