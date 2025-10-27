@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -30,9 +31,22 @@ func HandleCreateScheduledTask(c echo.Context) error {
 	}
 
 	method := c.Param("method")
-	emailIds := c.Request().Form["email_ids"]
-	if len(emailIds) == 0 {
+
+	// Get email_ids as a single form value (JSON array string)
+	emailIdsStr := c.FormValue("email_ids")
+	if emailIdsStr == "" {
 		return jsonErrorMsg(http.StatusBadRequest, "email_ids are required")
+	}
+
+	// Parse the JSON array string
+	var emailIds []string
+	if err := json.Unmarshal([]byte(emailIdsStr), &emailIds); err != nil {
+		logger.Error(ctx, "Failed to parse email_ids", logger.ErrorField(err))
+		return jsonError(http.StatusBadRequest, "Invalid email_ids format. Expected JSON array string", err)
+	}
+
+	if len(emailIds) == 0 {
+		return jsonErrorMsg(http.StatusBadRequest, "email_ids cannot be empty")
 	}
 
 	var reqBody struct{ AccessToken string }
