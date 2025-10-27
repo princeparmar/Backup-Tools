@@ -1,8 +1,8 @@
 package handler
 
 import (
-	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
@@ -32,17 +32,17 @@ func HandleCreateScheduledTask(c echo.Context) error {
 
 	method := c.Param("method")
 
-	// Get email_ids as a single form value (JSON array string)
+	// Get email_ids as a comma-separated string
 	emailIdsStr := c.FormValue("email_ids")
 	if emailIdsStr == "" {
 		return jsonErrorMsg(http.StatusBadRequest, "email_ids are required")
 	}
 
-	// Parse the JSON array string
-	var emailIds []string
-	if err := json.Unmarshal([]byte(emailIdsStr), &emailIds); err != nil {
-		logger.Error(ctx, "Failed to parse email_ids", logger.ErrorField(err))
-		return jsonError(http.StatusBadRequest, "Invalid email_ids format. Expected JSON array string", err)
+	// Parse the comma-separated string
+	emailIds := strings.Split(emailIdsStr, ",")
+	// Trim whitespace from each email ID
+	for i := range emailIds {
+		emailIds[i] = strings.TrimSpace(emailIds[i])
 	}
 
 	if len(emailIds) == 0 {
