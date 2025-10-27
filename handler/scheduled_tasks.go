@@ -49,14 +49,17 @@ func HandleCreateScheduledTask(c echo.Context) error {
 		return jsonErrorMsg(http.StatusBadRequest, "email_ids cannot be empty")
 	}
 
-	var reqBody struct{ AccessToken string }
+	// Get access_token from request body (raw JSON)
+	var reqBody struct {
+		AccessToken string `json:"access_token"`
+	}
 	if err := c.Bind(&reqBody); err != nil {
 		logger.Error(ctx, "Failed to bind request body", logger.ErrorField(err))
 		return jsonError(http.StatusBadRequest, "Invalid request body", err)
 	}
 
 	if method == "" || reqBody.AccessToken == "" {
-		return jsonErrorMsg(http.StatusBadRequest, "method and code are required")
+		return jsonErrorMsg(http.StatusBadRequest, "method and access_token are required")
 	}
 
 	var email string
