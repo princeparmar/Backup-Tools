@@ -38,6 +38,11 @@ func HandleCreateScheduledTask(c echo.Context) error {
 		return jsonErrorMsg(http.StatusBadRequest, "email_ids are required")
 	}
 
+	storxToken := c.FormValue("storx_token")
+	if storxToken == "" {
+		return jsonErrorMsg(http.StatusBadRequest, "storx_token is required")
+	}
+
 	// Parse the comma-separated string
 	emailIds := strings.Split(emailIdsStr, ",")
 	// Trim whitespace from each email ID
@@ -47,12 +52,6 @@ func HandleCreateScheduledTask(c echo.Context) error {
 
 	if len(emailIds) == 0 {
 		return jsonErrorMsg(http.StatusBadRequest, "email_ids cannot be empty")
-	}
-
-	// Get storx_token from token_key header (required for storage access)
-	storxToken := c.Request().Header.Get("token_key")
-	if storxToken == "" {
-		return jsonErrorMsg(http.StatusBadRequest, "token_key header is required for storage access")
 	}
 
 	// Get access_token from header
@@ -79,10 +78,8 @@ func HandleCreateScheduledTask(c echo.Context) error {
 		return err
 	}
 
-	emailStatusMap := make(map[string]string)
-	for _, emailID := range emailIds {
-		emailStatusMap[emailID] = "pending"
-	}
+	statusEmailsMap := make(map[string][]string)
+	statusEmailsMap["pending"] = emailIds
 
 	db := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	task := &repo.ScheduledTasks{
@@ -90,7 +87,7 @@ func HandleCreateScheduledTask(c echo.Context) error {
 		LoginId:    email,
 		Method:     method,
 		StorxToken: storxToken,
-		Memory:     database.NewDbJsonFromValue(emailStatusMap),
+		Memory:     database.NewDbJsonFromValue(statusEmailsMap),
 		Status:     "created",
 		InputData:  database.NewDbJsonFromValue(config),
 		Errors:     *database.NewDbJsonFromValue([]string{}),

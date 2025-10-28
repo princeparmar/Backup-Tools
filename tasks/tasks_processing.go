@@ -24,7 +24,7 @@ type TaskProcessorDeps struct {
 // ScheduledTaskProcessorInput defines the input for processor execution
 type ScheduledTaskProcessorInput struct {
 	InputData     map[string]interface{}
-	Memory        map[string]string
+	Memory        map[string][]string
 	Task          *repo.ScheduledTasks
 	HeartBeatFunc func() error
 	Deps          *TaskProcessorDeps
@@ -185,7 +185,7 @@ func (s *ScheduledTaskManager) processScheduledTask(ctx context.Context, task *r
 		logger.String("method", task.Method),
 	)
 
-	inputData, memory := make(map[string]interface{}), make(map[string]string)
+	inputData, memory := make(map[string]interface{}), make(map[string][]string)
 	if task.InputData != nil {
 		inputData = *task.InputData.Json()
 	}
@@ -233,13 +233,13 @@ func (s *ScheduledTaskManager) UpdateScheduledTaskStatus(task *repo.ScheduledTas
 
 	if task.Memory != nil {
 		memory := *task.Memory.Json()
-		for _, status := range memory {
+		for status, emailIDs := range memory {
 			if strings.HasPrefix(status, "error:") {
 				hasError = true
-				errorCount++
+				errorCount += len(emailIDs)
 			} else if status == "synced" {
 				hasSuccess = true
-				successCount++
+				successCount += len(emailIDs)
 			}
 		}
 	}

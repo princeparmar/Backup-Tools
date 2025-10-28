@@ -61,11 +61,18 @@ func (g *GmailProcessor) processEmails(input ScheduledTaskProcessorInput, client
 	successCount, failedCount := 0, 0
 	var failedEmails []string
 
-	for emailID, status := range input.Memory {
-		if status == "synced" || status == "skipped" || strings.HasPrefix(status, "error:") {
-			continue
-		}
+	// Get pending emails
+	pendingEmails := input.Memory["pending"]
+	if pendingEmails == nil {
+		pendingEmails = []string{}
+	}
 
+	// Initialize other status arrays if needed
+	ensureStatusArray(&input.Memory, "synced")
+	ensureStatusArray(&input.Memory, "skipped")
+	ensureStatusArray(&input.Memory, "error")
+
+	for _, emailID := range pendingEmails {
 		if err := input.HeartBeatFunc(); err != nil {
 			return err
 		}
@@ -78,7 +85,7 @@ func (g *GmailProcessor) processEmails(input ScheduledTaskProcessorInput, client
 
 		messagePath := input.Task.LoginId + "/" + g.generateTitleFromGmailMessage(message)
 		if _, exists := existingEmails[messagePath]; exists {
-			input.Memory[emailID] = "skipped: already exists in storage"
+			moveEmailToStatus(&input.Memory, emailID, "pending", "skipped: already exists in storage")
 			successCount++
 			continue
 		}
@@ -86,18 +93,46 @@ func (g *GmailProcessor) processEmails(input ScheduledTaskProcessorInput, client
 		if err := g.uploadEmail(input, message, messagePath, "gmail"); err != nil {
 			failedEmails, failedCount = g.trackFailure(emailID, err, failedEmails, failedCount, input)
 		} else {
-			input.Memory[emailID] = "synced"
+			moveEmailToStatus(&input.Memory, emailID, "pending", "synced")
 			successCount++
 		}
 	}
 
+	// Clear pending array after processing
+	input.Memory["pending"] = []string{}
+
 	return g.updateTaskStats(&input, successCount, failedCount, failedEmails)
+}
+
+// Helper function to ensure a status array exists in the map
+func ensureStatusArray(memory *map[string][]string, status string) {
+	if (*memory)[status] == nil {
+		(*memory)[status] = []string{}
+	}
+}
+
+// Helper function to move an email ID from one status to another
+func moveEmailToStatus(memory *map[string][]string, emailID, fromStatus, toStatus string) {
+	// Remove from source status
+	if arr, exists := (*memory)[fromStatus]; exists {
+		for i, id := range arr {
+			if id == emailID {
+				// Remove from array
+				(*memory)[fromStatus] = append(arr[:i], arr[i+1:]...)
+				break
+			}
+		}
+	}
+
+	// Add to target status
+	ensureStatusArray(memory, toStatus)
+	(*memory)[toStatus] = append((*memory)[toStatus], emailID)
 }
 
 func (g *GmailProcessor) trackFailure(emailID string, err error, failedEmails []string, failedCount int, input ScheduledTaskProcessorInput) ([]string, int) {
 	failedEmails = append(failedEmails, fmt.Sprintf("Email ID %s: %v", emailID, err))
 	failedCount++
-	input.Memory[emailID] = fmt.Sprintf("error: %v", err)
+	moveEmailToStatus(&input.Memory, emailID, "pending", fmt.Sprintf("error: %v", err))
 	return failedEmails, failedCount
 }
 

@@ -14,7 +14,7 @@ type ScheduledTasks struct {
 	LoginId      string                                   `json:"login_id"`
 	Method       string                                   `json:"method"`
 	StorxToken   string                                   `json:"storx_token"`
-	Memory       *database.DbJson[map[string]string]      `json:"memory" gorm:"type:jsonb"`
+	Memory       *database.DbJson[map[string][]string]    `json:"memory" gorm:"type:jsonb"`
 	Status       string                                   `json:"status" default:"created"`
 	InputData    *database.DbJson[map[string]interface{}] `json:"input_data" gorm:"type:jsonb"`
 	StartTime    *time.Time                               `json:"start_time"`

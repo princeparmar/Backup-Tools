@@ -67,11 +67,18 @@ func (o *OutlookProcessor) processEmails(input ScheduledTaskProcessorInput, clie
 	successCount, failedCount := 0, 0
 	var failedEmails []string
 
-	for emailID, status := range input.Memory {
-		if status == "synced" || status == "skipped" || strings.HasPrefix(status, "error:") {
-			continue
-		}
+	// Get pending emails
+	pendingEmails := input.Memory["pending"]
+	if pendingEmails == nil {
+		pendingEmails = []string{}
+	}
 
+	// Initialize other status arrays if needed
+	ensureStatusArray(&input.Memory, "synced")
+	ensureStatusArray(&input.Memory, "skipped")
+	ensureStatusArray(&input.Memory, "error")
+
+	for _, emailID := range pendingEmails {
 		if err := input.HeartBeatFunc(); err != nil {
 			return err
 		}
@@ -90,7 +97,7 @@ func (o *OutlookProcessor) processEmails(input ScheduledTaskProcessorInput, clie
 		})
 
 		if _, exists := existingEmails[messagePath]; exists {
-			input.Memory[emailID] = "skipped: already exists in storage"
+			moveEmailToStatus(&input.Memory, emailID, "pending", "skipped: already exists in storage")
 			successCount++
 			continue
 		}
@@ -98,10 +105,13 @@ func (o *OutlookProcessor) processEmails(input ScheduledTaskProcessorInput, clie
 		if err := o.uploadEmail(input, message, messagePath, "outlook"); err != nil {
 			failedEmails, failedCount = o.trackFailure(emailID, err, failedEmails, failedCount, input)
 		} else {
-			input.Memory[emailID] = "synced"
+			moveEmailToStatus(&input.Memory, emailID, "pending", "synced")
 			successCount++
 		}
 	}
+
+	// Clear pending array after processing
+	input.Memory["pending"] = []string{}
 
 	return o.updateTaskStats(&input, successCount, failedCount, failedEmails)
 }
@@ -109,7 +119,7 @@ func (o *OutlookProcessor) processEmails(input ScheduledTaskProcessorInput, clie
 func (o *OutlookProcessor) trackFailure(emailID string, err error, failedEmails []string, failedCount int, input ScheduledTaskProcessorInput) ([]string, int) {
 	failedEmails = append(failedEmails, fmt.Sprintf("Email ID %s: %v", emailID, err))
 	failedCount++
-	input.Memory[emailID] = fmt.Sprintf("error: %v", err)
+	moveEmailToStatus(&input.Memory, emailID, "pending", fmt.Sprintf("error: %v", err))
 	return failedEmails, failedCount
 }
 
