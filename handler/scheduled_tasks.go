@@ -11,6 +11,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/labstack/echo/v4"
@@ -137,9 +138,12 @@ func HandleGetScheduledTasksByUserID(c echo.Context) error {
 		logger.String("user_id", filter.UserID),
 		logger.Int("task_count", len(tasks)))
 
+	// Mask storx_token before returning
+	maskedTasks := maskStorxTokens(tasks)
+
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Scheduled tasks retrieved successfully",
-		"tasks":   tasks,
+		"tasks":   maskedTasks,
 		"count":   len(tasks),
 	})
 }
@@ -180,6 +184,18 @@ func parseFilterParams(c echo.Context) *repo.ScheduledTasksFilter {
 	}
 
 	return filter
+}
+
+// maskStorxTokens masks the storx_token field in scheduled tasks before returning them
+func maskStorxTokens(tasks []repo.ScheduledTasks) []repo.ScheduledTasks {
+	masked := make([]repo.ScheduledTasks, len(tasks))
+	for i, task := range tasks {
+		masked[i] = task
+		if task.StorxToken != "" {
+			masked[i].StorxToken = utils.MaskString(task.StorxToken)
+		}
+	}
+	return masked
 }
 
 // Method processing functions
