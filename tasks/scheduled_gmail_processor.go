@@ -8,8 +8,10 @@ import (
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
+	"google.golang.org/api/gmail/v1"
 )
 
 // GmailProcessor handles Gmail scheduled tasks
@@ -77,13 +79,15 @@ func (g *GmailProcessor) processEmails(input ScheduledTaskProcessorInput, client
 			return err
 		}
 
-		message, err := client.GetMessage(emailID)
+		// Get the full gmail.Message (same as direct upload) to ensure consistent filename generation
+		message, err := client.Service.Users.Messages.Get("me", emailID).Format("full").Do()
 		if err != nil {
 			failedEmails, failedCount = g.trackFailure(emailID, err, failedEmails, failedCount, input)
 			continue
 		}
 
-		messagePath := input.Task.LoginId + "/" + g.generateTitleFromGmailMessage(message)
+		// Use the same filename format as direct uploads for consistency
+		messagePath := input.Task.LoginId + "/" + utils.GenerateTitleFromGmailMessage(message)
 		if _, exists := existingEmails[messagePath]; exists {
 			moveEmailToStatus(&input.Memory, emailID, "pending", "skipped: already exists in storage")
 			successCount++
@@ -136,33 +140,10 @@ func (g *GmailProcessor) trackFailure(emailID string, err error, failedEmails []
 	return failedEmails, failedCount
 }
 
-func (g *GmailProcessor) uploadEmail(input ScheduledTaskProcessorInput, message interface{}, messagePath, bucket string) error {
+func (g *GmailProcessor) uploadEmail(input ScheduledTaskProcessorInput, message *gmail.Message, messagePath, bucket string) error {
 	b, err := json.Marshal(message)
 	if err != nil {
 		return fmt.Errorf("failed to marshal: %v", err)
 	}
 	return satellite.UploadObject(context.TODO(), input.Task.StorxToken, bucket, messagePath, b)
-}
-
-func (g *GmailProcessor) generateTitleFromGmailMessage(message *google.GmailMessage) string {
-	if message == nil {
-		return "unknown_message"
-	}
-
-	subject := message.Subject
-	if subject == "" {
-		subject = "no_subject"
-	}
-
-	// Replace invalid filename characters
-	invalidChars := []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|"}
-	for _, char := range invalidChars {
-		subject = strings.ReplaceAll(subject, char, "_")
-	}
-
-	if len(subject) > 50 {
-		subject = subject[:50]
-	}
-
-	return fmt.Sprintf("%s_%s.json", subject, message.ID)
 }
