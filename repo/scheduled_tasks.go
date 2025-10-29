@@ -104,6 +104,18 @@ func (r *ScheduledTasksRepository) UpdateHeartBeatForScheduledTask(id uint) erro
 	return err
 }
 
+// GetAllRunningScheduledTasksForUser retrieves all running scheduled tasks for a specific user
+func (r *ScheduledTasksRepository) GetAllRunningScheduledTasksForUser(userID string) ([]ScheduledTasks, error) {
+	var tasks []ScheduledTasks
+	err := r.db.Where("user_id = ? AND status = ?", userID, "running").
+		Order("start_time DESC").
+		Find(&tasks).Error
+	if err != nil {
+		return nil, fmt.Errorf("error getting running scheduled tasks for user: %v", err)
+	}
+	return tasks, nil
+}
+
 // MissedHeartbeatForScheduledTask checks for scheduled tasks with missed heartbeats
 func (r *ScheduledTasksRepository) MissedHeartbeatForScheduledTask() error {
 	// Find scheduled tasks that are running but haven't updated heartbeat in 10 minutes

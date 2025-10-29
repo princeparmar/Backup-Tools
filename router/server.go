@@ -181,6 +181,7 @@ func StartServer(db *db.PostgresDb, address string) {
 	scheduledTasks := e.Group("/tasks")
 	scheduledTasks.POST("/:method", handler.HandleCreateScheduledTask)
 	scheduledTasks.GET("", handler.HandleGetScheduledTasksByUserID)
+	scheduledTasks.GET("/live", handler.HandleGetRunningScheduledTasks)
 
 	err := e.Start(address)
 	if err != nil {

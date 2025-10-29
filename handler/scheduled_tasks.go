@@ -112,6 +112,46 @@ func HandleCreateScheduledTask(c echo.Context) error {
 	})
 }
 
+// HandleGetRunningScheduledTasks retrieves all running scheduled tasks for the authenticated user
+func HandleGetRunningScheduledTasks(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "not able to authenticate user",
+			"error":   err.Error(),
+		})
+	}
+
+	// Get database connection
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+
+	// Get running scheduled tasks by user ID
+	runningTasks, err := database.ScheduledTasksRepo.GetAllRunningScheduledTasksForUser(userID)
+	if err != nil {
+		logger.Error(ctx, "Failed to get running scheduled tasks", logger.ErrorField(err))
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"message": "internal server error",
+			"error":   err.Error(),
+		})
+	}
+
+	logger.Info(ctx, "Retrieved running scheduled tasks",
+		logger.String("user_id", userID),
+		logger.Int("task_count", len(runningTasks)))
+
+	// Mask storx_token before returning
+	maskedTasks := maskStorxTokens(runningTasks)
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "Running Scheduled Tasks List",
+		"data":    maskedTasks,
+	})
+}
+
 // HandleGetScheduledTasksByUserID retrieves all scheduled tasks for the authenticated user
 func HandleGetScheduledTasksByUserID(c echo.Context) error {
 	ctx := c.Request().Context()
