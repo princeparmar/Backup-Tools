@@ -69,6 +69,20 @@ func (g *GmailProcessor) processEmails(input ScheduledTaskProcessorInput, client
 		pendingEmails = []string{}
 	}
 
+	// Deduplicate pending emails to prevent processing the same email multiple times
+	seen := make(map[string]bool)
+	var uniquePendingEmails []string
+	for _, emailID := range pendingEmails {
+		emailID = strings.TrimSpace(emailID)
+		if emailID != "" && !seen[emailID] {
+			seen[emailID] = true
+			uniquePendingEmails = append(uniquePendingEmails, emailID)
+		}
+	}
+	pendingEmails = uniquePendingEmails
+	// Update memory with deduplicated list
+	input.Memory["pending"] = uniquePendingEmails
+
 	// Initialize other status arrays if needed
 	ensureStatusArray(&input.Memory, "synced")
 	ensureStatusArray(&input.Memory, "skipped")
@@ -117,20 +131,34 @@ func ensureStatusArray(memory *map[string][]string, status string) {
 
 // Helper function to move an email ID from one status to another
 func moveEmailToStatus(memory *map[string][]string, emailID, fromStatus, toStatus string) {
-	// Remove from source status
+	// Remove from source status (remove all occurrences to handle duplicates)
 	if arr, exists := (*memory)[fromStatus]; exists {
-		for i, id := range arr {
-			if id == emailID {
-				// Remove from array
-				(*memory)[fromStatus] = append(arr[:i], arr[i+1:]...)
-				break
+		var newArr []string
+		for _, id := range arr {
+			if id != emailID {
+				newArr = append(newArr, id)
 			}
+		}
+		(*memory)[fromStatus] = newArr
+	}
+
+	// Add to target status only if not already present (prevent duplicates)
+	ensureStatusArray(memory, toStatus)
+	targetArr := (*memory)[toStatus]
+
+	// Check if emailID already exists in target array
+	found := false
+	for _, id := range targetArr {
+		if id == emailID {
+			found = true
+			break
 		}
 	}
 
-	// Add to target status
-	ensureStatusArray(memory, toStatus)
-	(*memory)[toStatus] = append((*memory)[toStatus], emailID)
+	// Only add if not already present
+	if !found {
+		(*memory)[toStatus] = append(targetArr, emailID)
+	}
 }
 
 func (g *GmailProcessor) trackFailure(emailID string, err error, failedEmails []string, failedCount int, input ScheduledTaskProcessorInput) ([]string, int) {
