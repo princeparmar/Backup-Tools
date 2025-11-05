@@ -100,8 +100,8 @@ func setupStorage(ctx context.Context) (*db.PostgresDb, error) {
 }
 
 func getAddress() string {
-	if port := utils.GetEnvWithKey("PORT"); port != "" {
-		return ":" + port
+	if address := utils.GetEnvWithKey("ADDRESS"); address != "" {
+		return address
 	}
 	return ":8005"
 }
