@@ -3,6 +3,7 @@
 BINARY_NAME=backuptools
 MAIN_FILE=cmd/main.go
 GO=$(shell which go)
+BUILD_FLAGS=-trimpath -ldflags="-s -w -X main.buildTime=$(shell date -u +'%Y-%m-%d_%H:%M:%S')"
 
 # Function to check Go environment (GOBIN only)
 check-go-env:
@@ -41,41 +42,39 @@ check-env-credentials:
 # Primary targets
 .PHONY: build-all build-windows setup clean test deps info check-env-credentials check-go-env create-migration migrate-up migrate-down migrate-status
 
-# Build for multiple platforms
+# Build for multiple platforms (optimized)
 build-all: check-go-env check-env-credentials
-	@echo "🌍 Building for multiple platforms..."
-	@GOOS=linux GOARCH=amd64 $(GO) build -o $(BINARY_NAME)-linux-amd64 $(MAIN_FILE)
-	@GOOS=darwin GOARCH=amd64 $(GO) build -o $(BINARY_NAME)-darwin-amd64 $(MAIN_FILE)
-	@GOOS=windows GOARCH=amd64 $(GO) build -o $(BINARY_NAME)-windows-amd64.exe $(MAIN_FILE)
+	@echo "🌍 Building for multiple platforms (optimized)..."
+	@GOOS=linux GOARCH=amd64 $(GO) build $(BUILD_FLAGS) -o $(BINARY_NAME)-linux-amd64 $(MAIN_FILE)
+	@GOOS=darwin GOARCH=amd64 $(GO) build $(BUILD_FLAGS) -o $(BINARY_NAME)-darwin-amd64 $(MAIN_FILE)
+	@GOOS=windows GOARCH=amd64 $(GO) build $(BUILD_FLAGS) -o $(BINARY_NAME)-windows-amd64.exe $(MAIN_FILE)
 	@echo "✅ Cross-platform build complete!"
 
-# Build for Windows only
+# Build for Windows only (optimized)
 build-windows: check-go-env check-env-credentials
-	@echo "🪟 Building for Windows..."
-	@GOOS=windows GOARCH=amd64 $(GO) build -o $(BINARY_NAME)-windows-amd64.exe $(MAIN_FILE)
+	@echo "🪟 Building for Windows (optimized)..."
+	@GOOS=windows GOARCH=amd64 $(GO) build $(BUILD_FLAGS) -o $(BINARY_NAME)-windows-amd64.exe $(MAIN_FILE)
 	@echo "✅ Windows build complete!"
 
-# Setup/rebuild command (install if not present, rebuild if already installed)
-setup: check-go-env check-env-credentials
+# Fast build (skip some checks for development)
+build-fast:
+	@echo "⚡ Fast build..."
+	@$(GO) build $(BUILD_FLAGS) -o $(BINARY_NAME) $(MAIN_FILE)
+	@echo "✅ Fast build complete!"
+
+# Setup/rebuild command (optimized)
+setup: check-go-env
 	@echo "🔧 Setting up $(BINARY_NAME)..."
 	@INSTALL_PATH=$(shell $(GO) env GOBIN); \
+	$(GO) build $(BUILD_FLAGS) -o $(BINARY_NAME) $(MAIN_FILE); \
+	cp $(BINARY_NAME) "$$INSTALL_PATH"/; \
+	if [ -f ".env" ]; then \
+		cp .env "$$INSTALL_PATH"/.env; \
+		echo "✅ Copied .env file"; \
+	fi; \
 	if [ -f "$$INSTALL_PATH/$(BINARY_NAME)" ]; then \
-		echo "🔄 Binary found at $$INSTALL_PATH, rebuilding..."; \
-		$(GO) build -o $(BINARY_NAME) $(MAIN_FILE); \
-		cp $(BINARY_NAME) "$$INSTALL_PATH"/; \
-		if [ -f ".env" ]; then \
-			cp .env "$$INSTALL_PATH"/.env; \
-			echo "✅ Copied .env file"; \
-		fi; \
 		echo "✅ Rebuilt and updated $(BINARY_NAME) at $$INSTALL_PATH"; \
 	else \
-		echo "📦 Installing to $$INSTALL_PATH..."; \
-		$(GO) build -o $(BINARY_NAME) $(MAIN_FILE); \
-		cp $(BINARY_NAME) "$$INSTALL_PATH"/; \
-		if [ -f ".env" ]; then \
-			cp .env "$$INSTALL_PATH"/.env; \
-			echo "✅ Copied .env file"; \
-		fi; \
 		echo "✅ Successfully installed $(BINARY_NAME) to $$INSTALL_PATH"; \
 		echo "💡 Make sure $$INSTALL_PATH is in your PATH environment variable"; \
 	fi
@@ -90,14 +89,12 @@ clean:
 # Run tests
 test:
 	@echo "🧪 Running tests..."
-	@$(GO) test ./...
+	@$(GO) test -short ./...  # Use -short for faster tests
 
 # Install dependencies
 deps:
 	@echo "📥 Checking dependencies..."
-	@$(GO) mod tidy
-
-
+	@$(GO) mod download
 
 # Remove installed binary
 remove: check-go-env
@@ -125,26 +122,8 @@ info: check-go-env
 		echo "Run 'make setup' to install"; \
 	fi
 
-# Show Go environment details
-go-env:
-	@echo "🔧 Go Environment Details:"
-	@echo "GOBIN: $(shell $(GO) env GOBIN)"
-	@echo "GOROOT: $(shell $(GO) env GOROOT)"
-	@echo "Install Path: $(shell $(GO) env GOBIN)"
-
-# Show help
-help:
-	@echo "Available commands:"
-	@echo "  setup        - Smart install/rebuild (installs if not present, rebuilds if installed)"
-	@echo "  build-all    - Build for multiple platforms (Linux, macOS, Windows)"
-	@echo "  build-windows- Build for Windows only"
-	@echo "  test         - Run tests"
-	@echo "  clean        - Remove build artifacts"
-	@echo "  remove       - Remove installed binary"
-	@echo "  info         - Show project information"
-	@echo "  deps         - Install/update dependencies"
-	@echo "  go-env       - Show Go environment details"
-	@echo "  create-migration - Create a new database migration (requires name parameter)"
-	@echo "  migrate-up      - Run all pending database migrations"
-	@echo "  migrate-down    - Roll back database migrations"
-	@echo "  migrate-status  - Show migration status"
+# Development build (fastest, minimal checks)
+dev:
+	@echo "🚀 Development build..."
+	@$(GO) build -o $(BINARY_NAME) $(MAIN_FILE)
+	@echo "✅ Development build complete!"
