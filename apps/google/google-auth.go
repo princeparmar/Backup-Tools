@@ -234,8 +234,11 @@ func GetRefreshTokenFromCodeForEmail(code string) (*oauth2.Token, error) {
 		log.Printf("Unable to read client secret file: %v", err)
 	}
 
-	// get refresh token from code
-	config, err := google.ConfigFromJSON(b, gmail.GmailReadonlyScope, "https://www.googleapis.com/auth/userinfo.email")
+	// get refresh token from code - include Admin SDK scope for admin verification
+	config, err := google.ConfigFromJSON(b,
+		gmail.GmailReadonlyScope,
+		"https://www.googleapis.com/auth/userinfo.email",
+		"https://www.googleapis.com/auth/admin.directory.user.readonly") // Admin SDK scope
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse client secret file to config: %v", err)
 	}
@@ -246,6 +249,159 @@ func GetRefreshTokenFromCodeForEmail(code string) (*oauth2.Token, error) {
 	}
 
 	return tok, nil
+}
+
+// IsUserAdmin checks if a user is an admin in Google Workspace using Admin SDK Directory API
+func IsUserAdmin(accessToken, userEmail string) (bool, error) {
+	ctx := context.Background()
+
+	// Create HTTP client with the access token
+	client := &http.Client{}
+	req, err := http.NewRequest("GET",
+		fmt.Sprintf("https://admin.googleapis.com/admin/directory/v1/users/%s", userEmail),
+		nil)
+	if err != nil {
+		return false, fmt.Errorf("failed to create request: %v", err)
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("failed to make request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized {
+		// User doesn't have Admin SDK access or token doesn't have required scope
+		logger.Info(ctx, "Admin SDK access denied - user may not have admin scope or may not be admin",
+			logger.String("email", userEmail),
+			logger.Int("status_code", resp.StatusCode))
+		return false, nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return false, fmt.Errorf("admin SDK API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var userInfo struct {
+		IsAdmin bool   `json:"isAdmin"`
+		Email   string `json:"primaryEmail"`
+		Roles   []struct {
+			RoleID   string `json:"roleId"`
+			RoleName string `json:"roleName"`
+		} `json:"roles"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&userInfo); err != nil {
+		return false, fmt.Errorf("failed to decode response: %v", err)
+	}
+
+	// isAdmin field returns true for all admin types including super admins
+	// Super admins will have isAdmin: true and may have SUPER_ADMIN role
+	if userInfo.IsAdmin {
+		logger.Info(ctx, "User verified as admin",
+			logger.String("email", userEmail),
+			logger.Bool("is_admin", userInfo.IsAdmin),
+			logger.Int("roles_count", len(userInfo.Roles)))
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// CheckUserAdminStatusWithToken checks if a user is admin using a refresh token
+func CheckUserAdminStatusWithToken(refreshToken, userEmail string) (bool, error) {
+	// Get access token from refresh token
+	accessToken, err := AuthTokenUsingRefreshToken(refreshToken)
+	if err != nil {
+		return false, fmt.Errorf("failed to get access token: %v", err)
+	}
+
+	// Check admin status
+	return IsUserAdmin(accessToken, userEmail)
+}
+
+// ListAllDomainUsers lists all users in a Google Workspace domain using Admin SDK
+func ListAllDomainUsers(accessToken, domain string) ([]string, error) {
+	ctx := context.Background()
+	var allUsers []string
+	nextPageToken := ""
+
+	for {
+		// Build URL with pagination
+		url := fmt.Sprintf("https://admin.googleapis.com/admin/directory/v1/users?domain=%s&maxResults=500", domain)
+		if nextPageToken != "" {
+			url += fmt.Sprintf("&pageToken=%s", nextPageToken)
+		}
+
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %v", err)
+		}
+
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
+
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to make request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			return nil, fmt.Errorf("admin SDK API returned status %d: %s", resp.StatusCode, string(body))
+		}
+
+		var usersResponse struct {
+			Users []struct {
+				PrimaryEmail string `json:"primaryEmail"`
+				Suspended    bool   `json:"suspended"`
+			} `json:"users"`
+			NextPageToken string `json:"nextPageToken"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&usersResponse); err != nil {
+			return nil, fmt.Errorf("failed to decode response: %v", err)
+		}
+
+		// Collect all non-suspended users
+		for _, user := range usersResponse.Users {
+			if !user.Suspended && user.PrimaryEmail != "" {
+				allUsers = append(allUsers, user.PrimaryEmail)
+			}
+		}
+
+		// Check if there are more pages
+		if usersResponse.NextPageToken == "" {
+			break
+		}
+		nextPageToken = usersResponse.NextPageToken
+
+		logger.Info(ctx, "Fetched page of users",
+			logger.Int("users_count", len(usersResponse.Users)),
+			logger.String("domain", domain))
+	}
+
+	logger.Info(ctx, "Finished fetching all domain users",
+		logger.Int("total_users", len(allUsers)),
+		logger.String("domain", domain))
+
+	return allUsers, nil
+}
+
+// ListAllDomainUsersWithToken lists all users using a refresh token
+func ListAllDomainUsersWithToken(refreshToken, domain string) ([]string, error) {
+	// Get access token from refresh token
+	accessToken, err := AuthTokenUsingRefreshToken(refreshToken)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get access token: %v", err)
+	}
+
+	// List all users
+	return ListAllDomainUsers(accessToken, domain)
 }
 
 func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {

@@ -447,15 +447,135 @@ func HandleAutomaticSyncCreateTask(c echo.Context) error {
 		return sendJSONError(c, http.StatusBadRequest, "one time backup is already running wait for it to complete", nil)
 	}
 
+	// Parse request body for optional backup_email (for corporate users backing up other accounts)
+	var reqBody struct {
+		BackupEmail string `json:"backup_email"`
+	}
+
+	// Only bind if body is not empty (backup_email is optional)
+	if c.Request().ContentLength > 0 {
+		if err := c.Bind(&reqBody); err != nil {
+			// If binding fails, continue without backup_email (backward compatible)
+			logger.Info(ctx, "Failed to bind request body, continuing without backup_email", logger.ErrorField(err))
+		}
+	}
+
+	// Handle bulk backup for all corporate emails when backup_email is "all"
+	if reqBody.BackupEmail == "all" && job.Method == "gmail" {
+		return handleBulkBackupAllCorporateEmails(c, ctx, job, database)
+	}
+
+	// If backup_email is provided and job is Gmail, verify admin status and update InputData
+	if reqBody.BackupEmail != "" && reqBody.BackupEmail != "all" && job.Method == "gmail" {
+		// Validate email format
+		if !strings.Contains(reqBody.BackupEmail, "@") {
+			return sendJSONError(c, http.StatusBadRequest, "Invalid backup_email format", nil)
+		}
+
+		// Get admin email from job (job.Name typically contains the email)
+		adminEmail := job.Name
+
+		// Also check InputData for email field as fallback
+		if job.InputData != nil && job.InputData.Json() != nil {
+			if emailFromData, ok := (*job.InputData.Json())["email"].(string); ok && emailFromData != "" {
+				adminEmail = emailFromData
+			}
+		}
+
+		// Step 1: Verify admin status using Google Admin SDK
+		// Get refresh token from job InputData
+		var refreshToken string
+		if job.InputData != nil && job.InputData.Json() != nil {
+			if rt, ok := (*job.InputData.Json())["refresh_token"].(string); ok {
+				refreshToken = rt
+			}
+		}
+
+		if refreshToken == "" {
+			logger.Error(ctx, "Refresh token not found for admin verification",
+				logger.String("admin_email", adminEmail))
+			return sendJSONError(c, http.StatusInternalServerError, "Unable to verify admin status: refresh token not found", nil)
+		}
+
+		// Check if user is admin using Google Admin SDK
+		isAdmin, err := google.CheckUserAdminStatusWithToken(refreshToken, adminEmail)
+		if err != nil {
+			logger.Error(ctx, "Failed to verify admin status via Google Admin SDK",
+				logger.String("admin_email", adminEmail),
+				logger.ErrorField(err))
+			return sendJSONError(c, http.StatusInternalServerError, "Failed to verify admin status. Please ensure the user has Admin SDK permissions and the OAuth scope is granted", err)
+		}
+
+		if !isAdmin {
+			logger.Warn(ctx, "User is not an admin in Google Workspace",
+				logger.String("admin_email", adminEmail),
+				logger.String("backup_email", reqBody.BackupEmail))
+			return sendJSONError(c, http.StatusForbidden, "Only Google Workspace admins can backup other users' accounts. This user is not an admin.", nil)
+		}
+
+		logger.Info(ctx, "Admin status verified via Google Admin SDK",
+			logger.String("admin_email", adminEmail))
+
+		// Step 2: Verify that backup_email belongs to the same domain as admin
+		adminDomain := extractDomainFromEmail(adminEmail)
+		backupDomain := extractDomainFromEmail(reqBody.BackupEmail)
+
+		if adminDomain == "" || backupDomain == "" {
+			return sendJSONError(c, http.StatusBadRequest, "Invalid email format for domain verification", nil)
+		}
+
+		if adminDomain != backupDomain {
+			logger.Warn(ctx, "Domain mismatch for backup_email",
+				logger.String("admin_domain", adminDomain),
+				logger.String("backup_domain", backupDomain),
+				logger.String("admin_email", adminEmail),
+				logger.String("backup_email", reqBody.BackupEmail))
+			return sendJSONError(c, http.StatusForbidden, "Only admins can backup accounts from their own domain. backup_email must belong to the same domain as the admin account", nil)
+		}
+
+		// Get current InputData
+		inputData := make(map[string]interface{})
+		if job.InputData != nil && job.InputData.Json() != nil {
+			inputData = *job.InputData.Json()
+		}
+
+		// Add backup_email to InputData
+		inputData["backup_email"] = reqBody.BackupEmail
+
+		// Update job with new InputData
+		updateRequest := map[string]interface{}{
+			"input_data": inputData,
+		}
+
+		err = database.CronJobRepo.UpdateCronJobByID(job.ID, updateRequest)
+		if err != nil {
+			logger.Error(ctx, "Failed to update job with backup_email", logger.ErrorField(err))
+			return sendJSONError(c, http.StatusInternalServerError, "Failed to update job with backup_email", err)
+		}
+
+		logger.Info(ctx, "Updated job with backup_email for corporate admin",
+			logger.Int("job_id", int(job.ID)),
+			logger.String("admin_email", adminEmail),
+			logger.String("backup_email", reqBody.BackupEmail),
+			logger.String("domain", adminDomain))
+	}
+
 	task, err := database.TaskRepo.CreateTaskForCronJob(job.ID)
 	if err != nil {
 		return sendJSONError(c, http.StatusInternalServerError, "Failed to create task", err)
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{
+	response := map[string]interface{}{
 		"message": "Task created successfully",
 		"data":    task,
-	})
+	}
+
+	if reqBody.BackupEmail != "" && job.Method == "gmail" {
+		response["backup_email"] = reqBody.BackupEmail
+		response["message"] = fmt.Sprintf("Task created successfully for backing up %s", reqBody.BackupEmail)
+	}
+
+	return c.JSON(http.StatusOK, response)
 }
 
 // New helper function to reduce duplication in error responses
@@ -467,6 +587,171 @@ func sendJSONError(c echo.Context, status int, message string, err error) error 
 		response["error"] = err.Error()
 	}
 	return c.JSON(status, response)
+}
+
+// extractDomainFromEmail extracts the domain part from an email address
+func extractDomainFromEmail(email string) string {
+	if email == "" {
+		return ""
+	}
+
+	parts := strings.Split(email, "@")
+	if len(parts) != 2 {
+		return ""
+	}
+
+	// Return domain in lowercase for case-insensitive comparison
+	return strings.ToLower(strings.TrimSpace(parts[1]))
+}
+
+// handleBulkBackupAllCorporateEmails handles backup of all corporate emails in one request
+func handleBulkBackupAllCorporateEmails(c echo.Context, ctx context.Context, job *repo.CronJobListingDB, database *db.PostgresDb) error {
+	// Get admin email from job
+	adminEmail := job.Name
+	if job.InputData != nil && job.InputData.Json() != nil {
+		if emailFromData, ok := (*job.InputData.Json())["email"].(string); ok && emailFromData != "" {
+			adminEmail = emailFromData
+		}
+	}
+
+	// Get refresh token
+	var refreshToken string
+	if job.InputData != nil && job.InputData.Json() != nil {
+		if rt, ok := (*job.InputData.Json())["refresh_token"].(string); ok {
+			refreshToken = rt
+		}
+	}
+
+	if refreshToken == "" {
+		logger.Error(ctx, "Refresh token not found for bulk backup",
+			logger.String("admin_email", adminEmail))
+		return sendJSONError(c, http.StatusInternalServerError, "Unable to perform bulk backup: refresh token not found", nil)
+	}
+
+	// Verify admin status
+	isAdmin, err := google.CheckUserAdminStatusWithToken(refreshToken, adminEmail)
+	if err != nil {
+		logger.Error(ctx, "Failed to verify admin status for bulk backup",
+			logger.String("admin_email", adminEmail),
+			logger.ErrorField(err))
+		return sendJSONError(c, http.StatusInternalServerError, "Failed to verify admin status. Please ensure the user has Admin SDK permissions and the OAuth scope is granted", err)
+	}
+
+	if !isAdmin {
+		logger.Warn(ctx, "User is not an admin - cannot perform bulk backup",
+			logger.String("admin_email", adminEmail))
+		return sendJSONError(c, http.StatusForbidden, "Only Google Workspace admins can backup all corporate emails. This user is not an admin.", nil)
+	}
+
+	// Extract domain
+	adminDomain := extractDomainFromEmail(adminEmail)
+	if adminDomain == "" {
+		return sendJSONError(c, http.StatusBadRequest, "Invalid admin email format", nil)
+	}
+
+	logger.Info(ctx, "Starting bulk backup for all corporate emails",
+		logger.String("admin_email", adminEmail),
+		logger.String("domain", adminDomain))
+
+	// Get access token
+	accessToken, err := google.AuthTokenUsingRefreshToken(refreshToken)
+	if err != nil {
+		logger.Error(ctx, "Failed to get access token for bulk backup",
+			logger.ErrorField(err))
+		return sendJSONError(c, http.StatusInternalServerError, "Failed to get access token", err)
+	}
+
+	// List all users in the domain
+	allUsers, err := google.ListAllDomainUsers(accessToken, adminDomain)
+	if err != nil {
+		logger.Error(ctx, "Failed to list domain users",
+			logger.String("domain", adminDomain),
+			logger.ErrorField(err))
+		return sendJSONError(c, http.StatusInternalServerError, "Failed to list all users in domain. Please ensure Admin SDK Directory API access is granted", err)
+	}
+
+	if len(allUsers) == 0 {
+		return sendJSONError(c, http.StatusNotFound, "No users found in domain", nil)
+	}
+
+	logger.Info(ctx, "Found users for bulk backup",
+		logger.Int("total_users", len(allUsers)),
+		logger.String("domain", adminDomain))
+
+	// Create tasks for each user
+	var createdTasks []interface{}
+	var failedEmails []string
+	successCount := 0
+
+	for _, userEmail := range allUsers {
+		// Skip the admin's own email if it's in the list (they already have their own job)
+		if strings.EqualFold(userEmail, adminEmail) {
+			continue
+		}
+
+		// Get current InputData
+		inputData := make(map[string]interface{})
+		if job.InputData != nil && job.InputData.Json() != nil {
+			inputData = *job.InputData.Json()
+		}
+
+		// Add backup_email to InputData
+		inputData["backup_email"] = userEmail
+
+		// Update job with new InputData
+		updateRequest := map[string]interface{}{
+			"input_data": inputData,
+		}
+
+		err = database.CronJobRepo.UpdateCronJobByID(job.ID, updateRequest)
+		if err != nil {
+			logger.Error(ctx, "Failed to update job with backup_email",
+				logger.String("user_email", userEmail),
+				logger.ErrorField(err))
+			failedEmails = append(failedEmails, userEmail)
+			continue
+		}
+
+		// Create task for this user
+		task, err := database.TaskRepo.CreateTaskForCronJob(job.ID)
+		if err != nil {
+			logger.Error(ctx, "Failed to create task for user",
+				logger.String("user_email", userEmail),
+				logger.ErrorField(err))
+			failedEmails = append(failedEmails, userEmail)
+			continue
+		}
+
+		createdTasks = append(createdTasks, map[string]interface{}{
+			"email":   userEmail,
+			"task_id": task.ID,
+		})
+		successCount++
+
+		logger.Info(ctx, "Created backup task for user",
+			logger.String("user_email", userEmail),
+			logger.Int("task_id", int(task.ID)))
+	}
+
+	response := map[string]interface{}{
+		"message":       "Bulk backup initiated",
+		"domain":        adminDomain,
+		"total_users":   len(allUsers),
+		"success_count": successCount,
+		"failed_count":  len(failedEmails),
+		"tasks_created": createdTasks,
+	}
+
+	if len(failedEmails) > 0 {
+		response["failed_emails"] = failedEmails
+	}
+
+	logger.Info(ctx, "Bulk backup completed",
+		logger.Int("total_users", len(allUsers)),
+		logger.Int("success_count", successCount),
+		logger.Int("failed_count", len(failedEmails)))
+
+	return c.JSON(http.StatusOK, response)
 }
 
 func HandleAutomaticBackupUpdate(c echo.Context) error {

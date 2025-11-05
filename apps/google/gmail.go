@@ -417,8 +417,13 @@ func (filter *GmailFilter) buildGmailQuery() string {
 }
 
 func (client *GmailClient) GetUserMessagesControlled(nextPageToken, label string, num int64, filter *GmailFilter) (*MessagesResponse, error) {
+	return client.GetUserMessagesControlledWithUserID("me", nextPageToken, label, num, filter)
+}
 
-	req := client.Users.Messages.List("me").MaxResults(num)
+// GetUserMessagesControlledWithUserID allows specifying a user ID (email or "me") for corporate account access
+func (client *GmailClient) GetUserMessagesControlledWithUserID(userID, nextPageToken, label string, num int64, filter *GmailFilter) (*MessagesResponse, error) {
+
+	req := client.Users.Messages.List(userID).MaxResults(num)
 	if nextPageToken != "" {
 		req.PageToken(nextPageToken)
 	}
@@ -438,7 +443,7 @@ func (client *GmailClient) GetUserMessagesControlled(nextPageToken, label string
 
 	messages := make([]*gmail.Message, 0, len(res.Messages))
 	for _, msg := range res.Messages {
-		if message, err := client.Users.Messages.Get("me", msg.Id).Do(); err == nil {
+		if message, err := client.Users.Messages.Get(userID, msg.Id).Do(); err == nil {
 			messages = append(messages, message)
 		}
 	}

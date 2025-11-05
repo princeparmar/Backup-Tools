@@ -44,12 +44,32 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 		return err
 	}
 
-	err = satellite.UploadObject(context.Background(), input.Job.StorxToken, satellite.ReserveBucket_Gmail, input.Job.Name+"/.file_placeholder", nil)
+	// Check if backup_email is specified (for corporate users backing up other accounts)
+	backupEmail, ok := (*input.Job.InputData.Json())["backup_email"].(string)
+	if !ok || backupEmail == "" {
+		// Use the job's name as the default email
+		backupEmail = input.Job.Name
+	}
+
+	// Determine the user ID for Gmail API calls
+	// For corporate users with domain-wide delegation, use the email directly
+	// Otherwise, "me" refers to the authenticated user
+	userID := "me"
+	if backupEmail != input.Job.Name && backupEmail != "" {
+		// If backup_email is different from job name, use the email directly
+		// This requires domain-wide delegation to work
+		userID = backupEmail
+	}
+
+	// Use backup_email for storage path to organize backups by account
+	storagePath := backupEmail
+
+	err = satellite.UploadObject(context.Background(), input.Job.StorxToken, satellite.ReserveBucket_Gmail, storagePath+"/.file_placeholder", nil)
 	if err != nil {
 		return err
 	}
 
-	emailListFromBucket, err := satellite.ListObjectsWithPrefix(context.Background(), input.Job.StorxToken, satellite.ReserveBucket_Gmail, input.Job.Name+"/")
+	emailListFromBucket, err := satellite.ListObjectsWithPrefix(context.Background(), input.Job.StorxToken, satellite.ReserveBucket_Gmail, storagePath+"/")
 	if err != nil && !strings.Contains(err.Error(), "object not found") {
 		return err
 	}
@@ -66,7 +86,8 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 	emptyLoopCount := 0
 
 	for {
-		res, err := gmailClient.GetUserMessagesControlled(*input.Job.TaskMemory.GmailNextToken, "CATEGORY_PERSONAL", 500, nil)
+		// Use userID instead of hardcoded "me" for corporate account access
+		res, err := gmailClient.GetUserMessagesControlledWithUserID(userID, *input.Job.TaskMemory.GmailNextToken, "CATEGORY_PERSONAL", 500, nil)
 		if err != nil {
 			return err
 		}
@@ -83,7 +104,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 				continue
 			}
 
-			messagePath := input.Job.Name + "/" + utils.GenerateTitleFromGmailMessage(message)
+			messagePath := storagePath + "/" + utils.GenerateTitleFromGmailMessage(message)
 			_, synced := emailListFromBucket[messagePath]
 			if synced {
 				continue
