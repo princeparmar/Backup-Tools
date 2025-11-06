@@ -40,33 +40,67 @@ jobs:
           path: ${{ env.APP_NAME }}
           retention-days: 1
           
-      - name: Stop and deploy
+      - name: Stop NSSM service
         run: |
-          # Stop existing process
-          Get-Process -Name "${{ env.APP_NAME }}" -ErrorAction SilentlyContinue | Stop-Process -Force
-          Start-Sleep -Seconds 2
+          # Stop NSSM service named 'backuptools'
+          $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
+          if ($service) {
+            if ($service.Status -eq 'Running') {
+              Stop-Service -Name "${{ env.SERVICE_NAME }}" -Force
+              Write-Host "NSSM service '${{ env.SERVICE_NAME }}' stopped"
+              
+              # Wait for service to fully stop and release file lock
+              $timeout = 10
+              $elapsed = 0
+              while ($service.Status -ne 'Stopped' -and $elapsed -lt $timeout) {
+                Start-Sleep -Seconds 1
+                $service.Refresh()
+                $elapsed++
+              }
+              
+              if ($service.Status -eq 'Stopped') {
+                Write-Host "Service fully stopped"
+              } else {
+                Write-Host "Warning: Service may still be stopping"
+              }
+            } else {
+              Write-Host "Service '${{ env.SERVICE_NAME }}' is already stopped"
+            }
+          } else {
+            Write-Host "Service '${{ env.SERVICE_NAME }}' not found (may not be installed)"
+          }
           
+      - name: Deploy new version
+        run: |
           # Ensure directory exists
           if (!(Test-Path "${{ env.DEPLOY_DIR }}")) {
             New-Item -ItemType Directory -Path "${{ env.DEPLOY_DIR }}" -Force
           }
           
-          # Deploy
+          # Deploy new version (service should be stopped, so file should not be locked)
           Copy-Item "${{ env.APP_NAME }}" "${{ env.DEPLOY_DIR }}\" -Force
-          Write-Host "Deployed to ${{ env.DEPLOY_DIR }}"
+          Write-Host "✅ Deployed to ${{ env.DEPLOY_DIR }}"
           
-      - name: Start application
+      - name: Start NSSM service
         run: |
-          Start-Process "${{ env.DEPLOY_DIR }}\${{ env.APP_NAME }}" -WorkingDirectory "${{ env.DEPLOY_DIR }}"
-          Write-Host "Application started"
+          # Start the NSSM service
+          $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
+          if ($service) {
+            Start-Service -Name "${{ env.SERVICE_NAME }}"
+            Write-Host "NSSM service '${{ env.SERVICE_NAME }}' started"
+          } else {
+            Write-Host "❌ Service '${{ env.SERVICE_NAME }}' not found - cannot start"
+            exit 1
+          }
           
       - name: Verify deployment
         run: |
           Start-Sleep -Seconds 3
-          $process = Get-Process -Name "${{ env.APP_NAME }}" -ErrorAction SilentlyContinue
-          if ($process) {
-            Write-Host "✅ Staging deployment successful - PID: $($process.Id)"
+          # Check if service is running
+          $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
+          if ($service -and $service.Status -eq 'Running') {
+            Write-Host "✅ Staging deployment successful - Service is running"
           } else {
-            Write-Host "❌ Staging deployment failed"
+            Write-Host "❌ Staging deployment failed - Service is not running"
             exit 1
           }

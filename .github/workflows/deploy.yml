@@ -22,7 +22,7 @@ jobs:
         with:
           fetch-depth: 1
           
-      - name: Download pre-built binary
+      - name: Download pre-built binary (optional)
         id: download-binary
         uses: actions/download-artifact@v4
         with:
@@ -35,6 +35,7 @@ jobs:
         uses: actions/setup-go@v4
         with:
           go-version: '1.21.13'
+          cache: false
           
       - name: Build binary (if not downloaded)
         if: steps.download-binary.outcome != 'success'
@@ -42,50 +43,67 @@ jobs:
           $buildTime = Get-Date -Format 'yyyy-MM-dd_HH:mm:ss'
           go build -o ${{ env.APP_NAME }} -ldflags="-s -w -X main.buildTime=$buildTime" -trimpath ./cmd
           
-      - name: Stop service
+      - name: Stop NSSM service
         run: |
+          # Stop NSSM service named 'backuptools'
           $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
-          if ($service -and $service.Status -eq 'Running') {
-            Stop-Service -Name "${{ env.SERVICE_NAME }}" -Force
-            Write-Host "Service stopped"
-            # Wait for process to fully terminate
-            Start-Sleep -Seconds 3
+          if ($service) {
+            if ($service.Status -eq 'Running') {
+              Stop-Service -Name "${{ env.SERVICE_NAME }}" -Force
+              Write-Host "NSSM service '${{ env.SERVICE_NAME }}' stopped"
+              
+              # Wait for service to fully stop and release file lock
+              $timeout = 10
+              $elapsed = 0
+              while ($service.Status -ne 'Stopped' -and $elapsed -lt $timeout) {
+                Start-Sleep -Seconds 1
+                $service.Refresh()
+                $elapsed++
+              }
+              
+              if ($service.Status -eq 'Stopped') {
+                Write-Host "Service fully stopped"
+              } else {
+                Write-Host "Warning: Service may still be stopping"
+              }
+            } else {
+              Write-Host "Service '${{ env.SERVICE_NAME }}' is already stopped"
+            }
+          } else {
+            Write-Host "Service '${{ env.SERVICE_NAME }}' not found (may not be installed)"
           }
           
-      - name: Quick deploy
+      - name: Deploy new version
         run: |
-          # Create directory if needed
+          # Ensure directory exists
           if (!(Test-Path "${{ env.DEPLOY_DIR }}")) {
             New-Item -ItemType Directory -Path "${{ env.DEPLOY_DIR }}" -Force
           }
           
-          # Kill any remaining processes
-          Get-Process -Name "${{ env.APP_NAME }}" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 1
-          
-          # Deploy new version
+          # Deploy new version (service should be stopped, so file should not be locked)
           Copy-Item "${{ env.APP_NAME }}" "${{ env.DEPLOY_DIR }}\" -Force
-          Write-Host "New version deployed"
+          Write-Host "✅ Deployed to ${{ env.DEPLOY_DIR }}"
           
-      - name: Start service
+      - name: Start NSSM service
         run: |
-          # Start service or application
+          # Start the NSSM service
           $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
           if ($service) {
             Start-Service -Name "${{ env.SERVICE_NAME }}"
-            Write-Host "Service started"
+            Write-Host "NSSM service '${{ env.SERVICE_NAME }}' started"
           } else {
-            Start-Process "${{ env.DEPLOY_DIR }}\${{ env.APP_NAME }}" -WorkingDirectory "${{ env.DEPLOY_DIR }}"
-            Write-Host "Application started directly"
+            Write-Host "❌ Service '${{ env.SERVICE_NAME }}' not found - cannot start"
+            exit 1
           }
           
-      - name: Quick verification
+      - name: Verify deployment
         run: |
-          Start-Sleep -Seconds 2
-          $process = Get-Process -Name "${{ env.APP_NAME }}" -ErrorAction SilentlyContinue
-          if ($process) {
-            Write-Host "✅ Deployment successful - PID: $($process.Id)"
+          Start-Sleep -Seconds 3
+          # Check if service is running
+          $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
+          if ($service -and $service.Status -eq 'Running') {
+            Write-Host "✅ Production deployment successful - Service is running"
           } else {
-            Write-Host "❌ Deployment failed - application not running"
+            Write-Host "❌ Production deployment failed - Service is not running"
             exit 1
           }
