@@ -46,37 +46,31 @@ jobs:
         run: |
           # Stop NSSM service named 'backuptools'
           $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
-          if ($service) {
-            if ($service.Status -eq 'Running') {
-              Stop-Service -Name "${{ env.SERVICE_NAME }}" -Force
-              Write-Host "NSSM service '${{ env.SERVICE_NAME }}' stopped"
-              
-              # Wait for service to fully stop and release file lock
-              $timeout = 10
-              $elapsed = 0
-              while ($service.Status -ne 'Stopped' -and $elapsed -lt $timeout) {
-                Start-Sleep -Seconds 1
-                $service.Refresh()
-                $elapsed++
-              }
-              
-              if ($service.Status -eq 'Stopped') {
-                Write-Host "Service fully stopped"
-              } else {
-                Write-Host "Warning: Service may still be stopping"
-              }
-            } else {
-              Write-Host "Service '${{ env.SERVICE_NAME }}' is already stopped"
+          if ($service -and $service.Status -eq 'Running') {
+            Stop-Service -Name "${{ env.SERVICE_NAME }}" -Force
+            Write-Host "NSSM service '${{ env.SERVICE_NAME }}' stopped"
+            
+            # Wait for service to fully stop (reduced timeout for faster deployment)
+            $timeout = 5
+            $elapsed = 0
+            while ($service.Status -ne 'Stopped' -and $elapsed -lt $timeout) {
+              Start-Sleep -Milliseconds 500
+              $service.Refresh()
+              $elapsed += 0.5
+            }
+            
+            if ($service.Status -eq 'Stopped') {
+              Write-Host "Service fully stopped"
             }
           } else {
-            Write-Host "Service '${{ env.SERVICE_NAME }}' not found (may not be installed)"
+            Write-Host "Service '${{ env.SERVICE_NAME }}' is already stopped or not found"
           }
           
       - name: Deploy new version
         run: |
           # Ensure deploy directory exists
           if (!(Test-Path "${{ env.DEPLOY_DIR }}")) {
-            New-Item -ItemType Directory -Path "${{ env.DEPLOY_DIR }}" -Force
+            New-Item -ItemType Directory -Path "${{ env.DEPLOY_DIR }}" -Force | Out-Null
           }
           
           # Copy from build directory to deploy directory
@@ -85,32 +79,37 @@ jobs:
           
           if (Test-Path $buildPath) {
             Copy-Item $buildPath $deployPath -Force
-            Write-Host "✅ Deployed from $buildPath to $deployPath"
+            Write-Host "✅ Deployed to $deployPath"
           } else {
             Write-Host "❌ Build file not found at: $buildPath"
             exit 1
           }
           
-      - name: Start NSSM service
+      - name: Start NSSM service and verify
         run: |
           # Start the NSSM service
           $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
-          if ($service) {
-            Start-Service -Name "${{ env.SERVICE_NAME }}"
-            Write-Host "NSSM service '${{ env.SERVICE_NAME }}' started"
-          } else {
+          if (!$service) {
             Write-Host "❌ Service '${{ env.SERVICE_NAME }}' not found - cannot start"
             exit 1
           }
           
-      - name: Verify deployment
-        run: |
-          Start-Sleep -Seconds 3
-          # Check if service is running
-          $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
-          if ($service -and $service.Status -eq 'Running') {
+          Start-Service -Name "${{ env.SERVICE_NAME }}"
+          Write-Host "NSSM service '${{ env.SERVICE_NAME }}' start command issued"
+          
+          # Wait for service to start (with shorter timeout)
+          $timeout = 8
+          $elapsed = 0
+          while ($service.Status -ne 'Running' -and $elapsed -lt $timeout) {
+            Start-Sleep -Milliseconds 500
+            $service.Refresh()
+            $elapsed += 0.5
+          }
+          
+          # Verify deployment
+          if ($service.Status -eq 'Running') {
             Write-Host "✅ Staging deployment successful - Service is running"
           } else {
-            Write-Host "❌ Staging deployment failed - Service is not running"
+            Write-Host "❌ Staging deployment failed - Service is not running (Status: $($service.Status))"
             exit 1
           }
