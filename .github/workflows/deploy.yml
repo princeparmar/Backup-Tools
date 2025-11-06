@@ -23,14 +23,21 @@ jobs:
         with:
           fetch-depth: 1  # Shallow clone for faster checkout
           
+      - name: Clean Go cache (if exists)
+        run: |
+          # Clean up any existing Go installation that might cause symlink conflicts
+          $runnerWorkDir = "$env:RUNNER_WORKSPACE\.."
+          $goToolPath = Join-Path $runnerWorkDir "tool\go\${{ env.GO_VERSION }}\x64"
+          if (Test-Path $goToolPath) {
+            Remove-Item $goToolPath -Force -Recurse -ErrorAction SilentlyContinue
+            Write-Host "Cleaned Go cache directory: $goToolPath"
+          }
+          
       - name: Setup Go
         uses: actions/setup-go@v4
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true  # Enable Go build cache
-          cache-dependency-path: |
-            go.sum
-            **/go.sum
+          cache: false  # Disable cache to avoid symlink conflicts on self-hosted runners
           
       - name: Cache Go modules
         uses: actions/cache@v3
@@ -49,10 +56,8 @@ jobs:
       - name: Build application (optimized)
         run: |
           # Build with optimizations for faster compilation
-          go build -o ${{ env.APP_NAME }} \
-            -ldflags="-s -w -X main.buildTime=$(Get-Date -Format 'yyyy-MM-dd_HH:mm:ss')" \
-            -trimpath \
-            ./cmd
+          $buildTime = Get-Date -Format 'yyyy-MM-dd_HH:mm:ss'
+          go build -o ${{ env.APP_NAME }} -ldflags="-s -w -X main.buildTime=$buildTime" -trimpath ./cmd
           
       - name: Prepare deployment directory
         run: |
