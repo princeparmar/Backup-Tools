@@ -62,7 +62,7 @@ jobs:
           
       - name: Stop NSSM service
         run: |
-          # Fast stop using parallel job pattern
+          # Fast stop using optimized polling
           $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
           if ($service) {
             $status = $service.Status

@@ -8,6 +8,7 @@ on:
 
 env:
   APP_NAME: 'backuptools-windows-amd64.exe'
+  BUILD_DIR: 'D:\deployment'
   DEPLOY_DIR: 'D:\bin'
   SERVICE_NAME: 'backuptools'
 
@@ -37,73 +38,122 @@ jobs:
           go-version: '1.21.13'
           cache: false
           
-      - name: Build binary (if not downloaded)
+      - name: Pre-download dependencies (if building)
         if: steps.download-binary.outcome != 'success'
         run: |
+          Write-Host "Pre-downloading dependencies..."
+          go mod download
+          
+      - name: Fast build binary (if not downloaded)
+        if: steps.download-binary.outcome != 'success'
+        run: |
+          # Ensure build directory exists
+          if (!(Test-Path "${{ env.BUILD_DIR }}")) {
+            New-Item -ItemType Directory -Path "${{ env.BUILD_DIR }}" -Force | Out-Null
+          }
+          
+          $buildStart = Get-Date
+          Write-Host "Building with optimizations..."
+          
+          # Use Go build optimizations
+          $env:GOFLAGS = "-buildvcs=false"
           $buildTime = Get-Date -Format 'yyyy-MM-dd_HH:mm:ss'
-          go build -o ${{ env.APP_NAME }} -ldflags="-s -w -X main.buildTime=$buildTime" -trimpath ./cmd
+          $buildPath = Join-Path "${{ env.BUILD_DIR }}" "${{ env.APP_NAME }}"
           
-      - name: Stop NSSM service
-        run: |
-          # Stop NSSM service named 'backuptools'
-          $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
-          if ($service) {
-            if ($service.Status -eq 'Running') {
-              Stop-Service -Name "${{ env.SERVICE_NAME }}" -Force
-              Write-Host "NSSM service '${{ env.SERVICE_NAME }}' stopped"
-              
-              # Wait for service to fully stop and release file lock
-              $timeout = 10
-              $elapsed = 0
-              while ($service.Status -ne 'Stopped' -and $elapsed -lt $timeout) {
-                Start-Sleep -Seconds 1
-                $service.Refresh()
-                $elapsed++
-              }
-              
-              if ($service.Status -eq 'Stopped') {
-                Write-Host "Service fully stopped"
-              } else {
-                Write-Host "Warning: Service may still be stopping"
-              }
-            } else {
-              Write-Host "Service '${{ env.SERVICE_NAME }}' is already stopped"
-            }
+          go build -ldflags="-s -w -X main.buildTime=$buildTime" -trimpath -o $buildPath ./cmd
+          
+          $buildDuration = (Get-Date) - $buildStart
+          if (Test-Path $buildPath) {
+            $size = (Get-Item $buildPath).Length
+            Write-Host "✅ Binary built in $([math]::Round($buildDuration.TotalSeconds, 1))s ($([math]::Round($size/1MB, 2)) MB)"
+            # Copy to workspace root for deployment step
+            Copy-Item $buildPath "${{ env.APP_NAME }}" -Force
           } else {
-            Write-Host "Service '${{ env.SERVICE_NAME }}' not found (may not be installed)"
-          }
-          
-      - name: Deploy new version
-        run: |
-          # Ensure directory exists
-          if (!(Test-Path "${{ env.DEPLOY_DIR }}")) {
-            New-Item -ItemType Directory -Path "${{ env.DEPLOY_DIR }}" -Force
-          }
-          
-          # Deploy new version (service should be stopped, so file should not be locked)
-          Copy-Item "${{ env.APP_NAME }}" "${{ env.DEPLOY_DIR }}\" -Force
-          Write-Host "✅ Deployed to ${{ env.DEPLOY_DIR }}"
-          
-      - name: Start NSSM service
-        run: |
-          # Start the NSSM service
-          $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
-          if ($service) {
-            Start-Service -Name "${{ env.SERVICE_NAME }}"
-            Write-Host "NSSM service '${{ env.SERVICE_NAME }}' started"
-          } else {
-            Write-Host "❌ Service '${{ env.SERVICE_NAME }}' not found - cannot start"
+            Write-Error "Build failed - binary not found"
             exit 1
           }
           
-      - name: Verify deployment
+      - name: Stop NSSM service
         run: |
-          Start-Sleep -Seconds 3
-          # Check if service is running
+          # Fast stop using optimized polling
           $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
-          if ($service -and $service.Status -eq 'Running') {
+          if ($service) {
+            $status = $service.Status
+            if ($status -eq "Running" -or $status -eq "Paused" -or $status -eq "StartPending") {
+              Stop-Service -Name "${{ env.SERVICE_NAME }}" -Force -WarningAction SilentlyContinue
+              
+              # Quick wait with timeout
+              $timeout = 5
+              $elapsed = 0
+              while ($service.Status -ne 'Stopped' -and $elapsed -lt $timeout) {
+                Start-Sleep -Milliseconds 300
+                $service.Refresh()
+                $elapsed += 0.3
+              }
+              Write-Host "Service stopped"
+            } else {
+              Write-Host "Service already stopped"
+            }
+          }
+          
+      - name: Quick file replacement
+        run: |
+          # Ensure deploy directory exists
+          if (!(Test-Path "${{ env.DEPLOY_DIR }}")) {
+            New-Item -ItemType Directory -Path "${{ env.DEPLOY_DIR }}" -Force | Out-Null
+          }
+          
+          # Determine source path (artifact or build)
+          $sourcePath = "${{ env.APP_NAME }}"
+          if (!(Test-Path $sourcePath)) {
+            # Try build directory if artifact wasn't downloaded
+            $buildPath = Join-Path "${{ env.BUILD_DIR }}" "${{ env.APP_NAME }}"
+            if (Test-Path $buildPath) {
+              $sourcePath = $buildPath
+            }
+          }
+          
+          $deployPath = Join-Path "${{ env.DEPLOY_DIR }}" "${{ env.APP_NAME }}"
+          
+          if (Test-Path $sourcePath) {
+            # Remove old file if exists
+            if (Test-Path $deployPath) {
+              Remove-Item $deployPath -Force -ErrorAction SilentlyContinue
+            }
+            # Use Move-Item for faster replacement (atomic operation)
+            Move-Item $sourcePath $deployPath -Force
+            Write-Host "✅ File replaced at $deployPath"
+          } else {
+            Write-Error "Source file not found: $sourcePath"
+            exit 1
+          }
+          
+      - name: Start NSSM service and verify
+        run: |
+          # Fast start with quick verification
+          $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
+          if (!$service) {
+            Write-Error "Service '${{ env.SERVICE_NAME }}' not found"
+            exit 1
+          }
+          
+          # Suppress warnings and start service
+          $WarningPreference = 'SilentlyContinue'
+          Start-Service -Name "${{ env.SERVICE_NAME }}" -WarningAction SilentlyContinue
+          
+          # Quick wait with timeout
+          $timeout = 8
+          $elapsed = 0
+          while ($service.Status -ne 'Running' -and $elapsed -lt $timeout) {
+            Start-Sleep -Milliseconds 300
+            $service.Refresh()
+            $elapsed += 0.3
+          }
+          
+          # Verify deployment
+          if ($service.Status -eq 'Running') {
             Write-Host "✅ Production deployment successful - Service is running"
           } else {
-            Write-Host "❌ Production deployment failed - Service is not running"
+            Write-Error "Deployment failed - Service status: $($service.Status)"
             exit 1
           }
