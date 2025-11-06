@@ -23,29 +23,18 @@ jobs:
         with:
           fetch-depth: 1
           
-      - name: Download pre-built binary (optional)
-        id: download-binary
-        uses: actions/download-artifact@v4
-        with:
-          name: backuptools-binary
-          path: ./
-        continue-on-error: true
-        
-      - name: Setup Go (if building)
-        if: steps.download-binary.outcome != 'success'
+      - name: Setup Go
         uses: actions/setup-go@v4
         with:
           go-version: '1.21.13'
-          cache: false
+          cache: false  # Disable cache to avoid tar/gzip errors on Windows
           
-      - name: Pre-download dependencies (if building)
-        if: steps.download-binary.outcome != 'success'
+      - name: Pre-download dependencies
         run: |
           Write-Host "Pre-downloading dependencies..."
           go mod download
           
-      - name: Fast build binary (if not downloaded)
-        if: steps.download-binary.outcome != 'success'
+      - name: Fast build application
         run: |
           # Ensure build directory exists
           if (!(Test-Path "${{ env.BUILD_DIR }}")) {
@@ -66,8 +55,6 @@ jobs:
           if (Test-Path $buildPath) {
             $size = (Get-Item $buildPath).Length
             Write-Host "✅ Binary built in $([math]::Round($buildDuration.TotalSeconds, 1))s ($([math]::Round($size/1MB, 2)) MB)"
-            # Copy to workspace root for deployment step
-            Copy-Item $buildPath "${{ env.APP_NAME }}" -Force
           } else {
             Write-Error "Build failed - binary not found"
             exit 1
@@ -103,28 +90,20 @@ jobs:
             New-Item -ItemType Directory -Path "${{ env.DEPLOY_DIR }}" -Force | Out-Null
           }
           
-          # Determine source path (artifact or build)
-          $sourcePath = "${{ env.APP_NAME }}"
-          if (!(Test-Path $sourcePath)) {
-            # Try build directory if artifact wasn't downloaded
-            $buildPath = Join-Path "${{ env.BUILD_DIR }}" "${{ env.APP_NAME }}"
-            if (Test-Path $buildPath) {
-              $sourcePath = $buildPath
-            }
-          }
-          
+          # Use Move-Item for faster replacement (atomic operation)
+          $buildPath = Join-Path "${{ env.BUILD_DIR }}" "${{ env.APP_NAME }}"
           $deployPath = Join-Path "${{ env.DEPLOY_DIR }}" "${{ env.APP_NAME }}"
           
-          if (Test-Path $sourcePath) {
+          if (Test-Path $buildPath) {
             # Remove old file if exists
             if (Test-Path $deployPath) {
               Remove-Item $deployPath -Force -ErrorAction SilentlyContinue
             }
-            # Use Move-Item for faster replacement (atomic operation)
-            Move-Item $sourcePath $deployPath -Force
+            # Move new file (faster than copy)
+            Move-Item $buildPath $deployPath -Force
             Write-Host "✅ File replaced at $deployPath"
           } else {
-            Write-Error "Source file not found: $sourcePath"
+            Write-Error "Build file not found at: $buildPath"
             exit 1
           }
           
