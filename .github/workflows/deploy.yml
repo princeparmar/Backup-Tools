@@ -1,4 +1,4 @@
-name: Deploy to Windows Server
+name: Deploy to Production
 
 on:
   push:
@@ -8,113 +8,81 @@ on:
 
 env:
   APP_NAME: 'backuptools-windows-amd64.exe'
-  APP_PROCESS_NAME: 'backuptools-windows-amd64'
   DEPLOY_DIR: 'D:\bin'
   SERVICE_NAME: 'backuptools'
-  GO_VERSION: '1.21.13'
 
 jobs:
   deploy:
-    runs-on: [self-hosted, Windows, X64, production]  # Targets backup-tools-runner with production tag
+    runs-on: [self-hosted, Windows, X64, production]
+    timeout-minutes: 10
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1  # Shallow clone for faster checkout
+          fetch-depth: 1
           
-      - name: Clean Go cache (if exists)
-        run: |
-          # Clean up any existing Go installation that might cause symlink conflicts
-          $runnerWorkDir = "$env:RUNNER_WORKSPACE\.."
-          $goToolPath = Join-Path $runnerWorkDir "tool\go\${{ env.GO_VERSION }}\x64"
-          if (Test-Path $goToolPath) {
-            Remove-Item $goToolPath -Force -Recurse -ErrorAction SilentlyContinue
-            Write-Host "Cleaned Go cache directory: $goToolPath"
-          }
-          
-      - name: Setup Go
+      - name: Download pre-built binary
+        id: download-binary
+        uses: actions/download-artifact@v4
+        with:
+          name: backuptools-binary
+          path: ./
+        continue-on-error: true
+        
+      - name: Setup Go (if building)
+        if: steps.download-binary.outcome != 'success'
         uses: actions/setup-go@v4
         with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: false  # Disable cache to avoid symlink conflicts on self-hosted runners
+          go-version: '1.21.13'
           
-      - name: Cache Go modules
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-
-            
-      - name: Download dependencies
+      - name: Build binary (if not downloaded)
+        if: steps.download-binary.outcome != 'success'
         run: |
-          go mod download
-          
-      - name: Build application (optimized)
-        run: |
-          # Build with optimizations for faster compilation
           $buildTime = Get-Date -Format 'yyyy-MM-dd_HH:mm:ss'
           go build -o ${{ env.APP_NAME }} -ldflags="-s -w -X main.buildTime=$buildTime" -trimpath ./cmd
           
-      - name: Prepare deployment directory
+      - name: Stop service
         run: |
-          if (!(Test-Path "${{ env.DEPLOY_DIR }}")) {
-            New-Item -ItemType Directory -Path "${{ env.DEPLOY_DIR }}" -Force
-          }
-          
-      - name: Stop and backup current version
-        run: |
-          # Stop service if running
           $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
           if ($service -and $service.Status -eq 'Running') {
             Stop-Service -Name "${{ env.SERVICE_NAME }}" -Force
             Write-Host "Service stopped"
+            # Wait for process to fully terminate
+            Start-Sleep -Seconds 3
           }
           
-          # Backup existing application
-          $appPath = "${{ env.DEPLOY_DIR }}\${{ env.APP_NAME }}"
-          if (Test-Path $appPath) {
-            $backupName = "${{ env.APP_NAME }}.backup.$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-            Copy-Item $appPath "${{ env.DEPLOY_DIR }}\$backupName" -Force
-            Write-Host "Backup created: $backupName"
-          }
-          
-      - name: Deploy new version
+      - name: Quick deploy
         run: |
+          # Create directory if needed
+          if (!(Test-Path "${{ env.DEPLOY_DIR }}")) {
+            New-Item -ItemType Directory -Path "${{ env.DEPLOY_DIR }}" -Force
+          }
+          
+          # Kill any remaining processes
+          Get-Process -Name "${{ env.APP_NAME }}" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 1
+          
+          # Deploy new version
           Copy-Item "${{ env.APP_NAME }}" "${{ env.DEPLOY_DIR }}\" -Force
-          # Copy environment file if it exists
-          if (Test-Path ".env") {
-            Copy-Item ".env" "${{ env.DEPLOY_DIR }}\" -Force -ErrorAction SilentlyContinue
-          }
-          Write-Host "New version deployed to ${{ env.DEPLOY_DIR }}"
+          Write-Host "New version deployed"
           
-      - name: Start service and verify
+      - name: Start service
         run: |
-          # Try to start as service first
+          # Start service or application
           $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
           if ($service) {
-            try {
-              Start-Service -Name "${{ env.SERVICE_NAME }}"
-              Write-Host "Service started successfully"
-            } catch {
-              Write-Host "Service start failed: $($_.Exception.Message)"
-            }
-          }
-          
-          # Fallback: Start application directly
-          Start-Sleep -Seconds 2  
-          $process = Get-Process -Name "${{ env.APP_PROCESS_NAME }}" -ErrorAction SilentlyContinue
-          if (!$process) {
-            Write-Host "Starting application directly..."
+            Start-Service -Name "${{ env.SERVICE_NAME }}"
+            Write-Host "Service started"
+          } else {
             Start-Process "${{ env.DEPLOY_DIR }}\${{ env.APP_NAME }}" -WorkingDirectory "${{ env.DEPLOY_DIR }}"
-            Start-Sleep -Seconds 1
+            Write-Host "Application started directly"
           }
           
-          # Verification
-          $process = Get-Process -Name "${{ env.APP_PROCESS_NAME }}" -ErrorAction SilentlyContinue
+      - name: Quick verification
+        run: |
+          Start-Sleep -Seconds 2
+          $process = Get-Process -Name "${{ env.APP_NAME }}" -ErrorAction SilentlyContinue
           if ($process) {
             Write-Host "✅ Deployment successful - PID: $($process.Id)"
           } else {
