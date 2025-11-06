@@ -385,7 +385,24 @@ func HandleSendFileFromGoogleDriveToSatellite(c echo.Context) error {
 		})
 	}
 
-	err = satellite.UploadObject(context.Background(), accesGrant, "google-drive", name, data)
+	// Get user email to create user-specific directory
+	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "failed to get user email: " + err.Error(),
+		})
+	}
+
+	if userDetails.Email == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "user email not found, please check access handling",
+		})
+	}
+
+	// Create path with user email directory: userEmail/filename
+	drivePath := userDetails.Email + "/" + name
+
+	err = satellite.UploadObject(context.Background(), accesGrant, "google-drive", drivePath, data)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"error": fmt.Sprintf("failed to upload file to Satellite: %v", err),
@@ -408,6 +425,21 @@ func HandleSendAllFilesFromGoogleDriveToSatellite(c echo.Context) error {
 			"error": "access token not found",
 		})
 	}
+
+	// Get user email to create user-specific directory
+	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "failed to get user email: " + err.Error(),
+		})
+	}
+
+	if userDetails.Email == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "user email not found, please check access handling",
+		})
+	}
+
 	// Get only file names in root
 	shared := c.QueryParam("include_shared")
 	g, ctx := errgroup.WithContext(c.Request().Context())
@@ -420,8 +452,9 @@ func HandleSendAllFilesFromGoogleDriveToSatellite(c echo.Context) error {
 			return HandleGoogleDriveError(c, err, "retrieve shared files from Google Drive")
 		}
 		// If folder is empty, create an empty folder
+		sharedFolderPath := userDetails.Email + "/shared with me/"
 
-		err = satellite.UploadObject(ctx, accesGrant, "google-drive", "shared with me/", nil)
+		err = satellite.UploadObject(ctx, accesGrant, "google-drive", sharedFolderPath, nil)
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 				"error": fmt.Sprintf("failed to upload file to Satellite: %v", err),
@@ -439,7 +472,10 @@ func HandleSendAllFilesFromGoogleDriveToSatellite(c echo.Context) error {
 
 					}
 
-					err = satellite.UploadObject(ctx, accesGrant, "google-drive", path.Join("shared with me", name), data)
+					// Create path with user email directory: userEmail/shared with me/filename
+					drivePath := userDetails.Email + "/" + path.Join("shared with me", name)
+
+					err = satellite.UploadObject(ctx, accesGrant, "google-drive", drivePath, data)
 					if err != nil {
 						failedIDs.Add(file.ID)
 						return nil
@@ -467,7 +503,10 @@ func HandleSendAllFilesFromGoogleDriveToSatellite(c echo.Context) error {
 
 				}
 
-				err = satellite.UploadObject(ctx, accesGrant, "google-drive", path.Join("shared with me", name), data)
+				// Create path with user email directory: userEmail/filename
+				drivePath := userDetails.Email + "/" + name
+
+				err = satellite.UploadObject(ctx, accesGrant, "google-drive", drivePath, data)
 				if err != nil {
 					failedIDs.Add(file.ID)
 					return nil
@@ -543,6 +582,21 @@ func HandleSendListFromGoogleDriveToSatellite(c echo.Context) error {
 			"error": "access token not found",
 		})
 	}
+
+	// Get user email to create user-specific directory
+	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "failed to get user email: " + err.Error(),
+		})
+	}
+
+	if userDetails.Email == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "user email not found, please check access handling",
+		})
+	}
+
 	g, ctx := errgroup.WithContext(c.Request().Context())
 	g.SetLimit(10)
 
@@ -553,7 +607,9 @@ func HandleSendListFromGoogleDriveToSatellite(c echo.Context) error {
 				name, data, err := google.GetFileAndPath(c, id)
 				if err != nil {
 					if strings.Contains(err.Error(), "folder error") {
-						if err = HandleFolder(name, id, c); err != nil {
+						// Create path with user email directory: userEmail/foldername
+						folderPath := userDetails.Email + "/" + name
+						if err = HandleFolder(folderPath, id, c); err != nil {
 							failedIDs.Add(id)
 							return nil
 						} else {
@@ -566,8 +622,10 @@ func HandleSendListFromGoogleDriveToSatellite(c echo.Context) error {
 						return nil
 					}
 				} else {
+					// Create path with user email directory: userEmail/filename
+					drivePath := userDetails.Email + "/" + name
 
-					if err = satellite.UploadObject(ctx, accessGrant, "google-drive", name, data); err != nil {
+					if err = satellite.UploadObject(ctx, accessGrant, "google-drive", drivePath, data); err != nil {
 						failedIDs.Add(id)
 						return nil
 					}

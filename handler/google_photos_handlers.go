@@ -350,6 +350,20 @@ func HandleSendFileFromGooglePhotosToSatellite(c echo.Context) error {
 		}
 	}
 
+	// Get user email to create user-specific directory
+	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "failed to get user email: " + err.Error(),
+		})
+	}
+
+	if userDetails.Email == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "user email not found, please check access handling",
+		})
+	}
+
 	g, ctx := errgroup.WithContext(c.Request().Context())
 	g.SetLimit(10)
 
@@ -357,7 +371,7 @@ func HandleSendFileFromGooglePhotosToSatellite(c echo.Context) error {
 	for _, id := range allIDs {
 		func(id string) {
 			g.Go(func() error {
-				err := uploadSingleFileFromPhotosToSatellite(ctx, client, id, accesGrant)
+				err := uploadSingleFileFromPhotosToSatellite(ctx, client, id, accesGrant, userDetails.Email)
 				if err != nil {
 					failedIDs.Add(id)
 					return nil
@@ -385,7 +399,7 @@ func HandleSendFileFromGooglePhotosToSatellite(c echo.Context) error {
 	})
 }
 
-func uploadSingleFileFromPhotosToSatellite(ctx context.Context, client *google.GPotosClient, id, accesGrant string) error {
+func uploadSingleFileFromPhotosToSatellite(ctx context.Context, client *google.GPotosClient, id, accesGrant, userEmail string) error {
 	item, err := client.GetPhoto(ctx, id)
 	if err != nil {
 		return err
@@ -401,7 +415,10 @@ func uploadSingleFileFromPhotosToSatellite(ctx context.Context, client *google.G
 		return err
 	}
 
-	return satellite.UploadObject(context.Background(), accesGrant, "google-photos", item.Filename, body)
+	// Create path with user email directory: userEmail/filename
+	photoPath := userEmail + "/" + item.Filename
+
+	return satellite.UploadObject(context.Background(), accesGrant, "google-photos", photoPath, body)
 
 }
 
@@ -446,8 +463,22 @@ func HandleSendAllFilesFromGooglePhotosToSatellite(c echo.Context) error {
 		})
 	}
 
+	// Get user email to create user-specific directory
+	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "failed to get user email: " + err.Error(),
+		})
+	}
+
+	if userDetails.Email == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "user email not found, please check access handling",
+		})
+	}
+
 	for _, p := range photosRespJSON {
-		err := uploadSingleFileFromPhotosToSatellite(c.Request().Context(), client, p.ID, accesGrant)
+		err := uploadSingleFileFromPhotosToSatellite(c.Request().Context(), client, p.ID, accesGrant, userDetails.Email)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),
@@ -483,6 +514,20 @@ func HandleSendListFilesFromGooglePhotosToSatellite(c echo.Context) error {
 		})
 	}
 
+	// Get user email to create user-specific directory
+	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "failed to get user email: " + err.Error(),
+		})
+	}
+
+	if userDetails.Email == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "user email not found, please check access handling",
+		})
+	}
+
 	var allIDs []string
 	if strings.Contains(c.Request().Header.Get(echo.HeaderContentType), echo.MIMEApplicationJSON) {
 		// Decode JSON array from request body
@@ -497,7 +542,7 @@ func HandleSendListFilesFromGooglePhotosToSatellite(c echo.Context) error {
 		allIDs = strings.Split(formIDs, ",")
 	}
 	for _, p := range allIDs {
-		err := uploadSingleFileFromPhotosToSatellite(c.Request().Context(), client, p, accesGrant)
+		err := uploadSingleFileFromPhotosToSatellite(c.Request().Context(), client, p, accesGrant, userDetails.Email)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),
