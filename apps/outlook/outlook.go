@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	abs "github.com/microsoft/kiota-abstractions-go"
@@ -11,6 +12,19 @@ import (
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/users"
 )
+
+// OutlookFilter represents filter parameters for Outlook message queries
+type OutlookFilter struct {
+	From          string `json:"from,omitempty"`          // Filter by sender email
+	To            string `json:"to,omitempty"`            // Filter by recipient email
+	Subject       string `json:"subject,omitempty"`       // Filter by subject
+	HasAttachment bool   `json:"hasAttachment,omitempty"` // Filter messages with attachments
+	After         string `json:"after,omitempty"`         // Filter messages after date (YYYY-MM-DD or RFC3339)
+	Before        string `json:"before,omitempty"`        // Filter messages before date (YYYY-MM-DD or RFC3339)
+	NewerThan     string `json:"newerThan,omitempty"`     // Filter messages newer than (e.g., "1d", "1w", "1m")
+	OlderThan     string `json:"olderThan,omitempty"`     // Filter messages older than (e.g., "1d", "1w", "1m")
+	Query         string `json:"query,omitempty"`         // Raw OData filter query
+}
 
 type OutlookClient struct {
 	*msgraph.GraphServiceClient
@@ -63,9 +77,140 @@ func (client *OutlookClient) GetCurrentUser() (*OutlookUser, error) {
 	return u, nil
 }
 
+// buildOutlookFilter constructs an OData filter query string from filter parameters
+func (filter *OutlookFilter) buildOutlookFilter() string {
+	var filterParts []string
+
+	// If a raw query is provided, use it directly
+	if filter.Query != "" {
+		return filter.Query
+	}
+
+	// Build OData filter from individual filter parameters
+	if filter.From != "" {
+		// Escape single quotes in email address
+		escapedFrom := strings.ReplaceAll(filter.From, "'", "''")
+		filterParts = append(filterParts, fmt.Sprintf("from/emailAddress/address eq '%s'", escapedFrom))
+	}
+
+	if filter.To != "" {
+		// Escape single quotes in email address
+		escapedTo := strings.ReplaceAll(filter.To, "'", "''")
+		filterParts = append(filterParts, fmt.Sprintf("toRecipients/any(r:r/emailAddress/address eq '%s')", escapedTo))
+	}
+
+	if filter.Subject != "" {
+		// Escape single quotes in subject
+		escapedSubject := strings.ReplaceAll(filter.Subject, "'", "''")
+		filterParts = append(filterParts, fmt.Sprintf("contains(subject,'%s')", escapedSubject))
+	}
+
+	if filter.HasAttachment {
+		filterParts = append(filterParts, "hasAttachments eq true")
+	}
+
+	// Handle date filters
+	now := time.Now()
+	if filter.After != "" {
+		dateStr := parseDateFilter(filter.After)
+		if dateStr != "" {
+			filterParts = append(filterParts, fmt.Sprintf("receivedDateTime ge %s", dateStr))
+		}
+	}
+
+	if filter.Before != "" {
+		dateStr := parseDateFilter(filter.Before)
+		if dateStr != "" {
+			filterParts = append(filterParts, fmt.Sprintf("receivedDateTime le %s", dateStr))
+		}
+	}
+
+	if filter.NewerThan != "" {
+		dateStr := parseRelativeDateFilter(filter.NewerThan, now, true)
+		if dateStr != "" {
+			filterParts = append(filterParts, fmt.Sprintf("receivedDateTime ge %s", dateStr))
+		}
+	}
+
+	if filter.OlderThan != "" {
+		dateStr := parseRelativeDateFilter(filter.OlderThan, now, false)
+		if dateStr != "" {
+			filterParts = append(filterParts, fmt.Sprintf("receivedDateTime le %s", dateStr))
+		}
+	}
+
+	// Join all filter parts with 'and'
+	return strings.Join(filterParts, " and ")
+}
+
+// parseDateFilter parses date string and returns RFC3339 format for OData
+func parseDateFilter(dateStr string) string {
+	// Try RFC3339 format first
+	if t, err := time.Parse(time.RFC3339, dateStr); err == nil {
+		return t.Format(time.RFC3339)
+	}
+	// Try YYYY-MM-DD format
+	if t, err := time.Parse("2006-01-02", dateStr); err == nil {
+		return t.Format(time.RFC3339)
+	}
+	// Try YYYY/MM/DD format (Gmail style)
+	if t, err := time.Parse("2006/01/02", dateStr); err == nil {
+		return t.Format(time.RFC3339)
+	}
+	return ""
+}
+
+// parseRelativeDateFilter parses relative date strings like "1d", "1w", "1m"
+func parseRelativeDateFilter(relativeStr string, now time.Time, newer bool) string {
+	var duration time.Duration
+	var err error
+
+	// Remove common suffixes and parse
+	relativeStr = strings.ToLower(strings.TrimSpace(relativeStr))
+	if strings.HasSuffix(relativeStr, "d") {
+		days := strings.TrimSuffix(relativeStr, "d")
+		var d int
+		if _, err = fmt.Sscanf(days, "%d", &d); err == nil {
+			duration = time.Duration(d) * 24 * time.Hour
+		}
+	} else if strings.HasSuffix(relativeStr, "w") {
+		weeks := strings.TrimSuffix(relativeStr, "w")
+		var w int
+		if _, err = fmt.Sscanf(weeks, "%d", &w); err == nil {
+			duration = time.Duration(w) * 7 * 24 * time.Hour
+		}
+	} else if strings.HasSuffix(relativeStr, "m") {
+		months := strings.TrimSuffix(relativeStr, "m")
+		var m int
+		if _, err = fmt.Sscanf(months, "%d", &m); err == nil {
+			// Approximate month as 30 days
+			duration = time.Duration(m) * 30 * 24 * time.Hour
+		}
+	}
+
+	if err != nil || duration == 0 {
+		return ""
+	}
+
+	var targetTime time.Time
+	if newer {
+		// Messages newer than X (received after now - duration)
+		targetTime = now.Add(-duration)
+	} else {
+		// Messages older than X (received before now - duration)
+		targetTime = now.Add(-duration)
+	}
+
+	return targetTime.Format(time.RFC3339)
+}
+
 // GetUserMessages retrieves messages from Outlook with pagination support
 func (client *OutlookClient) GetUserMessages(skip, limit int32) ([]*OutlookMinimalMessage, error) {
+	return client.GetUserMessagesControlled(skip, limit, nil)
+}
 
+// GetUserMessagesControlled retrieves messages from Outlook with pagination and filter support
+func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter *OutlookFilter) ([]*OutlookMinimalMessage, error) {
 	if limit > 100 || limit < 1 {
 		limit = 100
 	}
@@ -78,6 +223,13 @@ func (client *OutlookClient) GetUserMessages(skip, limit int32) ([]*OutlookMinim
 		Skip:    int32Ptr(skip),
 		Select:  []string{"id", "subject", "from", "receivedDateTime", "isRead", "hasAttachments"},
 		Orderby: []string{"receivedDateTime DESC"},
+	}
+
+	// Apply filter if provided
+	if filter != nil {
+		if filterStr := filter.buildOutlookFilter(); filterStr != "" {
+			query.Filter = stringPtr(filterStr)
+		}
 	}
 
 	configuration := users.ItemMessagesRequestBuilderGetRequestConfiguration{
@@ -340,4 +492,9 @@ func (client *OutlookClient) SendMessage(message *OutlookMessage) error {
 // Helper function to create int32 pointer
 func int32Ptr(i int32) *int32 {
 	return &i
+}
+
+// Helper function to create string pointer
+func stringPtr(s string) *string {
+	return &s
 }

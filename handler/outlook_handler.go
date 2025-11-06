@@ -76,6 +76,15 @@ func createOutlookClient(accessToken string) (*outlook.OutlookClient, error) {
 	return client, nil
 }
 
+// DecodeOutlookURLFilter decodes a URL-encoded JSON filter parameter and returns an OutlookFilter
+func DecodeOutlookURLFilter(urlEncodedFilter string) (*outlook.OutlookFilter, error) {
+	var filter outlook.OutlookFilter
+	if err := decodeFilterJSON(urlEncodedFilter, &filter); err != nil {
+		return nil, err
+	}
+	return &filter, nil
+}
+
 func HandleOutlookGetMessages(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
@@ -89,12 +98,24 @@ func HandleOutlookGetMessages(c echo.Context) error {
 	skip, _ := strconv.Atoi(c.QueryParam("offset"))
 	limit, _ := strconv.Atoi(c.QueryParam("limit"))
 
+	// Parse filter from JWT-encoded query parameter
+	var filter *outlook.OutlookFilter
+	if filterParam := c.QueryParam("filter"); filterParam != "" {
+		decodedFilter, err := DecodeOutlookURLFilter(filterParam)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{
+				"error": "invalid filter parameter: " + err.Error(),
+			})
+		}
+		filter = decodedFilter
+	}
+
 	client, err := createOutlookClient(accessToken)
 	if err != nil {
 		return err
 	}
 
-	messages, err := client.GetUserMessages(int32(skip), int32(limit))
+	messages, err := client.GetUserMessagesControlled(int32(skip), int32(limit), filter)
 	if err != nil {
 		logger.Error(ctx, "Failed to get user messages from Outlook", logger.ErrorField(err))
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())

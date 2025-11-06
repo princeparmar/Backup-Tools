@@ -162,19 +162,27 @@ func (s *GmailService) DownloadMessagesFromSatellite(ctx context.Context, keys [
 
 // decodeURLFilter decodes a URL-encoded JSON filter parameter and returns a GmailFilter
 func DecodeURLFilter(urlEncodedFilter string) (*google.GmailFilter, error) {
+	var filter google.GmailFilter
+	if err := decodeFilterJSON(urlEncodedFilter, &filter); err != nil {
+		return nil, err
+	}
+	return &filter, nil
+}
+
+// decodeFilterJSON is a generic helper to decode URL-encoded JSON filter parameters
+func decodeFilterJSON(urlEncodedFilter string, target interface{}) error {
 	// URL decode the filter string
 	decodedFilter, err := url.QueryUnescape(urlEncodedFilter)
 	if err != nil {
-		return nil, fmt.Errorf("failed to URL decode filter: %v", err)
+		return fmt.Errorf("failed to URL decode filter: %v", err)
 	}
 
-	// Parse the JSON string into GmailFilter struct
-	var filter google.GmailFilter
-	if err := json.Unmarshal([]byte(decodedFilter), &filter); err != nil {
-		return nil, fmt.Errorf("failed to parse filter JSON: %v", err)
+	// Parse the JSON string into target struct
+	if err := json.Unmarshal([]byte(decodedFilter), target); err != nil {
+		return fmt.Errorf("failed to parse filter JSON: %v", err)
 	}
 
-	return &filter, nil
+	return nil
 }
 
 // Helper function to parse request IDs from JSON or form data
