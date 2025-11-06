@@ -393,11 +393,21 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 
 	// Save job to database if job exists
 	if job != nil {
-		if err := a.store.CronJobRepo.UpdateCronJobByID(job.ID, map[string]interface{}{
+		updateMap := map[string]interface{}{
 			"message":        job.Message,
 			"message_status": job.MessageStatus,
 			"last_run":       job.LastRun,
-		}); err != nil {
+		}
+
+		// Update cron job status based on task status
+		switch task.Status {
+		case repo.TaskStatusSuccess:
+			updateMap["status"] = repo.JobStatusSuccess
+		case repo.TaskStatusFailed:
+			updateMap["status"] = repo.JobStatusFailed
+		}
+
+		if err := a.store.CronJobRepo.UpdateCronJobByID(job.ID, updateMap); err != nil {
 			logger.Error(ctx, "Failed to save job status",
 				logger.Int("job_id", int(job.ID)),
 				logger.ErrorField(err),

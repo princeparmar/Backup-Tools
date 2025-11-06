@@ -98,6 +98,7 @@ func (r *TaskRepository) MissedHeartbeatForTask() error {
 
 		job.Message = "Process got stuck because of some reason. Marked as failed"
 		job.MessageStatus = JobMessageStatusError
+		job.Status = JobStatusFailed
 
 		db = tx.Save(&job)
 		if db != nil && db.Error != nil {
@@ -150,6 +151,7 @@ func (r *TaskRepository) GetPushedTask() (*TaskListingDB, error) {
 
 	job.Message = "Automatic backup started"
 	job.MessageStatus = JobMessageStatusInfo
+	job.Status = JobStatusInProgress
 
 	if err := tx.Save(&job).Error; err != nil {
 		tx.Rollback()
@@ -177,15 +179,28 @@ func (r *TaskRepository) GetTaskByID(ID uint) (*TaskListingDB, error) {
 
 // CreateTaskForCronJob creates a new task for a cron job
 func (r *TaskRepository) CreateTaskForCronJob(cronJobID uint) (*TaskListingDB, error) {
+	tx := r.db.Begin()
+
 	data := TaskListingDB{
 		CronJobID: cronJobID,
 		Status:    TaskStatusPushed,
 	}
 
 	// create new entry in database and return newly created task
-	res := r.db.Create(&data)
+	res := tx.Create(&data)
 	if res != nil && res.Error != nil {
+		tx.Rollback()
 		return nil, fmt.Errorf("error creating task for cron job: %v", res.Error)
+	}
+
+	// Update cron job status to In_Queue when task is created with pushed status
+	if err := tx.Model(&CronJobListingDB{}).Where("id = ?", cronJobID).Update("status", JobStatusInQueue).Error; err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("error updating cron job status: %v", err)
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return nil, fmt.Errorf("error committing transaction: %v", err)
 	}
 
 	return &data, nil

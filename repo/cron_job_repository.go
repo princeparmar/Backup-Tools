@@ -21,6 +21,12 @@ const (
 
 // Task status constants
 const (
+	JobStatusCreated    = "created"
+	JobStatusInQueue    = "in_queue"
+	JobStatusInProgress = "in_progress"
+	JobStatusSuccess    = "success"
+	JobStatusFailed     = "failed"
+
 	TaskStatusPushed  = "pushed"
 	TaskStatusRunning = "running"
 	TaskStatusSuccess = "success"
@@ -63,6 +69,8 @@ type CronJobListingDB struct {
 	Tasks []TaskListingDB `gorm:"foreignKey:CronJobID"`
 
 	SyncType string `json:"sync_type" gorm:"uniqueIndex:idx_name_sync_type"`
+
+	Status string `json:"status" gorm:"default:created"`
 }
 
 // TaskMemory represents the memory state of a task
@@ -305,6 +313,7 @@ func (r *CronJobRepository) CreateCronJobForUser(userID, name, method string, sy
 		Method:    method,
 		SyncType:  syncType,
 		InputData: database.NewDbJsonFromValue(inputData),
+		Status:    JobStatusCreated,
 	}
 	// create new entry in database and return newly created cron job
 	res := r.db.Create(&data)
