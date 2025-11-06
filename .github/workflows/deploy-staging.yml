@@ -15,7 +15,7 @@ env:
 
 jobs:
   deploy:
-    runs-on: [self-hosted, Windows, X64]  # Targets STORX-STAGING runner (excludes production tag)
+    runs-on: [self-hosted, Windows, X64, staging]  # Targets STORX-STAGING runner (excludes production tag)
     
     steps:
       - name: Checkout code
