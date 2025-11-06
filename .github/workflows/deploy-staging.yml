@@ -8,6 +8,7 @@ on:
 
 env:
   APP_NAME: 'backuptools-windows-amd64.exe'
+  BUILD_DIR: 'D:\deployment'
   DEPLOY_DIR: 'D:\bin'
   SERVICE_NAME: 'backuptools'
 
@@ -28,17 +29,18 @@ jobs:
           go-version: '1.21.13'
           cache: true
           
-      - name: Build application
+      - name: Build application in deployment directory
         run: |
-          $buildTime = Get-Date -Format 'yyyy-MM-dd_HH:mm:ss'
-          go build -o ${{ env.APP_NAME }} -ldflags="-s -w -X main.buildTime=$buildTime" -trimpath ./cmd
+          # Ensure build directory exists
+          if (!(Test-Path "${{ env.BUILD_DIR }}")) {
+            New-Item -ItemType Directory -Path "${{ env.BUILD_DIR }}" -Force
+          }
           
-      - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: backuptools-binary
-          path: ${{ env.APP_NAME }}
-          retention-days: 1
+          # Build binary in D:\deployment
+          $buildTime = Get-Date -Format 'yyyy-MM-dd_HH:mm:ss'
+          $buildPath = Join-Path "${{ env.BUILD_DIR }}" "${{ env.APP_NAME }}"
+          go build -o $buildPath -ldflags="-s -w -X main.buildTime=$buildTime" -trimpath ./cmd
+          Write-Host "✅ Binary built at: $buildPath"
           
       - name: Stop NSSM service
         run: |
@@ -72,14 +74,22 @@ jobs:
           
       - name: Deploy new version
         run: |
-          # Ensure directory exists
+          # Ensure deploy directory exists
           if (!(Test-Path "${{ env.DEPLOY_DIR }}")) {
             New-Item -ItemType Directory -Path "${{ env.DEPLOY_DIR }}" -Force
           }
           
-          # Deploy new version (service should be stopped, so file should not be locked)
-          Copy-Item "${{ env.APP_NAME }}" "${{ env.DEPLOY_DIR }}\" -Force
-          Write-Host "✅ Deployed to ${{ env.DEPLOY_DIR }}"
+          # Copy from build directory to deploy directory
+          $buildPath = Join-Path "${{ env.BUILD_DIR }}" "${{ env.APP_NAME }}"
+          $deployPath = Join-Path "${{ env.DEPLOY_DIR }}" "${{ env.APP_NAME }}"
+          
+          if (Test-Path $buildPath) {
+            Copy-Item $buildPath $deployPath -Force
+            Write-Host "✅ Deployed from $buildPath to $deployPath"
+          } else {
+            Write-Host "❌ Build file not found at: $buildPath"
+            exit 1
+          }
           
       - name: Start NSSM service
         run: |
