@@ -139,16 +139,9 @@ func HandleGetRunningScheduledTasks(c echo.Context) error {
 		})
 	}
 
-	logger.Info(ctx, "Retrieved running scheduled tasks",
-		logger.String("user_id", userID),
-		logger.Int("task_count", len(runningTasks)))
-
-	// Mask storx_token before returning
-	maskedTasks := maskStorxTokens(runningTasks)
-
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Running Scheduled Tasks List",
-		"data":    maskedTasks,
+		"data":    runningTasks,
 	})
 }
 

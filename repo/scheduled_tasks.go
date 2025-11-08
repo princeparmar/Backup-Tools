@@ -25,6 +25,16 @@ type ScheduledTasks struct {
 	HeartBeat    *time.Time                               `json:"heart_beat"`
 }
 
+type LiveScheduledTasks struct {
+	Memory       *database.DbJson[map[string][]string] `json:"memory" gorm:"type:jsonb"`
+	Status       string                                `json:"status" default:"created"`
+	StartTime    *time.Time                            `json:"start_time"`
+	Execution    uint64                                `json:"execution"`
+	SuccessCount uint                                  `json:"success_count"`
+	FailedCount  uint                                  `json:"failed_count"`
+	Errors       database.DbJson[[]string]             `json:"errors" gorm:"type:jsonb"`
+	HeartBeat    *time.Time                            `json:"heart_beat"`
+}
 type ScheduledTasksFilter struct {
 	UserID    string     `json:"user_id"`
 	LoginID   string     `json:"login_id"`
@@ -105,11 +115,14 @@ func (r *ScheduledTasksRepository) UpdateHeartBeatForScheduledTask(id uint) erro
 }
 
 // GetAllRunningScheduledTasksForUser retrieves all running scheduled tasks for a specific user
-func (r *ScheduledTasksRepository) GetAllRunningScheduledTasksForUser(userID string) ([]ScheduledTasks, error) {
-	var tasks []ScheduledTasks
-	err := r.db.Where("user_id = ? AND status = ?", userID, "running").
-		Order("start_time DESC").
-		Find(&tasks).Error
+func (r *ScheduledTasksRepository) GetAllRunningScheduledTasksForUser(userID string) ([]LiveScheduledTasks, error) {
+	var tasks []LiveScheduledTasks
+	query := `
+		SELECT memory,status,start_time,execution,success_count,failed_count,errors,heart_beat
+		FROM scheduled_tasks
+		WHERE user_id = ? AND status = 'running'
+		ORDER BY start_time DESC`
+	err := r.db.Raw(query, userID).Scan(&tasks).Error
 	if err != nil {
 		return nil, fmt.Errorf("error getting running scheduled tasks for user: %v", err)
 	}
