@@ -24,6 +24,7 @@ type OutlookFilter struct {
 	NewerThan     string `json:"newerThan,omitempty"`     // Filter messages newer than (e.g., "1d", "1w", "1m")
 	OlderThan     string `json:"olderThan,omitempty"`     // Filter messages older than (e.g., "1d", "1w", "1m")
 	Query         string `json:"query,omitempty"`         // Raw OData filter query
+	Search        string `json:"search,omitempty"`        // Full-text search across message properties (subject, body, sender, etc.)
 }
 
 type OutlookClient struct {
@@ -226,9 +227,19 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 	}
 
 	// Apply filter if provided
+	// Note: Microsoft Graph API does not support combining $search and $filter in a single request.
+	// If both are provided, $search takes precedence.
 	if filter != nil {
-		if filterStr := filter.buildOutlookFilter(); filterStr != "" {
-			query.Filter = stringPtr(filterStr)
+		// If search is provided, use it (search and filter cannot be combined)
+		// Trim whitespace to handle edge cases
+		searchStr := strings.TrimSpace(filter.Search)
+		if searchStr != "" {
+			query.Search = stringPtr(searchStr)
+		} else {
+			// Otherwise, use the OData filter
+			if filterStr := filter.buildOutlookFilter(); filterStr != "" {
+				query.Filter = stringPtr(filterStr)
+			}
 		}
 	}
 
