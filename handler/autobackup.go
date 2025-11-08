@@ -49,9 +49,23 @@ func HandleAutomaticSyncListForUser(c echo.Context) error {
 		})
 	}
 
+	// Parse filter from query parameter
+	var filter *repo.CronJobFilter
+	if filterParam := c.QueryParam("filter"); filterParam != "" {
+		var decodedFilter repo.CronJobFilter
+		if err := decodeFilterJSON(filterParam, &decodedFilter); err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "invalid filter parameter",
+				"error":   err.Error(),
+			})
+		}
+		filter = &decodedFilter
+	}
+
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
-	automaticSyncList, err := database.CronJobRepo.GetAllCronJobsForUser(userID)
+	automaticSyncList, err := database.CronJobRepo.GetAllCronJobsForUser(userID, filter)
 	if err != nil {
+		logger.Error(ctx, "Failed to get cron jobs for user", logger.ErrorField(err))
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"message": "internal server error",
 			"error":   err.Error(),
@@ -303,7 +317,7 @@ func createSyncJob(userID, name, method, syncType string, config map[string]inte
 }
 
 func checkExistingJobs(userID, syncType, method string, db *db.PostgresDb) error {
-	existingJobs, err := db.CronJobRepo.GetAllCronJobsForUser(userID)
+	existingJobs, err := db.CronJobRepo.GetAllCronJobsForUser(userID, nil)
 	if err != nil {
 		return jsonError(http.StatusInternalServerError, "Failed to check existing jobs", err)
 	}

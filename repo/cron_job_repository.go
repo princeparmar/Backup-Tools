@@ -140,10 +140,48 @@ func (r *CronJobRepository) GetAllCronJobs() ([]CronJobListingDB, error) {
 	return res, nil
 }
 
-// GetAllCronJobsForUser retrieves all cron jobs for a specific user
-func (r *CronJobRepository) GetAllCronJobsForUser(userID string) ([]CronJobListingDB, error) {
+// CronJobFilter represents filter parameters for cron job queries
+type CronJobFilter struct {
+	Name          string `json:"name,omitempty"`          // Filter by name (partial match)
+	Method        string `json:"method,omitempty"`        // Filter by method
+	SyncType      string `json:"syncType,omitempty"`      // Filter by sync type
+	Active        *bool  `json:"active,omitempty"`        // Filter by active status
+	Status        string `json:"status,omitempty"`        // Filter by status (created, in_queue, in_progress, success, failed)
+	MessageStatus string `json:"messageStatus,omitempty"` // Filter by message status (info, warning, error)
+	Interval      string `json:"interval,omitempty"`      // Filter by interval (daily, weekly, monthly)
+}
+
+// GetAllCronJobsForUser retrieves all cron jobs for a specific user with optional filtering
+func (r *CronJobRepository) GetAllCronJobsForUser(userID string, filter *CronJobFilter) ([]CronJobListingDB, error) {
 	var res []CronJobListingDB
-	db := r.db.Where("user_id = ?", userID).Find(&res)
+	query := r.db.Where("user_id = ?", userID)
+
+	// Apply filters if provided
+	if filter != nil {
+		if filter.Name != "" {
+			query = query.Where("name ILIKE ?", "%"+filter.Name+"%")
+		}
+		if filter.Method != "" {
+			query = query.Where("method = ?", filter.Method)
+		}
+		if filter.SyncType != "" {
+			query = query.Where("sync_type = ?", filter.SyncType)
+		}
+		if filter.Active != nil {
+			query = query.Where("active = ?", *filter.Active)
+		}
+		if filter.Status != "" {
+			query = query.Where("status = ?", filter.Status)
+		}
+		if filter.MessageStatus != "" {
+			query = query.Where("message_status = ?", filter.MessageStatus)
+		}
+		if filter.Interval != "" {
+			query = query.Where("interval = ?", filter.Interval)
+		}
+	}
+
+	db := query.Order("created_at DESC").Find(&res)
 	if db != nil && db.Error != nil {
 		return nil, fmt.Errorf("error getting cron jobs for user: %v", db.Error)
 	}
