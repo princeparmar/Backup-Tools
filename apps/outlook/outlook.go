@@ -100,10 +100,12 @@ func (filter *OutlookFilter) buildOutlookFilter() string {
 		filterParts = append(filterParts, fmt.Sprintf("toRecipients/any(r:r/emailAddress/address eq '%s')", escapedTo))
 	}
 
-	if filter.Subject != "" {
-		// Escape single quotes in subject
-		escapedSubject := strings.ReplaceAll(filter.Subject, "'", "''")
-		filterParts = append(filterParts, fmt.Sprintf("contains(subject,'%s')", escapedSubject))
+	// Subject is handled separately in GetUserMessagesControlled when it's the only filter
+	// If subject is provided with other filters, it's not included here to avoid complexity issues
+	if filter.Subject != "" && (filter.From != "" || filter.To != "" || filter.HasAttachment ||
+		filter.After != "" || filter.Before != "" || filter.NewerThan != "" || filter.OlderThan != "") {
+		// Only process subject if there are other filters, but skip it to avoid complexity
+		// Subject should be used alone or passed directly
 	}
 
 	if filter.HasAttachment {
@@ -246,10 +248,19 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 			if skip > 0 {
 				query.Skip = int32Ptr(skip)
 			}
-			query.Orderby = []string{"receivedDateTime DESC"}
-			// Otherwise, use the OData filter
-			if filterStr := filter.buildOutlookFilter(); filterStr != "" {
-				query.Filter = stringPtr(filterStr)
+			// If only subject is provided, wrap it in contains() without processing the text
+			if filter.Subject != "" && filter.From == "" && filter.To == "" && !filter.HasAttachment &&
+				filter.After == "" && filter.Before == "" && filter.NewerThan == "" && filter.OlderThan == "" && filter.Query == "" {
+				// Wrap subject in contains() - only escape single quotes for OData, pass text as-is
+				escapedSubject := strings.ReplaceAll(filter.Subject, "'", "''")
+				query.Filter = stringPtr(fmt.Sprintf("contains(subject,'%s')", escapedSubject))
+				// Don't use orderBy with subject filter to avoid "too complex" errors
+			} else {
+				query.Orderby = []string{"receivedDateTime DESC"}
+				// Build the OData filter from other parameters
+				if filterStr := filter.buildOutlookFilter(); filterStr != "" {
+					query.Filter = stringPtr(filterStr)
+				}
 			}
 		}
 	} else {
@@ -267,6 +278,7 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 
 	result, err := client.Me().Messages().Get(context.Background(), &configuration)
 	if err != nil {
+		fmt.Println("failed to get user messages: %w", err)
 		return nil, fmt.Errorf("failed to get user messages: %w", err)
 	}
 
