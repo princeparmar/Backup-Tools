@@ -220,13 +220,12 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 	}
 
 	query := users.ItemMessagesRequestBuilderGetQueryParameters{
-		Select:  []string{"id", "subject", "from", "receivedDateTime", "isRead", "hasAttachments"},
-		Orderby: []string{"receivedDateTime DESC"},
+		Select: []string{"id", "subject", "from", "receivedDateTime", "isRead", "hasAttachments"},
 	}
 
 	// Apply filter if provided
 	// Note: Microsoft Graph API does not support combining $search and $filter in a single request.
-	// Also, $search does not support $skip parameter - only $top is supported.
+	// Also, $search does not support $skip or $orderBy parameters - only $top is supported.
 	// If both are provided, $search takes precedence.
 	if filter != nil {
 		// If search is provided, use it (search and filter cannot be combined)
@@ -234,30 +233,32 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 		searchStr := strings.TrimSpace(filter.Search)
 		if searchStr != "" {
 			query.Search = stringPtr(searchStr)
-			// $search does not support $skip, only $top
+			// $search does not support $skip or $orderBy, only $top
 			// Set Top for search results (max 250 for search)
 			if limit > 250 {
 				limit = 250
 			}
 			query.Top = int32Ptr(limit)
-			// Skip is not supported with $search, so we ignore skip parameter
+			// Skip and Orderby are not supported with $search, so we ignore them
 		} else {
-			// For OData filter, we can use both $top and $skip
+			// For OData filter, we can use $top, $skip, and $orderBy
 			query.Top = int32Ptr(limit)
 			if skip > 0 {
 				query.Skip = int32Ptr(skip)
 			}
+			query.Orderby = []string{"receivedDateTime DESC"}
 			// Otherwise, use the OData filter
 			if filterStr := filter.buildOutlookFilter(); filterStr != "" {
 				query.Filter = stringPtr(filterStr)
 			}
 		}
 	} else {
-		// No filter - use normal pagination
+		// No filter - use normal pagination with ordering
 		query.Top = int32Ptr(limit)
 		if skip > 0 {
 			query.Skip = int32Ptr(skip)
 		}
+		query.Orderby = []string{"receivedDateTime DESC"}
 	}
 
 	configuration := users.ItemMessagesRequestBuilderGetRequestConfiguration{
