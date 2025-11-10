@@ -220,14 +220,13 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 	}
 
 	query := users.ItemMessagesRequestBuilderGetQueryParameters{
-		Top:     int32Ptr(limit),
-		Skip:    int32Ptr(skip),
 		Select:  []string{"id", "subject", "from", "receivedDateTime", "isRead", "hasAttachments"},
 		Orderby: []string{"receivedDateTime DESC"},
 	}
 
 	// Apply filter if provided
 	// Note: Microsoft Graph API does not support combining $search and $filter in a single request.
+	// Also, $search does not support $skip parameter - only $top is supported.
 	// If both are provided, $search takes precedence.
 	if filter != nil {
 		// If search is provided, use it (search and filter cannot be combined)
@@ -235,11 +234,29 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 		searchStr := strings.TrimSpace(filter.Search)
 		if searchStr != "" {
 			query.Search = stringPtr(searchStr)
+			// $search does not support $skip, only $top
+			// Set Top for search results (max 250 for search)
+			if limit > 250 {
+				limit = 250
+			}
+			query.Top = int32Ptr(limit)
+			// Skip is not supported with $search, so we ignore skip parameter
 		} else {
+			// For OData filter, we can use both $top and $skip
+			query.Top = int32Ptr(limit)
+			if skip > 0 {
+				query.Skip = int32Ptr(skip)
+			}
 			// Otherwise, use the OData filter
 			if filterStr := filter.buildOutlookFilter(); filterStr != "" {
 				query.Filter = stringPtr(filterStr)
 			}
+		}
+	} else {
+		// No filter - use normal pagination
+		query.Top = int32Ptr(limit)
+		if skip > 0 {
+			query.Skip = int32Ptr(skip)
 		}
 	}
 
