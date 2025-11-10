@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -78,13 +79,37 @@ func (client *OutlookClient) GetCurrentUser() (*OutlookUser, error) {
 	return u, nil
 }
 
+// validateSubject checks if subject contains any special characters
+// Returns error if subject contains special characters that could cause OData filter issues
+func validateSubject(subject string) error {
+	if subject == "" {
+		return nil
+	}
+	// Allow alphanumeric, spaces, and basic punctuation: period, comma, hyphen, underscore, colon, semicolon
+	// Reject parentheses, brackets, quotes, backslashes, and other special characters
+	validPattern := regexp.MustCompile(`^[a-zA-Z0-9\s.,\-_:;]+$`)
+	if !validPattern.MatchString(subject) {
+		return fmt.Errorf("subject contains special characters that are not allowed. Only alphanumeric characters, spaces, and basic punctuation (.,-_:;) are allowed")
+	}
+	return nil
+}
+
 // buildOutlookFilter constructs an OData filter query string from filter parameters
-func (filter *OutlookFilter) buildOutlookFilter() string {
+func (filter *OutlookFilter) buildOutlookFilter() (string, error) {
 	var filterParts []string
 
 	// If a raw query is provided, use it directly
 	if filter.Query != "" {
-		return filter.Query
+		return filter.Query, nil
+	}
+
+	// If subject is provided with other filters, validate it but skip it to avoid complexity issues
+	if filter.Subject != "" {
+		if err := validateSubject(filter.Subject); err != nil {
+			return "", fmt.Errorf("invalid subject: %w", err)
+		}
+		// Subject is handled separately in GetUserMessagesControlled when it's the only filter
+		// If subject is provided with other filters, it's not included here to avoid complexity issues
 	}
 
 	// Build OData filter from individual filter parameters
@@ -98,14 +123,6 @@ func (filter *OutlookFilter) buildOutlookFilter() string {
 		// Escape single quotes in email address
 		escapedTo := strings.ReplaceAll(filter.To, "'", "''")
 		filterParts = append(filterParts, fmt.Sprintf("toRecipients/any(r:r/emailAddress/address eq '%s')", escapedTo))
-	}
-
-	// Subject is handled separately in GetUserMessagesControlled when it's the only filter
-	// If subject is provided with other filters, it's not included here to avoid complexity issues
-	if filter.Subject != "" && (filter.From != "" || filter.To != "" || filter.HasAttachment ||
-		filter.After != "" || filter.Before != "" || filter.NewerThan != "" || filter.OlderThan != "") {
-		// Only process subject if there are other filters, but skip it to avoid complexity
-		// Subject should be used alone or passed directly
 	}
 
 	if filter.HasAttachment {
@@ -143,7 +160,7 @@ func (filter *OutlookFilter) buildOutlookFilter() string {
 	}
 
 	// Join all filter parts with 'and'
-	return strings.Join(filterParts, " and ")
+	return strings.Join(filterParts, " and "), nil
 }
 
 // parseDateFilter parses date string and returns RFC3339 format for OData
@@ -251,6 +268,10 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 			// If only subject is provided, wrap it in contains() without processing the text
 			if filter.Subject != "" && filter.From == "" && filter.To == "" && !filter.HasAttachment &&
 				filter.After == "" && filter.Before == "" && filter.NewerThan == "" && filter.OlderThan == "" && filter.Query == "" {
+				// Validate subject for special characters
+				if err := validateSubject(filter.Subject); err != nil {
+					return nil, fmt.Errorf("invalid subject: %w", err)
+				}
 				// Wrap subject in contains() - only escape single quotes for OData, pass text as-is
 				escapedSubject := strings.ReplaceAll(filter.Subject, "'", "''")
 				query.Filter = stringPtr(fmt.Sprintf("contains(subject,'%s')", escapedSubject))
@@ -258,7 +279,9 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 			} else {
 				query.Orderby = []string{"receivedDateTime DESC"}
 				// Build the OData filter from other parameters
-				if filterStr := filter.buildOutlookFilter(); filterStr != "" {
+				if filterStr, err := filter.buildOutlookFilter(); err != nil {
+					return nil, err
+				} else if filterStr != "" {
 					query.Filter = stringPtr(filterStr)
 				}
 			}
