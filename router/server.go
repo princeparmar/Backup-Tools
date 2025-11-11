@@ -143,7 +143,7 @@ func StartServer(db *db.PostgresDb, address string) {
 	// office 365
 	office365 := e.Group("/office365")
 	office365.GET("/get-outlook-messages", handler.HandleOutlookGetMessages)
-	office365.GET("/get-outlook-message/:id", handler.HandleOutlookGetMessageById)
+	office365.GET("/get-outlook-messages/:id", handler.HandleOutlookGetMessageById)
 	office365.POST("/outlook-messages-to-satellite", handler.HandleListOutlookMessagesToSatellite)
 	office365.POST("/satellite-to-outlook", handler.HandleOutlookDownloadAndInsert)
 	// AWS S3

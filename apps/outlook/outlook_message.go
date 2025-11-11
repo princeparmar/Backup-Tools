@@ -1,6 +1,7 @@
 package outlook
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
@@ -22,7 +23,7 @@ func NewOutlookMinimalMessage(message models.Messageable) *OutlookMinimalMessage
 		ID:               stringValue(message.GetId()),
 		Subject:          stringValue(message.GetSubject()),
 		From:             stringValue(message.GetFrom().GetEmailAddress().GetAddress()),
-		ReceivedDateTime: timeValue(message.GetReceivedDateTime()),
+		ReceivedDateTime: timeValueInMilliseconds(message.GetReceivedDateTime()),
 	}
 
 	return result
@@ -127,7 +128,7 @@ func NewOutlookMessage(message models.Messageable) *OutlookMessage {
 			ID:               stringValue(message.GetId()),
 			Subject:          stringValue(message.GetSubject()),
 			From:             stringValue(message.GetFrom().GetEmailAddress().GetAddress()),
-			ReceivedDateTime: timeValue(message.GetReceivedDateTime()),
+			ReceivedDateTime: timeValueInMilliseconds(message.GetReceivedDateTime()),
 		},
 		Body:                   stringValue(message.GetBody().GetContent()),
 		ContentType:            message.GetBody().GetContentType(),
@@ -193,6 +194,14 @@ func timeValue(t *time.Time) string {
 		return ""
 	}
 	return t.Format(time.RFC3339)
+}
+
+// timeValueInMilliseconds returns the time as Unix timestamp in milliseconds (as string)
+func timeValueInMilliseconds(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d", t.UnixMilli())
 }
 
 func int64Value(i *int32) int64 {
