@@ -103,16 +103,13 @@ func (filter *OutlookFilter) buildOutlookFilter() (string, error) {
 		return filter.Query, nil
 	}
 
-	// If subject is provided with other filters, validate it but skip it to avoid complexity issues
-	if filter.Subject != "" {
-		if err := validateSubject(filter.Subject); err != nil {
-			return "", fmt.Errorf("invalid subject: %w", err)
-		}
-		// Subject is handled separately in GetUserMessagesControlled when it's the only filter
-		// If subject is provided with other filters, it's not included here to avoid complexity issues
-	}
-
 	// Build OData filter from individual filter parameters
+	// Include subject filter if provided
+	if filter.Subject != "" {
+		// Wrap subject in contains() - only escape single quotes for OData
+		escapedSubject := strings.ReplaceAll(filter.Subject, "'", "''")
+		filterParts = append(filterParts, fmt.Sprintf("contains(subject,'%s')", escapedSubject))
+	}
 	if filter.From != "" {
 		// Escape single quotes in email address
 		escapedFrom := strings.ReplaceAll(filter.From, "'", "''")
@@ -240,58 +237,48 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 
 	query := users.ItemMessagesRequestBuilderGetQueryParameters{
 		Select: []string{"id", "subject", "from", "receivedDateTime", "isRead", "hasAttachments"},
+		Top:    int32Ptr(limit),
+	}
+
+	// Apply skip if provided (except when using $search)
+	if skip > 0 {
+		query.Skip = int32Ptr(skip)
 	}
 
 	// Apply filter if provided
-	// Note: Microsoft Graph API does not support combining $search and $filter in a single request.
-	// Also, $search does not support $skip or $orderBy parameters - only $top is supported.
-	// If both are provided, $search takes precedence.
 	if filter != nil {
-		// If search is provided, use it (search and filter cannot be combined)
-		// Trim whitespace to handle edge cases
+		// If search is provided, use it
 		searchStr := strings.TrimSpace(filter.Search)
 		if searchStr != "" {
 			query.Search = stringPtr(searchStr)
-			// $search does not support $skip or $orderBy, only $top
-			// Set Top for search results (max 250 for search)
 			if limit > 250 {
-				limit = 250
+				query.Top = int32Ptr(250)
 			}
-			query.Top = int32Ptr(limit)
-			// Skip and Orderby are not supported with $search, so we ignore them
+			// $search doesn't support $skip or $orderby
 		} else {
-			// For OData filter, we can use $top, $skip, and $orderBy
-			query.Top = int32Ptr(limit)
-			if skip > 0 {
-				query.Skip = int32Ptr(skip)
-			}
-			// If only subject is provided, wrap it in contains() without processing the text
-			if filter.Subject != "" && filter.From == "" && filter.To == "" && !filter.HasAttachment &&
-				filter.After == "" && filter.Before == "" && filter.NewerThan == "" && filter.OlderThan == "" && filter.Query == "" {
-				// Validate subject for special characters
+			// For OData filter
+			if filter.Subject != "" {
 				if err := validateSubject(filter.Subject); err != nil {
 					return nil, fmt.Errorf("invalid subject: %w", err)
 				}
-				// Wrap subject in contains() - only escape single quotes for OData, pass text as-is
-				escapedSubject := strings.ReplaceAll(filter.Subject, "'", "''")
-				query.Filter = stringPtr(fmt.Sprintf("contains(subject,'%s')", escapedSubject))
-				// Don't use orderBy with subject filter to avoid "too complex" errors
-			} else {
-				query.Orderby = []string{"receivedDateTime DESC"}
-				// Build the OData filter from other parameters
-				if filterStr, err := filter.buildOutlookFilter(); err != nil {
-					return nil, err
-				} else if filterStr != "" {
-					query.Filter = stringPtr(filterStr)
-				}
 			}
+
+			// Build the OData filter
+			if filterStr, err := filter.buildOutlookFilter(); err != nil {
+				return nil, err
+			} else if filterStr != "" {
+				query.Filter = stringPtr(filterStr)
+			}
+
+			// FIX: Only use orderBy when we don't have subject filter
+			// Subject filter with contains() makes the query too complex when combined with orderBy
+			if filter.Subject == "" {
+				query.Orderby = []string{"receivedDateTime DESC"}
+			}
+			// If subject filter is present, don't use orderBy - let API use default ordering
 		}
 	} else {
-		// No filter - use normal pagination with ordering
-		query.Top = int32Ptr(limit)
-		if skip > 0 {
-			query.Skip = int32Ptr(skip)
-		}
+		// No filter - use normal ordering
 		query.Orderby = []string{"receivedDateTime DESC"}
 	}
 
@@ -301,7 +288,6 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 
 	result, err := client.Me().Messages().Get(context.Background(), &configuration)
 	if err != nil {
-		fmt.Println("failed to get user messages: %w", err)
 		return nil, fmt.Errorf("failed to get user messages: %w", err)
 	}
 
