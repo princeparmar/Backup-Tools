@@ -104,33 +104,29 @@ func (filter *OutlookFilter) buildOutlookFilter() (string, error) {
 	}
 
 	// Build OData filter from individual filter parameters
-	// Include subject filter if provided
 	if filter.Subject != "" {
-		// Wrap subject in contains() - only escape single quotes for OData
+		if err := validateSubject(filter.Subject); err != nil {
+			return "", fmt.Errorf("invalid subject: %w", err)
+		}
 		escapedSubject := strings.ReplaceAll(filter.Subject, "'", "''")
 		filterParts = append(filterParts, fmt.Sprintf("contains(subject,'%s')", escapedSubject))
 	}
+
 	if filter.From != "" {
-		// Escape single quotes in email address
 		escapedFrom := strings.ReplaceAll(filter.From, "'", "''")
 		filterParts = append(filterParts, fmt.Sprintf("from/emailAddress/address eq '%s'", escapedFrom))
-	}
-
-	if filter.To != "" {
-		// Escape single quotes in email address
-		escapedTo := strings.ReplaceAll(filter.To, "'", "''")
-		filterParts = append(filterParts, fmt.Sprintf("toRecipients/any(r:r/emailAddress/address eq '%s')", escapedTo))
 	}
 
 	if filter.HasAttachment {
 		filterParts = append(filterParts, "hasAttachments eq true")
 	}
 
-	// Handle date filters
+	// Handle date filters - OData datetime values must NOT be quoted
 	now := time.Now()
 	if filter.After != "" {
 		dateStr := parseDateFilter(filter.After)
 		if dateStr != "" {
+			// OData datetime format: receivedDateTime ge 2025-11-05T00:00:00Z (no quotes)
 			filterParts = append(filterParts, fmt.Sprintf("receivedDateTime ge %s", dateStr))
 		}
 	}
@@ -157,6 +153,9 @@ func (filter *OutlookFilter) buildOutlookFilter() (string, error) {
 	}
 
 	// Join all filter parts with 'and'
+	if len(filterParts) == 0 {
+		return "", nil
+	}
 	return strings.Join(filterParts, " and "), nil
 }
 
@@ -200,8 +199,9 @@ func parseRelativeDateFilter(relativeStr string, now time.Time, newer bool) stri
 		months := strings.TrimSuffix(relativeStr, "m")
 		var m int
 		if _, err = fmt.Sscanf(months, "%d", &m); err == nil {
-			// Approximate month as 30 days
-			duration = time.Duration(m) * 30 * 24 * time.Hour
+			// Better month calculation - use actual month arithmetic
+			targetTime := now.AddDate(0, -m, 0) // Subtract m months
+			return targetTime.Format(time.RFC3339)
 		}
 	}
 
@@ -235,11 +235,6 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 		Top:    int32Ptr(limit),
 	}
 
-	// Apply skip if provided (except when using $search)
-	if skip > 0 {
-		query.Skip = int32Ptr(skip)
-	}
-
 	// Apply filter if provided
 	if filter != nil {
 		// If search is provided, use it
@@ -249,13 +244,10 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 			if limit > 250 {
 				query.Top = int32Ptr(250)
 			}
-			// $search doesn't support $skip
 		} else {
-			// For OData filter
-			if filter.Subject != "" {
-				if err := validateSubject(filter.Subject); err != nil {
-					return nil, fmt.Errorf("invalid subject: %w", err)
-				}
+			// For OData filter - we can use normal pagination
+			if skip > 0 {
+				query.Skip = int32Ptr(skip)
 			}
 
 			// Build the OData filter
@@ -265,6 +257,13 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 				query.Filter = stringPtr(filterStr)
 			}
 		}
+	} else {
+		// No filter - use normal pagination with ordering
+		if skip > 0 {
+			query.Skip = int32Ptr(skip)
+		}
+		// Only use orderBy when there are no filters
+		query.Orderby = []string{"receivedDateTime DESC"}
 	}
 
 	configuration := users.ItemMessagesRequestBuilderGetRequestConfiguration{
