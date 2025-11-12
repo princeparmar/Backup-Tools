@@ -249,7 +249,7 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 			if limit > 250 {
 				query.Top = int32Ptr(250)
 			}
-			// $search doesn't support $skip or $orderby
+			// $search doesn't support $skip
 		} else {
 			// For OData filter
 			if filter.Subject != "" {
@@ -264,17 +264,7 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 			} else if filterStr != "" {
 				query.Filter = stringPtr(filterStr)
 			}
-
-			// FIX: Only use orderBy when we don't have subject filter
-			// Subject filter with contains() makes the query too complex when combined with orderBy
-			if filter.Subject == "" {
-				query.Orderby = []string{"receivedDateTime DESC"}
-			}
-			// If subject filter is present, don't use orderBy - let API use default ordering
 		}
-	} else {
-		// No filter - use normal ordering
-		query.Orderby = []string{"receivedDateTime DESC"}
 	}
 
 	configuration := users.ItemMessagesRequestBuilderGetRequestConfiguration{
@@ -311,11 +301,10 @@ func (client *OutlookClient) GetMessageWithDetails(skip, limit int32) ([]*Outloo
 	}
 
 	query := users.ItemMessagesRequestBuilderGetQueryParameters{
-		Top:     int32Ptr(limit),
-		Skip:    int32Ptr(skip),
-		Select:  []string{"subject", "body", "from", "toRecipients", "receivedDateTime", "ccRecipients", "bccRecipients", "attachments", "isRead", "importance"},
-		Expand:  []string{"attachments"},
-		Orderby: []string{"receivedDateTime DESC"},
+		Top:    int32Ptr(limit),
+		Skip:   int32Ptr(skip),
+		Select: []string{"subject", "body", "from", "toRecipients", "receivedDateTime", "ccRecipients", "bccRecipients", "attachments", "isRead", "importance"},
+		Expand: []string{"attachments"},
 	}
 
 	configuration := users.ItemMessagesRequestBuilderGetRequestConfiguration{
