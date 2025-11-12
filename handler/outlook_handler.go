@@ -141,6 +141,8 @@ func HandleOutlookGetMessages(c echo.Context) error {
 			Subject:          msg.Subject,
 			From:             msg.From,
 			ReceivedDateTime: msg.ReceivedDateTime,
+			IsRead:           msg.IsRead,
+			HasAttachments:   msg.HasAttachments,
 		}
 		_, synced := emailListFromBucket[userDetails.Mail+"/"+utils.GenerateTitleFromOutlookMessage(message)]
 		outlookMessages = append(outlookMessages, &OutlookMessageListJSON{

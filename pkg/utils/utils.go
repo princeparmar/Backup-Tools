@@ -119,6 +119,8 @@ type OutlookMinimalMessage struct {
 	Subject          string `json:"subject"`
 	From             string `json:"from"`
 	ReceivedDateTime string `json:"received_datetime"`
+	IsRead           bool   `json:"is_read"`
+	HasAttachments   bool   `json:"has_attachments"`
 }
 
 func GenerateTitleFromOutlookMessage(msg *OutlookMinimalMessage) string {

@@ -12,6 +12,8 @@ type OutlookMinimalMessage struct {
 	Subject          string `json:"subject"`
 	From             string `json:"from"`
 	ReceivedDateTime string `json:"received_datetime"`
+	IsRead           bool   `json:"is_read"`
+	HasAttachments   bool   `json:"has_attachments"`
 }
 
 type OutlookResponse struct {
@@ -30,6 +32,8 @@ func NewOutlookMinimalMessage(message models.Messageable) *OutlookMinimalMessage
 		Subject:          stringValue(message.GetSubject()),
 		From:             stringValue(message.GetFrom().GetEmailAddress().GetAddress()),
 		ReceivedDateTime: timeValueInMilliseconds(message.GetReceivedDateTime()),
+		IsRead:           boolValue(message.GetIsRead()),
+		HasAttachments:   boolValue(message.GetHasAttachments()),
 	}
 
 	return result
