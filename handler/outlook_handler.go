@@ -95,7 +95,7 @@ func HandleOutlookGetMessages(c echo.Context) error {
 		return err
 	}
 
-	skip, _ := strconv.Atoi(c.QueryParam("offset"))
+	skip, _ := strconv.Atoi(c.QueryParam("skip"))
 	limit, _ := strconv.Atoi(c.QueryParam("limit"))
 
 	// Parse filter from JWT-encoded query parameter
@@ -134,8 +134,8 @@ func HandleOutlookGetMessages(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusForbidden, err.Error())
 	}
 
-	outlookMessages := make([]*OutlookMessageListJSON, 0, len(messages))
-	for _, msg := range messages {
+	outlookMessages := make([]*OutlookMessageListJSON, 0, len(messages.Messages))
+	for _, msg := range messages.Messages {
 		message := &utils.OutlookMinimalMessage{
 			ID:               msg.ID,
 			Subject:          msg.Subject,
@@ -151,6 +151,8 @@ func HandleOutlookGetMessages(c echo.Context) error {
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"messages": outlookMessages,
+		"skip":     messages.Skip,
+		"limit":    messages.Limit,
 	})
 }
 

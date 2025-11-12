@@ -14,6 +14,12 @@ type OutlookMinimalMessage struct {
 	ReceivedDateTime string `json:"received_datetime"`
 }
 
+type OutlookResponse struct {
+	Messages []*OutlookMinimalMessage `json:"messages"`
+	Skip     int                      `json:"skip"`
+	Limit    int                      `json:"limit"`
+}
+
 func NewOutlookMinimalMessage(message models.Messageable) *OutlookMinimalMessage {
 	if message == nil {
 		return nil

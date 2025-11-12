@@ -221,13 +221,8 @@ func parseRelativeDateFilter(relativeStr string, now time.Time, newer bool) stri
 	return targetTime.Format(time.RFC3339)
 }
 
-// GetUserMessages retrieves messages from Outlook with pagination support
-func (client *OutlookClient) GetUserMessages(skip, limit int32) ([]*OutlookMinimalMessage, error) {
-	return client.GetUserMessagesControlled(skip, limit, nil)
-}
-
 // GetUserMessagesControlled retrieves messages from Outlook with pagination and filter support
-func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter *OutlookFilter) ([]*OutlookMinimalMessage, error) {
+func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter *OutlookFilter) (*OutlookResponse, error) {
 	if limit > 100 || limit < 1 {
 		limit = 100
 	}
@@ -296,7 +291,13 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 		outlookMessages = append(outlookMessages, NewOutlookMinimalMessage(message))
 	}
 
-	return outlookMessages, nil
+	response := &OutlookResponse{
+		Messages: outlookMessages,
+		Skip:     int(skip),
+		Limit:    int(limit),
+	}
+
+	return response, nil
 }
 
 // GetMessageWithDetails retrieves detailed messages with attachments
