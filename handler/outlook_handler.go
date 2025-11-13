@@ -155,6 +155,7 @@ func HandleOutlookGetMessages(c echo.Context) error {
 		"messages": outlookMessages,
 		"skip":     messages.Skip,
 		"limit":    messages.Limit,
+		"has_more": messages.HasMore,
 	})
 }
 

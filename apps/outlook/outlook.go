@@ -280,10 +280,22 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 		outlookMessages = append(outlookMessages, NewOutlookMinimalMessage(message))
 	}
 
+	// Check for pagination using OData nextLink
+	// The presence of @odata.nextLink is the definitive indicator of more results
+	hasMore := false
+	if result.GetOdataNextLink() != nil {
+		// nextLink exists = more results available
+		hasMore = true
+	} else {
+		// No nextLink = reached the end
+		hasMore = false
+	}
+
 	response := &OutlookResponse{
 		Messages: outlookMessages,
 		Skip:     int(skip),
-		Limit:    int(limit),
+		Limit:    len(outlookMessages), // Return actual count of messages returned, not requested limit
+		HasMore:  hasMore,
 	}
 
 	return response, nil
