@@ -233,6 +233,7 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 	query := users.ItemMessagesRequestBuilderGetQueryParameters{
 		Select: []string{"id", "subject", "from", "receivedDateTime", "isRead", "hasAttachments"},
 		Top:    int32Ptr(limit),
+		Count:  boolPtr(true), // Request total count to accurately determine has_more
 	}
 
 	// Apply filter if provided
@@ -280,22 +281,52 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 		outlookMessages = append(outlookMessages, NewOutlookMinimalMessage(message))
 	}
 
-	// Check for pagination using OData nextLink
-	// The presence of @odata.nextLink is the definitive indicator of more results
+	// Check for pagination using OData nextLink, message count, and total count
+	actualCount := len(outlookMessages)
 	hasMore := false
-	if result.GetOdataNextLink() != nil {
-		// nextLink exists = more results available
+
+	// Safely get response count - use OData count if available, otherwise use actual message count
+	responseCount := actualCount
+	var totalCount *int
+	if odataCount := result.GetOdataCount(); odataCount != nil {
+		totalCountValue := int(*odataCount)
+		totalCount = &totalCountValue
+		responseCount = totalCountValue
+	}
+
+	// Determine if there are more messages
+	if actualCount < int(limit) {
+		// Got fewer messages than requested - definitely no more
+		hasMore = false
+	} else if totalCount != nil {
+		// We have the total count - use it to determine if there are more
+		// If skip + actualCount >= totalCount, we've reached the end
+		if int(skip)+actualCount >= *totalCount {
+			hasMore = false
+		} else {
+			hasMore = true
+		}
+	} else if result.GetOdataNextLink() != nil {
+		// No total count available, but nextLink exists = more results available
 		hasMore = true
 	} else {
-		// No nextLink = reached the end
+		// Got exactly the limit but no nextLink and no total count = assume reached the end
 		hasMore = false
 	}
 
+	// Set total count - use OData count if available, otherwise use actual count
+	totalCountValue := actualCount
+	if totalCount != nil {
+		totalCountValue = *totalCount
+	}
+
 	response := &OutlookResponse{
-		Messages: outlookMessages,
-		Skip:     int(skip),
-		Limit:    len(outlookMessages), // Return actual count of messages returned, not requested limit
-		HasMore:  hasMore,
+		Messages:      outlookMessages,
+		Skip:          int(skip),
+		Limit:         int(limit),
+		TotalCount:    totalCountValue,
+		ResponseCount: responseCount,
+		HasMore:       hasMore,
 	}
 
 	return response, nil
@@ -548,4 +579,9 @@ func int32Ptr(i int32) *int32 {
 // Helper function to create string pointer
 func stringPtr(s string) *string {
 	return &s
+}
+
+// Helper function to create bool pointer
+func boolPtr(b bool) *bool {
+	return &b
 }

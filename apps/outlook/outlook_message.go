@@ -17,10 +17,12 @@ type OutlookMinimalMessage struct {
 }
 
 type OutlookResponse struct {
-	Messages []*OutlookMinimalMessage `json:"messages"`
-	Skip     int                      `json:"skip"`
-	Limit    int                      `json:"limit"`
-	HasMore  bool                     `json:"has_more"`
+	Messages      []*OutlookMinimalMessage `json:"messages"`
+	Skip          int                      `json:"skip"`
+	Limit         int                      `json:"limit"`
+	TotalCount    int                      `json:"total_count"`
+	ResponseCount int                      `json:"response_count"`
+	HasMore       bool                     `json:"has_more"`
 }
 
 func NewOutlookMinimalMessage(message models.Messageable) *OutlookMinimalMessage {

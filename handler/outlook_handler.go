@@ -96,7 +96,7 @@ func HandleOutlookGetMessages(c echo.Context) error {
 	}
 
 	skip, _ := strconv.Atoi(c.QueryParam("skip"))
-	limit, _ := strconv.Atoi(c.QueryParam("limit"))
+	limit, _ := strconv.Atoi(c.QueryParam("num"))
 
 	// Parse filter from JWT-encoded query parameter
 	var filter *outlook.OutlookFilter
@@ -152,10 +152,12 @@ func HandleOutlookGetMessages(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"messages": outlookMessages,
-		"skip":     messages.Skip,
-		"limit":    messages.Limit,
-		"has_more": messages.HasMore,
+		"messages":       outlookMessages,
+		"skip":           messages.Skip,
+		"limit":          messages.Limit,
+		"total_count":    messages.TotalCount,
+		"response_count": messages.ResponseCount,
+		"has_more":       messages.HasMore,
 	})
 }
 
