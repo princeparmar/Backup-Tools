@@ -31,6 +31,7 @@ func StartServer(db *db.PostgresDb, address string) {
 	e.POST("/satellite-auth", satellite.HandleSatelliteAuthentication)
 	e.POST("/google-auth", googlepack.Autentificate)
 	e.GET("/google-auth", googlepack.Autentificateg)
+	e.GET("/autobackup/summary", handler.HandleAutomaticBackupSummary)
 
 	autoSync := e.Group("/auto-sync")
 	autoSync.GET("/live", handler.HandleAutomaticSyncActiveJobsForUser)

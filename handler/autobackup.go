@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
@@ -982,5 +984,85 @@ func HandleDeleteJobsByEmail(c echo.Context) error {
 		"deleted_task_ids":    deletedTaskIDs,
 		"total_jobs_deleted":  len(deletedJobIDs),
 		"total_tasks_deleted": len(deletedTaskIDs),
+	})
+}
+
+func HandleAutomaticBackupSummary(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "not able to authenticate user",
+			"error":   err.Error(),
+		})
+	}
+
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+
+	// Execute all counts in parallel - each goroutine creates its own query
+	var totalAccounts, activeBackups, providers int64
+	today := time.Now().Format("2006-01-02")
+	var todaysBackups int64
+
+	errs := make([]error, 4)
+	var wg sync.WaitGroup
+	wg.Add(4)
+
+	// Each goroutine creates its own query from database.DB
+	go func() {
+		defer wg.Done()
+		errs[0] = database.DB.Model(&repo.CronJobListingDB{}).
+			Where("user_id = ?", userID).
+			Count(&totalAccounts).Error
+	}()
+
+	go func() {
+		defer wg.Done()
+		errs[1] = database.DB.Model(&repo.CronJobListingDB{}).
+			Where("user_id = ? AND active = ?", userID, true).
+			Count(&activeBackups).Error
+	}()
+
+	go func() {
+		defer wg.Done()
+		errs[2] = database.DB.Model(&repo.CronJobListingDB{}).
+			Where("user_id = ?", userID).
+			Distinct("method").
+			Count(&providers).Error
+	}()
+
+	go func() {
+		defer wg.Done()
+		errs[3] = database.DB.Model(&repo.TaskListingDB{}).
+			Joins("JOIN cron_job_listing_dbs ON task_listing_dbs.cron_job_id = cron_job_listing_dbs.id").
+			Where("cron_job_listing_dbs.user_id = ? AND task_listing_dbs.status = ? AND DATE(task_listing_dbs.start_time) = ?",
+				userID, repo.TaskStatusSuccess, today).
+			Count(&todaysBackups).Error
+	}()
+
+	wg.Wait()
+
+	// Check for any errors
+	for _, e := range errs {
+		if e != nil {
+			logger.Error(ctx, "Failed to get backup summary", logger.ErrorField(e))
+			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+				"message": "internal server error",
+				"error":   e.Error(),
+			})
+		}
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "Automatic Backup Summary",
+		"data": map[string]interface{}{
+			"total_accounts": int(totalAccounts),
+			"active_backups": int(activeBackups),
+			"todays_backups": int(todaysBackups),
+			"providers":      int(providers),
+		},
 	})
 }
