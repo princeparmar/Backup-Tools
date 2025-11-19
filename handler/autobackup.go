@@ -228,6 +228,8 @@ func HandleAutomaticSyncCreate(c echo.Context) error {
 		return err
 	}
 
+	satellite.SendNotification(ctx, userID, "Automatic Backup Created", "Your automatic backup has been created successfully", nil, nil, nil)
+
 	return sendSyncResponse(c, syncType, data)
 }
 

@@ -408,3 +408,94 @@ func SendEmailForBackupFailure(ctx context.Context, email, errorMsg, method stri
 
 	return nil
 }
+
+// createNotificationJWTToken creates a JWT token for generic notifications
+func createNotificationJWTToken(userID, title, body, secretKey string, priority *string, data map[string]interface{}, imageURL *string) (string, error) {
+	claims := jwt.MapClaims{
+		"user_id": userID,
+		"title":   title,
+		"body":    body,
+		"iat":     time.Now().Unix(),
+		"exp":     time.Now().Add(7 * time.Minute).Unix(),
+	}
+
+	if priority != nil && (*priority == "high" || *priority == "normal") {
+		claims["priority"] = *priority
+	}
+	if len(data) > 0 {
+		claims["data"] = data
+	}
+	if imageURL != nil && *imageURL != "" {
+		claims["image_url"] = *imageURL
+	}
+
+	tokenString, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(secretKey))
+	if err != nil {
+		return "", fmt.Errorf("sign token: %w", err)
+	}
+	return tokenString, nil
+}
+
+// SendNotification sends a generic notification for any type of event
+func SendNotification(ctx context.Context, userID, title, body string, priority *string, data map[string]interface{}, imageURL *string) error {
+	if userID == "" || title == "" || body == "" {
+		return fmt.Errorf("userID, title, and body are required")
+	}
+	if StorxSatelliteService == "" {
+		return fmt.Errorf("STORX_SATELLITE_SERVICE not set")
+	}
+
+	emailAPIKey := utils.GetEnvWithKey("EMAIL_API_KEY")
+	if emailAPIKey == "" {
+		return fmt.Errorf("EMAIL_API_KEY not set")
+	}
+
+	jwtToken, err := createNotificationJWTToken(userID, title, body, emailAPIKey, priority, data, imageURL)
+	if err != nil {
+		return fmt.Errorf("create token: %w", err)
+	}
+
+	notificationCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	payloadBytes, _ := json.Marshal(struct{ Token string }{Token: jwtToken})
+	url := strings.TrimSuffix(StorxSatelliteService, "/") + "/api/v0/auth/send-notification"
+
+	req, _ := http.NewRequestWithContext(notificationCtx, http.MethodPost, url, bytes.NewBuffer(payloadBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	res, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("send request: %w", err)
+	}
+	defer res.Body.Close()
+
+	responseBody, _ := io.ReadAll(res.Body)
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return fmt.Errorf("status %d: %s", res.StatusCode, string(responseBody))
+	}
+
+	var response struct {
+		Success bool   `json:"success"`
+		Status  string `json:"status"`
+		Message string `json:"message"`
+		Error   string `json:"error"`
+	}
+
+	json.Unmarshal(responseBody, &response)
+
+	switch {
+	case response.Error != "":
+		return fmt.Errorf("server error: %s", response.Error)
+	case response.Success || strings.Contains(strings.ToLower(response.Status), "success"):
+		return nil
+	case response.Status != "":
+		return fmt.Errorf("request failed: %s", response.Status)
+	case response.Message != "":
+		return fmt.Errorf("request failed: %s", response.Message)
+	default:
+		return nil
+	}
+}
