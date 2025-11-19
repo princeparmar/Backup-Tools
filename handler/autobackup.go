@@ -285,6 +285,29 @@ func ProcessOutlookMethod(refreshToken string) (string, map[string]interface{}, 
 	return userDetails.Mail, config, nil
 }
 
+func ProcessOutlookAccessToken(accessToken string) (string, map[string]interface{}, error) {
+	if accessToken == "" {
+		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Access Token Required")
+	}
+
+	client, err := outlook.NewOutlookClientUsingToken(accessToken)
+	if err != nil {
+		return "", nil, jsonError(http.StatusBadRequest, "Invalid Access Token. May be it is expired or invalid", err)
+	}
+
+	userDetails, err := client.GetCurrentUser()
+	if err != nil || userDetails.Mail == "" {
+		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid")
+	}
+
+	config := map[string]interface{}{
+		"access_token": accessToken,
+		"email":        userDetails.Mail,
+	}
+
+	return userDetails.Mail, config, nil
+}
+
 func ProcessDatabaseMethod(reqBody DatabaseConnection) (string, map[string]interface{}, error) {
 	if reqBody.Name == "" || reqBody.DatabaseName == "" || reqBody.Host == "" ||
 		reqBody.Port == "" || reqBody.Username == "" || reqBody.Password == "" {

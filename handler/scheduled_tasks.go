@@ -71,7 +71,7 @@ func HandleCreateScheduledTask(c echo.Context) error {
 	case "gmail":
 		email, config, err = processGmailAccessToken(accessToken)
 	case "outlook":
-		email, config, err = ProcessOutlookMethod(accessToken)
+		email, config, err = ProcessOutlookAccessToken(accessToken)
 	default:
 		return jsonErrorMsg(http.StatusBadRequest, "Unsupported method. Supported methods: gmail")
 	}
