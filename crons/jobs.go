@@ -260,6 +260,18 @@ func (a *AutosyncManager) ProcessTask(ctx context.Context) error {
 			continue
 		}
 
+		// Send notification for cron task started running
+		priority := "normal"
+		data := map[string]interface{}{
+			"event":   "cron_started_running",
+			"level":   2,
+			"task_id": task.ID,
+			"job_id":  job.ID,
+			"method":  job.Method,
+			"name":    job.Name,
+		}
+		satellite.SendNotificationAsync(ctx, job.UserID, "Automatic Backup Started", fmt.Sprintf("Automatic backup for %s has started running", job.Name), &priority, data, nil)
+
 		// Process the task
 		processErr := a.processTask(ctx, task, job)
 
@@ -375,6 +387,35 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 
 			// Send email notification
 			go satellite.SendEmailForBackupFailure(context.Background(), job.Name, emailMessage, job.Method)
+
+			// Send generic notification with level 4
+			priority := "high"
+			data := map[string]interface{}{
+				"event":     "cron_failed",
+				"level":     4,
+				"task_id":   task.ID,
+				"job_id":    job.ID,
+				"method":    job.Method,
+				"name":      job.Name,
+				"error":     processErr.Error(),
+				"execution": task.Execution,
+			}
+			satellite.SendNotificationAsync(context.Background(), job.UserID, "Automatic Backup Failed", fmt.Sprintf("Automatic backup for %s failed: %s", job.Name, emailMessage), &priority, data, nil)
+		}
+	} else {
+		// Handle success case - send notification
+		if job != nil {
+			priority := "normal"
+			data := map[string]interface{}{
+				"event":     "cron_successfully_completed",
+				"level":     2,
+				"task_id":   task.ID,
+				"job_id":    job.ID,
+				"method":    job.Method,
+				"name":      job.Name,
+				"execution": task.Execution,
+			}
+			satellite.SendNotificationAsync(context.Background(), job.UserID, "Automatic Backup Completed", fmt.Sprintf("Automatic backup for %s completed successfully in %d seconds", job.Name, task.Execution), &priority, data, nil)
 		}
 	}
 

@@ -228,7 +228,19 @@ func HandleAutomaticSyncCreate(c echo.Context) error {
 		return err
 	}
 
-	satellite.SendNotification(ctx, userID, "Automatic Backup Created", "Your automatic backup has been created successfully", nil, nil, nil)
+	// Send notification for cron job creation
+	priority := "normal"
+	notificationData := map[string]interface{}{
+		"event":  "cron_created",
+		"level":  2,
+		"method": method,
+		"name":   name,
+		"type":   syncType,
+	}
+	if cronJob, ok := data.(*repo.CronJobListingDB); ok {
+		notificationData["job_id"] = cronJob.ID
+	}
+	satellite.SendNotificationAsync(ctx, userID, "Automatic Backup Created", fmt.Sprintf("Your automatic backup for %s has been created successfully", name), &priority, notificationData, nil)
 
 	return sendSyncResponse(c, syncType, data)
 }

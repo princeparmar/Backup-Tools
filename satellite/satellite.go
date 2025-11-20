@@ -436,6 +436,19 @@ func createNotificationJWTToken(userID, title, body, secretKey string, priority 
 	return tokenString, nil
 }
 
+// SendNotificationAsync sends a notification asynchronously and logs any errors
+func SendNotificationAsync(ctx context.Context, userID, title, body string, priority *string, data map[string]interface{}, imageURL *string) {
+	go func() {
+		if err := SendNotification(ctx, userID, title, body, priority, data, imageURL); err != nil {
+			logger.Error(ctx, "Failed to send notification",
+				logger.String("user_id", userID),
+				logger.String("title", title),
+				logger.ErrorField(err),
+			)
+		}
+	}()
+}
+
 // SendNotification sends a generic notification for any type of event
 func SendNotification(ctx context.Context, userID, title, body string, priority *string, data map[string]interface{}, imageURL *string) error {
 	if userID == "" || title == "" || body == "" {
@@ -458,10 +471,16 @@ func SendNotification(ctx context.Context, userID, title, body string, priority 
 	notificationCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	payloadBytes, _ := json.Marshal(struct{ Token string }{Token: jwtToken})
+	payloadBytes, err := json.Marshal(struct{ Token string }{Token: jwtToken})
+	if err != nil {
+		return fmt.Errorf("marshal payload: %w", err)
+	}
 	url := strings.TrimSuffix(StorxSatelliteService, "/") + "/api/v0/auth/send-notification"
 
-	req, _ := http.NewRequestWithContext(notificationCtx, http.MethodPost, url, bytes.NewBuffer(payloadBytes))
+	req, err := http.NewRequestWithContext(notificationCtx, http.MethodPost, url, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
@@ -472,7 +491,10 @@ func SendNotification(ctx context.Context, userID, title, body string, priority 
 	}
 	defer res.Body.Close()
 
-	responseBody, _ := io.ReadAll(res.Body)
+	responseBody, err := io.ReadAll(res.Body)
+	if err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		return fmt.Errorf("status %d: %s", res.StatusCode, string(responseBody))
 	}
@@ -484,7 +506,9 @@ func SendNotification(ctx context.Context, userID, title, body string, priority 
 		Error   string `json:"error"`
 	}
 
-	json.Unmarshal(responseBody, &response)
+	if err := json.Unmarshal(responseBody, &response); err != nil {
+		return fmt.Errorf("parse response: %w", err)
+	}
 
 	switch {
 	case response.Error != "":

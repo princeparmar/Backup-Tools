@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -103,6 +104,18 @@ func HandleCreateScheduledTask(c echo.Context) error {
 		logger.String("user_id", userID),
 		logger.String("login_id", email),
 		logger.String("method", method))
+
+	// Send notification for scheduled task creation
+	priority := "normal"
+	data := map[string]interface{}{
+		"event":     "scheduled_task_created",
+		"level":     2,
+		"task_id":   task.ID,
+		"method":    method,
+		"login_id":  email,
+		"email_ids": emailIds,
+	}
+	satellite.SendNotificationAsync(ctx, userID, "Scheduled Task Created", fmt.Sprintf("Scheduled task for %s has been created successfully", email), &priority, data, nil)
 
 	return c.JSON(http.StatusCreated, map[string]interface{}{
 		"success": true,

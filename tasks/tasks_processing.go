@@ -11,6 +11,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/repo"
+	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
 )
@@ -149,6 +150,17 @@ func (s *ScheduledTaskManager) ProcessScheduledTasks(ctx context.Context) error 
 			continue
 		}
 
+		// Send notification for scheduled task started running
+		priority := "normal"
+		data := map[string]interface{}{
+			"event":    "scheduled_task_started_running",
+			"level":    2,
+			"task_id":  task.ID,
+			"method":   task.Method,
+			"login_id": task.LoginId,
+		}
+		satellite.SendNotificationAsync(ctx, task.UserID, "Scheduled Task Started", fmt.Sprintf("Scheduled task for %s has started running", task.LoginId), &priority, data, nil)
+
 		processErr := s.processScheduledTask(ctx, task)
 		if updateErr := s.UpdateScheduledTaskStatus(task, processErr); updateErr != nil {
 			logger.Error(ctx, "Failed to update scheduled task status",
@@ -282,6 +294,62 @@ func (s *ScheduledTaskManager) UpdateScheduledTaskStatus(task *repo.ScheduledTas
 		)
 		return fmt.Errorf("failed to save scheduled task: %w", err)
 	}
+
+	// Send notifications based on task status
+	var priority string
+	var title, body string
+	var level int
+	var event string
+
+	switch task.Status {
+	case "completed":
+		priority = "normal"
+		level = 2
+		event = "scheduled_task_successfully_completed"
+		title = "Scheduled Task Completed"
+		body = fmt.Sprintf("Scheduled task for %s completed successfully. Processed %d email(s) successfully in %d seconds", task.LoginId, task.SuccessCount, task.Execution)
+	case "partially_completed":
+		priority = "normal"
+		level = 3
+		event = "scheduled_task_partially_completed"
+		title = "Scheduled Task Partially Completed"
+		body = fmt.Sprintf("Scheduled task for %s partially completed. %d succeeded, %d failed in %d seconds", task.LoginId, task.SuccessCount, task.FailedCount, task.Execution)
+	case "failed":
+		priority = "high"
+		level = 4
+		event = "scheduled_task_failed"
+		title = "Scheduled Task Failed"
+		errorMsg := "Unknown error"
+		if task.Errors.Json() != nil && len(*task.Errors.Json()) > 0 {
+			errors := *task.Errors.Json()
+			errorMsg = errors[len(errors)-1]
+		}
+		body = fmt.Sprintf("Scheduled task for %s failed: %s", task.LoginId, errorMsg)
+	default:
+		// No notification for other statuses
+		logger.Info(ctx, "Scheduled task status updated",
+			logger.Int("task_id", int(task.ID)),
+			logger.String("status", task.Status),
+			logger.Int("success_count", int(task.SuccessCount)),
+			logger.Int("failed_count", int(task.FailedCount)),
+		)
+		return nil
+	}
+
+	data := map[string]interface{}{
+		"event":         event,
+		"level":         level,
+		"task_id":       task.ID,
+		"method":        task.Method,
+		"login_id":      task.LoginId,
+		"success_count": task.SuccessCount,
+		"failed_count":  task.FailedCount,
+		"execution":     task.Execution,
+	}
+	if task.Errors.Json() != nil {
+		data["errors"] = *task.Errors.Json()
+	}
+	satellite.SendNotificationAsync(ctx, task.UserID, title, body, &priority, data, nil)
 
 	logger.Info(ctx, "Scheduled task status updated",
 		logger.Int("task_id", int(task.ID)),
