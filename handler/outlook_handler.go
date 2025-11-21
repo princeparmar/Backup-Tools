@@ -166,11 +166,7 @@ func HandleOutlookGetMessageById(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	// FIX: Use blank identifier for unused accessGrant
-	_, accessToken, err := getAccessTokens(c)
-	if err != nil {
-		return err
-	}
+	accessToken := c.Request().Header.Get("Authorization")
 
 	msgID := c.Param("id")
 	client, err := createOutlookClient(accessToken)
