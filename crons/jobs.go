@@ -367,7 +367,8 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 	if job != nil {
 		job.Message = "Automatic backup completed successfully"
 		job.MessageStatus = repo.JobMessageStatusInfo
-		job.LastRun = time.Now()
+		now := time.Now()
+		job.LastRun = &now
 	}
 
 	// Handle error case
@@ -380,7 +381,8 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 		if job != nil {
 			job.Message = "Last task execution failed"
 			job.MessageStatus = repo.JobMessageStatusError
-			job.LastRun = time.Now()
+			now := time.Now()
+			job.LastRun = &now
 
 			emailMessage := a.determineErrorMessage(processErr, job, task)
 			a.handleErrorScenarios(processErr, job, task)

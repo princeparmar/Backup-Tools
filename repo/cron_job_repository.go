@@ -45,11 +45,11 @@ type CronJobListingDB struct {
 	UserID string `json:"user_id"`
 
 	// Name + SyncType should be unique
-	Name     string    `json:"name" gorm:"uniqueIndex:idx_name_sync_type"`
-	Method   string    `json:"method"`
-	Interval string    `json:"interval"`
-	On       string    `json:"on"`
-	LastRun  time.Time `json:"last_run"`
+	Name     string     `json:"name" gorm:"uniqueIndex:idx_name_sync_type"`
+	Method   string     `json:"method"`
+	Interval string     `json:"interval"`
+	On       string     `json:"on"`
+	LastRun  *time.Time `json:"last_run"`
 
 	// Change the type from map[string]interface{} to *database.DbJson[map[string]interface{}]
 	InputData *database.DbJson[map[string]interface{}] `json:"input_data" gorm:"type:jsonb"`
@@ -278,7 +278,7 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 		FROM cron_job_listing_dbs
 		WHERE active = true
 		AND (message is null or message != ?)
-		AND DATE(last_run) != ?
+		AND (last_run IS NULL OR DATE(last_run) != ?)
 		AND (interval = 'daily'
 				OR (interval = 'weekly' AND "on" = ?)
 			OR (interval = 'monthly' AND "on" = ?))
@@ -352,6 +352,7 @@ func (r *CronJobRepository) CreateCronJobForUser(userID, name, method string, sy
 		SyncType:  syncType,
 		InputData: database.NewDbJsonFromValue(inputData),
 		Status:    JobStatusCreated,
+		LastRun:   nil,
 	}
 	// create new entry in database and return newly created cron job
 	res := r.db.Create(&data)
