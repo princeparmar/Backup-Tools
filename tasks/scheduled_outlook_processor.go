@@ -31,14 +31,9 @@ func (o *OutlookProcessor) Run(input ScheduledTaskProcessorInput) error {
 		return err
 	}
 
-	refreshToken, ok := input.InputData["refresh_token"].(string)
+	accessToken, ok := input.InputData["access_token"].(string)
 	if !ok {
-		return o.handleError(input.Task, "Refresh token not found for Outlook method", nil)
-	}
-
-	accessToken, err := outlook.AuthTokenUsingRefreshToken(refreshToken)
-	if err != nil {
-		return o.handleError(input.Task, fmt.Sprintf("Authentication failed: %s", err), nil)
+		return o.handleError(input.Task, "Access token not found for Outlook method", nil)
 	}
 
 	outlookClient, err := outlook.NewOutlookClientUsingToken(accessToken)
@@ -48,7 +43,7 @@ func (o *OutlookProcessor) Run(input ScheduledTaskProcessorInput) error {
 
 	// Create placeholder and get existing emails
 	if err := o.setupStorage(input.Task, satellite.ReserveBucket_Outlook); err != nil {
-		return err
+		return o.handleError(input.Task, fmt.Sprintf("Failed to create placeholder: %s", err), nil)
 	}
 
 	emailListFromBucket, err := satellite.ListObjectsWithPrefix(ctx, input.Task.StorxToken, satellite.ReserveBucket_Outlook, input.Task.LoginId+"/")
