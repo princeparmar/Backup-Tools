@@ -359,6 +359,15 @@ func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
 		return nil, err
 	}
 
+	// Get user email for sync checking
+	userDetails, err := GetGoogleAccountDetailsFromContext(c)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user email: %w", err)
+	}
+	if userDetails.Email == "" {
+		return nil, errors.New("user email not found, please check access handling")
+	}
+
 	// Get folder ID by name
 	folderID, err := getFolderIDByName(srv, folderName)
 	if err != nil {
@@ -368,9 +377,18 @@ func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get folder name: %v", err)
 	}
-	o, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", folderName+"/")
+	// Files are stored with userEmail prefix, so prepend it to folder path
+	satelliteFolderPath := userDetails.Email + "/" + folderName + "/"
+	o, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", satelliteFolderPath)
 	if err != nil {
-		return nil, errors.New("failed to get list from satellite with error:" + err.Error())
+		// Handle permission errors gracefully
+		if strings.Contains(err.Error(), "permission denied") || strings.Contains(err.Error(), "Unauthorized") {
+			logger.Warn(context.Background(), "Failed to list objects from satellite (will show all files as not synced)",
+				logger.ErrorField(err))
+			o = []uplink.Object{}
+		} else {
+			return nil, errors.New("failed to get list from satellite with error:" + err.Error())
+		}
 	}
 	sortSatelliteObjects(o)
 	// List all files within the folder
@@ -383,10 +401,14 @@ func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
 	for _, i := range r.Files {
 		if i.MimeType != "application/vnd.google-apps.folder" {
 			i.Name = addGoogleAppsFileExtension(i.Name, i.MimeType)
-			synced := isFileSyncedInObjects(o, path.Join(folderName, i.Name))
+			// Check sync with userEmail prefix
+			filePath := userDetails.Email + "/" + path.Join(folderName, i.Name)
+			synced := isFileSyncedInObjects(o, filePath)
 			files = append(files, createFilesJSON(i, synced, ""))
 		} else {
-			synced := isFileSyncedInObjects(o, path.Join(folderName, i.Name)+"/")
+			// Check sync with userEmail prefix
+			folderPath := userDetails.Email + "/" + path.Join(folderName, i.Name) + "/"
+			synced := isFileSyncedInObjects(o, folderPath)
 			if synced {
 				synced, _ = checkFolderSyncStatus(c, i.Id)
 			}
@@ -410,14 +432,32 @@ func GetFilesInFolderByID(c echo.Context, folderID string) (*PaginatedFilesRespo
 	if err != nil {
 		return nil, err
 	}
-	//fpath, err :=
+
+	// Get user email for sync checking
+	userDetails, err := GetGoogleAccountDetailsFromContext(c)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user email: %w", err)
+	}
+	if userDetails.Email == "" {
+		return nil, errors.New("user email not found, please check access handling")
+	}
+
 	folderName, err := GetFolderPathByID(context.Background(), srv, folderID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get folder name: %v", err)
 	}
-	o, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", folderName+"/")
+	// Files are stored with userEmail prefix, so prepend it to folder path
+	satelliteFolderPath := userDetails.Email + "/" + folderName + "/"
+	o, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", satelliteFolderPath)
 	if err != nil {
-		return nil, errors.New("failed to get list from satellite with error:" + err.Error())
+		// Handle permission errors gracefully
+		if strings.Contains(err.Error(), "permission denied") || strings.Contains(err.Error(), "Unauthorized") {
+			logger.Warn(context.Background(), "Failed to list objects from satellite (will show all files as not synced)",
+				logger.ErrorField(err))
+			o = []uplink.Object{}
+		} else {
+			return nil, errors.New("failed to get list from satellite with error:" + err.Error())
+		}
 	}
 	sortSatelliteObjects(o)
 
@@ -453,10 +493,14 @@ func GetFilesInFolderByID(c echo.Context, folderID string) (*PaginatedFilesRespo
 	for _, i := range r.Files {
 		if i.MimeType != "application/vnd.google-apps.folder" {
 			i.Name = addGoogleAppsFileExtension(i.Name, i.MimeType)
-			synced := isFileSyncedInObjects(o, path.Join(folderName, i.Name))
+			// Check sync with userEmail prefix
+			filePath := userDetails.Email + "/" + path.Join(folderName, i.Name)
+			synced := isFileSyncedInObjects(o, filePath)
 			files = append(files, createFilesJSON(i, synced, ""))
 		} else {
-			synced := isFileSyncedInObjects(o, path.Join(folderName, i.Name)+"/")
+			// Check sync with userEmail prefix
+			folderPath := userDetails.Email + "/" + path.Join(folderName, i.Name) + "/"
+			synced := isFileSyncedInObjects(o, folderPath)
 			if synced {
 				synced, _ = checkFolderSyncStatus(c, i.Id)
 			}
@@ -727,10 +771,26 @@ func GetFileNamesInRoot(c echo.Context) (*PaginatedFilesResponse, error) {
 		return nil, err
 	}
 
-	// Get satellite objects for sync checking
-	satelliteObjects, err := satellite.ListObjectsDetailed(context.Background(), accessGrant, "google-drive")
+	// Get user email for sync checking
+	userDetails, err := GetGoogleAccountDetailsFromContext(c)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get satellite list: %w", err)
+		return nil, fmt.Errorf("failed to get user email: %w", err)
+	}
+	if userDetails.Email == "" {
+		return nil, errors.New("user email not found, please check access handling")
+	}
+
+	// Get satellite objects for sync checking - use prefix to only get user's files
+	satelliteObjects, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", userDetails.Email+"/")
+	if err != nil {
+		// Handle permission errors gracefully - continue with empty list
+		if strings.Contains(err.Error(), "permission denied") || strings.Contains(err.Error(), "Unauthorized") {
+			logger.Warn(context.Background(), "Failed to list objects from satellite (will show all files as not synced)",
+				logger.ErrorField(err))
+			satelliteObjects = []uplink.Object{}
+		} else {
+			return nil, fmt.Errorf("failed to get satellite list: %w", err)
+		}
 	}
 	sortSatelliteObjects(satelliteObjects)
 
@@ -763,7 +823,7 @@ func GetFileNamesInRoot(c echo.Context) (*PaginatedFilesResponse, error) {
 	}
 
 	// Process files
-	files := processRootFiles(response.Files, satelliteObjects, c)
+	files := processRootFiles(response.Files, satelliteObjects, c, userDetails.Email)
 
 	return &PaginatedFilesResponse{
 		Files:         files,
@@ -783,10 +843,26 @@ func GetSharedFiles(c echo.Context) (*PaginatedFilesResponse, error) {
 		return nil, err
 	}
 
-	// Get satellite objects for sync checking
-	satelliteObjects, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", "shared with me/")
+	// Get user email for sync checking
+	userDetails, err := GetGoogleAccountDetailsFromContext(c)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get satellite list: %w", err)
+		return nil, fmt.Errorf("failed to get user email: %w", err)
+	}
+	if userDetails.Email == "" {
+		return nil, errors.New("user email not found, please check access handling")
+	}
+
+	// Get satellite objects for sync checking - shared files are stored with userEmail prefix
+	satelliteObjects, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", userDetails.Email+"/shared with me/")
+	if err != nil {
+		// Handle permission errors gracefully - continue with empty list
+		if strings.Contains(err.Error(), "permission denied") || strings.Contains(err.Error(), "Unauthorized") {
+			logger.Warn(context.Background(), "Failed to list objects from satellite (will show all files as not synced)",
+				logger.ErrorField(err))
+			satelliteObjects = []uplink.Object{}
+		} else {
+			return nil, fmt.Errorf("failed to get satellite list: %w", err)
+		}
 	}
 	sortSatelliteObjects(satelliteObjects)
 
@@ -819,7 +895,7 @@ func GetSharedFiles(c echo.Context) (*PaginatedFilesResponse, error) {
 	}
 
 	// Process files
-	files := processSharedFiles(response.Files, satelliteObjects, c)
+	files := processSharedFiles(response.Files, satelliteObjects, c, userDetails.Email)
 
 	return &PaginatedFilesResponse{
 		Files:         files,
@@ -883,12 +959,12 @@ func GetPaginationParams(filter *GoogleDriveFilter) (int64, string) {
 	return pageSize, pageToken
 }
 
-func processSharedFiles(driveFiles []*drive.File, satelliteObjects []uplink.Object, c echo.Context) []*FilesJSON {
+func processSharedFiles(driveFiles []*drive.File, satelliteObjects []uplink.Object, c echo.Context, userEmail string) []*FilesJSON {
 	var files []*FilesJSON
 
 	for _, file := range driveFiles {
 		fullPath := path.Join("shared with me", file.Name)
-		synced := isFileSynced(satelliteObjects, fullPath, file.MimeType)
+		synced := isFileSynced(satelliteObjects, fullPath, file.MimeType, userEmail)
 
 		if file.MimeType == "application/vnd.google-apps.folder" && synced {
 			// Check if all files in folder are synced
@@ -901,11 +977,11 @@ func processSharedFiles(driveFiles []*drive.File, satelliteObjects []uplink.Obje
 	return files
 }
 
-func processRootFiles(driveFiles []*drive.File, satelliteObjects []uplink.Object, c echo.Context) []*FilesJSON {
+func processRootFiles(driveFiles []*drive.File, satelliteObjects []uplink.Object, c echo.Context, userEmail string) []*FilesJSON {
 	var files []*FilesJSON
 
 	for _, file := range driveFiles {
-		synced := isFileSynced(satelliteObjects, file.Name, file.MimeType)
+		synced := isFileSynced(satelliteObjects, file.Name, file.MimeType, userEmail)
 
 		if file.MimeType == "application/vnd.google-apps.folder" && synced {
 			// Check if all files in folder are synced
@@ -919,13 +995,18 @@ func processRootFiles(driveFiles []*drive.File, satelliteObjects []uplink.Object
 }
 
 // Helper function to check if a file is synced with proper path handling
-func isFileSynced(satelliteObjects []uplink.Object, filePath, mimeType string) bool {
+func isFileSynced(satelliteObjects []uplink.Object, filePath, mimeType, userEmail string) bool {
 	searchPath := filePath
 	if mimeType == "application/vnd.google-apps.folder" {
 		searchPath += "/"
 	} else {
 		// Add appropriate extensions for Google Apps files
 		searchPath += addGoogleAppsFileExtension("", mimeType)
+	}
+
+	// Prepend userEmail to match upload path format
+	if userEmail != "" {
+		searchPath = userEmail + "/" + searchPath
 	}
 
 	return isFileSyncedInObjects(satelliteObjects, searchPath)

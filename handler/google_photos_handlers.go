@@ -3,7 +3,6 @@ package handler
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -12,6 +11,7 @@ import (
 	"sync"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
@@ -123,15 +123,35 @@ func HandleListPhotosInAlbum(c echo.Context) error {
 		})
 	}
 
-	listFromSatellite, err := satellite.ListObjects(c.Request().Context(), accesGrant, "google-photos")
+	// Get user email for sync checking
+	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"error": fmt.Sprintf("failed to list objects from Satellite: %v", err),
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "failed to get user email: " + err.Error(),
 		})
+	}
+
+	if userDetails.Email == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "user email not found, please check access handling",
+		})
+	}
+
+	// Try to list objects from bucket with user email prefix, but don't fail if there are permission issues
+	// In that case, we'll just treat all photos as not synced
+	listFromSatellite, listErr := satellite.ListObjectsWithPrefix(c.Request().Context(), accesGrant, "google-photos", userDetails.Email+"/")
+	if listErr != nil {
+		// Log the error but continue - we'll just show all photos as not synced
+		// This handles cases where bucket doesn't exist, permission denied, etc.
+		logger.Warn(ctx, "Failed to list objects from satellite (will show all photos as not synced)",
+			logger.ErrorField(listErr))
+		listFromSatellite = make(map[string]bool) // Initialize as empty map
 	}
 
 	var photosRespJSON []*AllPhotosJSON
 	for _, v := range paginatedResponse.MediaItems {
+		// Check sync status using userEmail + "/" + filename to match upload path format
+		syncPath := userDetails.Email + "/" + v.Filename
 		photosRespJSON = append(photosRespJSON, &AllPhotosJSON{
 			Name:         v.Filename,
 			ID:           v.ID,
@@ -143,7 +163,7 @@ func HandleListPhotosInAlbum(c echo.Context) error {
 			CreationTime: v.MediaMetadata.CreationTime,
 			Width:        v.MediaMetadata.Width,
 			Height:       v.MediaMetadata.Height,
-			Synced:       listFromSatellite[v.Filename],
+			Synced:       listFromSatellite[syncPath],
 		})
 	}
 

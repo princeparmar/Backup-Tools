@@ -438,8 +438,11 @@ func createNotificationJWTToken(userID, title, body, secretKey string, priority 
 
 // SendNotificationAsync sends a notification asynchronously and logs any errors
 func SendNotificationAsync(ctx context.Context, userID, title, body string, priority *string, data map[string]interface{}, imageURL *string) {
+	// Create a new background context to avoid cancellation when the original context is canceled
+	// This ensures the notification can complete independently of the request lifecycle
+	notificationCtx := context.Background()
 	go func() {
-		if err := SendNotification(ctx, userID, title, body, priority, data, imageURL); err != nil {
+		if err := SendNotification(notificationCtx, userID, title, body, priority, data, imageURL); err != nil {
 			logger.Error(ctx, "Failed to send notification",
 				logger.String("user_id", userID),
 				logger.String("title", title),
