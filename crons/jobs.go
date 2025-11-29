@@ -450,7 +450,8 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 			updateMap["status"] = repo.JobStatusFailed
 		}
 
-		if err := a.store.CronJobRepo.UpdateCronJobByID(job.ID, updateMap); err != nil {
+		// Use cron-specific update function to safely handle one-time jobs
+		if err := a.store.CronJobRepo.UpdateCronJobFieldsForCron(job.ID, updateMap); err != nil {
 			logger.Error(ctx, "Failed to save job status",
 				logger.Int("job_id", int(job.ID)),
 				logger.ErrorField(err),

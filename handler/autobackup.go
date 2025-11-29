@@ -26,8 +26,9 @@ var intervalValues = map[string][]string{
 	"monthly": {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13",
 		"14", "15", "16", "17", "18", "19", "20", "21", "22", "23",
 		"24", "25", "26", "27", "28", "29", "30"},
-	"weekly": {"Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"},
-	"daily":  {"12am"},
+	"weekly":   {"Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"},
+	"daily":    {"12am"},
+	"one_time": {},
 }
 
 type DatabaseConnection struct {
@@ -343,7 +344,7 @@ func createSyncJob(userID, name, method, syncType string, config map[string]inte
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
 	// Check for existing jobs using original name (before adding timestamp)
-	if err := checkExistingJobs(userID, syncType, method, database); err != nil {
+	if err := checkExistingJobs(userID, name, syncType, method, database); err != nil {
 		return nil, err
 	}
 
@@ -355,7 +356,7 @@ func createSyncJob(userID, name, method, syncType string, config map[string]inte
 	return data, nil
 }
 
-func checkExistingJobs(userID, syncType, method string, db *db.PostgresDb) error {
+func checkExistingJobs(userID, name, syncType, method string, db *db.PostgresDb) error {
 	existingJobs, err := db.CronJobRepo.GetAllCronJobsForUser(userID, nil)
 	if err != nil {
 		return jsonError(http.StatusInternalServerError, "Failed to check existing jobs", err)
@@ -364,22 +365,36 @@ func checkExistingJobs(userID, syncType, method string, db *db.PostgresDb) error
 	serviceName := getServiceName(method)
 
 	for _, job := range existingJobs {
-		// Only check conflicts for jobs of the same method
-		if job.Method != method {
+		// Only check conflicts for jobs of the same method and name
+		if job.Method != method || job.Name != name {
 			continue
 		}
 
-		// Check if there are running tasks for this job
-		hasRunningTasks, err := hasRunningTasksForJob(db.TaskRepo, job.ID)
-		if err != nil {
-			return jsonError(http.StatusInternalServerError, "Failed to check task status", err)
+		// Check for name conflicts between daily and one_time syncs
+		if syncType == "one_time" && job.SyncType == "daily" {
+			// Daily sync blocks one_time sync creation (regardless of active status)
+			return jsonErrorMsg(http.StatusBadRequest, "A daily sync already exists with this "+name+". Cannot create one-time sync.")
 		}
 
-		if hasRunningTasks {
-			errorMsg := fmt.Sprintf("A backup job for this %s is currently running. Cannot create %s backup.", serviceName, syncType)
-			return jsonErrorMsg(http.StatusBadRequest, errorMsg, errorMsg)
+		if syncType == "daily" && job.SyncType == "one_time" {
+			// One_time sync blocks daily sync unless it's completed (success) or failed
+			if job.Status != repo.JobStatusSuccess && job.Status != repo.JobStatusFailed {
+				return jsonErrorMsg(http.StatusBadRequest, "A one-time sync with this name is still in progress. Wait for it to complete or fail before creating a daily sync.", "A one-time sync with this name is still in progress. Wait for it to complete or fail before creating a daily sync.")
+			}
 		}
 
+		// Check if there are running tasks for this job (for same sync type)
+		if job.SyncType == syncType {
+			hasRunningTasks, err := hasRunningTasksForJob(db.TaskRepo, job.ID)
+			if err != nil {
+				return jsonError(http.StatusInternalServerError, "Failed to check task status", err)
+			}
+
+			if hasRunningTasks {
+				errorMsg := fmt.Sprintf("A backup job for this %s is currently running. Cannot create %s backup.", serviceName, syncType)
+				return jsonErrorMsg(http.StatusBadRequest, errorMsg, errorMsg)
+			}
+		}
 	}
 
 	return nil
@@ -574,6 +589,16 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 		logger.String("job_method", job.Method),
 		logger.Bool("job_active", job.Active))
 
+	// Block all updates for one-time sync jobs
+	if job.SyncType == "one_time" {
+		logger.Warn(ctx, "Attempt to update one-time sync job",
+			logger.Int("job_id", jobID))
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   "cannot update one_time sync job",
+		})
+	}
+
 	type DatabaseConnection struct {
 		DatabaseName string `json:"database_name"`
 		Host         string `json:"host"`
@@ -601,15 +626,6 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 			"error":   err.Error(),
 		})
 	}
-	logger.Info(ctx, "Request body parsed successfully",
-		logger.Int("job_id", jobID),
-		logger.Bool("has_interval", reqBody.Interval != nil),
-		logger.Bool("has_on", reqBody.On != nil),
-		logger.Bool("has_code", reqBody.Code != nil),
-		logger.Bool("has_refresh_token", reqBody.RefreshToken != nil),
-		logger.Bool("has_database_connection", reqBody.DatabaseConnection != nil),
-		logger.Bool("has_storx_token", reqBody.StorxToken != nil),
-		logger.Bool("has_active", reqBody.Active != nil))
 
 	// Validate interval and on together
 	if (reqBody.Interval != nil && reqBody.On == nil) ||
@@ -943,6 +959,11 @@ func HandleAutomaticSyncTaskList(c echo.Context) error {
 }
 
 func validateInterval(interval, on string) bool {
+	// For one_time backups, interval doesn't need validation since scheduling doesn't apply
+	if interval == "one_time" {
+		return true
+	}
+
 	if interval == "monthly" && (on == "30" || on == "29") {
 		return false
 	}

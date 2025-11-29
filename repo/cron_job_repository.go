@@ -354,6 +354,14 @@ func (r *CronJobRepository) CreateCronJobForUser(userID, name, method string, sy
 		Status:    JobStatusCreated,
 		LastRun:   nil,
 	}
+
+	// Set interval and activation for one-time backups
+	if syncType == "one_time" {
+		data.Interval = "one_time"
+		data.On = ""
+		data.Active = true
+	}
+
 	// create new entry in database and return newly created cron job
 	res := r.db.Create(&data)
 	if res != nil && res.Error != nil {
@@ -413,6 +421,70 @@ func (r *CronJobRepository) UpdateCronJobByID(ID uint, m map[string]interface{})
 	// Commit the transaction
 	if err := tx.Commit().Error; err != nil {
 		return fmt.Errorf("error committing transaction: %w", err)
+	}
+
+	committed = true
+	return nil
+}
+
+// UpdateCronJobFieldsForCron updates a cron job by ID for cron processing.
+// For one-time sync jobs, only specific fields are allowed (status, message, message_status, last_run).
+func (r *CronJobRepository) UpdateCronJobFieldsForCron(ID uint, fields map[string]interface{}) error {
+	tx := r.db.Begin()
+	if tx.Error != nil {
+		return fmt.Errorf("error starting transaction: %w", tx.Error)
+	}
+
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Rollback()
+		}
+	}()
+
+	// Load existing job to enforce one-time sync constraints
+	var existingJob CronJobListingDB
+	if err := tx.First(&existingJob, ID).Error; err != nil {
+		return fmt.Errorf("error getting existing cron job: %w", err)
+	}
+
+	updateMap := fields
+
+	// For one-time sync jobs, only allow specific fields to be updated
+	if existingJob.SyncType == "one_time" {
+		allowedFields := map[string]bool{
+			"status":         true,
+			"message":        true,
+			"message_status": true,
+			"last_run":       true,
+		}
+
+		filteredMap := make(map[string]interface{})
+		for key, value := range fields {
+			if allowedFields[key] {
+				filteredMap[key] = value
+			}
+		}
+
+		if len(filteredMap) == 0 {
+			return fmt.Errorf("cannot update one_time sync job: only status, message, message_status, and last_run fields are allowed")
+		}
+
+		updateMap = filteredMap
+	}
+
+	// Perform the update
+	res := tx.Model(&CronJobListingDB{}).Where("id = ?", ID).Updates(updateMap)
+	if res.Error != nil {
+		return fmt.Errorf("error updating cron job for cron: %w", res.Error)
+	}
+
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("no cron job found with id %d", ID)
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return fmt.Errorf("error committing cron update transaction: %w", err)
 	}
 
 	committed = true
