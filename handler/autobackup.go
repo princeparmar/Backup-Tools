@@ -252,7 +252,7 @@ func ProcessGmailMethod(code string) (string, map[string]interface{}, error) {
 		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Code is required")
 	}
 
-	tok, err := google.GetRefreshTokenFromCodeForEmail(code)
+	tok, err := google.ExchangeCodeForToken(code)
 	if err != nil {
 		return "", nil, jsonError(http.StatusBadRequest, "Invalid Code. Not able to generate auth token from code", err)
 	}
@@ -589,16 +589,6 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 		logger.String("job_method", job.Method),
 		logger.Bool("job_active", job.Active))
 
-	// Block all updates for one-time sync jobs
-	if job.SyncType == "one_time" {
-		logger.Warn(ctx, "Attempt to update one-time sync job",
-			logger.Int("job_id", jobID))
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "Invalid Request",
-			"error":   "cannot update one_time sync job",
-		})
-	}
-
 	type DatabaseConnection struct {
 		DatabaseName string `json:"database_name"`
 		Host         string `json:"host"`
@@ -627,7 +617,219 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 		})
 	}
 
-	// Validate interval and on together
+	// For one-time syncs, only allow storx_token and refresh_token (outlook) updates
+	if job.SyncType == "one_time" {
+		// Block updates to interval, on, code, database_connection, active
+		if reqBody.Interval != nil || reqBody.On != nil ||
+			reqBody.DatabaseConnection != nil || reqBody.Active != nil {
+			logger.Warn(ctx, "Attempt to update restricted fields for one-time sync",
+				logger.Int("job_id", jobID))
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Request",
+				"error":   "For one-time sync jobs, only storx_token and refresh_token (outlook), code (gmail) updates are allowed",
+			})
+		}
+
+		updateRequest := map[string]interface{}{}
+		logger.Info(ctx, "Processing one-time sync update", logger.Int("job_id", jobID))
+
+		// Handle storx_token update for one-time syncs
+		if reqBody.StorxToken != nil {
+			if *reqBody.StorxToken == "" {
+				logger.Warn(ctx, "Empty storx_token provided for one-time sync",
+					logger.Int("job_id", jobID))
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "Invalid Request",
+					"error":   "storx_token cannot be empty",
+				})
+			}
+			updateRequest["storx_token"] = *reqBody.StorxToken
+			logger.Info(ctx, "Storx token updated for one-time sync",
+				logger.Int("job_id", jobID))
+		}
+
+		// Handle code update for one-time syncs (gmail only)
+		if reqBody.Code != nil {
+			if job.Method != "gmail" {
+				logger.Warn(ctx, "Code update attempted for non-gmail one-time sync",
+					logger.Int("job_id", jobID),
+					logger.String("current_method", job.Method))
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "Invalid Request",
+					"error":   "code update is only allowed for gmail method",
+				})
+			}
+
+			logger.Info(ctx, "Processing Google OAuth code for one-time sync", logger.Int("job_id", jobID))
+			tok, err := google.ExchangeCodeForToken(*reqBody.Code)
+			if err != nil {
+				logger.Error(ctx, "Failed to get refresh token from code",
+					logger.Int("job_id", jobID),
+					logger.ErrorField(err))
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "Invalid Code. Not able to generate auth token from code",
+					"error":   err.Error(),
+				})
+			}
+
+			// Get User Email
+			userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(tok.AccessToken)
+			if err != nil {
+				logger.Error(ctx, "Failed to get Google account details",
+					logger.Int("job_id", jobID),
+					logger.ErrorField(err))
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "Invalid Code. May be it is expired or invalid",
+					"error":   err.Error(),
+				})
+			}
+
+			if userDetails.Email == "" {
+				logger.Error(ctx, "Empty email received from Google token", logger.Int("job_id", jobID))
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "Invalid Code. May be it is expired or invalid",
+					"error":   "getting empty email id from google token",
+				})
+			}
+
+			if userDetails.Email != job.Name {
+				logger.Warn(ctx, "Email mismatch in Google OAuth for one-time sync",
+					logger.Int("job_id", jobID),
+					logger.String("token_email", userDetails.Email),
+					logger.String("job_email", job.Name))
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "email id mismatch",
+				})
+			}
+
+			updateRequest["input_data"] = map[string]interface{}{
+				"refresh_token": tok.RefreshToken,
+			}
+			logger.Info(ctx, "Google OAuth token updated successfully for one-time sync",
+				logger.Int("job_id", jobID),
+				logger.String("email", userDetails.Email))
+		}
+
+		// Handle refresh_token update for one-time syncs (outlook only)
+		if reqBody.RefreshToken != nil {
+			if job.Method != "outlook" {
+				logger.Warn(ctx, "Refresh token update attempted for non-outlook one-time sync",
+					logger.Int("job_id", jobID),
+					logger.String("current_method", job.Method))
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "Invalid Request",
+					"error":   "refresh_token update is only allowed for outlook method",
+				})
+			}
+
+			logger.Info(ctx, "Processing Outlook refresh token for one-time sync", logger.Int("job_id", jobID))
+			// Get new access token using refresh token
+			authToken, err := outlook.AuthTokenUsingRefreshToken(*reqBody.RefreshToken)
+			if err != nil {
+				logger.Error(ctx, "Failed to get auth token from refresh token",
+					logger.Int("job_id", jobID),
+					logger.ErrorField(err))
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "Invalid Refresh Token. Not able to generate auth token from refresh token",
+					"error":   err.Error(),
+				})
+			}
+
+			// Create Outlook client and get user details
+			client, err := outlook.NewOutlookClientUsingToken(authToken)
+			if err != nil {
+				logger.Error(ctx, "Failed to create Outlook client",
+					logger.Int("job_id", jobID),
+					logger.ErrorField(err))
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "Invalid Refresh Token. May be it is expired or invalid",
+					"error":   err.Error(),
+				})
+			}
+
+			userDetails, err := client.GetCurrentUser()
+			if err != nil {
+				logger.Error(ctx, "Failed to get Outlook user details",
+					logger.Int("job_id", jobID),
+					logger.ErrorField(err))
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "Invalid Refresh Token. May be it is expired or invalid",
+					"error":   err.Error(),
+				})
+			}
+
+			if userDetails.Mail == "" {
+				logger.Error(ctx, "Empty email received from Outlook token", logger.Int("job_id", jobID))
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "Invalid Refresh Token. May be it is expired or invalid",
+					"error":   "getting empty email id from outlook token",
+				})
+			}
+
+			if userDetails.Mail != job.Name {
+				logger.Warn(ctx, "Email mismatch in Outlook refresh token update",
+					logger.Int("job_id", jobID),
+					logger.String("token_email", userDetails.Mail),
+					logger.String("job_email", job.Name))
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "email id mismatch",
+				})
+			}
+
+			updateRequest["input_data"] = map[string]interface{}{
+				"refresh_token": *reqBody.RefreshToken,
+			}
+			logger.Info(ctx, "Outlook refresh token updated successfully for one-time sync",
+				logger.Int("job_id", jobID),
+				logger.String("email", userDetails.Mail))
+		}
+
+		// If no valid updates were provided
+		if len(updateRequest) == 0 {
+			logger.Warn(ctx, "No valid update fields provided for one-time sync",
+				logger.Int("job_id", jobID))
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "No valid update fields provided. Only storx_token, code (gmail), and refresh_token (outlook) are allowed",
+			})
+		}
+
+		logger.Info(ctx, "Updating one-time sync job in database",
+			logger.Int("job_id", jobID),
+			logger.Int("update_fields_count", len(updateRequest)))
+
+		err = database.CronJobRepo.UpdateCronJobByID(uint(jobID), updateRequest)
+		if err != nil {
+			logger.Error(ctx, "Failed to update one-time sync job in database",
+				logger.Int("job_id", jobID),
+				logger.ErrorField(err))
+			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+				"message": "Failed to update job",
+				"error":   err.Error(),
+			})
+		}
+
+		data, err := database.CronJobRepo.GetCronJobByID(uint(jobID))
+		if err != nil {
+			logger.Error(ctx, "Failed to retrieve updated one-time sync job data",
+				logger.Int("job_id", jobID),
+				logger.ErrorField(err))
+			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+				"message": "internal server error",
+				"error":   err.Error(),
+			})
+		}
+
+		logger.Info(ctx, "One-time sync update completed successfully",
+			logger.Int("job_id", jobID),
+			logger.String("job_name", data.Name))
+
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"message": "Automatic backup updated successfully",
+			"data":    data,
+		})
+	}
+
+	// Validate interval and on together (for daily syncs)
 	if (reqBody.Interval != nil && reqBody.On == nil) ||
 		(reqBody.On != nil && reqBody.Interval == nil) {
 		logger.Warn(ctx, "Invalid interval/on combination",
@@ -673,7 +875,7 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 		}
 
 		logger.Info(ctx, "Processing Google OAuth code", logger.Int("job_id", jobID))
-		tok, err := google.GetRefreshTokenFromCodeForEmail(*reqBody.Code)
+		tok, err := google.ExchangeCodeForToken(*reqBody.Code)
 		if err != nil {
 			logger.Error(ctx, "Failed to get refresh token from code",
 				logger.Int("job_id", jobID),

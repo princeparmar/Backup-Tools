@@ -228,7 +228,7 @@ func AuthRequestChecker(c echo.Context) bool {
 	}
 }
 
-func GetRefreshTokenFromCodeForEmail(code string) (*oauth2.Token, error) {
+func ExchangeCodeForToken(code string) (*oauth2.Token, error) {
 	b, err := os.ReadFile("credentials.json")
 	if err != nil {
 		log.Printf("Unable to read client secret file: %v", err)
