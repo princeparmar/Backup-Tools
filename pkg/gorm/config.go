@@ -13,7 +13,16 @@ type DatabaseConfig struct {
 
 func DefaultConfig() DatabaseConfig {
 	return DatabaseConfig{
-		MaxIdleConns:    10,
+		MaxIdleConns:    25,
+		MaxOpenConns:    100,
+		ConnMaxLifetime: time.Hour,
+	}
+}
+
+// OptimizedConfig returns configuration optimized for high concurrency
+func OptimizedConfig() DatabaseConfig {
+	return DatabaseConfig{
+		MaxIdleConns:    30,
 		MaxOpenConns:    100,
 		ConnMaxLifetime: time.Hour,
 	}

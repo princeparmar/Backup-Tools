@@ -127,7 +127,7 @@ require (
 	golang.org/x/sys v0.36.0 // indirect
 	golang.org/x/text v0.29.0 // indirect
 	gorm.io/driver/postgres v1.5.4
-	storj.io/common v0.0.0-20240325183111-3a1a80390ccd
+	storj.io/common v0.0.0-20240325183111-3a1a80390ccd // indirect
 	storj.io/drpc v0.0.33 // indirect
 	storj.io/uplink v1.12.3-0.20240325204957-7e1a1e616922
 )

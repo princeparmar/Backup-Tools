@@ -277,14 +277,16 @@ func HandleOutlookDownloadAndInsert(c echo.Context) error {
 		return err
 	}
 
+	// Get user details once outside the loop for better performance
+	userDetails, err := client.GetCurrentUser()
+	if err != nil {
+		logger.Error(ctx, "Failed to get user details", logger.ErrorField(err))
+		return echo.NewHTTPError(http.StatusForbidden, "Failed to get user details: "+err.Error())
+	}
+
 	return processMessagesConcurrently(c, allIDs, func(echoCtx echo.Context, key string) error {
 		// FIX: Use the echo context parameter
 		reqCtx := echoCtx.Request().Context()
-		userDetails, err := client.GetCurrentUser()
-		if err != nil {
-			logger.Error(reqCtx, "Failed to get user details", logger.ErrorField(err))
-			return err
-		}
 
 		msg, err := client.GetMessage(key)
 		if err != nil {

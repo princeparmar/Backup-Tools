@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
+	"github.com/StorX2-0/Backup-Tools/pkg/worker"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	tasks "github.com/StorX2-0/Backup-Tools/tasks"
@@ -35,11 +37,18 @@ var processorMap = map[string]Processor{
 }
 
 type AutosyncManager struct {
-	store *db.PostgresDb
+	store      *db.PostgresDb
+	workerPool *worker.WorkerPool
+	cron       *cron.Cron
 }
 
 func NewAutosyncManager(store *db.PostgresDb) *AutosyncManager {
-	return &AutosyncManager{store: store}
+	// Create worker pool with 8 workers for task processing
+	wp := worker.NewWorkerPool(8)
+	return &AutosyncManager{
+		store:      store,
+		workerPool: wp,
+	}
 }
 
 // createCronContext creates a context with trace ID for cron jobs
@@ -129,7 +138,30 @@ func (a *AutosyncManager) Start() {
 	// })
 
 	c.Start()
+	a.cron = c
 	logger.Info(context.Background(), "Cron scheduler started successfully")
+}
+
+// Stop gracefully shuts down the AutosyncManager
+func (a *AutosyncManager) Stop() {
+	ctx := context.Background()
+	logger.Info(ctx, "Stopping AutosyncManager...")
+
+	// Stop cron scheduler
+	if a.cron != nil {
+		stopCtx := a.cron.Stop()
+		logger.Info(ctx, "Cron scheduler stopped, waiting for running jobs to complete")
+		<-stopCtx.Done()
+		logger.Info(ctx, "Cron scheduler shutdown complete")
+	}
+
+	// Shutdown worker pool
+	if a.workerPool != nil {
+		logger.Info(ctx, "Shutting down worker pool...")
+		a.workerPool.Shutdown()
+		logger.Info(ctx, "Worker pool shutdown complete")
+	}
+	logger.Info(ctx, "AutosyncManager stopped")
 }
 
 func (a *AutosyncManager) CreateTaskForAllPendingJobs(ctx context.Context) error {
@@ -224,74 +256,112 @@ func (a *AutosyncManager) ProcessTask(ctx context.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
+	// Process tasks in batches with worker pool
+	maxBatchSize := 10
 	processedCount := 0
 	errorCount := 0
 
+	var mu sync.Mutex
+
 	for {
-		task, err := a.store.TaskRepo.GetPushedTask()
-		if err != nil {
-			if strings.Contains(err.Error(), "record not found") {
-				logger.Info(ctx, "No tasks to process")
-				break
-			}
-			return fmt.Errorf("failed to get pushed task: %w", err)
+		// Fetch multiple tasks in batch
+		tasks := a.store.TaskRepo.GetPushedTasksBatch(maxBatchSize)
+		if len(tasks) == 0 {
+			logger.Info(ctx, "No tasks to process")
+			break
 		}
 
-		logger.Info(ctx, "Processing task",
-			logger.Int("task_id", int(task.ID)),
-			logger.Int("job_id", int(task.CronJobID)),
+		logger.Info(ctx, "Processing batch of tasks",
+			logger.Int("batch_size", len(tasks)),
 		)
 
-		job, err := a.store.CronJobRepo.GetCronJobByID(task.CronJobID)
-		if err != nil {
-			logger.Error(ctx, "Failed to get cron job for task",
-				logger.Int("task_id", int(task.ID)),
-				logger.Int("job_id", int(task.CronJobID)),
-				logger.ErrorField(err),
-			)
-			errorCount++
-			// Update task status with error and continue to next task
-			if updateErr := a.UpdateTaskStatus(task, job, err); updateErr != nil {
-				logger.Error(ctx, "Failed to update task status after job fetch error",
+		// Track submitted tasks to wait for completion
+		var batchWg sync.WaitGroup
+
+		// Process tasks concurrently using worker pool
+		for _, task := range tasks {
+			task := task // Capture loop variable
+			taskWg, submitErr := a.workerPool.SubmitAndWait(func() error {
+				logger.Info(ctx, "Processing task",
 					logger.Int("task_id", int(task.ID)),
-					logger.ErrorField(updateErr),
+					logger.Int("job_id", int(task.CronJobID)),
 				)
+
+				job, err := a.store.CronJobRepo.GetCronJobByID(task.CronJobID)
+				if err != nil {
+					logger.Error(ctx, "Failed to get cron job for task",
+						logger.Int("task_id", int(task.ID)),
+						logger.Int("job_id", int(task.CronJobID)),
+						logger.ErrorField(err),
+					)
+					mu.Lock()
+					errorCount++
+					mu.Unlock()
+					// Update task status with error
+					_ = a.UpdateTaskStatus(ctx, task, job, err)
+					return err
+				}
+
+				// Send notification for cron task started running
+				priority := "normal"
+				data := map[string]interface{}{
+					"event":   "cron_started_running",
+					"level":   2,
+					"task_id": task.ID,
+					"job_id":  job.ID,
+					"method":  job.Method,
+					"name":    job.Name,
+				}
+				satellite.SendNotificationAsync(ctx, job.UserID, "Automatic Backup Started", fmt.Sprintf("Automatic backup for %s has started running", job.Name), &priority, data, nil)
+
+				// Process the task
+				processErr := a.processTask(ctx, task, job)
+
+				// Update task status
+				if updateErr := a.UpdateTaskStatus(ctx, task, job, processErr); updateErr != nil {
+					logger.Error(ctx, "Failed to update task status",
+						logger.Int("task_id", int(task.ID)),
+						logger.ErrorField(updateErr),
+					)
+				}
+
+				mu.Lock()
+				processedCount++
+				if processErr != nil {
+					errorCount++
+				}
+				mu.Unlock()
+
+				return processErr
+			})
+
+			if submitErr != nil {
+				logger.Error(ctx, "Failed to submit task to worker pool",
+					logger.Int("task_id", int(task.ID)),
+					logger.ErrorField(submitErr),
+				)
+				mu.Lock()
+				errorCount++
+				mu.Unlock()
+				continue
 			}
-			continue
+
+			// Track this task's completion
+			batchWg.Add(1)
+			go func(wg *sync.WaitGroup) {
+				defer batchWg.Done()
+				taskWg.Wait()
+			}(taskWg)
 		}
 
-		// Send notification for cron task started running
-		priority := "normal"
-		data := map[string]interface{}{
-			"event":   "cron_started_running",
-			"level":   2,
-			"task_id": task.ID,
-			"job_id":  job.ID,
-			"method":  job.Method,
-			"name":    job.Name,
-		}
-		satellite.SendNotificationAsync(ctx, job.UserID, "Automatic Backup Started", fmt.Sprintf("Automatic backup for %s has started running", job.Name), &priority, data, nil)
+		// Wait for all tasks in this batch to complete
+		batchWg.Wait()
 
-		// Process the task
-		processErr := a.processTask(ctx, task, job)
-
-		// Update task status
-		if updateErr := a.UpdateTaskStatus(task, job, processErr); updateErr != nil {
-			logger.Error(ctx, "Failed to update task status",
-				logger.Int("task_id", int(task.ID)),
-				logger.ErrorField(updateErr),
-			)
-			// Continue with next task even if status update fails
-			continue
-		}
-
-		processedCount++
-		if processErr != nil {
-			errorCount++
+		// If we got fewer tasks than batch size, we're done
+		if len(tasks) < maxBatchSize {
+			break
 		}
 	}
-
-	// Record overall execution metrics
 
 	logger.Info(ctx, "Task processing completed",
 		logger.Int("processed", processedCount),
@@ -351,8 +421,7 @@ func (a *AutosyncManager) processTask(ctx context.Context, task *repo.TaskListin
 	return err
 }
 
-func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.CronJobListingDB, processErr error) error {
-	ctx := context.Background() // You might want to pass context here
+func (a *AutosyncManager) UpdateTaskStatus(ctx context.Context, task *repo.TaskListingDB, job *repo.CronJobListingDB, processErr error) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
@@ -388,7 +457,7 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 			a.handleErrorScenarios(processErr, job, task)
 
 			// Send email notification
-			go satellite.SendEmailForBackupFailure(context.Background(), job.Name, emailMessage, job.Method)
+			go satellite.SendEmailForBackupFailure(ctx, job.Name, emailMessage, job.Method)
 
 			// Send generic notification with level 4
 			priority := "high"
@@ -402,7 +471,7 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 				"error":     processErr.Error(),
 				"execution": task.Execution,
 			}
-			satellite.SendNotificationAsync(context.Background(), job.UserID, "Automatic Backup Failed", fmt.Sprintf("Automatic backup for %s failed: %s", job.Name, emailMessage), &priority, data, nil)
+			satellite.SendNotificationAsync(ctx, job.UserID, "Automatic Backup Failed", fmt.Sprintf("Automatic backup for %s failed: %s", job.Name, emailMessage), &priority, data, nil)
 		}
 	} else {
 		// Handle success case - send notification
@@ -417,7 +486,7 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 				"name":      job.Name,
 				"execution": task.Execution,
 			}
-			satellite.SendNotificationAsync(context.Background(), job.UserID, "Automatic Backup Completed", fmt.Sprintf("Automatic backup for %s completed successfully in %d seconds", job.Name, task.Execution), &priority, data, nil)
+			satellite.SendNotificationAsync(ctx, job.UserID, "Automatic Backup Completed", fmt.Sprintf("Automatic backup for %s completed successfully in %d seconds", job.Name, task.Execution), &priority, data, nil)
 		}
 	}
 

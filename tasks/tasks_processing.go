@@ -24,6 +24,7 @@ type TaskProcessorDeps struct {
 
 // ScheduledTaskProcessorInput defines the input for processor execution
 type ScheduledTaskProcessorInput struct {
+	Ctx           context.Context
 	InputData     map[string]interface{}
 	Memory        map[string][]string
 	Task          *repo.ScheduledTasks
@@ -162,7 +163,7 @@ func (s *ScheduledTaskManager) ProcessScheduledTasks(ctx context.Context) error 
 		satellite.SendNotificationAsync(ctx, task.UserID, "Scheduled Task Started", fmt.Sprintf("Scheduled task for %s has started running", task.LoginId), &priority, data, nil)
 
 		processErr := s.processScheduledTask(ctx, task)
-		if updateErr := s.UpdateScheduledTaskStatus(task, processErr); updateErr != nil {
+		if updateErr := s.UpdateScheduledTaskStatus(ctx, task, processErr); updateErr != nil {
 			logger.Error(ctx, "Failed to update scheduled task status",
 				logger.Int("task_id", int(task.ID)),
 				logger.ErrorField(updateErr),
@@ -206,6 +207,7 @@ func (s *ScheduledTaskManager) processScheduledTask(ctx context.Context, task *r
 	}
 
 	err = processor.Run(ScheduledTaskProcessorInput{
+		Ctx:       ctx,
 		InputData: inputData,
 		Memory:    memory,
 		Task:      task,
@@ -231,8 +233,7 @@ func (s *ScheduledTaskManager) processScheduledTask(ctx context.Context, task *r
 	return err
 }
 
-func (s *ScheduledTaskManager) UpdateScheduledTaskStatus(task *repo.ScheduledTasks, processErr error) error {
-	ctx := context.Background()
+func (s *ScheduledTaskManager) UpdateScheduledTaskStatus(ctx context.Context, task *repo.ScheduledTasks, processErr error) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 

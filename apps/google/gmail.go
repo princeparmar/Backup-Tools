@@ -12,6 +12,7 @@ import (
 
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 
 	"github.com/labstack/echo/v4"
@@ -416,9 +417,9 @@ func (filter *GmailFilter) buildGmailQuery() string {
 	return strings.Join(queryParts, " ")
 }
 
-func (client *GmailClient) GetUserMessagesControlled(nextPageToken, label string, num int64, filter *GmailFilter) (*MessagesResponse, error) {
+func (client *GmailClient) GetUserMessagesControlled(ctx context.Context, nextPageToken, label string, num int64, filter *GmailFilter) (*MessagesResponse, error) {
 
-	req := client.Users.Messages.List("me").MaxResults(num)
+	req := client.Users.Messages.List("me").MaxResults(num).Context(ctx)
 	if nextPageToken != "" {
 		req.PageToken(nextPageToken)
 	}
@@ -436,9 +437,25 @@ func (client *GmailClient) GetUserMessagesControlled(nextPageToken, label string
 		return nil, err
 	}
 
+	// Use worker pool for parallel message fetching when we have many messages
+	// Only use workers if no filter or label is applied, as GetUserMessagesUsingWorkers
+	// doesn't support filters/labels and would fetch unfiltered messages
+	if len(res.Messages) > 10 && label == "" && (filter == nil || filter.buildGmailQuery() == "") {
+		workerResponse, err := client.GetUserMessagesUsingWorkers(ctx, nextPageToken, 10)
+		if err == nil {
+			workerResponse.NextPageToken = res.NextPageToken
+			return workerResponse, nil
+		}
+		// Log error before fallback
+		logger.Warn(ctx, "Worker pool failed, falling back to sequential processing",
+			logger.ErrorField(err))
+		// Fall through to sequential if worker pool fails
+	}
+
+	// For smaller batches, fetch sequentially
 	messages := make([]*gmail.Message, 0, len(res.Messages))
 	for _, msg := range res.Messages {
-		if message, err := client.Users.Messages.Get("me", msg.Id).Do(); err == nil {
+		if message, err := client.Users.Messages.Get("me", msg.Id).Context(ctx).Do(); err == nil {
 			messages = append(messages, message)
 		}
 	}
@@ -449,10 +466,10 @@ func (client *GmailClient) GetUserMessagesControlled(nextPageToken, label string
 	}, nil
 }
 
-func (client *GmailClient) GetUserMessagesUsingWorkers(nextPageToken string, workerCount int) (*MessagesResponse, error) {
+func (client *GmailClient) GetUserMessagesUsingWorkers(ctx context.Context, nextPageToken string, workerCount int) (*MessagesResponse, error) {
 
 	// Fetch list of message IDs
-	req := client.Users.Messages.List("me").MaxResults(500)
+	req := client.Users.Messages.List("me").MaxResults(500).Context(ctx)
 	if nextPageToken != "" {
 		req.PageToken(nextPageToken)
 	}
@@ -476,7 +493,7 @@ func (client *GmailClient) GetUserMessagesUsingWorkers(nextPageToken string, wor
 		go func() {
 			defer wg.Done()
 			for msgID := range idCh {
-				if message, err := client.Users.Messages.Get("me", msgID).Do(); err == nil {
+				if message, err := client.Users.Messages.Get("me", msgID).Context(ctx).Do(); err == nil {
 					msgCh <- message
 				}
 			}

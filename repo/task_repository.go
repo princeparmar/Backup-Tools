@@ -80,7 +80,9 @@ func (r *TaskRepository) MissedHeartbeatForTask() error {
 		task.Status = TaskStatusFailed
 		task.Message = "Process got stuck because of some reason. Marked as failed"
 
-		task.Execution = uint64(time.Since(*task.StartTime).Seconds())
+		if task.StartTime != nil {
+			task.Execution = uint64(time.Since(*task.StartTime).Seconds())
+		}
 		task.RetryCount++
 
 		db = tx.Save(&task)
@@ -121,7 +123,8 @@ func (r *TaskRepository) GetPushedTask() (*TaskListingDB, error) {
 	tx := r.db.Begin()
 	// lock table tasks for update and select and return the first row with status pushed
 	// or status 'failed' and retry count less than 3
-	db := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+	// Use SKIP LOCKED for better concurrency
+	db := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
 		Joins("JOIN cron_job_listing_dbs ON task_listing_dbs.cron_job_id = cron_job_listing_dbs.id").
 		Where("cron_job_listing_dbs.active = ? AND (task_listing_dbs.status = ? OR (task_listing_dbs.status = ? AND task_listing_dbs.retry_count < ?))",
 			true, TaskStatusPushed, TaskStatusFailed, MaxRetryCount).
@@ -164,6 +167,77 @@ func (r *TaskRepository) GetPushedTask() (*TaskListingDB, error) {
 	}
 
 	return &res, nil
+}
+
+// GetPushedTasksBatch retrieves multiple pushed tasks in a batch for parallel processing
+func (r *TaskRepository) GetPushedTasksBatch(limit int) []*TaskListingDB {
+	var tasks []*TaskListingDB
+	tx := r.db.Begin()
+
+	// Use SKIP LOCKED to allow concurrent workers to pick different tasks
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+		Joins("JOIN cron_job_listing_dbs ON task_listing_dbs.cron_job_id = cron_job_listing_dbs.id").
+		Where("cron_job_listing_dbs.active = ? AND (task_listing_dbs.status = ? OR (task_listing_dbs.status = ? AND task_listing_dbs.retry_count < ?))",
+			true, TaskStatusPushed, TaskStatusFailed, MaxRetryCount).
+		Limit(limit).
+		Find(&tasks).Error
+
+	if err != nil {
+		tx.Rollback()
+		return []*TaskListingDB{}
+	}
+
+	if len(tasks) == 0 {
+		tx.Rollback()
+		return []*TaskListingDB{}
+	}
+
+	// Update all tasks to running status in batch
+	startTime := time.Now()
+	taskIDs := make([]uint, len(tasks))
+	for i := range tasks {
+		tasks[i].Status = TaskStatusRunning
+		tasks[i].StartTime = &startTime
+		tasks[i].LastHeartBeat = &startTime
+		tasks[i].Message = "Automatic backup started"
+		taskIDs[i] = tasks[i].ID
+	}
+
+	// Batch update tasks
+	if err := tx.Model(&TaskListingDB{}).Where("id IN ?", taskIDs).Updates(map[string]interface{}{
+		"status":          TaskStatusRunning,
+		"start_time":      startTime,
+		"last_heart_beat": startTime,
+		"message":         "Automatic backup started",
+	}).Error; err != nil {
+		tx.Rollback()
+		return []*TaskListingDB{}
+	}
+
+	// Update associated jobs
+	jobIDs := make([]uint, 0, len(tasks))
+	jobIDMap := make(map[uint]bool)
+	for _, task := range tasks {
+		if !jobIDMap[task.CronJobID] {
+			jobIDs = append(jobIDs, task.CronJobID)
+			jobIDMap[task.CronJobID] = true
+		}
+	}
+
+	if err := tx.Model(&CronJobListingDB{}).Where("id IN ?", jobIDs).Updates(map[string]interface{}{
+		"message":        "Automatic backup started",
+		"message_status": JobMessageStatusInfo,
+		"status":         JobStatusInProgress,
+	}).Error; err != nil {
+		tx.Rollback()
+		return []*TaskListingDB{}
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return []*TaskListingDB{}
+	}
+
+	return tasks
 }
 
 // GetTaskByID retrieves a task by its ID

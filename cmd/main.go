@@ -30,14 +30,16 @@ func main() {
 	// Setup storage
 	store, err := setupStorage(ctx)
 	if err != nil {
+		logger.Error(ctx, "failed to setup storage", logger.ErrorField(err))
 		os.Exit(1)
 	}
 
 	// Start background jobs
-	crons.NewAutosyncManager(store).Start()
+	autosyncManager := crons.NewAutosyncManager(store)
+	autosyncManager.Start()
 
-	// Start server
-	router.StartServer(store, getAddress())
+	// Start server with graceful shutdown
+	router.StartServerWithGracefulShutdown(store, getAddress(), autosyncManager)
 }
 
 func initApp(ctx context.Context) error {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
@@ -15,7 +16,6 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/dgrijalva/jwt-go"
 	"github.com/labstack/echo/v4"
-	"storj.io/common/grant"
 	"storj.io/uplink"
 )
 
@@ -58,35 +58,24 @@ func HandleSatelliteAuthentication(c echo.Context) error {
 }
 
 // GetUploader creates an uploader for the specified bucket and object
+// Note: The caller is responsible for calling Commit() or Abort() on the returned upload
 func GetUploader(ctx context.Context, accessGrant, bucketName, objectKey string) (*uplink.Upload, error) {
-
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
 		return nil, fmt.Errorf("parse access grant: %w", err)
 	}
 
-	testAccessParse, err := grant.ParseAccess(accessGrant)
-	if err != nil {
-		return nil, fmt.Errorf("parse access grant: %w", err)
-	}
-
-	logger.Info(ctx, "access details",
-		logger.String("satellite", testAccessParse.SatelliteAddress),
-		logger.String("api_key", testAccessParse.APIKey.Serialize()))
-
 	project, err := uplink.OpenProject(ctx, access)
 	if err != nil {
 		return nil, fmt.Errorf("open project: %w", err)
 	}
-	defer project.Close()
 
 	_, err = project.EnsureBucket(ctx, bucketName)
 	if err != nil {
-		_, err = project.CreateBucket(ctx, bucketName)
-		if err != nil {
+		if _, err = project.CreateBucket(ctx, bucketName); err != nil {
+			project.Close()
 			return nil, fmt.Errorf("create bucket: %w", err)
 		}
-	} else {
 	}
 
 	logger.Info(ctx, "Uploading object",
@@ -95,29 +84,50 @@ func GetUploader(ctx context.Context, accessGrant, bucketName, objectKey string)
 
 	upload, err := project.UploadObject(ctx, bucketName, objectKey, nil)
 	if err != nil {
+		project.Close()
 		return nil, fmt.Errorf("initiate upload: %w", err)
 	}
 
+	// Note: Project will be closed when upload is committed or aborted
 	return upload, nil
 }
 
 // UploadObject uploads data to satellite storage
 func UploadObject(ctx context.Context, accessGrant, bucketName, objectKey string, data []byte) error {
-
-	upload, err := GetUploader(ctx, accessGrant, bucketName, objectKey)
+	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
-		return err
+		return fmt.Errorf("parse access grant: %w", err)
+	}
+
+	project, err := uplink.OpenProject(ctx, access)
+	if err != nil {
+		return fmt.Errorf("open project: %w", err)
+	}
+	defer project.Close()
+
+	_, err = project.EnsureBucket(ctx, bucketName)
+	if err != nil {
+		if _, err = project.CreateBucket(ctx, bucketName); err != nil {
+			return fmt.Errorf("create bucket: %w", err)
+		}
+	}
+
+	logger.Info(ctx, "Uploading object",
+		logger.String("bucket", bucketName),
+		logger.String("object", objectKey))
+
+	upload, err := project.UploadObject(ctx, bucketName, objectKey, nil)
+	if err != nil {
+		return fmt.Errorf("initiate upload: %w", err)
 	}
 
 	buf := bytes.NewBuffer(data)
-	_, err = io.Copy(upload, buf)
-	if err != nil {
+	if _, err = io.Copy(upload, buf); err != nil {
 		_ = upload.Abort()
 		return fmt.Errorf("upload data: %w", err)
 	}
 
-	err = upload.Commit()
-	if err != nil {
+	if err = upload.Commit(); err != nil {
 		return fmt.Errorf("commit object: %w", err)
 	}
 
@@ -202,9 +212,14 @@ func ListObjectsDetailed(ctx context.Context, accessGrant, bucketName string) ([
 
 // GetFilesInFolder lists objects with a specific prefix
 func GetFilesInFolder(ctx context.Context, accessGrant, bucketName, prefix string) ([]uplink.Object, error) {
-	return listObjectsWithOptions(ctx, accessGrant, bucketName, &uplink.ListObjectsOptions{
+	objects, err := listObjectsWithOptions(ctx, accessGrant, bucketName, &uplink.ListObjectsOptions{
 		Prefix: prefix,
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	return objects, nil
 }
 
 // ListObjectsRecursive lists all objects recursively
@@ -525,4 +540,69 @@ func SendNotification(ctx context.Context, userID, title, body string, priority 
 	default:
 		return nil
 	}
+}
+
+// UploadItem represents a single upload item
+type UploadItem struct {
+	ObjectKey string
+	Data      []byte
+}
+
+// UploadBatch uploads multiple objects in parallel
+func UploadBatch(ctx context.Context, accessGrant, bucketName string, uploads []UploadItem, workerCount int) error {
+	if len(uploads) == 0 {
+		return nil
+	}
+
+	if workerCount <= 0 {
+		workerCount = 5 // Default to 5 workers
+	}
+	if workerCount > len(uploads) {
+		workerCount = len(uploads)
+	}
+
+	var wg sync.WaitGroup
+	uploadChan := make(chan UploadItem, len(uploads))
+	errChan := make(chan error, len(uploads))
+
+	// Send all uploads to channel
+	for _, item := range uploads {
+		uploadChan <- item
+	}
+	close(uploadChan)
+
+	// Start workers
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for item := range uploadChan {
+				if err := UploadObject(ctx, accessGrant, bucketName, item.ObjectKey, item.Data); err != nil {
+					logger.Error(ctx, "Failed to upload object",
+						logger.String("object_key", item.ObjectKey),
+						logger.ErrorField(err),
+					)
+					errChan <- fmt.Errorf("failed to upload %s: %w", item.ObjectKey, err)
+				}
+			}
+		}()
+	}
+
+	// Wait for all workers to complete
+	wg.Wait()
+	close(errChan)
+
+	// Collect errors
+	var errors []error
+	for err := range errChan {
+		if err != nil {
+			errors = append(errors, err)
+		}
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("batch upload completed with %d errors: %v", len(errors), errors[0])
+	}
+
+	return nil
 }

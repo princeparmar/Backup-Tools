@@ -3,8 +3,13 @@ package router
 import (
 	"context"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	googlepack "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/crons"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/handler"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
@@ -15,12 +20,15 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-func StartServer(db *db.PostgresDb, address string) {
+func StartServer(db *db.PostgresDb, address string) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
 
-	// Initialize all middleware
+	// Initialize all middleware (includes compression if enabled)
 	middleware.InitializeAllMiddleware(e, db)
+
+	// Enable HTTP compression for better performance (after other middleware)
+	e.Use(middleware.GzipMiddleware())
 
 	// Prometheus metrics endpoints
 	e.GET("/metrics", echo.WrapHandler(monitor.CreateMetricsHandler()))
@@ -123,7 +131,7 @@ func StartServer(db *db.PostgresDb, address string) {
 				"error": "access token not found",
 			})
 		}
-		list, err := satellite.ListObjectsRecursive(context.Background(), accesGrant, bucketName)
+		list, err := satellite.ListObjectsRecursive(c.Request().Context(), accesGrant, bucketName)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),
@@ -184,8 +192,41 @@ func StartServer(db *db.PostgresDb, address string) {
 	scheduledTasks.GET("", handler.HandleGetScheduledTasksByUserID)
 	scheduledTasks.GET("/live", handler.HandleGetRunningScheduledTasks)
 
-	err := e.Start(address)
-	if err != nil {
-		logger.Info(context.Background(), "Error starting server", logger.ErrorField(err))
+	// Return the echo instance for graceful shutdown handling
+	return e
+}
+
+// StartServerWithGracefulShutdown starts the server with graceful shutdown support
+func StartServerWithGracefulShutdown(db *db.PostgresDb, address string, autosyncManager *crons.AutosyncManager) {
+	e := StartServer(db, address)
+
+	// Start server in a goroutine
+	go func() {
+		if err := e.Start(address); err != nil && err != http.ErrServerClosed {
+			logger.Error(context.Background(), "Error starting server", logger.ErrorField(err))
+		}
+	}()
+
+	// Wait for interrupt signal to gracefully shutdown the server
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	<-quit
+
+	logger.Info(context.Background(), "Shutting down server...")
+
+	// Create a context with timeout for graceful shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Stop background jobs first
+	if autosyncManager != nil {
+		autosyncManager.Stop()
+	}
+
+	// Shutdown the server
+	if err := e.Shutdown(ctx); err != nil {
+		logger.Error(context.Background(), "Server forced to shutdown", logger.ErrorField(err))
+	} else {
+		logger.Info(context.Background(), "Server exited gracefully")
 	}
 }

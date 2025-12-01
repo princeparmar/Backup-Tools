@@ -33,6 +33,11 @@ func InitializeAllMiddleware(e *echo.Echo, db *db.PostgresDb) {
 	e.Use(echomiddleware.CORS())
 }
 
+// GzipMiddleware enables gzip compression for responses
+func GzipMiddleware() echo.MiddlewareFunc {
+	return echomiddleware.Gzip()
+}
+
 func DBMiddleware(db *db.PostgresDb) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {

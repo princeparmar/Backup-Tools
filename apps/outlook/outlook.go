@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	abs "github.com/microsoft/kiota-abstractions-go"
@@ -221,6 +222,111 @@ func parseRelativeDateFilter(relativeStr string, now time.Time, newer bool) stri
 	return targetTime.Format(time.RFC3339)
 }
 
+// GetUserMessagesControlledParallel processes messages in parallel for better performance
+func (client *OutlookClient) GetUserMessagesControlledParallel(result models.MessageCollectionResponseable, skip, limit int32) (*OutlookResponse, error) {
+	messages := result.GetValue()
+	if len(messages) == 0 {
+		return &OutlookResponse{
+			Messages:      []*OutlookMinimalMessage{},
+			Skip:          int(skip),
+			Limit:         int(limit),
+			TotalCount:    0,
+			ResponseCount: 0,
+			HasMore:       false,
+		}, nil
+	}
+
+	workerCount := 15
+	if len(messages) < workerCount {
+		workerCount = len(messages)
+	}
+
+	type resultItem struct {
+		message *OutlookMinimalMessage
+		index   int
+	}
+
+	var wg sync.WaitGroup
+	messageChan := make(chan struct {
+		msg   models.Messageable
+		index int
+	}, len(messages))
+	resultChan := make(chan resultItem, len(messages))
+
+	// Send messages to channel
+	for i, msg := range messages {
+		messageChan <- struct {
+			msg   models.Messageable
+			index int
+		}{msg: msg, index: i}
+	}
+	close(messageChan)
+
+	// Start workers
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for item := range messageChan {
+				outlookMsg := NewOutlookMinimalMessage(item.msg)
+				resultChan <- resultItem{message: outlookMsg, index: item.index}
+			}
+		}()
+	}
+
+	// Close result channel when all workers are done
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Collect results
+	outlookMessages := make([]*OutlookMinimalMessage, len(messages))
+	for res := range resultChan {
+		outlookMessages[res.index] = res.message
+	}
+
+	// Calculate pagination info (same logic as original)
+	actualCount := len(outlookMessages)
+	hasMore := false
+	responseCount := actualCount
+	var totalCount *int
+
+	if odataCount := result.GetOdataCount(); odataCount != nil {
+		totalCountValue := int(*odataCount)
+		totalCount = &totalCountValue
+		responseCount = totalCountValue
+	}
+
+	if actualCount < int(limit) {
+		hasMore = false
+	} else if totalCount != nil {
+		if int(skip)+actualCount >= *totalCount {
+			hasMore = false
+		} else {
+			hasMore = true
+		}
+	} else if result.GetOdataNextLink() != nil {
+		hasMore = true
+	} else {
+		hasMore = false
+	}
+
+	totalCountValue := actualCount
+	if totalCount != nil {
+		totalCountValue = *totalCount
+	}
+
+	return &OutlookResponse{
+		Messages:      outlookMessages,
+		Skip:          int(skip),
+		Limit:         int(limit),
+		TotalCount:    totalCountValue,
+		ResponseCount: responseCount,
+		HasMore:       hasMore,
+	}, nil
+}
+
 // GetUserMessagesControlled retrieves messages from Outlook with pagination and filter support
 func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter *OutlookFilter) (*OutlookResponse, error) {
 	if limit > 100 || limit < 1 {
@@ -276,6 +382,12 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 		return nil, fmt.Errorf("failed to get user messages: %w", err)
 	}
 
+	// For larger batches, process in parallel
+	if len(result.GetValue()) > 20 {
+		return client.GetUserMessagesControlledParallel(result, skip, limit)
+	}
+
+	// For smaller batches, process sequentially
 	outlookMessages := make([]*OutlookMinimalMessage, 0, len(result.GetValue()))
 	for _, message := range result.GetValue() {
 		outlookMessages = append(outlookMessages, NewOutlookMinimalMessage(message))
@@ -358,9 +470,76 @@ func (client *OutlookClient) GetMessageWithDetails(skip, limit int32) ([]*Outloo
 		return nil, fmt.Errorf("failed to get detailed messages: %w", err)
 	}
 
+	// For larger batches, use parallel processing
+	if len(result.GetValue()) > 10 {
+		return client.GetMessagesWithDetailsParallel(result.GetValue(), 10)
+	}
+
+	// For smaller batches, process sequentially
 	outlookMessages := make([]*OutlookMessage, 0, len(result.GetValue()))
 	for _, message := range result.GetValue() {
 		outlookMessages = append(outlookMessages, NewOutlookMessage(message))
+	}
+
+	return outlookMessages, nil
+}
+
+// GetMessagesWithDetailsParallel retrieves detailed messages in parallel using worker pool
+func (client *OutlookClient) GetMessagesWithDetailsParallel(messages []models.Messageable, workerCount int) ([]*OutlookMessage, error) {
+	if len(messages) == 0 {
+		return []*OutlookMessage{}, nil
+	}
+
+	if workerCount <= 0 {
+		workerCount = 10
+	}
+	if workerCount > len(messages) {
+		workerCount = len(messages)
+	}
+
+	type result struct {
+		message *OutlookMessage
+		index   int
+	}
+
+	var wg sync.WaitGroup
+	messageChan := make(chan struct {
+		msg   models.Messageable
+		index int
+	}, len(messages))
+	resultChan := make(chan result, len(messages))
+
+	// Send messages to channel
+	for i, msg := range messages {
+		messageChan <- struct {
+			msg   models.Messageable
+			index int
+		}{msg: msg, index: i}
+	}
+	close(messageChan)
+
+	// Start workers
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for item := range messageChan {
+				outlookMsg := NewOutlookMessage(item.msg)
+				resultChan <- result{message: outlookMsg, index: item.index}
+			}
+		}()
+	}
+
+	// Close result channel when all workers are done
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Collect results
+	outlookMessages := make([]*OutlookMessage, len(messages))
+	for res := range resultChan {
+		outlookMessages[res.index] = res.message
 	}
 
 	return outlookMessages, nil

@@ -272,7 +272,7 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 	var res []CronJobListingDB
 	tx := r.db.Begin()
 
-	// The raw SQL query
+	// The raw SQL query with SKIP LOCKED for better concurrency
 	sqlQuery := `
 		SELECT *
 		FROM cron_job_listing_dbs
@@ -288,7 +288,7 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 		)
 		AND deleted_at is null
 		LIMIT 10
-		FOR UPDATE
+		FOR UPDATE SKIP LOCKED
 	`
 
 	// Execute the raw SQL query and store the result in the cronJobs slice
@@ -303,14 +303,22 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 		return nil, fmt.Errorf("error getting jobs to process: %v", scanResult.Error)
 	}
 
-	// update message to "push to queue" and message status to "info"
-	for i := range res {
-		res[i].Message = JobMessagePushToQueue
-		res[i].MessageStatus = JobMessageStatusInfo
+	// Batch update message to "push to queue" and message status to "info"
+	if len(res) > 0 {
+		jobIDs := make([]uint, len(res))
+		for i := range res {
+			res[i].Message = JobMessagePushToQueue
+			res[i].MessageStatus = JobMessageStatusInfo
+			jobIDs[i] = res[i].ID
+		}
 
-		if err := tx.Save(&res[i]).Error; err != nil {
+		// Batch update instead of individual saves
+		if err := tx.Model(&CronJobListingDB{}).Where("id IN ?", jobIDs).Updates(map[string]interface{}{
+			"message":        JobMessagePushToQueue,
+			"message_status": JobMessageStatusInfo,
+		}).Error; err != nil {
 			tx.Rollback()
-			return nil, fmt.Errorf("error updating cron job: %w", err)
+			return nil, fmt.Errorf("error batch updating cron jobs: %w", err)
 		}
 	}
 

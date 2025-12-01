@@ -6,6 +6,7 @@ import (
 
 	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type ScheduledTasks struct {
@@ -93,10 +94,13 @@ func NewScheduledTasksRepository(db *gorm.DB) *ScheduledTasksRepository {
 	return &ScheduledTasksRepository{db: db}
 }
 
-// GetNextScheduledTask gets the next scheduled task to process
+// GetNextScheduledTask gets the next scheduled task to process using SKIP LOCKED for better concurrency
 func (r *ScheduledTasksRepository) GetNextScheduledTask() (*ScheduledTasks, error) {
 	var task ScheduledTasks
-	err := r.db.Where("status = ?", "created").First(&task).Error
+	// Use SKIP LOCKED to allow concurrent task processing without blocking
+	err := r.db.Where("status = ?", "created").
+		Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+		First(&task).Error
 	return &task, err
 }
 
@@ -139,15 +143,25 @@ func (r *ScheduledTasksRepository) MissedHeartbeatForScheduledTask() error {
 		return fmt.Errorf("error getting scheduled tasks with missed heartbeat: %v", err)
 	}
 
-	for _, task := range tasks {
-		// Update task status to failed
-		err := r.db.Model(&ScheduledTasks{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
+	if len(tasks) == 0 {
+		return nil
+	}
+
+	// Batch update all tasks at once for better performance
+	taskIDs := make([]uint, len(tasks))
+	for i, task := range tasks {
+		taskIDs[i] = task.ID
+	}
+
+	errorMsg := `["Process got stuck because of server restart or crash. Marked as failed"]`
+	err = r.db.Model(&ScheduledTasks{}).
+		Where("id IN ?", taskIDs).
+		Updates(map[string]interface{}{
 			"status": "failed",
-			"errors": `["Process got stuck because of server restart or crash. Marked as failed"]`,
+			"errors": errorMsg,
 		}).Error
-		if err != nil {
-			return fmt.Errorf("error updating scheduled task %d: %v", task.ID, err)
-		}
+	if err != nil {
+		return fmt.Errorf("error batch updating scheduled tasks: %v", err)
 	}
 
 	return nil

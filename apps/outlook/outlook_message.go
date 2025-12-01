@@ -33,10 +33,14 @@ func NewOutlookMinimalMessage(message models.Messageable) *OutlookMinimalMessage
 	result := &OutlookMinimalMessage{
 		ID:               stringValue(message.GetId()),
 		Subject:          stringValue(message.GetSubject()),
-		From:             stringValue(message.GetFrom().GetEmailAddress().GetAddress()),
 		ReceivedDateTime: timeValueInMilliseconds(message.GetReceivedDateTime()),
 		IsRead:           boolValue(message.GetIsRead()),
 		HasAttachments:   boolValue(message.GetHasAttachments()),
+	}
+
+	// Safely get From address
+	if from := message.GetFrom(); from != nil && from.GetEmailAddress() != nil {
+		result.From = stringValue(from.GetEmailAddress().GetAddress())
 	}
 
 	return result
@@ -140,12 +144,8 @@ func NewOutlookMessage(message models.Messageable) *OutlookMessage {
 		OutlookMinimalMessage: OutlookMinimalMessage{
 			ID:               stringValue(message.GetId()),
 			Subject:          stringValue(message.GetSubject()),
-			From:             stringValue(message.GetFrom().GetEmailAddress().GetAddress()),
 			ReceivedDateTime: timeValueInMilliseconds(message.GetReceivedDateTime()),
 		},
-		Body:                   stringValue(message.GetBody().GetContent()),
-		ContentType:            message.GetBody().GetContentType(),
-		ODataType:              message.GetBody().GetOdataType(),
 		HasAttachments:         boolValue(message.GetHasAttachments()),
 		IsRead:                 boolValue(message.GetIsRead()),
 		Importance:             importance,
@@ -154,9 +154,16 @@ func NewOutlookMessage(message models.Messageable) *OutlookMessage {
 		SentDateTime:           timeValue(message.GetSentDateTime()),
 	}
 
-	// Set From address
+	// Set From address safely
 	if from := message.GetFrom(); from != nil && from.GetEmailAddress() != nil {
 		msg.From = stringValue(from.GetEmailAddress().GetAddress())
+	}
+
+	// Set Body safely
+	if body := message.GetBody(); body != nil {
+		msg.Body = stringValue(body.GetContent())
+		msg.ContentType = body.GetContentType()
+		msg.ODataType = body.GetOdataType()
 	}
 
 	// Set Recipients
