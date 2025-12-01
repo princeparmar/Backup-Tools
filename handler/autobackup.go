@@ -366,7 +366,7 @@ func checkExistingJobs(userID, name, syncType, method string, db *db.PostgresDb)
 
 	// Check for exact duplicate (same name + syncType + userID)
 	for _, job := range existingJobs {
-		if job.Name == name && job.SyncType == syncType && job.UserID == userID {
+		if job.Name == name && job.SyncType == syncType {
 			return jsonErrorMsg(http.StatusBadRequest,
 				fmt.Sprintf("A %s backup with this email (%s) already exists for your account", syncType, name))
 		}
