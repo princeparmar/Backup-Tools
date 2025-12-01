@@ -364,6 +364,14 @@ func checkExistingJobs(userID, name, syncType, method string, db *db.PostgresDb)
 
 	serviceName := getServiceName(method)
 
+	// Check for exact duplicate (same name + syncType + userID)
+	for _, job := range existingJobs {
+		if job.Name == name && job.SyncType == syncType && job.UserID == userID {
+			return jsonErrorMsg(http.StatusBadRequest,
+				fmt.Sprintf("A %s backup with this email (%s) already exists for your account", syncType, name))
+		}
+	}
+
 	for _, job := range existingJobs {
 		// Only check conflicts for jobs of the same method and name
 		if job.Method != method || job.Name != name {
@@ -475,6 +483,9 @@ func jsonError(code int, message string, err error) *echo.HTTPError {
 
 func handleDBError(err error) *echo.HTTPError {
 	if strings.Contains(err.Error(), "duplicate key value") {
+		if strings.Contains(err.Error(), "idx_name_sync_type_user") {
+			return jsonError(http.StatusBadRequest, "A backup job with this name and sync type already exists for your account", err)
+		}
 		return jsonError(http.StatusBadRequest, "Email already exists", err)
 	}
 	return jsonError(http.StatusInternalServerError, "Internal Server Error", err)
