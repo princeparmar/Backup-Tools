@@ -31,6 +31,7 @@ func InitializeAllMiddleware(e *echo.Echo, db *db.PostgresDb) {
 	e.Use(MonkitMiddleware())
 	e.Use(DBMiddleware(db))
 	e.Use(echomiddleware.CORS())
+	e.Use(echomiddleware.Gzip())
 }
 
 func DBMiddleware(db *db.PostgresDb) echo.MiddlewareFunc {
