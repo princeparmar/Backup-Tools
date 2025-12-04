@@ -37,6 +37,7 @@ func (s *PostgresDb) Migrate() error {
 		&repo.CronJobListingDB{},
 		&repo.TaskListingDB{},
 		&repo.ScheduledTasks{},
+		&repo.SyncedObject{},
 	); err != nil {
 		return err
 	}

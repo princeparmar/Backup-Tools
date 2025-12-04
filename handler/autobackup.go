@@ -232,11 +232,12 @@ func HandleAutomaticSyncCreate(c echo.Context) error {
 	// Send notification for cron job creation
 	priority := "normal"
 	notificationData := map[string]interface{}{
-		"event":  "cron_created",
-		"level":  2,
-		"method": method,
-		"name":   name,
-		"type":   syncType,
+		"event":     "cron_created",
+		"level":     2,
+		"method":    method,
+		"name":      name,
+		"type":      syncType,
+		"timestamp": "now", // Required by notification template
 	}
 	if cronJob, ok := data.(*repo.CronJobListingDB); ok {
 		notificationData["job_id"] = cronJob.ID
