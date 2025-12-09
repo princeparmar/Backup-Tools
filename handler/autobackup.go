@@ -15,6 +15,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/labstack/echo/v4"
@@ -656,6 +657,10 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 				})
 			}
 			updateRequest["storx_token"] = *reqBody.StorxToken
+
+			// Extract project_id from storx_token and store it
+			extractAndStoreProjectID(ctx, *reqBody.StorxToken, updateRequest, jobID, "one-time")
+
 			logger.Info(ctx, "Storx token updated for one-time sync",
 				logger.Int("job_id", jobID))
 		}
@@ -1021,6 +1026,15 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 
 	if reqBody.StorxToken != nil {
 		updateRequest["storx_token"] = *reqBody.StorxToken
+
+		logger.Info(ctx, "Attempting to extract project_id from storx_token",
+			logger.Int("job_id", jobID),
+			logger.String("storx_token_length", fmt.Sprintf("%d", len(*reqBody.StorxToken))),
+			logger.String("storx_token_prefix", utils.MaskString(*reqBody.StorxToken)))
+
+		// Extract project_id from storx_token and store it
+		extractAndStoreProjectID(ctx, *reqBody.StorxToken, updateRequest, jobID, "daily")
+
 		logger.Info(ctx, "Storx token updated",
 			logger.Int("job_id", jobID),
 			logger.Bool("has_storx_token", true))
@@ -1189,6 +1203,28 @@ func validateInterval(interval, on string) bool {
 	}
 
 	return false
+}
+
+// extractAndStoreProjectID extracts project_id from storx_token and adds it to updateRequest
+// This is a helper function to avoid code duplication
+func extractAndStoreProjectID(ctx context.Context, storxToken string, updateRequest map[string]interface{}, jobID int, syncType string) {
+	projectID, err := satellite.GetProjectIDFromAccessGrant(ctx, storxToken)
+	if err != nil {
+		logger.Warn(ctx, fmt.Sprintf("Failed to extract project_id from storx_token for %s sync, continuing without it", syncType),
+			logger.Int("job_id", jobID),
+			logger.ErrorField(err))
+		// Continue without project_id (backward compatible)
+		// Note: storj_project_id will be populated from webhook events when they arrive
+	} else if projectID != "" {
+		updateRequest["storj_project_id"] = projectID
+		logger.Info(ctx, fmt.Sprintf("Extracted and stored storj_project_id from storx_token for %s sync", syncType),
+			logger.Int("job_id", jobID),
+			logger.String("storj_project_id", projectID))
+	} else {
+		// Extraction returned empty (API endpoint not available or project_id not in response)
+		logger.Info(ctx, fmt.Sprintf("Could not extract project_id from access grant for %s sync. It will be populated from webhook events.", syncType),
+			logger.Int("job_id", jobID))
+	}
 }
 
 // Default password for admin operations

@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/handler"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
@@ -23,6 +25,16 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 	ctx := context.Background()
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
+
+	// Process webhook events using access grant from database (auto-sync)
+	// Run in background, non-blocking - process at beginning so webhooks are handled even if sync fails
+	go func() {
+		processCtx := context.Background()
+		if processErr := handler.ProcessWebhookEvents(processCtx, input.Database, input.Job.StorxToken, 100); processErr != nil {
+			logger.Warn(processCtx, "Failed to process webhook events from auto-sync",
+				logger.ErrorField(processErr))
+		}
+	}()
 
 	err = input.HeartBeatFunc()
 	if err != nil {
@@ -95,7 +107,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 			}
 
 			syncedData = true
-			err = satellite.UploadObject(context.TODO(), input.Job.StorxToken, "gmail", messagePath, b)
+			err = handler.UploadObjectAndSync(context.TODO(), input.Database, input.Job.StorxToken, "gmail", messagePath, b, input.Job.UserID)
 			if err != nil {
 				return err
 			}

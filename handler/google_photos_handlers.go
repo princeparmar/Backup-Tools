@@ -11,6 +11,8 @@ import (
 	"sync"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/db"
+	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
@@ -32,6 +34,19 @@ func HandleListGPhotosAlbums(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
+
+	// Extract access grant early for webhook processing
+	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accessGrant != "" {
+		go func() {
+			processCtx := context.Background()
+			database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+			if processErr := ProcessWebhookEvents(processCtx, database, accessGrant, 100); processErr != nil {
+				logger.Warn(processCtx, "Failed to process webhook events from listing route",
+					logger.ErrorField(processErr))
+			}
+		}()
+	}
 
 	client, err := google.NewGPhotosClient(c)
 	if err != nil {
@@ -387,11 +402,13 @@ func HandleSendFileFromGooglePhotosToSatellite(c echo.Context) error {
 	g, ctx := errgroup.WithContext(c.Request().Context())
 	g.SetLimit(10)
 
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+
 	processedIDs, failedIDs := utils.NewLockedArray(), utils.NewLockedArray()
 	for _, id := range allIDs {
 		func(id string) {
 			g.Go(func() error {
-				err := uploadSingleFileFromPhotosToSatellite(ctx, client, id, accesGrant, userDetails.Email)
+				err := uploadSingleFileFromPhotosToSatellite(ctx, client, id, accesGrant, userDetails.Email, database)
 				if err != nil {
 					failedIDs.Add(id)
 					return nil
@@ -419,7 +436,7 @@ func HandleSendFileFromGooglePhotosToSatellite(c echo.Context) error {
 	})
 }
 
-func uploadSingleFileFromPhotosToSatellite(ctx context.Context, client *google.GPotosClient, id, accesGrant, userEmail string) error {
+func uploadSingleFileFromPhotosToSatellite(ctx context.Context, client *google.GPotosClient, id, accesGrant, userEmail string, database *db.PostgresDb) error {
 	item, err := client.GetPhoto(ctx, id)
 	if err != nil {
 		return err
@@ -438,8 +455,10 @@ func uploadSingleFileFromPhotosToSatellite(ctx context.Context, client *google.G
 	// Create path with user email directory: userEmail/filename
 	photoPath := userEmail + "/" + item.Filename
 
-	return satellite.UploadObject(context.Background(), accesGrant, "google-photos", photoPath, body)
-
+	// Use helper function to upload and sync to database
+	// Source and Type are automatically derived from bucket name (hardcoded)
+	// Source: "google", Type: "photos" (from bucket name "google-photos")
+	return UploadObjectAndSync(ctx, database, accesGrant, "google-photos", photoPath, body, userEmail)
 }
 
 func HandleSendAllFilesFromGooglePhotosToSatellite(c echo.Context) error {
@@ -497,8 +516,10 @@ func HandleSendAllFilesFromGooglePhotosToSatellite(c echo.Context) error {
 		})
 	}
 
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+
 	for _, p := range photosRespJSON {
-		err := uploadSingleFileFromPhotosToSatellite(c.Request().Context(), client, p.ID, accesGrant, userDetails.Email)
+		err := uploadSingleFileFromPhotosToSatellite(c.Request().Context(), client, p.ID, accesGrant, userDetails.Email, database)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),
@@ -548,6 +569,8 @@ func HandleSendListFilesFromGooglePhotosToSatellite(c echo.Context) error {
 		})
 	}
 
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+
 	var allIDs []string
 	if strings.Contains(c.Request().Header.Get(echo.HeaderContentType), echo.MIMEApplicationJSON) {
 		// Decode JSON array from request body
@@ -562,7 +585,7 @@ func HandleSendListFilesFromGooglePhotosToSatellite(c echo.Context) error {
 		allIDs = strings.Split(formIDs, ",")
 	}
 	for _, p := range allIDs {
-		err := uploadSingleFileFromPhotosToSatellite(c.Request().Context(), client, p, accesGrant, userDetails.Email)
+		err := uploadSingleFileFromPhotosToSatellite(c.Request().Context(), client, p, accesGrant, userDetails.Email, database)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),

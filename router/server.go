@@ -9,6 +9,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/handler"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 
 	middleware "github.com/StorX2-0/Backup-Tools/middleware"
@@ -27,6 +28,26 @@ func StartServer(db *db.PostgresDb, address string) {
 
 	// Swagger documentation endpoints
 	e.GET("/swagger", handler.SwaggerUIHandler)
+
+	e.GET("/health", func(c echo.Context) error {
+		return c.String(http.StatusOK, "OK")
+	})
+
+	webhookPrivateKeyPath := utils.GetEnvWithKey("WEBHOOK_PRIVATE_KEY")
+	if webhookPrivateKeyPath != "" {
+		decryptor, err := handler.NewWebhookDecryptor(webhookPrivateKeyPath)
+		if err != nil {
+			logger.Info(context.Background(), "Failed to initialize webhook decryptor, webhook endpoint will be disabled", logger.ErrorField(err))
+		} else {
+			e.POST("/webhook", func(c echo.Context) error {
+				c.Set("webhook_decryptor", decryptor)
+				return handler.HandleWebhook(c)
+			})
+			logger.Info(context.Background(), "Webhook endpoint initialized at /webhook")
+		}
+	} else {
+		logger.Info(context.Background(), "WEBHOOK_PRIVATE_KEY not set, webhook endpoint will be disabled")
+	}
 
 	e.POST("/satellite-auth", satellite.HandleSatelliteAuthentication)
 	e.POST("/google-auth", googlepack.Autentificate)

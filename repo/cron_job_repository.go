@@ -42,7 +42,8 @@ const (
 type CronJobListingDB struct {
 	gorm.GormModel
 
-	UserID string `json:"user_id" gorm:"uniqueIndex:idx_name_sync_type_user"`
+	UserID         string `json:"user_id" gorm:"column:user_id;uniqueIndex:idx_name_sync_type_user"`
+	StorjProjectID string `json:"storj_project_id" gorm:"column:storj_project_id;index:idx_storj_project_id"` // Storj project ID extracted from access grant
 
 	// Name + SyncType + UserID should be unique
 	Name     string     `json:"name" gorm:"uniqueIndex:idx_name_sync_type_user"`
@@ -341,6 +342,23 @@ func (r *CronJobRepository) GetCronJobByID(ID uint) (*CronJobListingDB, error) {
 	}
 
 	return &res, nil
+}
+
+// GetAccessGrantByProjectID retrieves the access grant (storx_token) for a given project_id and method
+func (r *CronJobRepository) GetAccessGrantByProjectID(projectID, method string) (string, error) {
+	var cronJob CronJobListingDB
+	result := r.db.Where("storj_project_id = ? AND method = ? AND active = true AND storx_token != ''",
+		projectID, method).First(&cronJob)
+
+	if result.Error != nil {
+		return "", fmt.Errorf("access grant not found for project_id %s and method %s: %w", projectID, method, result.Error)
+	}
+
+	if cronJob.StorxToken == "" {
+		return "", fmt.Errorf("access grant is empty for project_id %s and method %s", projectID, method)
+	}
+
+	return cronJob.StorxToken, nil
 }
 
 // CreateCronJobForUser creates a new cron job for a user

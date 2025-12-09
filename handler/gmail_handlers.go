@@ -12,6 +12,8 @@ import (
 	"strings"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/db"
+	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
@@ -57,8 +59,8 @@ func NewGmailService(client *google.GmailClient, accessGrant, userEmail string) 
 	}
 }
 
-// UploadMessagesToSatellite uploads Gmail messages to Satellite
-func (s *GmailService) UploadMessagesToSatellite(ctx context.Context, messageIDs []string) (*UploadResult, error) {
+// UploadMessagesToSatellite uploads Gmail messages to Satellite and updates synced_objects
+func (s *GmailService) UploadMessagesToSatellite(ctx context.Context, database *db.PostgresDb, messageIDs []string) (*UploadResult, error) {
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(10)
 
@@ -87,7 +89,9 @@ func (s *GmailService) UploadMessagesToSatellite(ctx context.Context, messageIDs
 
 				messagePath := s.userEmail + "/" + utils.GenerateTitleFromGmailMessage(msg)
 
-				err = satellite.UploadObject(ctx, s.accessGrant, "gmail", messagePath, b)
+				// Use helper function to upload and sync
+				// Source and Type are automatically derived from bucket name ("gmail" -> source: "google", type: "gmail")
+				err = UploadObjectAndSync(ctx, database, s.accessGrant, "gmail", messagePath, b, s.userEmail)
 				if err != nil {
 					logger.Info(ctx, "error uploading to satellite", logger.ErrorField(err))
 					failedIDs.Add(id)
@@ -282,9 +286,12 @@ func HandleListGmailMessagesToSatellite(c echo.Context) error {
 		})
 	}
 
+	// Get database from context
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+
 	// Create Gmail service and upload messages
 	gmailService := NewGmailService(gmailClient, accessGrant, userDetails.Email)
-	result, err := gmailService.UploadMessagesToSatellite(c.Request().Context(), allIDs)
+	result, err := gmailService.UploadMessagesToSatellite(c.Request().Context(), database, allIDs)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error":         err.Error(),
@@ -302,6 +309,23 @@ func HandleGmailGetThreadsIDsControlled(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
+
+	// Extract access grant early for webhook processing
+	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accessGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "access token not found",
+		})
+	}
+
+	go func() {
+		processCtx := context.Background()
+		database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+		if processErr := ProcessWebhookEvents(processCtx, database, accessGrant, 100); processErr != nil {
+			logger.Warn(processCtx, "Failed to process webhook events from listing route",
+				logger.ErrorField(processErr))
+		}
+	}()
 
 	num := c.QueryParam("num")
 	var numInt int64
@@ -341,11 +365,6 @@ func HandleGmailGetThreadsIDsControlled(c echo.Context) error {
 		return err
 	}
 	//threads = append(threads, res.Messages...)
-
-	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accessGrant == "" {
-		return errors.New("access token not found")
-	}
 
 	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
 	if err != nil {

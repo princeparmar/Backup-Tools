@@ -1032,33 +1032,39 @@ func GetFolderPathByID(ctx context.Context, srv *drive.Service, folderID string)
 
 // GetFileAndPath downloads file from Google Drive by ID and returns path with content
 func GetFileAndPath(c echo.Context, id string) (string, []byte, error) {
+	path, _, data, err := GetFileAndPathWithMimeType(c, id)
+	return path, data, err
+}
+
+// GetFileAndPathWithMimeType downloads file from Google Drive by ID and returns path, MimeType, and content
+func GetFileAndPathWithMimeType(c echo.Context, id string) (string, string, []byte, error) {
 	srv, err := getDriveService(c)
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 
 	file, err := srv.Files.Get(id).Do()
 	if err != nil {
-		return "", nil, fmt.Errorf("unable to retrieve file metadata: %w", err)
+		return "", "", nil, fmt.Errorf("unable to retrieve file metadata: %w", err)
 	}
 
 	p, err := GetFolderPathByID(context.Background(), srv, file.Id)
 	if err != nil {
-		return "", nil, fmt.Errorf("unable to get file path: %w", err)
+		return "", "", nil, fmt.Errorf("unable to get file path: %w", err)
 	}
 
 	res, err := downloadFile(srv, id, file.MimeType, &p)
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	defer res.Body.Close()
 
 	data, err := io.ReadAll(res.Body)
 	if err != nil {
-		return "", nil, fmt.Errorf("unable to read file content: %w", err)
+		return "", "", nil, fmt.Errorf("unable to read file content: %w", err)
 	}
 
-	return p, data, nil
+	return p, file.MimeType, data, nil
 }
 
 // downloadFile handles both regular files and Google Docs export

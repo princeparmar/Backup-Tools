@@ -10,6 +10,9 @@ import (
 	"strings"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/db"
+	"github.com/StorX2-0/Backup-Tools/middleware"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
@@ -37,10 +40,24 @@ func HandleRootGoogleDriveFileNames(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
+	// Extract access grant early for webhook processing
+	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accessGrant != "" {
+		go func() {
+			processCtx := context.Background()
+			database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+			if processErr := ProcessWebhookEvents(processCtx, database, accessGrant, 100); processErr != nil {
+				logger.Warn(processCtx, "Failed to process webhook events from listing route",
+					logger.ErrorField(processErr))
+			}
+		}()
+	}
+
 	response, err := google.GetFileNamesInRoot(c)
 	if err != nil {
 		return HandleGoogleDriveError(c, err, "retrieve file names from Google Drive")
 	}
+
 	return c.JSON(http.StatusOK, response)
 }
 
@@ -597,6 +614,8 @@ func HandleSendListFromGoogleDriveToSatellite(c echo.Context) error {
 		})
 	}
 
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+
 	g, ctx := errgroup.WithContext(c.Request().Context())
 	g.SetLimit(10)
 
@@ -625,7 +644,10 @@ func HandleSendListFromGoogleDriveToSatellite(c echo.Context) error {
 					// Create path with user email directory: userEmail/filename
 					drivePath := userDetails.Email + "/" + name
 
-					if err = satellite.UploadObject(ctx, accessGrant, "google-drive", drivePath, data); err != nil {
+					// Use helper function to upload and sync to database
+					// Source and Type are automatically derived from bucket name (hardcoded)
+					// Source: "google", Type: "drive" (from bucket name "google-drive")
+					if err = UploadObjectAndSync(ctx, database, accessGrant, "google-drive", drivePath, data, userDetails.Email); err != nil {
 						failedIDs.Add(id)
 						return nil
 					}
