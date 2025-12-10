@@ -1338,3 +1338,66 @@ func HandleAutomaticBackupSummary(c echo.Context) error {
 		},
 	})
 }
+
+func HandleAutomaticSyncStats(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "not able to authenticate user",
+			"error":   err.Error(),
+		})
+	}
+
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+
+	var activeSyncs, failedSyncs int64
+
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		errs[0] = database.DB.Model(&repo.CronJobListingDB{}).
+			Where("user_id = ? AND active = ?", userID, true).
+			Count(&activeSyncs).Error
+	}()
+
+	go func() {
+		defer wg.Done()
+		errs[1] = database.DB.Model(&repo.TaskListingDB{}).
+			Joins("JOIN cron_job_listing_dbs ON task_listing_dbs.cron_job_id = cron_job_listing_dbs.id").
+			Where("cron_job_listing_dbs.user_id = ? AND task_listing_dbs.status = ?", userID, repo.TaskStatusFailed).
+			Count(&failedSyncs).Error
+	}()
+
+	wg.Wait()
+
+	for _, e := range errs {
+		if e != nil {
+			logger.Error(ctx, "Failed to get autosync stats", logger.ErrorField(e))
+			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+				"message": "internal server error",
+				"error":   e.Error(),
+			})
+		}
+	}
+
+	status := "healthy"
+	if failedSyncs > 0 {
+		status = "warning"
+	}
+	if failedSyncs > activeSyncs && activeSyncs > 0 {
+		status = "error"
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"active_syncs": int(activeSyncs),
+		"failed_syncs": int(failedSyncs),
+		"status":       status,
+	})
+}
