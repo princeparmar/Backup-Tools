@@ -303,6 +303,33 @@ func structToMap(v interface{}) map[string]interface{} {
 				result[jsonKey] = nil
 				continue
 			}
+
+			ptrVal := fieldVal.Interface()
+			if dbJsonPtr, ok := ptrVal.(*database.DbJson[map[string][]string]); ok {
+				if jsonVal := dbJsonPtr.Json(); jsonVal != nil {
+					result[jsonKey] = *jsonVal
+				} else {
+					result[jsonKey] = map[string][]string{}
+				}
+				continue
+			}
+			if dbJsonPtr, ok := ptrVal.(*database.DbJson[map[string]interface{}]); ok {
+				if jsonVal := dbJsonPtr.Json(); jsonVal != nil {
+					result[jsonKey] = *jsonVal
+				} else {
+					result[jsonKey] = map[string]interface{}{}
+				}
+				continue
+			}
+			if dbJsonPtr, ok := ptrVal.(*database.DbJson[[]string]); ok {
+				if jsonVal := dbJsonPtr.Json(); jsonVal != nil {
+					result[jsonKey] = *jsonVal
+				} else {
+					result[jsonKey] = []string{}
+				}
+				continue
+			}
+
 			fieldVal = fieldVal.Elem()
 		}
 
