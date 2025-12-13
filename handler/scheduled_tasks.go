@@ -371,8 +371,18 @@ func calculateProgressFromMemory(task repo.ScheduledTasks) int {
 		return 0
 	}
 
+	getErrorLen := func() int {
+		total := 0
+		for key, arr := range memory {
+			if strings.HasPrefix(key, "error") {
+				total += len(arr)
+			}
+		}
+		return total
+	}
+
 	synced := getLen("synced")
-	total := synced + getLen("pending") + getLen("skipped") + getLen("error")
+	total := synced + getLen("pending") + getLen("skipped") + getErrorLen()
 
 	if total == 0 {
 		if task.Status == "completed" {
