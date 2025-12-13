@@ -3,6 +3,7 @@ package handler
 import (
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
@@ -187,9 +188,12 @@ func HandleGetScheduledTasksByUserID(c echo.Context) error {
 	// Mask storx_token before returning
 	maskedTasks := maskStorxTokens(tasks)
 
+	// Enrich tasks with execution_time_formatted, progress, and operation
+	enrichedTasks := enrichTasksForUI(maskedTasks)
+
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Scheduled tasks retrieved successfully",
-		"tasks":   maskedTasks,
+		"tasks":   enrichedTasks,
 		"count":   len(tasks),
 	})
 }
@@ -242,6 +246,131 @@ func maskStorxTokens(tasks []repo.ScheduledTasks) []repo.ScheduledTasks {
 		}
 	}
 	return masked
+}
+
+func enrichTasksForUI(tasks []repo.ScheduledTasks) []map[string]interface{} {
+	enriched := make([]map[string]interface{}, len(tasks))
+
+	for i, task := range tasks {
+		taskMap := structToMap(task)
+
+		taskMap["execution_time_formatted"] = formatExecutionTime(task.CreatedAt, task.UpdatedAt)
+		taskMap["progress"] = calculateProgressFromMemory(task)
+		taskMap["operation"] = getOperationByMethod(task.Method)
+
+		enriched[i] = taskMap
+	}
+
+	return enriched
+}
+
+func structToMap(v interface{}) map[string]interface{} {
+	result := make(map[string]interface{})
+	val := reflect.ValueOf(v)
+	typ := reflect.TypeOf(v)
+
+	if val.Kind() == reflect.Ptr {
+		if val.IsNil() {
+			return result
+		}
+		val = val.Elem()
+		typ = typ.Elem()
+	}
+
+	if val.Kind() != reflect.Struct {
+		return result
+	}
+
+	for i := 0; i < val.NumField(); i++ {
+		field := typ.Field(i)
+		fieldVal := val.Field(i)
+
+		if !fieldVal.CanInterface() {
+			continue
+		}
+
+		jsonKey := field.Tag.Get("json")
+		if jsonKey == "" || jsonKey == "-" {
+			jsonKey = field.Name
+		} else {
+			if idx := strings.Index(jsonKey, ","); idx != -1 {
+				jsonKey = jsonKey[:idx]
+			}
+		}
+
+		if fieldVal.Kind() == reflect.Ptr {
+			if fieldVal.IsNil() {
+				result[jsonKey] = nil
+				continue
+			}
+			fieldVal = fieldVal.Elem()
+		}
+
+		result[jsonKey] = fieldVal.Interface()
+	}
+
+	return result
+}
+
+func formatExecutionTime(createdAt, updatedAt time.Time) string {
+	if updatedAt.IsZero() || createdAt.IsZero() {
+		return "-"
+	}
+
+	seconds := int(updatedAt.Sub(createdAt).Seconds())
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", seconds)
+	}
+
+	minutes := seconds / 60
+	if remainingSeconds := seconds % 60; remainingSeconds > 0 {
+		return fmt.Sprintf("%dm %ds", minutes, remainingSeconds)
+	}
+	return fmt.Sprintf("%dm", minutes)
+}
+
+func calculateProgressFromMemory(task repo.ScheduledTasks) int {
+	memPtr := task.Memory.Json()
+	if memPtr == nil {
+		return 0
+	}
+
+	memory := *memPtr
+
+	getLen := func(key string) int {
+		if arr, ok := memory[key]; ok {
+			return len(arr)
+		}
+		return 0
+	}
+
+	synced := getLen("synced")
+	total := synced + getLen("pending") + getLen("skipped") + getLen("error")
+
+	if total == 0 {
+		if task.Status == "completed" {
+			return 100
+		}
+		return 0
+	}
+
+	return int(float64(synced) / float64(total) * 100)
+}
+
+var operationMappings = map[string]string{
+	"gmail":          "Email Backup",
+	"outlook":        "Email Backup",
+	"google_photos":  "Photos Upload",
+	"google_drive":   "Folder Upload",
+	"psql_database":  "Database Backup",
+	"mysql_database": "Database Backup",
+}
+
+func getOperationByMethod(method string) string {
+	if operation, ok := operationMappings[method]; ok {
+		return operation
+	}
+	return "Backup"
 }
 
 // Method processing functions
