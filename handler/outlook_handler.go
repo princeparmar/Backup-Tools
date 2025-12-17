@@ -364,3 +364,19 @@ func processMessagesConcurrently(c echo.Context, ids []string, processor func(ec
 		"processed_ids": processedIDs.Get(),
 	})
 }
+
+func HandleMicrosoftAuthRedirect(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	authURL, err := outlook.BuildAuthURL()
+	if err != nil {
+		logger.Error(ctx, "Failed to build Outlook auth URL", logger.ErrorField(err))
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"error": "Failed to build authorization URL: " + err.Error(),
+		})
+	}
+
+	return c.Redirect(http.StatusTemporaryRedirect, authURL)
+}

@@ -187,9 +187,12 @@ func HandleGetScheduledTasksByUserID(c echo.Context) error {
 	// Mask storx_token before returning
 	maskedTasks := maskStorxTokens(tasks)
 
+	// Enrich tasks with execution_time_formatted, progress, and operation
+	enrichedTasks := enrichTasksForUI(maskedTasks)
+
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Scheduled tasks retrieved successfully",
-		"tasks":   maskedTasks,
+		"tasks":   enrichedTasks,
 		"count":   len(tasks),
 	})
 }
@@ -242,6 +245,99 @@ func maskStorxTokens(tasks []repo.ScheduledTasks) []repo.ScheduledTasks {
 		}
 	}
 	return masked
+}
+
+type EnrichedScheduledTask struct {
+	repo.ScheduledTasks
+	ExecutionTimeFormatted string `json:"execution_time_formatted"`
+	Progress               int    `json:"progress"`
+	Operation              string `json:"operation"`
+}
+
+func enrichTasksForUI(tasks []repo.ScheduledTasks) []EnrichedScheduledTask {
+	enriched := make([]EnrichedScheduledTask, len(tasks))
+
+	for i, task := range tasks {
+		enriched[i] = EnrichedScheduledTask{
+			ScheduledTasks:         task,
+			ExecutionTimeFormatted: formatExecutionTime(task.CreatedAt, task.UpdatedAt),
+			Progress:               calculateProgressFromMemory(task),
+			Operation:              getOperationByMethod(task.Method),
+		}
+	}
+
+	return enriched
+}
+
+func formatExecutionTime(createdAt, updatedAt time.Time) string {
+	if updatedAt.IsZero() || createdAt.IsZero() {
+		return "-"
+	}
+
+	seconds := int(updatedAt.Sub(createdAt).Seconds())
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", seconds)
+	}
+
+	minutes := seconds / 60
+	if remainingSeconds := seconds % 60; remainingSeconds > 0 {
+		return fmt.Sprintf("%dm %ds", minutes, remainingSeconds)
+	}
+	return fmt.Sprintf("%dm", minutes)
+}
+
+func calculateProgressFromMemory(task repo.ScheduledTasks) int {
+	memPtr := task.Memory.Json()
+	if memPtr == nil {
+		return 0
+	}
+
+	memory := *memPtr
+
+	getLen := func(key string) int {
+		if arr, ok := memory[key]; ok {
+			return len(arr)
+		}
+		return 0
+	}
+
+	getErrorLen := func() int {
+		total := 0
+		for key, arr := range memory {
+			if strings.HasPrefix(key, "error") {
+				total += len(arr)
+			}
+		}
+		return total
+	}
+
+	synced := getLen("synced")
+	total := synced + getLen("pending") + getLen("skipped") + getErrorLen()
+
+	if total == 0 {
+		if task.Status == "completed" {
+			return 100
+		}
+		return 0
+	}
+
+	return int(float64(synced) / float64(total) * 100)
+}
+
+var operationMappings = map[string]string{
+	"gmail":          "Email Backup",
+	"outlook":        "Email Backup",
+	"google_photos":  "Photos Upload",
+	"google_drive":   "Folder Upload",
+	"psql_database":  "Database Backup",
+	"mysql_database": "Database Backup",
+}
+
+func getOperationByMethod(method string) string {
+	if operation, ok := operationMappings[method]; ok {
+		return operation
+	}
+	return "Backup"
 }
 
 // Method processing functions
