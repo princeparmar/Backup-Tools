@@ -33,6 +33,7 @@ func StartServer(db *db.PostgresDb, address string) {
 	e.GET("/google-auth", googlepack.Autentificateg)
 	e.GET("/auth/microsoft/start", handler.HandleMicrosoftAuthRedirect)
 	e.GET("/autobackup/summary", handler.HandleAutomaticBackupSummary)
+	e.GET("/autosync/stats", handler.HandleAutomaticSyncStats)
 
 	autoSync := e.Group("/auto-sync")
 	autoSync.GET("/live", handler.HandleAutomaticSyncActiveJobsForUser)
