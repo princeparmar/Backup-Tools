@@ -526,3 +526,30 @@ func SendNotification(ctx context.Context, userID, title, body string, priority 
 		return nil
 	}
 }
+
+// FormatSatelliteError converts technical satellite errors to user-friendly messages
+func FormatSatelliteError(err error) string {
+	if err == nil {
+		return ""
+	}
+	errMsg := err.Error()
+
+	// Check for permission denied / unauthorized API credentials
+	if strings.Contains(errMsg, "permission denied") &&
+		strings.Contains(errMsg, "Unauthorized API credentials") {
+		return "Please reconnect your account to proceed"
+	}
+
+	// Check for other permission denied patterns
+	if strings.Contains(errMsg, "permission denied") {
+		return "Please reconnect your account to proceed"
+	}
+
+	// Check for ensure bucket permission errors
+	if strings.Contains(errMsg, "ensure bucket") && strings.Contains(errMsg, "permission denied") {
+		return "Please reconnect your account to proceed"
+	}
+
+	// Return original error for other cases
+	return errMsg
+}

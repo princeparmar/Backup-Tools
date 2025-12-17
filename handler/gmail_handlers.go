@@ -354,9 +354,11 @@ func HandleGmailGetThreadsIDsControlled(c echo.Context) error {
 
 	emailListFromBucket, err := satellite.ListObjectsWithPrefix(context.Background(),
 		accessGrant, satellite.ReserveBucket_Gmail, userDetails.Email+"/")
-	if err != nil && !strings.Contains(err.Error(), "object not found") {
+	if err != nil {
+		logger.Error(ctx, "Failed to list objects from satellite", logger.ErrorField(err))
+		userFriendlyError := satellite.FormatSatelliteError(err)
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": err.Error(),
+			"error": userFriendlyError,
 		})
 	}
 
