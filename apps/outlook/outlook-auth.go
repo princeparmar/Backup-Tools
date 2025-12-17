@@ -22,7 +22,41 @@ type TokenResponse struct {
 
 const (
 	tokenURL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+	authURL  = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
 )
+
+var defaultScopes = []string{
+	"offline_access",
+	"Mail.Read",
+	"openid",
+	"profile",
+	"email",
+	"User.Read",
+}
+
+// BuildAuthURL builds the Microsoft OAuth authorization URL
+func BuildAuthURL() (string, error) {
+	clientID := utils.GetEnvWithKey("OUTLOOK_CLIENT_ID")
+	redirectURI := utils.GetEnvWithKey("OUTLOOK_REDIRECT_URI")
+
+	if clientID == "" {
+		return "", fmt.Errorf("OUTLOOK_CLIENT_ID environment variable is not set")
+	}
+	if redirectURI == "" {
+		return "", fmt.Errorf("OUTLOOK_REDIRECT_URI environment variable is not set")
+	}
+
+	scope := strings.Join(defaultScopes, " ")
+
+	params := url.Values{}
+	params.Set("client_id", clientID)
+	params.Set("response_type", "code")
+	params.Set("redirect_uri", redirectURI)
+	params.Set("response_mode", "query")
+	params.Set("scope", scope)
+
+	return authURL + "?" + params.Encode(), nil
+}
 
 func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 
