@@ -646,7 +646,7 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 				logger.Int("job_id", jobID))
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
 				"message": "Invalid Request",
-				"error":   "For one-time sync jobs, only storx_token and refresh_token (outlook), code (gmail) updates are allowed",
+				"error":   "For one-time sync jobs, only storx_token and code for outlook/gmail updates are allowed",
 			})
 		}
 
