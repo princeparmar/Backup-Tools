@@ -3,7 +3,6 @@ package handler
 import (
 	"fmt"
 	"net/http"
-	"reflect"
 	"strings"
 	"time"
 
@@ -248,95 +247,26 @@ func maskStorxTokens(tasks []repo.ScheduledTasks) []repo.ScheduledTasks {
 	return masked
 }
 
-func enrichTasksForUI(tasks []repo.ScheduledTasks) []map[string]interface{} {
-	enriched := make([]map[string]interface{}, len(tasks))
+type EnrichedScheduledTask struct {
+	repo.ScheduledTasks
+	ExecutionTimeFormatted string `json:"execution_time_formatted"`
+	Progress               int    `json:"progress"`
+	Operation              string `json:"operation"`
+}
+
+func enrichTasksForUI(tasks []repo.ScheduledTasks) []EnrichedScheduledTask {
+	enriched := make([]EnrichedScheduledTask, len(tasks))
 
 	for i, task := range tasks {
-		taskMap := structToMap(task)
-
-		taskMap["execution_time_formatted"] = formatExecutionTime(task.CreatedAt, task.UpdatedAt)
-		taskMap["progress"] = calculateProgressFromMemory(task)
-		taskMap["operation"] = getOperationByMethod(task.Method)
-
-		enriched[i] = taskMap
+		enriched[i] = EnrichedScheduledTask{
+			ScheduledTasks:         task,
+			ExecutionTimeFormatted: formatExecutionTime(task.CreatedAt, task.UpdatedAt),
+			Progress:               calculateProgressFromMemory(task),
+			Operation:              getOperationByMethod(task.Method),
+		}
 	}
 
 	return enriched
-}
-
-func structToMap(v interface{}) map[string]interface{} {
-	result := make(map[string]interface{})
-	val := reflect.ValueOf(v)
-	typ := reflect.TypeOf(v)
-
-	if val.Kind() == reflect.Ptr {
-		if val.IsNil() {
-			return result
-		}
-		val = val.Elem()
-		typ = typ.Elem()
-	}
-
-	if val.Kind() != reflect.Struct {
-		return result
-	}
-
-	for i := 0; i < val.NumField(); i++ {
-		field := typ.Field(i)
-		fieldVal := val.Field(i)
-
-		if !fieldVal.CanInterface() {
-			continue
-		}
-
-		jsonKey := field.Tag.Get("json")
-		if jsonKey == "" || jsonKey == "-" {
-			jsonKey = field.Name
-		} else {
-			if idx := strings.Index(jsonKey, ","); idx != -1 {
-				jsonKey = jsonKey[:idx]
-			}
-		}
-
-		if fieldVal.Kind() == reflect.Ptr {
-			if fieldVal.IsNil() {
-				result[jsonKey] = nil
-				continue
-			}
-
-			ptrVal := fieldVal.Interface()
-			if dbJsonPtr, ok := ptrVal.(*database.DbJson[map[string][]string]); ok {
-				if jsonVal := dbJsonPtr.Json(); jsonVal != nil {
-					result[jsonKey] = *jsonVal
-				} else {
-					result[jsonKey] = map[string][]string{}
-				}
-				continue
-			}
-			if dbJsonPtr, ok := ptrVal.(*database.DbJson[map[string]interface{}]); ok {
-				if jsonVal := dbJsonPtr.Json(); jsonVal != nil {
-					result[jsonKey] = *jsonVal
-				} else {
-					result[jsonKey] = map[string]interface{}{}
-				}
-				continue
-			}
-			if dbJsonPtr, ok := ptrVal.(*database.DbJson[[]string]); ok {
-				if jsonVal := dbJsonPtr.Json(); jsonVal != nil {
-					result[jsonKey] = *jsonVal
-				} else {
-					result[jsonKey] = []string{}
-				}
-				continue
-			}
-
-			fieldVal = fieldVal.Elem()
-		}
-
-		result[jsonKey] = fieldVal.Interface()
-	}
-
-	return result
 }
 
 func formatExecutionTime(createdAt, updatedAt time.Time) string {
