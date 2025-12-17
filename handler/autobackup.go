@@ -207,7 +207,7 @@ func HandleAutomaticSyncCreate(c echo.Context) error {
 	case "gmail":
 		name, config, err = ProcessGmailMethod(reqBody.Code)
 	case "outlook":
-		name, config, err = ProcessOutlookMethod(reqBody.RefreshToken)
+		name, config, err = ProcessOutlookMethod(reqBody.Code)
 	case "psql_database", "mysql_database":
 		name, config, err = ProcessDatabaseMethod(DatabaseConnection{
 			Name:         reqBody.Name,
@@ -271,28 +271,28 @@ func ProcessGmailMethod(code string) (string, map[string]interface{}, error) {
 	return userDetails.Email, config, nil
 }
 
-func ProcessOutlookMethod(refreshToken string) (string, map[string]interface{}, error) {
-	if refreshToken == "" {
-		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Refresh Token Required")
+func ProcessOutlookMethod(code string) (string, map[string]interface{}, error) {
+	if code == "" {
+		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Code is required")
 	}
 
-	authToken, err := outlook.AuthTokenUsingRefreshToken(refreshToken)
+	tok, err := outlook.AuthTokenUsingCode(code)
 	if err != nil {
-		return "", nil, jsonError(http.StatusBadRequest, "Invalid Refresh Token. Not able to generate auth token", err)
+		return "", nil, jsonError(http.StatusBadRequest, "Invalid Code. Not able to generate auth token from code", err)
 	}
 
-	client, err := outlook.NewOutlookClientUsingToken(authToken)
+	client, err := outlook.NewOutlookClientUsingToken(tok.AccessToken)
 	if err != nil {
-		return "", nil, jsonError(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err)
+		return "", nil, jsonError(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid", err)
 	}
 
 	userDetails, err := client.GetCurrentUser()
 	if err != nil || userDetails.Mail == "" {
-		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid")
+		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid")
 	}
 
 	config := map[string]interface{}{
-		"refresh_token": refreshToken,
+		"refresh_token": tok.RefreshToken,
 		"email":         userDetails.Mail,
 	}
 
