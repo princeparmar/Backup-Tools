@@ -18,6 +18,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/labstack/echo/v4"
+	"gorm.io/gorm"
 )
 
 var Err error
@@ -38,6 +39,13 @@ type DatabaseConnection struct {
 	Port         string `json:"port"`
 	Username     string `json:"username"`
 	Password     string `json:"password"`
+}
+
+// AutoSyncStatsResponse represents the response structure for autosync stats
+type AutoSyncStatsResponse struct {
+	ActiveSyncs int    `json:"active_syncs"`
+	FailedSyncs int    `json:"failed_syncs"`
+	Status      string `json:"status"`
 }
 
 // <<<<<------------ AUTOMATIC BACKUP ------------>>>>>
@@ -1346,58 +1354,69 @@ func HandleAutomaticSyncStats(c echo.Context) error {
 
 	userID, err := satellite.GetUserdetails(c)
 	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-			"message": "not able to authenticate user",
-			"error":   err.Error(),
+		logger.Error(ctx, "Failed to authenticate user", logger.ErrorField(err))
+		return c.JSON(http.StatusUnauthorized, map[string]string{
+			"message": "unauthorized",
 		})
 	}
 
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+	db := database.DB.WithContext(ctx)
 
 	var activeSyncs, failedSyncs int64
+	var errActive, errFailed error
 
-	errs := make([]error, 2)
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	go func() {
 		defer wg.Done()
-		errs[0] = database.DB.Model(&repo.CronJobListingDB{}).
+		errActive = db.Session(&gorm.Session{}).
+			Model(&repo.CronJobListingDB{}).
 			Where("user_id = ? AND active = ?", userID, true).
 			Count(&activeSyncs).Error
 	}()
 
 	go func() {
 		defer wg.Done()
-		errs[1] = database.DB.Model(&repo.TaskListingDB{}).
-			Joins("JOIN cron_job_listing_dbs ON task_listing_dbs.cron_job_id = cron_job_listing_dbs.id").
-			Where("cron_job_listing_dbs.user_id = ? AND task_listing_dbs.status = ?", userID, repo.TaskStatusFailed).
+		errFailed = db.Session(&gorm.Session{}).
+			Model(&repo.CronJobListingDB{}).
+			Where("user_id = ? AND active = ? AND message_status = ?", userID, true, repo.JobMessageStatusError).
 			Count(&failedSyncs).Error
 	}()
 
 	wg.Wait()
 
-	for _, e := range errs {
-		if e != nil {
-			logger.Error(ctx, "Failed to get autosync stats", logger.ErrorField(e))
-			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-				"message": "internal server error",
-				"error":   e.Error(),
-			})
+	if errActive != nil || errFailed != nil {
+		if errActive != nil {
+			err = errActive
+		} else {
+			err = errFailed
 		}
+		logger.Error(ctx, "Failed to get autosync stats",
+			logger.ErrorField(errActive),
+			logger.ErrorField(errFailed),
+		)
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"message": "internal server error",
+		})
 	}
 
-	status := "healthy"
-	if failedSyncs > 0 {
-		status = "warning"
-	}
-	if failedSyncs > activeSyncs && activeSyncs > 0 {
-		status = "error"
+	var status string
+	switch {
+	case activeSyncs == 0:
+		status = "inactive"
+	case failedSyncs == 0:
+		status = "success"
+	case failedSyncs == activeSyncs:
+		status = "failed"
+	default:
+		status = "partial_success"
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"active_syncs": int(activeSyncs),
-		"failed_syncs": int(failedSyncs),
-		"status":       status,
+	return c.JSON(http.StatusOK, AutoSyncStatsResponse{
+		ActiveSyncs: int(activeSyncs),
+		FailedSyncs: int(failedSyncs),
+		Status:      status,
 	})
 }
