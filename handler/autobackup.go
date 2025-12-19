@@ -1363,11 +1363,19 @@ func HandleAutomaticSyncStats(c echo.Context) error {
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	db := database.DB.WithContext(ctx)
 
-	var activeSyncs, failedSyncs int64
-	var errActive, errFailed error
+	var totalAccounts, activeSyncs, failedSyncs int64
+	var errTotal, errActive, errFailed error
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
+
+	go func() {
+		defer wg.Done()
+		errTotal = db.Session(&gorm.Session{}).
+			Model(&repo.CronJobListingDB{}).
+			Where("user_id = ?", userID).
+			Count(&totalAccounts).Error
+	}()
 
 	go func() {
 		defer wg.Done()
@@ -1387,13 +1395,16 @@ func HandleAutomaticSyncStats(c echo.Context) error {
 
 	wg.Wait()
 
-	if errActive != nil || errFailed != nil {
-		if errActive != nil {
+	if errTotal != nil || errActive != nil || errFailed != nil {
+		if errTotal != nil {
+			err = errTotal
+		} else if errActive != nil {
 			err = errActive
 		} else {
 			err = errFailed
 		}
 		logger.Error(ctx, "Failed to get autosync stats",
+			logger.ErrorField(errTotal),
 			logger.ErrorField(errActive),
 			logger.ErrorField(errFailed),
 		)
@@ -1404,6 +1415,8 @@ func HandleAutomaticSyncStats(c echo.Context) error {
 
 	var status string
 	switch {
+	case totalAccounts == 0:
+		status = "add accounts"
 	case activeSyncs == 0:
 		status = "inactive"
 	case failedSyncs == 0:
