@@ -48,6 +48,12 @@ type AutoSyncStatsResponse struct {
 	Status      string `json:"status"`
 }
 
+// CronJobResponse represents a cron job with next backup time
+type CronJobResponse struct {
+	repo.CronJobListingDB
+	NextBackup *time.Time `json:"next_backup"`
+}
+
 // <<<<<------------ AUTOMATIC BACKUP ------------>>>>>
 func HandleAutomaticSyncListForUser(c echo.Context) error {
 	ctx := c.Request().Context()
@@ -83,10 +89,105 @@ func HandleAutomaticSyncListForUser(c echo.Context) error {
 		})
 	}
 
+	maskedJobs := repo.MaskTokenForCronJobListingDB(automaticSyncList)
+	response := make([]CronJobResponse, len(maskedJobs))
+	for i, job := range maskedJobs {
+		response[i] = CronJobResponse{
+			CronJobListingDB: job,
+			NextBackup:       calculateNextBackup(job),
+		}
+	}
+
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Automatic Backup Accounts List",
-		"data":    repo.MaskTokenForCronJobListingDB(automaticSyncList),
+		"data":    response,
 	})
+}
+
+func calculateNextBackup(job repo.CronJobListingDB) *time.Time {
+	if !job.Active || job.Interval == "one_time" {
+		return nil
+	}
+
+	now := time.Now()
+	base := now
+	if job.LastRun != nil {
+		base = *job.LastRun
+	}
+
+	var next time.Time
+
+	switch job.Interval {
+	case "daily":
+		next = base.Add(24 * time.Hour)
+		for !next.After(now) {
+			next = next.Add(24 * time.Hour)
+		}
+
+	case "weekly":
+		if job.On == "" {
+			return nil
+		}
+		target := parseWeekday(job.On)
+		if target < 0 {
+			return nil
+		}
+		next = base
+		for next.Weekday() != time.Weekday(target) || !next.After(now) {
+			next = next.AddDate(0, 0, 1)
+		}
+
+	case "monthly":
+		if job.On == "" {
+			return nil
+		}
+		day, err := strconv.Atoi(job.On)
+		if err != nil || day < 1 || day > 31 {
+			return nil
+		}
+		next = base
+		for !next.After(now) {
+			next = addOneMonthSameDay(next, day)
+		}
+
+	default:
+		return nil
+	}
+
+	return &next
+}
+
+func addOneMonthSameDay(t time.Time, day int) time.Time {
+	year, month := t.Year(), t.Month()+1
+	if month > 12 {
+		month = 1
+		year++
+	}
+	lastDay := time.Date(year, month+1, 0, 0, 0, 0, 0, t.Location()).Day()
+	if day > lastDay {
+		day = lastDay
+	}
+	return time.Date(
+		year, month, day,
+		t.Hour(), t.Minute(), t.Second(), 0,
+		t.Location(),
+	)
+}
+
+func parseWeekday(weekday string) time.Weekday {
+	weekdayMap := map[string]time.Weekday{
+		"Sunday":    time.Sunday,
+		"Monday":    time.Monday,
+		"Tuesday":   time.Tuesday,
+		"Wednesday": time.Wednesday,
+		"Thursday":  time.Thursday,
+		"Friday":    time.Friday,
+		"Saturday":  time.Saturday,
+	}
+	if wd, ok := weekdayMap[weekday]; ok {
+		return wd
+	}
+	return -1
 }
 
 func HandleAutomaticSyncActiveJobsForUser(c echo.Context) error {
@@ -215,7 +316,7 @@ func HandleAutomaticSyncCreate(c echo.Context) error {
 	case "gmail":
 		name, config, err = ProcessGmailMethod(reqBody.Code)
 	case "outlook":
-		name, config, err = ProcessOutlookMethod(reqBody.Code)
+		name, config, err = ProcessOutlookMethod(reqBody.RefreshToken)
 	case "psql_database", "mysql_database":
 		name, config, err = ProcessDatabaseMethod(DatabaseConnection{
 			Name:         reqBody.Name,
@@ -279,28 +380,28 @@ func ProcessGmailMethod(code string) (string, map[string]interface{}, error) {
 	return userDetails.Email, config, nil
 }
 
-func ProcessOutlookMethod(code string) (string, map[string]interface{}, error) {
-	if code == "" {
-		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Code is required")
+func ProcessOutlookMethod(refreshToken string) (string, map[string]interface{}, error) {
+	if refreshToken == "" {
+		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Refresh Token Required")
 	}
 
-	tok, err := outlook.AuthTokenUsingCode(code)
+	authToken, err := outlook.AuthTokenUsingRefreshToken(refreshToken)
 	if err != nil {
-		return "", nil, jsonError(http.StatusBadRequest, "Invalid Code. Not able to generate auth token from code", err)
+		return "", nil, jsonError(http.StatusBadRequest, "Invalid Refresh Token. Not able to generate auth token", err)
 	}
 
-	client, err := outlook.NewOutlookClientUsingToken(tok.AccessToken)
+	client, err := outlook.NewOutlookClientUsingToken(authToken)
 	if err != nil {
-		return "", nil, jsonError(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid", err)
+		return "", nil, jsonError(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err)
 	}
 
 	userDetails, err := client.GetCurrentUser()
 	if err != nil || userDetails.Mail == "" {
-		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid")
+		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid")
 	}
 
 	config := map[string]interface{}{
-		"refresh_token": tok.RefreshToken,
+		"refresh_token": refreshToken,
 		"email":         userDetails.Mail,
 	}
 
@@ -646,7 +747,7 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 				logger.Int("job_id", jobID))
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
 				"message": "Invalid Request",
-				"error":   "For one-time sync jobs, only storx_token and code for outlook/gmail updates are allowed",
+				"error":   "For one-time sync jobs, only storx_token and refresh_token (outlook), code (gmail) updates are allowed",
 			})
 		}
 
@@ -1363,11 +1464,19 @@ func HandleAutomaticSyncStats(c echo.Context) error {
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	db := database.DB.WithContext(ctx)
 
-	var activeSyncs, failedSyncs int64
-	var errActive, errFailed error
+	var totalAccounts, activeSyncs, failedSyncs int64
+	var errTotal, errActive, errFailed error
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
+
+	go func() {
+		defer wg.Done()
+		errTotal = db.Session(&gorm.Session{}).
+			Model(&repo.CronJobListingDB{}).
+			Where("user_id = ?", userID).
+			Count(&totalAccounts).Error
+	}()
 
 	go func() {
 		defer wg.Done()
@@ -1387,13 +1496,16 @@ func HandleAutomaticSyncStats(c echo.Context) error {
 
 	wg.Wait()
 
-	if errActive != nil || errFailed != nil {
-		if errActive != nil {
+	if errTotal != nil || errActive != nil || errFailed != nil {
+		if errTotal != nil {
+			err = errTotal
+		} else if errActive != nil {
 			err = errActive
 		} else {
 			err = errFailed
 		}
 		logger.Error(ctx, "Failed to get autosync stats",
+			logger.ErrorField(errTotal),
 			logger.ErrorField(errActive),
 			logger.ErrorField(errFailed),
 		)
@@ -1404,6 +1516,8 @@ func HandleAutomaticSyncStats(c echo.Context) error {
 
 	var status string
 	switch {
+	case totalAccounts == 0:
+		status = "add accounts"
 	case activeSyncs == 0:
 		status = "inactive"
 	case failedSyncs == 0:
