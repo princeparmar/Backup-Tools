@@ -37,6 +37,7 @@ func StartServer(db *db.PostgresDb, address string) {
 
 	autoSync := e.Group("/auto-sync")
 	autoSync.GET("/live", handler.HandleAutomaticSyncActiveJobsForUser)
+	autoSync.PUT("/task/hide", handler.HandleHideTask)
 
 	job := autoSync.Group("/job")
 	job.GET("/", handler.HandleAutomaticSyncListForUser)

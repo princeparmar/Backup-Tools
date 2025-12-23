@@ -197,7 +197,7 @@ func (r *CronJobRepository) GetAllActiveCronJobsForUser(userID string) ([]LiveCr
 			cj.id,cj.name,cj.method,cj.message,cj.message_status,
 			t.start_time,t.status
 		FROM cron_job_listing_dbs cj
-		LEFT JOIN task_listing_dbs t ON cj.id = t.cron_job_id AND t.status IN ('running')
+		LEFT JOIN task_listing_dbs t ON cj.id = t.cron_job_id AND t.status IN ('failed','running') AND t.hidden = false
 		WHERE cj.user_id = $1 
 		AND cj.deleted_at IS NULL
 		ORDER BY cj.id, t.start_time DESC`

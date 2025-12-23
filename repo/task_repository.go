@@ -35,6 +35,9 @@ type TaskListingDB struct {
 
 	// LastHeartBeat will be the time when the task was last heartbeat
 	LastHeartBeat *time.Time `json:"last_heart_beat"`
+
+	//hidden coloumn for scheduled tasks by default it will be false
+	Hidden bool `json:"hidden" gorm:"default:false"`
 }
 
 // TaskRepository handles all database operations for tasks

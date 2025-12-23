@@ -217,6 +217,76 @@ func HandleAutomaticSyncActiveJobsForUser(c echo.Context) error {
 	})
 }
 
+func HandleHideTask(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "not able to authenticate user",
+		})
+	}
+
+	var reqBody struct {
+		TaskID uint `json:"task_id"`
+	}
+
+	if err := c.Bind(&reqBody); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "invalid request body",
+			"error":   "task_id is required",
+		})
+	}
+
+	if reqBody.TaskID == 0 {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "task_id is required and must be greater than 0",
+		})
+	}
+
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+
+	task, err := database.TaskRepo.GetTaskByID(reqBody.TaskID)
+	if err != nil {
+		logger.Error(ctx, "Failed to get task", logger.Int("task_id", int(reqBody.TaskID)), logger.ErrorField(err))
+		return c.JSON(http.StatusNotFound, map[string]interface{}{
+			"message": "task not found",
+		})
+	}
+
+	job, err := database.CronJobRepo.GetCronJobByID(task.CronJobID)
+	if err != nil {
+		logger.Error(ctx, "Failed to get cron job", logger.Int("job_id", int(task.CronJobID)), logger.ErrorField(err))
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"message": "internal server error",
+		})
+	}
+
+	if job.UserID != userID {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"message": "access denied",
+		})
+	}
+
+	updateMap := map[string]interface{}{
+		"hidden": true,
+	}
+
+	if err := database.TaskRepo.UpdateTaskByID(reqBody.TaskID, updateMap); err != nil {
+		logger.Error(ctx, "Failed to update task", logger.Int("task_id", int(reqBody.TaskID)), logger.ErrorField(err))
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"message": "failed to hide task",
+		})
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "task hidden successfully",
+		"task_id": reqBody.TaskID,
+	})
+}
+
 func HandleIntervalOnConfig(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
