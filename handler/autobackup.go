@@ -294,7 +294,6 @@ func HandleAutomaticSyncCreate(c echo.Context) error {
 	// Parse request body and extract common fields
 	var reqBody struct {
 		Code         string `json:"code"`
-		RefreshToken string `json:"refresh_token"`
 		Name         string `json:"name"`
 		DatabaseName string `json:"database_name"`
 		Host         string `json:"host"`
