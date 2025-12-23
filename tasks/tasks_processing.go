@@ -89,8 +89,10 @@ func NewScheduledTaskManager(store *db.PostgresDb) *ScheduledTaskManager {
 	return &ScheduledTaskManager{
 		Deps: deps,
 		processor: map[string]ScheduledTaskProcessor{
-			"gmail":   NewScheduledGmailProcessor(deps),
-			"outlook": NewScheduledOutlookProcessor(deps),
+			"gmail":         NewScheduledGmailProcessor(deps),
+			"outlook":       NewScheduledOutlookProcessor(deps),
+			"google_photos": NewScheduledGooglePhotosProcessor(deps),
+			"google_drive":  NewScheduledGoogleDriveProcessor(deps),
 		},
 	}
 }

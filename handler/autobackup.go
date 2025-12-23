@@ -48,6 +48,12 @@ type AutoSyncStatsResponse struct {
 	Status      string `json:"status"`
 }
 
+// CronJobResponse represents a cron job with next backup time
+type CronJobResponse struct {
+	repo.CronJobListingDB
+	NextBackup *time.Time `json:"next_backup"`
+}
+
 // <<<<<------------ AUTOMATIC BACKUP ------------>>>>>
 func HandleAutomaticSyncListForUser(c echo.Context) error {
 	ctx := c.Request().Context()
@@ -83,10 +89,104 @@ func HandleAutomaticSyncListForUser(c echo.Context) error {
 		})
 	}
 
+	maskedJobs := repo.MaskTokenForCronJobListingDB(automaticSyncList)
+	response := make([]CronJobResponse, len(maskedJobs))
+	for i, job := range maskedJobs {
+		response[i] = CronJobResponse{
+			CronJobListingDB: job,
+			NextBackup:       calculateNextBackup(job),
+		}
+	}
+
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Automatic Backup Accounts List",
-		"data":    repo.MaskTokenForCronJobListingDB(automaticSyncList),
+		"data":    response,
 	})
+}
+func calculateNextBackup(job repo.CronJobListingDB) *time.Time {
+	if !job.Active || job.Interval == "one_time" {
+		return nil
+	}
+
+	now := time.Now()
+	base := now
+	if job.LastRun != nil {
+		base = *job.LastRun
+	}
+
+	var next time.Time
+
+	switch job.Interval {
+	case "daily":
+		next = base.Add(24 * time.Hour)
+		for !next.After(now) {
+			next = next.Add(24 * time.Hour)
+		}
+
+	case "weekly":
+		if job.On == "" {
+			return nil
+		}
+		target := parseWeekday(job.On)
+		if target < 0 {
+			return nil
+		}
+		next = base
+		for next.Weekday() != time.Weekday(target) || !next.After(now) {
+			next = next.AddDate(0, 0, 1)
+		}
+
+	case "monthly":
+		if job.On == "" {
+			return nil
+		}
+		day, err := strconv.Atoi(job.On)
+		if err != nil || day < 1 || day > 31 {
+			return nil
+		}
+		next = base
+		for !next.After(now) {
+			next = addOneMonthSameDay(next, day)
+		}
+
+	default:
+		return nil
+	}
+
+	return &next
+}
+
+func addOneMonthSameDay(t time.Time, day int) time.Time {
+	year, month := t.Year(), t.Month()+1
+	if month > 12 {
+		month = 1
+		year++
+	}
+	lastDay := time.Date(year, month+1, 0, 0, 0, 0, 0, t.Location()).Day()
+	if day > lastDay {
+		day = lastDay
+	}
+	return time.Date(
+		year, month, day,
+		t.Hour(), t.Minute(), t.Second(), 0,
+		t.Location(),
+	)
+}
+
+func parseWeekday(weekday string) time.Weekday {
+	weekdayMap := map[string]time.Weekday{
+		"Sunday":    time.Sunday,
+		"Monday":    time.Monday,
+		"Tuesday":   time.Tuesday,
+		"Wednesday": time.Wednesday,
+		"Thursday":  time.Thursday,
+		"Friday":    time.Friday,
+		"Saturday":  time.Saturday,
+	}
+	if wd, ok := weekdayMap[weekday]; ok {
+		return wd
+	}
+	return -1
 }
 
 func HandleAutomaticSyncActiveJobsForUser(c echo.Context) error {
@@ -194,7 +294,6 @@ func HandleAutomaticSyncCreate(c echo.Context) error {
 	// Parse request body and extract common fields
 	var reqBody struct {
 		Code         string `json:"code"`
-		RefreshToken string `json:"refresh_token"`
 		Name         string `json:"name"`
 		DatabaseName string `json:"database_name"`
 		Host         string `json:"host"`
