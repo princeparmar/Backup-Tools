@@ -62,7 +62,15 @@ func (st *ScheduledTasks) GetTasksForCurrentUser(db *gorm.DB, filter ScheduledTa
 	}
 
 	if filter.Method != "" {
-		query = query.Where("method = ?", filter.Method)
+		// Handle method groups
+		switch filter.Method {
+		case "google":
+			query = query.Where("method IN ?", []string{"gmail", "google_drive", "google_photos"})
+		case "microsoft":
+			query = query.Where("method IN ?", []string{"outlook"})
+		default:
+			query = query.Where("method = ?", filter.Method)
+		}
 	}
 
 	if filter.Status != "" {

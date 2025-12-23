@@ -217,7 +217,14 @@ func parseFilterParams(c echo.Context) *repo.ScheduledTasksFilter {
 	}
 
 	if method := c.QueryParam("method"); method != "" {
-		filter.Method = method
+		switch method {
+		case "google":
+			filter.Method = "google"
+		case "microsoft":
+			filter.Method = "microsoft"
+		default:
+			filter.Method = method
+		}
 	}
 
 	if status := c.QueryParam("status"); status != "" {
