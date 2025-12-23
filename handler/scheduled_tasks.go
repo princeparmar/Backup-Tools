@@ -34,10 +34,14 @@ func HandleCreateScheduledTask(c echo.Context) error {
 
 	method := c.Param("method")
 
-	// Get email_ids as a comma-separated string
-	emailIdsStr := c.FormValue("email_ids")
-	if emailIdsStr == "" {
-		return jsonErrorMsg(http.StatusBadRequest, "email_ids are required")
+	// Get item_ids as a comma-separated string (works for email_ids, photo_ids, file_ids)
+	itemIdsStr := c.FormValue("item_ids")
+	if itemIdsStr == "" {
+		// Fallback to email_ids for backward compatibility
+		itemIdsStr = c.FormValue("email_ids")
+		if itemIdsStr == "" {
+			return jsonErrorMsg(http.StatusBadRequest, "item_ids (or email_ids) are required")
+		}
 	}
 
 	storxToken := c.FormValue("storx_token")
@@ -46,14 +50,14 @@ func HandleCreateScheduledTask(c echo.Context) error {
 	}
 
 	// Parse the comma-separated string
-	emailIds := strings.Split(emailIdsStr, ",")
-	// Trim whitespace from each email ID
-	for i := range emailIds {
-		emailIds[i] = strings.TrimSpace(emailIds[i])
+	itemIds := strings.Split(itemIdsStr, ",")
+	// Trim whitespace from each item ID
+	for i := range itemIds {
+		itemIds[i] = strings.TrimSpace(itemIds[i])
 	}
 
-	if len(emailIds) == 0 {
-		return jsonErrorMsg(http.StatusBadRequest, "email_ids cannot be empty")
+	if len(itemIds) == 0 {
+		return jsonErrorMsg(http.StatusBadRequest, "item_ids cannot be empty")
 	}
 
 	// Get access_token from header
@@ -69,19 +73,19 @@ func HandleCreateScheduledTask(c echo.Context) error {
 	var email string
 	var config map[string]interface{}
 	switch method {
-	case "gmail":
+	case "gmail", "google_photos", "google_drive":
 		email, config, err = processGmailAccessToken(accessToken)
 	case "outlook":
 		email, config, err = ProcessOutlookAccessToken(accessToken)
 	default:
-		return jsonErrorMsg(http.StatusBadRequest, "Unsupported method. Supported methods: gmail")
+		return jsonErrorMsg(http.StatusBadRequest, "Unsupported method. Supported methods: gmail, outlook, google_photos, google_drive")
 	}
 	if err != nil {
 		return err
 	}
 
-	statusEmailsMap := make(map[string][]string)
-	statusEmailsMap["pending"] = emailIds
+	statusItemsMap := make(map[string][]string)
+	statusItemsMap["pending"] = itemIds
 
 	db := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	task := &repo.ScheduledTasks{
@@ -89,7 +93,7 @@ func HandleCreateScheduledTask(c echo.Context) error {
 		LoginId:    email,
 		Method:     method,
 		StorxToken: storxToken,
-		Memory:     database.NewDbJsonFromValue(statusEmailsMap),
+		Memory:     database.NewDbJsonFromValue(statusItemsMap),
 		Status:     "created",
 		InputData:  database.NewDbJsonFromValue(config),
 		Errors:     *database.NewDbJsonFromValue([]string{}),
@@ -108,20 +112,21 @@ func HandleCreateScheduledTask(c echo.Context) error {
 	// Send notification for scheduled task creation
 	priority := "normal"
 	data := map[string]interface{}{
-		"event":     "scheduled_task_created",
-		"level":     2,
-		"task_id":   task.ID,
-		"method":    method,
-		"login_id":  email,
-		"email_ids": emailIds,
+		"event":      "scheduled_task_created",
+		"level":      2,
+		"task_id":    task.ID,
+		"method":     method,
+		"login_id":   email,
+		"item_count": len(itemIds),
 	}
 	satellite.SendNotificationAsync(ctx, userID, "Scheduled Task Created", fmt.Sprintf("Scheduled task for %s has been created successfully", email), &priority, data, nil)
-
 	return c.JSON(http.StatusCreated, map[string]interface{}{
-		"success": true,
-		"message": "Scheduled task created successfully",
-		"task_id": task.ID,
-		"email":   email,
+		"success":    true,
+		"message":    "Scheduled task created successfully",
+		"task_id":    task.ID,
+		"login_id":   email,
+		"method":     method,
+		"item_count": len(itemIds),
 	})
 }
 
