@@ -137,15 +137,13 @@ func HandleListPhotosInAlbum(c echo.Context) error {
 		})
 	}
 
-	// Try to list objects from bucket with user email prefix, but don't fail if there are permission issues
-	// In that case, we'll just treat all photos as not synced
 	listFromSatellite, listErr := satellite.ListObjectsWithPrefix(c.Request().Context(), accesGrant, "google-photos", userDetails.Email+"/")
 	if listErr != nil {
-		// Log the error but continue - we'll just show all photos as not synced
-		// This handles cases where bucket doesn't exist, permission denied, etc.
-		logger.Warn(ctx, "Failed to list objects from satellite (will show all photos as not synced)",
-			logger.ErrorField(listErr))
-		listFromSatellite = make(map[string]bool) // Initialize as empty map
+		logger.Error(ctx, "Failed to list objects from satellite", logger.ErrorField(listErr))
+		userFriendlyError := satellite.FormatSatelliteError(listErr)
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": userFriendlyError,
+		})
 	}
 
 	var photosRespJSON []*AllPhotosJSON
