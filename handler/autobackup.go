@@ -224,66 +224,41 @@ func HandleHideTask(c echo.Context) error {
 
 	userID, err := satellite.GetUserdetails(c)
 	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-			"message": "not able to authenticate user",
-		})
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"message": "authentication failed"})
 	}
 
 	var reqBody struct {
-		TaskID uint `json:"task_id"`
+		CronJobID uint `json:"cron_job_id"`
 	}
-
-	if err := c.Bind(&reqBody); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "invalid request body",
-			"error":   "task_id is required",
-		})
-	}
-
-	if reqBody.TaskID == 0 {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "task_id is required and must be greater than 0",
-		})
+	if err := c.Bind(&reqBody); err != nil || reqBody.CronJobID == 0 {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "invalid cron_job_id"})
 	}
 
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
-	task, err := database.TaskRepo.GetTaskByID(reqBody.TaskID)
+	job, err := database.CronJobRepo.GetCronJobByID(reqBody.CronJobID)
 	if err != nil {
-		logger.Error(ctx, "Failed to get task", logger.Int("task_id", int(reqBody.TaskID)), logger.ErrorField(err))
-		return c.JSON(http.StatusNotFound, map[string]interface{}{
-			"message": "task not found",
-		})
-	}
-
-	job, err := database.CronJobRepo.GetCronJobByID(task.CronJobID)
-	if err != nil {
-		logger.Error(ctx, "Failed to get cron job", logger.Int("job_id", int(task.CronJobID)), logger.ErrorField(err))
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"message": "internal server error",
-		})
+		return c.JSON(http.StatusNotFound, map[string]interface{}{"message": "cron job not found"})
 	}
 
 	if job.UserID != userID {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"message": "access denied",
+		return c.JSON(http.StatusForbidden, map[string]interface{}{"message": "access denied"})
+	}
+
+	if job.Status != repo.JobStatusFailed {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "cron job has no failed tasks to hide",
 		})
 	}
 
-	updateMap := map[string]interface{}{
-		"hidden": true,
-	}
-
-	if err := database.TaskRepo.UpdateTaskByID(reqBody.TaskID, updateMap); err != nil {
-		logger.Error(ctx, "Failed to update task", logger.Int("task_id", int(reqBody.TaskID)), logger.ErrorField(err))
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"message": "failed to hide task",
-		})
+	if err := database.CronJobRepo.UpdateCronJobByID(reqBody.CronJobID, map[string]interface{}{"hidden": true}); err != nil {
+		logger.Error(ctx, "Failed to hide cron job", logger.Int("job_id", int(reqBody.CronJobID)), logger.ErrorField(err))
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"message": "failed to hide cron job"})
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message": "task hidden successfully",
-		"task_id": reqBody.TaskID,
+		"message":     "cron job hidden successfully",
+		"cron_job_id": reqBody.CronJobID,
 	})
 }
 
