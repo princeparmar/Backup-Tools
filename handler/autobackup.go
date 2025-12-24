@@ -217,6 +217,51 @@ func HandleAutomaticSyncActiveJobsForUser(c echo.Context) error {
 	})
 }
 
+func HandleHideTask(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"message": "authentication failed"})
+	}
+
+	var reqBody struct {
+		CronJobID uint `json:"cron_job_id"`
+	}
+	if err := c.Bind(&reqBody); err != nil || reqBody.CronJobID == 0 {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "invalid cron_job_id"})
+	}
+
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+
+	job, err := database.CronJobRepo.GetCronJobByID(reqBody.CronJobID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]interface{}{"message": "cron job not found"})
+	}
+
+	if job.UserID != userID {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{"message": "access denied"})
+	}
+
+	if job.Status != repo.JobStatusFailed {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "cron job has no failed tasks to hide",
+		})
+	}
+
+	if err := database.CronJobRepo.UpdateCronJobByID(reqBody.CronJobID, map[string]interface{}{"hidden": true}); err != nil {
+		logger.Error(ctx, "Failed to hide cron job", logger.Int("job_id", int(reqBody.CronJobID)), logger.ErrorField(err))
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"message": "failed to hide cron job"})
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message":     "cron job hidden successfully",
+		"cron_job_id": reqBody.CronJobID,
+	})
+}
+
 func HandleIntervalOnConfig(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error

@@ -71,6 +71,10 @@ type CronJobListingDB struct {
 	SyncType string `json:"sync_type" gorm:"uniqueIndex:idx_name_sync_type_user"`
 
 	Status string `json:"status" gorm:"default:created"`
+
+	// Hidden column for scheduled tasks - when true, hides the cron job from the live view
+	// Default is false, and it gets reset to false when a new task is created
+	Hidden bool `json:"hidden" gorm:"default:false"`
 }
 
 // TaskMemory represents the memory state of a task
@@ -197,9 +201,11 @@ func (r *CronJobRepository) GetAllActiveCronJobsForUser(userID string) ([]LiveCr
 			cj.id,cj.name,cj.method,cj.message,cj.message_status,
 			t.start_time,t.status
 		FROM cron_job_listing_dbs cj
-		LEFT JOIN task_listing_dbs t ON cj.id = t.cron_job_id AND t.status IN ('running')
+		LEFT JOIN task_listing_dbs t ON cj.id = t.cron_job_id 
+			AND t.status IN ('failed','running')
 		WHERE cj.user_id = $1 
 		AND cj.deleted_at IS NULL
+		AND (cj.hidden = false OR cj.hidden IS NULL)
 		ORDER BY cj.id, t.start_time DESC`
 
 	rows, err := r.db.Raw(query, userID).Rows()
