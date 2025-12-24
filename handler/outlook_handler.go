@@ -127,16 +127,12 @@ func HandleOutlookGetMessages(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusForbidden, err.Error())
 	}
 
-	// Try to list objects from bucket, but don't fail if there are permission issues
-	// In that case, we'll just treat all messages as not synced
 	emailListFromBucket, err := satellite.ListObjectsWithPrefix(ctx,
 		accessGrant, satellite.ReserveBucket_Outlook, userDetails.Mail+"/")
 	if err != nil {
-		// Log the error but continue - we'll just show all messages as not synced
-		// This handles cases where bucket doesn't exist, permission denied, etc.
-		logger.Warn(ctx, "Failed to list objects from satellite (will show all messages as not synced)",
-			logger.ErrorField(err))
-		emailListFromBucket = make(map[string]bool) // Initialize as empty map
+		logger.Error(ctx, "Failed to list objects from satellite", logger.ErrorField(err))
+		userFriendlyError := satellite.FormatSatelliteError(err)
+		return echo.NewHTTPError(http.StatusForbidden, userFriendlyError)
 	}
 
 	outlookMessages := make([]*OutlookMessageListJSON, 0, len(messages.Messages))
@@ -367,4 +363,20 @@ func processMessagesConcurrently(c echo.Context, ids []string, processor func(ec
 		"failed_ids":    failedIDs.Get(),
 		"processed_ids": processedIDs.Get(),
 	})
+}
+
+func HandleMicrosoftAuthRedirect(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	authURL, err := outlook.BuildAuthURL()
+	if err != nil {
+		logger.Error(ctx, "Failed to build Outlook auth URL", logger.ErrorField(err))
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"error": "Failed to build authorization URL: " + err.Error(),
+		})
+	}
+
+	return c.Redirect(http.StatusTemporaryRedirect, authURL)
 }

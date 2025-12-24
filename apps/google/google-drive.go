@@ -381,14 +381,8 @@ func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
 	satelliteFolderPath := userDetails.Email + "/" + folderName + "/"
 	o, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", satelliteFolderPath)
 	if err != nil {
-		// Handle permission errors gracefully
-		if strings.Contains(err.Error(), "permission denied") || strings.Contains(err.Error(), "Unauthorized") {
-			logger.Warn(context.Background(), "Failed to list objects from satellite (will show all files as not synced)",
-				logger.ErrorField(err))
-			o = []uplink.Object{}
-		} else {
-			return nil, errors.New("failed to get list from satellite with error:" + err.Error())
-		}
+		userFriendlyError := satellite.FormatSatelliteError(err)
+		return nil, fmt.Errorf("%s", userFriendlyError)
 	}
 	sortSatelliteObjects(o)
 	// List all files within the folder
@@ -450,14 +444,8 @@ func GetFilesInFolderByID(c echo.Context, folderID string) (*PaginatedFilesRespo
 	satelliteFolderPath := userDetails.Email + "/" + folderName + "/"
 	o, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", satelliteFolderPath)
 	if err != nil {
-		// Handle permission errors gracefully
-		if strings.Contains(err.Error(), "permission denied") || strings.Contains(err.Error(), "Unauthorized") {
-			logger.Warn(context.Background(), "Failed to list objects from satellite (will show all files as not synced)",
-				logger.ErrorField(err))
-			o = []uplink.Object{}
-		} else {
-			return nil, errors.New("failed to get list from satellite with error:" + err.Error())
-		}
+		userFriendlyError := satellite.FormatSatelliteError(err)
+		return nil, fmt.Errorf("%s", userFriendlyError)
 	}
 	sortSatelliteObjects(o)
 
@@ -783,14 +771,8 @@ func GetFileNamesInRoot(c echo.Context) (*PaginatedFilesResponse, error) {
 	// Get satellite objects for sync checking - use prefix to only get user's files
 	satelliteObjects, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", userDetails.Email+"/")
 	if err != nil {
-		// Handle permission errors gracefully - continue with empty list
-		if strings.Contains(err.Error(), "permission denied") || strings.Contains(err.Error(), "Unauthorized") {
-			logger.Warn(context.Background(), "Failed to list objects from satellite (will show all files as not synced)",
-				logger.ErrorField(err))
-			satelliteObjects = []uplink.Object{}
-		} else {
-			return nil, fmt.Errorf("failed to get satellite list: %w", err)
-		}
+		userFriendlyError := satellite.FormatSatelliteError(err)
+		return nil, fmt.Errorf("%s", userFriendlyError)
 	}
 	sortSatelliteObjects(satelliteObjects)
 
@@ -855,14 +837,8 @@ func GetSharedFiles(c echo.Context) (*PaginatedFilesResponse, error) {
 	// Get satellite objects for sync checking - shared files are stored with userEmail prefix
 	satelliteObjects, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", userDetails.Email+"/shared with me/")
 	if err != nil {
-		// Handle permission errors gracefully - continue with empty list
-		if strings.Contains(err.Error(), "permission denied") || strings.Contains(err.Error(), "Unauthorized") {
-			logger.Warn(context.Background(), "Failed to list objects from satellite (will show all files as not synced)",
-				logger.ErrorField(err))
-			satelliteObjects = []uplink.Object{}
-		} else {
-			return nil, fmt.Errorf("failed to get satellite list: %w", err)
-		}
+		userFriendlyError := satellite.FormatSatelliteError(err)
+		return nil, fmt.Errorf("%s", userFriendlyError)
 	}
 	sortSatelliteObjects(satelliteObjects)
 

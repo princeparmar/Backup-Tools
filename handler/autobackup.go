@@ -19,6 +19,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/labstack/echo/v4"
+	"gorm.io/gorm"
 )
 
 var Err error
@@ -39,6 +40,19 @@ type DatabaseConnection struct {
 	Port         string `json:"port"`
 	Username     string `json:"username"`
 	Password     string `json:"password"`
+}
+
+// AutoSyncStatsResponse represents the response structure for autosync stats
+type AutoSyncStatsResponse struct {
+	ActiveSyncs int    `json:"active_syncs"`
+	FailedSyncs int    `json:"failed_syncs"`
+	Status      string `json:"status"`
+}
+
+// CronJobResponse represents a cron job with next backup time
+type CronJobResponse struct {
+	repo.CronJobListingDB
+	NextBackup *time.Time `json:"next_backup"`
 }
 
 // <<<<<------------ AUTOMATIC BACKUP ------------>>>>>
@@ -76,10 +90,104 @@ func HandleAutomaticSyncListForUser(c echo.Context) error {
 		})
 	}
 
+	maskedJobs := repo.MaskTokenForCronJobListingDB(automaticSyncList)
+	response := make([]CronJobResponse, len(maskedJobs))
+	for i, job := range maskedJobs {
+		response[i] = CronJobResponse{
+			CronJobListingDB: job,
+			NextBackup:       calculateNextBackup(job),
+		}
+	}
+
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Automatic Backup Accounts List",
-		"data":    repo.MaskTokenForCronJobListingDB(automaticSyncList),
+		"data":    response,
 	})
+}
+func calculateNextBackup(job repo.CronJobListingDB) *time.Time {
+	if !job.Active || job.Interval == "one_time" {
+		return nil
+	}
+
+	now := time.Now()
+	base := now
+	if job.LastRun != nil {
+		base = *job.LastRun
+	}
+
+	var next time.Time
+
+	switch job.Interval {
+	case "daily":
+		next = base.Add(24 * time.Hour)
+		for !next.After(now) {
+			next = next.Add(24 * time.Hour)
+		}
+
+	case "weekly":
+		if job.On == "" {
+			return nil
+		}
+		target := parseWeekday(job.On)
+		if target < 0 {
+			return nil
+		}
+		next = base
+		for next.Weekday() != time.Weekday(target) || !next.After(now) {
+			next = next.AddDate(0, 0, 1)
+		}
+
+	case "monthly":
+		if job.On == "" {
+			return nil
+		}
+		day, err := strconv.Atoi(job.On)
+		if err != nil || day < 1 || day > 31 {
+			return nil
+		}
+		next = base
+		for !next.After(now) {
+			next = addOneMonthSameDay(next, day)
+		}
+
+	default:
+		return nil
+	}
+
+	return &next
+}
+
+func addOneMonthSameDay(t time.Time, day int) time.Time {
+	year, month := t.Year(), t.Month()+1
+	if month > 12 {
+		month = 1
+		year++
+	}
+	lastDay := time.Date(year, month+1, 0, 0, 0, 0, 0, t.Location()).Day()
+	if day > lastDay {
+		day = lastDay
+	}
+	return time.Date(
+		year, month, day,
+		t.Hour(), t.Minute(), t.Second(), 0,
+		t.Location(),
+	)
+}
+
+func parseWeekday(weekday string) time.Weekday {
+	weekdayMap := map[string]time.Weekday{
+		"Sunday":    time.Sunday,
+		"Monday":    time.Monday,
+		"Tuesday":   time.Tuesday,
+		"Wednesday": time.Wednesday,
+		"Thursday":  time.Thursday,
+		"Friday":    time.Friday,
+		"Saturday":  time.Saturday,
+	}
+	if wd, ok := weekdayMap[weekday]; ok {
+		return wd
+	}
+	return -1
 }
 
 func HandleAutomaticSyncActiveJobsForUser(c echo.Context) error {
@@ -107,6 +215,51 @@ func HandleAutomaticSyncActiveJobsForUser(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Active Automatic Backup Accounts List",
 		"data":    activeJobs,
+	})
+}
+
+func HandleHideTask(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"message": "authentication failed"})
+	}
+
+	var reqBody struct {
+		CronJobID uint `json:"cron_job_id"`
+	}
+	if err := c.Bind(&reqBody); err != nil || reqBody.CronJobID == 0 {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "invalid cron_job_id"})
+	}
+
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+
+	job, err := database.CronJobRepo.GetCronJobByID(reqBody.CronJobID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]interface{}{"message": "cron job not found"})
+	}
+
+	if job.UserID != userID {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{"message": "access denied"})
+	}
+
+	if job.Status != repo.JobStatusFailed {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "cron job has no failed tasks to hide",
+		})
+	}
+
+	if err := database.CronJobRepo.UpdateCronJobByID(reqBody.CronJobID, map[string]interface{}{"hidden": true}); err != nil {
+		logger.Error(ctx, "Failed to hide cron job", logger.Int("job_id", int(reqBody.CronJobID)), logger.ErrorField(err))
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"message": "failed to hide cron job"})
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message":     "cron job hidden successfully",
+		"cron_job_id": reqBody.CronJobID,
 	})
 }
 
@@ -187,7 +340,6 @@ func HandleAutomaticSyncCreate(c echo.Context) error {
 	// Parse request body and extract common fields
 	var reqBody struct {
 		Code         string `json:"code"`
-		RefreshToken string `json:"refresh_token"`
 		Name         string `json:"name"`
 		DatabaseName string `json:"database_name"`
 		Host         string `json:"host"`
@@ -208,7 +360,7 @@ func HandleAutomaticSyncCreate(c echo.Context) error {
 	case "gmail":
 		name, config, err = ProcessGmailMethod(reqBody.Code)
 	case "outlook":
-		name, config, err = ProcessOutlookMethod(reqBody.RefreshToken)
+		name, config, err = ProcessOutlookMethod(reqBody.Code)
 	case "psql_database", "mysql_database":
 		name, config, err = ProcessDatabaseMethod(DatabaseConnection{
 			Name:         reqBody.Name,
@@ -272,28 +424,28 @@ func ProcessGmailMethod(code string) (string, map[string]interface{}, error) {
 	return userDetails.Email, config, nil
 }
 
-func ProcessOutlookMethod(refreshToken string) (string, map[string]interface{}, error) {
-	if refreshToken == "" {
-		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Refresh Token Required")
+func ProcessOutlookMethod(code string) (string, map[string]interface{}, error) {
+	if code == "" {
+		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Code is required")
 	}
 
-	authToken, err := outlook.AuthTokenUsingRefreshToken(refreshToken)
+	tok, err := outlook.AuthTokenUsingCode(code)
 	if err != nil {
-		return "", nil, jsonError(http.StatusBadRequest, "Invalid Refresh Token. Not able to generate auth token", err)
+		return "", nil, jsonError(http.StatusBadRequest, "Invalid Code. Not able to generate auth token from code", err)
 	}
 
-	client, err := outlook.NewOutlookClientUsingToken(authToken)
+	client, err := outlook.NewOutlookClientUsingToken(tok.AccessToken)
 	if err != nil {
-		return "", nil, jsonError(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err)
+		return "", nil, jsonError(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid", err)
 	}
 
 	userDetails, err := client.GetCurrentUser()
 	if err != nil || userDetails.Mail == "" {
-		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid")
+		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid")
 	}
 
 	config := map[string]interface{}{
-		"refresh_token": refreshToken,
+		"refresh_token": tok.RefreshToken,
 		"email":         userDetails.Mail,
 	}
 
@@ -639,7 +791,7 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 				logger.Int("job_id", jobID))
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
 				"message": "Invalid Request",
-				"error":   "For one-time sync jobs, only storx_token and refresh_token (outlook), code (gmail) updates are allowed",
+				"error":   "For one-time sync jobs, only storx_token and code for outlook/gmail updates are allowed",
 			})
 		}
 
@@ -1372,5 +1524,92 @@ func HandleAutomaticBackupSummary(c echo.Context) error {
 			"todays_backups": int(todaysBackups),
 			"providers":      int(providers),
 		},
+	})
+}
+
+func HandleAutomaticSyncStats(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		logger.Error(ctx, "Failed to authenticate user", logger.ErrorField(err))
+		return c.JSON(http.StatusUnauthorized, map[string]string{
+			"message": "unauthorized",
+		})
+	}
+
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+	db := database.DB.WithContext(ctx)
+
+	var totalAccounts, activeSyncs, failedSyncs int64
+	var errTotal, errActive, errFailed error
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	go func() {
+		defer wg.Done()
+		errTotal = db.Session(&gorm.Session{}).
+			Model(&repo.CronJobListingDB{}).
+			Where("user_id = ?", userID).
+			Count(&totalAccounts).Error
+	}()
+
+	go func() {
+		defer wg.Done()
+		errActive = db.Session(&gorm.Session{}).
+			Model(&repo.CronJobListingDB{}).
+			Where("user_id = ? AND active = ?", userID, true).
+			Count(&activeSyncs).Error
+	}()
+
+	go func() {
+		defer wg.Done()
+		errFailed = db.Session(&gorm.Session{}).
+			Model(&repo.CronJobListingDB{}).
+			Where("user_id = ? AND active = ? AND message_status = ?", userID, true, repo.JobMessageStatusError).
+			Count(&failedSyncs).Error
+	}()
+
+	wg.Wait()
+
+	if errTotal != nil || errActive != nil || errFailed != nil {
+		if errTotal != nil {
+			err = errTotal
+		} else if errActive != nil {
+			err = errActive
+		} else {
+			err = errFailed
+		}
+		logger.Error(ctx, "Failed to get autosync stats",
+			logger.ErrorField(errTotal),
+			logger.ErrorField(errActive),
+			logger.ErrorField(errFailed),
+		)
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"message": "internal server error",
+		})
+	}
+
+	var status string
+	switch {
+	case totalAccounts == 0:
+		status = "add accounts"
+	case activeSyncs == 0:
+		status = "inactive"
+	case failedSyncs == 0:
+		status = "success"
+	case failedSyncs == activeSyncs:
+		status = "failed"
+	default:
+		status = "partial_success"
+	}
+
+	return c.JSON(http.StatusOK, AutoSyncStatsResponse{
+		ActiveSyncs: int(activeSyncs),
+		FailedSyncs: int(failedSyncs),
+		Status:      status,
 	})
 }

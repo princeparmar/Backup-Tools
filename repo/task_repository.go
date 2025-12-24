@@ -193,8 +193,12 @@ func (r *TaskRepository) CreateTaskForCronJob(cronJobID uint) (*TaskListingDB, e
 		return nil, fmt.Errorf("error creating task for cron job: %v", res.Error)
 	}
 
-	// Update cron job status to In_Queue when task is created with pushed status
-	if err := tx.Model(&CronJobListingDB{}).Where("id = ?", cronJobID).Update("status", JobStatusInQueue).Error; err != nil {
+	// Update cron job status to In_Queue and reset hidden to false when task is created
+	updates := map[string]interface{}{
+		"status": JobStatusInQueue,
+		"hidden": false,
+	}
+	if err := tx.Model(&CronJobListingDB{}).Where("id = ?", cronJobID).Updates(updates).Error; err != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf("error updating cron job status: %v", err)
 	}

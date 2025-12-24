@@ -22,7 +22,41 @@ type TokenResponse struct {
 
 const (
 	tokenURL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+	authURL  = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
 )
+
+var defaultScopes = []string{
+	"offline_access",
+	"Mail.Read",
+	"openid",
+	"profile",
+	"email",
+	"User.Read",
+}
+
+// BuildAuthURL builds the Microsoft OAuth authorization URL
+func BuildAuthURL() (string, error) {
+	clientID := utils.GetEnvWithKey("OUTLOOK_CLIENT_ID")
+	redirectURI := utils.GetEnvWithKey("OUTLOOK_REDIRECT_URI")
+
+	if clientID == "" {
+		return "", fmt.Errorf("OUTLOOK_CLIENT_ID environment variable is not set")
+	}
+	if redirectURI == "" {
+		return "", fmt.Errorf("OUTLOOK_REDIRECT_URI environment variable is not set")
+	}
+
+	scope := strings.Join(defaultScopes, " ")
+
+	params := url.Values{}
+	params.Set("client_id", clientID)
+	params.Set("response_type", "code")
+	params.Set("redirect_uri", redirectURI)
+	params.Set("response_mode", "query")
+	params.Set("scope", scope)
+
+	return authURL + "?" + params.Encode(), nil
+}
 
 func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 
@@ -86,9 +120,9 @@ func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 	return tokenResponse.AccessToken, nil
 }
 
-func AuthTokenUsingCode(code string) (string, error) {
+func AuthTokenUsingCode(code string) (*TokenResponse, error) {
 	if code == "" {
-		return "", fmt.Errorf("code is empty")
+		return nil, fmt.Errorf("code is empty")
 	}
 
 	// Prepare the form data
@@ -98,13 +132,13 @@ func AuthTokenUsingCode(code string) (string, error) {
 	redirectURI := utils.GetEnvWithKey("OUTLOOK_REDIRECT_URI")
 
 	if clientID == "" {
-		return "", fmt.Errorf("OUTLOOK_CLIENT_ID environment variable is not set")
+		return nil, fmt.Errorf("OUTLOOK_CLIENT_ID environment variable is not set")
 	}
 	if clientSecret == "" {
-		return "", fmt.Errorf("OUTLOOK_CLIENT_SECRET environment variable is not set")
+		return nil, fmt.Errorf("OUTLOOK_CLIENT_SECRET environment variable is not set")
 	}
 	if redirectURI == "" {
-		return "", fmt.Errorf("OUTLOOK_REDIRECT_URI environment variable is not set")
+		return nil, fmt.Errorf("OUTLOOK_REDIRECT_URI environment variable is not set")
 	}
 
 	data.Set("client_id", clientID)
@@ -116,7 +150,7 @@ func AuthTokenUsingCode(code string) (string, error) {
 	// Create the request
 	req, err := http.NewRequestWithContext(context.Background(), "POST", tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
-		return "", fmt.Errorf("error creating request: %v", err)
+		return nil, fmt.Errorf("error creating request: %v", err)
 	}
 
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
@@ -125,29 +159,33 @@ func AuthTokenUsingCode(code string) (string, error) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("error sending request: %v", err)
+		return nil, fmt.Errorf("error sending request: %v", err)
 	}
 	defer resp.Body.Close()
 
 	// Read the response
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("error reading response: %v", err)
+		return nil, fmt.Errorf("error reading response: %v", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("error response from server: %s", string(body))
+		return nil, fmt.Errorf("error response from server: %s", string(body))
 	}
 
 	// Parse the response
 	var tokenResponse TokenResponse
 	if err := json.Unmarshal(body, &tokenResponse); err != nil {
-		return "", fmt.Errorf("error parsing response: %v", err)
+		return nil, fmt.Errorf("error parsing response: %v", err)
 	}
 
 	if tokenResponse.AccessToken == "" {
-		return "", fmt.Errorf("received empty access token")
+		return nil, fmt.Errorf("received empty access token")
 	}
 
-	return tokenResponse.AccessToken, nil
+	if tokenResponse.RefreshToken == "" {
+		return nil, fmt.Errorf("received empty refresh token")
+	}
+
+	return &tokenResponse, nil
 }
