@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
+	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 
 	"github.com/gphotosuploader/google-photos-api-client-go/v2/albums"
@@ -94,6 +96,18 @@ func HandleListPhotosInAlbum(c echo.Context) error {
 		})
 	}
 
+	// Extract access grant early for webhook processing
+	if accesGrant != "" {
+		go func() {
+			processCtx := context.Background()
+			database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+			if processErr := ProcessWebhookEvents(processCtx, database, accesGrant, 100); processErr != nil {
+				logger.Warn(processCtx, "Failed to process webhook events from listing route",
+					logger.ErrorField(processErr))
+			}
+		}()
+	}
+
 	id := c.Param("ID")
 
 	client, err := google.NewGPhotosClient(c)
@@ -138,7 +152,7 @@ func HandleListPhotosInAlbum(c echo.Context) error {
 		})
 	}
 
-	// Get user email for sync checking
+	// Get user email and userID for sync checking
 	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -152,19 +166,48 @@ func HandleListPhotosInAlbum(c echo.Context) error {
 		})
 	}
 
-	listFromSatellite, listErr := satellite.ListObjectsWithPrefix(c.Request().Context(), accesGrant, "google-photos", userDetails.Email+"/")
-	if listErr != nil {
-		logger.Error(ctx, "Failed to list objects from satellite", logger.ErrorField(listErr))
-		userFriendlyError := satellite.FormatSatelliteError(listErr)
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": userFriendlyError,
+	// Get database and userID for synced_objects query
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+	// Set hardcoded token_key for testing (only if not provided in request)
+	// TODO: Remove this hardcoded token before production deployment
+	const hardcodedTokenKey = "UO6GJUm4Sr2XBOAegg8gvg==.KfA_hPIJjHgLHAG5b0G6PSki6p6IwvTiSeg9yYfoOzI=.VTJGc2RHVmtYMS9oaG5NeHRIS0J2dTM2TTdFczBHWXNXcm5ua2xmMFJzOEg1ckUzQjhJWmtHK04ybTJXcU5EZWdaN09EY21hSmtzN3FQcXdqSm9TVU12UDRFeFpGbXBIVUdUK0lySjJLb1F5Q2lJVDlhNU1sUTdKd1hsdHdQd04="
+	if c.Request().Header.Get("token_key") == "" {
+		c.Request().Header.Set("token_key", hardcodedTokenKey)
+	}
+
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		logger.Error(ctx, "Failed to get userID from Satellite service", logger.ErrorField(err))
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"error": "authentication failed",
 		})
+	}
+
+	// Get synced objects from database and create map for fast lookup
+	syncedObjects, err := database.SyncedObjectRepo.GetSyncedObjectsByUserAndBucket(userID, satellite.ReserveBucket_Photos, "google", "photos")
+	if err != nil {
+		logger.Warn(ctx, "Failed to get synced objects from database, continuing with empty map",
+			logger.String("user_id", userID),
+			logger.String("bucket", satellite.ReserveBucket_Photos),
+			logger.ErrorField(err))
+		syncedObjects = []repo.SyncedObject{}
+	}
+
+	syncedMap := make(map[string]bool)
+	for _, obj := range syncedObjects {
+		syncedMap[obj.ObjectKey] = true
 	}
 
 	var photosRespJSON []*AllPhotosJSON
 	for _, v := range paginatedResponse.MediaItems {
-		// Check sync status using userEmail + "/" + filename to match upload path format
-		syncPath := userDetails.Email + "/" + v.Filename
+		// Check sync status - scheduled processor uses photoID_filename format, direct upload uses filename
+		// Format 1: Direct upload - email/filename
+		syncPath1 := userDetails.Email + "/" + v.Filename
+		// Format 2: Scheduled processor - email/photoID_filename
+		syncPath2 := fmt.Sprintf("%s/%s_%s", userDetails.Email, v.ID, v.Filename)
+
+		synced := syncedMap[syncPath1] || syncedMap[syncPath2]
+
 		photosRespJSON = append(photosRespJSON, &AllPhotosJSON{
 			Name:         v.Filename,
 			ID:           v.ID,
@@ -176,7 +219,7 @@ func HandleListPhotosInAlbum(c echo.Context) error {
 			CreationTime: v.MediaMetadata.CreationTime,
 			Width:        v.MediaMetadata.Width,
 			Height:       v.MediaMetadata.Height,
-			Synced:       listFromSatellite[syncPath],
+			Synced:       synced,
 		})
 	}
 

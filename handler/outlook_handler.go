@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
+	"github.com/StorX2-0/Backup-Tools/db"
+	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
@@ -210,6 +212,13 @@ func HandleListOutlookMessagesToSatellite(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusForbidden, err.Error())
 	}
 
+	// Get database and userID for syncing
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "authentication failed")
+	}
+
 	return processMessagesConcurrently(c, allIDs, func(echoCtx echo.Context, id string) error {
 		// FIX: Use the echo context parameter
 		reqCtx := echoCtx.Request().Context()
@@ -235,7 +244,7 @@ func HandleListOutlookMessagesToSatellite(c echo.Context) error {
 		}
 
 		messagePath := userDetails.Mail + "/" + utils.GenerateTitleFromOutlookMessage(message)
-		err = satellite.UploadObject(reqCtx, accessGrant, satellite.ReserveBucket_Outlook, messagePath, b)
+		err = UploadObjectAndSync(reqCtx, database, accessGrant, satellite.ReserveBucket_Outlook, messagePath, b, userID)
 		if err != nil {
 			logger.Error(reqCtx, "Failed to upload message to satellite",
 				logger.ErrorField(err), logger.String("id", id), logger.String("path", messagePath))

@@ -75,3 +75,26 @@ func (r *SyncedObjectRepository) DeleteSyncedObject(bucketName, objectKey string
 
 	return nil
 }
+
+// GetSyncedObjectsByUserAndBucket retrieves all synced objects for a user and bucket
+// source and type are optional filters - pass empty strings to ignore them
+func (r *SyncedObjectRepository) GetSyncedObjectsByUserAndBucket(userID, bucketName, source, objectType string) ([]SyncedObject, error) {
+	var syncedObjects []SyncedObject
+	query := r.db.Where("user_id = ? AND bucket_name = ?", userID, bucketName)
+
+	// Add optional filters for source and type
+	if source != "" {
+		query = query.Where("source = ?", source)
+	}
+	if objectType != "" {
+		query = query.Where("type = ?", objectType)
+	}
+
+	result := query.Find(&syncedObjects)
+
+	if result.Error != nil {
+		return nil, fmt.Errorf("error getting synced objects: %v", result.Error)
+	}
+
+	return syncedObjects, nil
+}

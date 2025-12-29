@@ -98,21 +98,21 @@ func StartServer(db *db.PostgresDb, address string) {
 	//get list of files in satellite folder from drive
 	google.GET("/satellite-drive-folder/:name", handler.HandleSatelliteDriveFolder)
 	// All files and folders from drive to satellite
-	google.GET("/all-drive-to-satellite", handler.HandleSendAllFilesFromGoogleDriveToSatellite)
+	// google.GET("/all-drive-to-satellite", handler.HandleSendAllFilesFromGoogleDriveToSatellite)
 	// List files in a folder by name
-	google.GET("/folder/:name/list", handler.HandleListAllFolderFiles)
+	// google.GET("/folder/:name/list", handler.HandleListAllFolderFiles)
 	// sync all files from drive folder to satellite using the folder name
-	google.POST("/folder/:name/sync", handler.HandleSyncAllFolderFiles)
+	// google.POST("/folder/:name/sync", handler.HandleSyncAllFolderFiles)
 	// list files in folder by folder ID
 	google.GET("/folder/:id", handler.HandleListAllFolderFilesByID)
 	// sync files in folder by folder ID
-	google.POST("/folder/:id", handler.HandleSyncAllFolderFilesByID)
+	// google.POST("/folder/:id", handler.HandleSyncAllFolderFilesByID)
 	// Get all shared files
 	google.GET("/get-shared-filenames", handler.HandleSharedGoogleDriveFileNames)
 	// Sync all shared files
-	google.POST("/sync-shared", handler.HandleSyncAllSharedFolderAndFiles)
+	// google.POST("/sync-shared", handler.HandleSyncAllSharedFolderAndFiles)
 	// Send a list of items from google drive to satellite
-	google.POST("/sync-list-from-drive", handler.HandleSendListFromGoogleDriveToSatellite)
+	// google.POST("/sync-list-from-drive", handler.HandleSendListFromGoogleDriveToSatellite)
 
 	// Google Photos
 	google.GET("/photos-list-albums", handler.HandleListGPhotosAlbums)
@@ -124,9 +124,9 @@ func StartServer(db *db.PostgresDb, address string) {
 	google.POST("/list-photos-to-satellite", handler.HandleSendListFilesFromGooglePhotosToSatellite)
 
 	// In the existing google group routes section
-	google.POST("/gmail/insert-mail", handler.HandleGmailDownloadAndInsert)             // used by desktop app to sync emails to satellite.
-	google.POST("/gmail-list-to-satellite", handler.HandleListGmailMessagesToSatellite) // used by desktop app to sync emails to satellite.
-	google.GET("/query-messages", handler.HandleGmailGetThreadsIDsControlled)           // used by desktop app to show email list on backup tools UI.
+	google.POST("/gmail/insert-mail", handler.HandleGmailDownloadAndInsert) // used by desktop app to sync emails to satellite.
+	// google.POST("/gmail-list-to-satellite", handler.HandleListGmailMessagesToSatellite) // used by desktop app to sync emails to satellite.
+	google.GET("/query-messages", handler.HandleGmailGetThreadsIDsControlled) // used by desktop app to show email list on backup tools UI.
 
 	// Google Cloud Storage
 	google.GET("/storage-list-buckets/:projectName", handler.HandleStorageListBuckets)

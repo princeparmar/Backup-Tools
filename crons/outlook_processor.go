@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
+	"github.com/StorX2-0/Backup-Tools/handler"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
@@ -54,7 +55,7 @@ func (o *outlookProcessor) Run(input ProcessorInput) error {
 	}
 
 	// Create placeholder file to initialize bucket
-	err = satellite.UploadObject(context.Background(), input.Job.StorxToken, satellite.ReserveBucket_Outlook, userDetails.Mail+"/.file_placeholder", nil)
+	err = handler.UploadObjectAndSync(context.Background(), input.Database, input.Job.StorxToken, satellite.ReserveBucket_Outlook, userDetails.Mail+"/.file_placeholder", nil, input.Job.UserID)
 	if err != nil {
 		return err
 	}
@@ -112,7 +113,7 @@ func (o *outlookProcessor) Run(input ProcessorInput) error {
 			}
 
 			syncedData = true
-			err = satellite.UploadObject(context.Background(), input.Job.StorxToken, satellite.ReserveBucket_Outlook, messagePath, b)
+			err = handler.UploadObjectAndSync(context.Background(), input.Database, input.Job.StorxToken, satellite.ReserveBucket_Outlook, messagePath, b, input.Job.UserID)
 			if err != nil {
 				continue
 			}

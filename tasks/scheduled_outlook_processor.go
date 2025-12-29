@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
+	"github.com/StorX2-0/Backup-Tools/handler"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
@@ -55,7 +56,7 @@ func (o *OutlookProcessor) Run(input ScheduledTaskProcessorInput) error {
 }
 
 func (o *OutlookProcessor) setupStorage(task *repo.ScheduledTasks, bucket string) error {
-	return satellite.UploadObject(context.Background(), task.StorxToken, bucket, task.LoginId+"/.file_placeholder", nil)
+	return handler.UploadObjectAndSync(context.Background(), o.Deps.Store, task.StorxToken, bucket, task.LoginId+"/.file_placeholder", nil, task.UserID)
 }
 
 func (o *OutlookProcessor) processEmails(input ScheduledTaskProcessorInput, client *outlook.OutlookClient, existingEmails map[string]bool) error {
@@ -123,5 +124,5 @@ func (o *OutlookProcessor) uploadEmail(input ScheduledTaskProcessorInput, messag
 	if err != nil {
 		return fmt.Errorf("failed to marshal: %v", err)
 	}
-	return satellite.UploadObject(context.TODO(), input.Task.StorxToken, bucket, messagePath, b)
+	return handler.UploadObjectAndSync(context.TODO(), input.Deps.Store, input.Task.StorxToken, bucket, messagePath, b, input.Task.UserID)
 }

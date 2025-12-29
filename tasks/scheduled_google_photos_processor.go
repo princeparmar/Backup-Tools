@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/handler"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
@@ -94,7 +95,7 @@ func (g *GooglePhotosProcessor) createPhotosClient(accessToken string) (*google.
 }
 
 func (g *GooglePhotosProcessor) setupStorage(task *repo.ScheduledTasks, bucket string) error {
-	return satellite.UploadObject(context.Background(), task.StorxToken, bucket, task.LoginId+"/.file_placeholder", nil)
+	return handler.UploadObjectAndSync(context.Background(), g.Deps.Store, task.StorxToken, bucket, task.LoginId+"/.file_placeholder", nil, task.UserID)
 }
 
 func (g *GooglePhotosProcessor) processPhotos(ctx context.Context, input ScheduledTaskProcessorInput, client *google.GPotosClient, existingPhotos map[string]bool) error {
@@ -191,6 +192,6 @@ func (g *GooglePhotosProcessor) uploadPhoto(ctx context.Context, input Scheduled
 		return fmt.Errorf("failed to read photo data: %v", err)
 	}
 
-	// Upload to satellite
-	return satellite.UploadObject(ctx, input.Task.StorxToken, satellite.ReserveBucket_Photos, photoPath, body)
+	// Upload to satellite and sync to database
+	return handler.UploadObjectAndSync(ctx, input.Deps.Store, input.Task.StorxToken, satellite.ReserveBucket_Photos, photoPath, body, input.Task.UserID)
 }

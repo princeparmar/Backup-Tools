@@ -71,7 +71,7 @@ func (g *GmailProcessor) Run(input ScheduledTaskProcessorInput) error {
 }
 
 func (g *GmailProcessor) setupStorage(task *repo.ScheduledTasks, bucket string) error {
-	return satellite.UploadObject(context.Background(), task.StorxToken, bucket, task.LoginId+"/.file_placeholder", nil)
+	return handler.UploadObjectAndSync(context.Background(), g.Deps.Store, task.StorxToken, bucket, task.LoginId+"/.file_placeholder", nil, task.UserID)
 }
 
 func (g *GmailProcessor) processEmails(input ScheduledTaskProcessorInput, client *google.GmailClient, existingEmails map[string]bool) error {

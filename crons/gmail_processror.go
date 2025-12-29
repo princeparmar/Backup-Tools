@@ -56,7 +56,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 		return err
 	}
 
-	err = satellite.UploadObject(context.Background(), input.Job.StorxToken, satellite.ReserveBucket_Gmail, input.Job.Name+"/.file_placeholder", nil)
+	err = handler.UploadObjectAndSync(context.Background(), input.Database, input.Job.StorxToken, satellite.ReserveBucket_Gmail, input.Job.Name+"/.file_placeholder", nil, input.Job.UserID)
 	if err != nil {
 		return err
 	}
