@@ -320,12 +320,6 @@ func HandleGmailGetThreadsIDsControlled(c echo.Context) error {
 	}
 
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
-
-	const hardcodedTokenKey = "UO6GJUm4Sr2XBOAegg8gvg==.KfA_hPIJjHgLHAG5b0G6PSki6p6IwvTiSeg9yYfoOzI=.VTJGc2RHVmtYMS9oaG5NeHRIS0J2dTM2TTdFczBHWXNXcm5ua2xmMFJzOEg1ckUzQjhJWmtHK04ybTJXcU5EZWdaN09EY21hSmtzN3FQcXdqSm9TVU12UDRFeFpGbXBIVUdUK0lySjJLb1F5Q2lJVDlhNU1sUTdKd1hsdHdQd04="
-	if c.Request().Header.Get("token_key") == "" {
-		c.Request().Header.Set("token_key", hardcodedTokenKey)
-	}
-
 	userID, err := satellite.GetUserdetails(c)
 	if err != nil {
 		logger.Error(ctx, "Failed to get userID from Satellite service", logger.ErrorField(err))
