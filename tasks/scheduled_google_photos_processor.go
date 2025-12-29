@@ -102,54 +102,86 @@ func (g *GooglePhotosProcessor) processPhotos(ctx context.Context, input Schedul
 	successCount, failedCount := 0, 0
 	var failedPhotos []string
 
-	// Get pending photo IDs
-	pendingPhotos := input.Memory["pending"]
-	if pendingPhotos == nil {
-		pendingPhotos = []string{}
+	// Get pending photo/album IDs
+	pendingItems := input.Memory["pending"]
+	if pendingItems == nil {
+		pendingItems = []string{}
 	}
 
-	// Deduplicate pending photos to prevent processing the same photo multiple times
+	// Deduplicate pending items to prevent processing the same item multiple times
 	seen := make(map[string]bool)
-	var uniquePendingPhotos []string
-	for _, photoID := range pendingPhotos {
-		photoID = strings.TrimSpace(photoID)
-		if photoID != "" && !seen[photoID] {
-			seen[photoID] = true
-			uniquePendingPhotos = append(uniquePendingPhotos, photoID)
+	var uniquePendingItems []string
+	for _, itemID := range pendingItems {
+		itemID = strings.TrimSpace(itemID)
+		if itemID != "" && !seen[itemID] {
+			seen[itemID] = true
+			uniquePendingItems = append(uniquePendingItems, itemID)
 		}
 	}
-	pendingPhotos = uniquePendingPhotos
+
+	// Use a dynamic list that can grow as we discover photos in albums
+	processingQueue := uniquePendingItems
 	// Update memory with deduplicated list
-	input.Memory["pending"] = uniquePendingPhotos
+	input.Memory["pending"] = uniquePendingItems
 
 	// Initialize other status arrays if needed
 	ensureStatusArray(&input.Memory, "synced")
 	ensureStatusArray(&input.Memory, "skipped")
 	ensureStatusArray(&input.Memory, "error")
 
-	for _, photoID := range pendingPhotos {
+	// Process items - queue grows as photos are discovered in albums
+	for i := 0; i < len(processingQueue); i++ {
+		itemID := processingQueue[i]
 		if err := input.HeartBeatFunc(); err != nil {
 			return err
 		}
 
-		mediaItem, err := client.GetPhoto(ctx, photoID)
+		// Check if this is an album ID (try to get album info first)
+		album, err := client.Albums.GetById(ctx, itemID)
+		if err == nil && album != nil {
+			// This is an album - discover all photos in it
+			nestedPhotoIDs, err := g.discoverPhotosInAlbum(ctx, client, album.ID)
+			if err == nil && len(nestedPhotoIDs) > 0 {
+				// Add nested photos to processing queue for immediate processing in this run
+				for _, nestedID := range nestedPhotoIDs {
+					nestedID = strings.TrimSpace(nestedID)
+					if nestedID != "" && !seen[nestedID] {
+						seen[nestedID] = true
+						processingQueue = append(processingQueue, nestedID)
+					}
+				}
+				// Also update memory for persistence
+				currentPending := input.Memory["pending"]
+				if currentPending == nil {
+					currentPending = []string{}
+				}
+				input.Memory["pending"] = append(currentPending, nestedPhotoIDs...)
+			}
+
+			moveEmailToStatus(&input.Memory, itemID, "pending", "synced")
+			successCount++
+			continue
+		}
+
+		// Not an album - treat as photo ID
+		mediaItem, err := client.GetPhoto(ctx, itemID)
 		if err != nil {
-			failedPhotos, failedCount = g.trackFailure(photoID, err, failedPhotos, failedCount, input)
+			failedPhotos, failedCount = g.trackFailure(itemID, err, failedPhotos, failedCount, input)
 			continue
 		}
 
 		// Use collision-safe filename format: photoID_filename to avoid duplicates
 		photoPath := fmt.Sprintf("%s/%s_%s", input.Task.LoginId, mediaItem.ID, mediaItem.Filename)
 		if _, exists := existingPhotos[photoPath]; exists {
-			moveEmailToStatus(&input.Memory, photoID, "pending", "skipped")
+			moveEmailToStatus(&input.Memory, itemID, "pending", "skipped: already exists in storage")
 			successCount++
 			continue
 		}
 
 		if err := g.uploadPhoto(ctx, input, mediaItem, photoPath); err != nil {
-			failedPhotos, failedCount = g.trackFailure(photoID, err, failedPhotos, failedCount, input)
+			failedPhotos, failedCount = g.trackFailure(itemID, err, failedPhotos, failedCount, input)
 		} else {
-			moveEmailToStatus(&input.Memory, photoID, "pending", "synced")
+			moveEmailToStatus(&input.Memory, itemID, "pending", "synced")
 			successCount++
 		}
 	}
@@ -194,4 +226,34 @@ func (g *GooglePhotosProcessor) uploadPhoto(ctx context.Context, input Scheduled
 
 	// Upload to satellite and sync to database
 	return handler.UploadObjectAndSync(ctx, input.Deps.Store, input.Task.StorxToken, satellite.ReserveBucket_Photos, photoPath, body, input.Task.UserID)
+}
+
+// discoverPhotosInAlbum recursively discovers all photos inside an album
+func (g *GooglePhotosProcessor) discoverPhotosInAlbum(ctx context.Context, client *google.GPotosClient, albumID string) ([]string, error) {
+	var allPhotoIDs []string
+	pageToken := ""
+
+	for {
+		searchReq := &photoslibrary.SearchMediaItemsRequest{
+			AlbumId:   albumID,
+			PageSize:  100,
+			PageToken: pageToken,
+		}
+
+		response, err := client.Service.MediaItems.Search(searchReq).Do()
+		if err != nil {
+			return nil, fmt.Errorf("failed to list photos in album: %w", err)
+		}
+
+		for _, item := range response.MediaItems {
+			allPhotoIDs = append(allPhotoIDs, item.Id)
+		}
+
+		if response.NextPageToken == "" {
+			break
+		}
+		pageToken = response.NextPageToken
+	}
+
+	return allPhotoIDs, nil
 }
