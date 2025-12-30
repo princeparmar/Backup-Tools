@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/handler"
@@ -47,8 +46,10 @@ func (o *OutlookProcessor) Run(input ScheduledTaskProcessorInput) error {
 		return o.handleError(input.Task, fmt.Sprintf("Failed to create placeholder: %s", err), nil)
 	}
 
-	emailListFromBucket, err := satellite.ListObjectsWithPrefix(ctx, input.Task.StorxToken, satellite.ReserveBucket_Outlook, input.Task.LoginId+"/")
-	if err != nil && !strings.Contains(err.Error(), "object not found") {
+	// Get synced objects from database instead of listing from Satellite
+	// Uses common BaseProcessor.ListObjectsWithPrefix which ensures bucket exists and queries database
+	emailListFromBucket, err := o.ListObjectsWithPrefix(ctx, input.Task.StorxToken, satellite.ReserveBucket_Outlook, input.Task.LoginId+"/", input.Task.UserID, "outlook", "outlook")
+	if err != nil {
 		return o.handleError(input.Task, fmt.Sprintf("Failed to list existing emails: %s", err), nil)
 	}
 

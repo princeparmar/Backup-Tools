@@ -53,8 +53,10 @@ func (g *GooglePhotosProcessor) Run(input ScheduledTaskProcessorInput) error {
 		return err
 	}
 
-	photoListFromBucket, err := satellite.ListObjectsWithPrefix(ctx, input.Task.StorxToken, satellite.ReserveBucket_Photos, input.Task.LoginId+"/")
-	if err != nil && !strings.Contains(err.Error(), "object not found") {
+	// Get synced objects from database instead of listing from Satellite
+	// Uses common BaseProcessor.ListObjectsWithPrefix which ensures bucket exists and queries database
+	photoListFromBucket, err := g.ListObjectsWithPrefix(ctx, input.Task.StorxToken, satellite.ReserveBucket_Photos, input.Task.LoginId+"/", input.Task.UserID, "google", "photos")
+	if err != nil {
 		return g.handleError(input.Task, fmt.Sprintf("Failed to list existing photos: %s", err), nil)
 	}
 

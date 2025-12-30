@@ -99,7 +99,7 @@ func GetFileNames(c echo.Context) ([]*FilesJSON, error) {
 	// Loop to handle pagination
 	pageToken := ""
 	for {
-		r, err := srv.Files.List().Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").PageToken(pageToken).Do()
+		r, err := srv.Files.List().Q("trashed=false").Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").PageToken(pageToken).Do()
 		if err != nil {
 			return nil, fmt.Errorf("failed to retrieve files: %v", err)
 		}
@@ -464,7 +464,7 @@ func GetFilesInFolderByID(c echo.Context, folderID string, database *db.Postgres
 	}
 
 	// Build query
-	query := fmt.Sprintf("'%s' in parents", folderID)
+	query := fmt.Sprintf("'%s' in parents and trashed=false", folderID)
 	if filter != nil && filter.Query != "" {
 		query = filter.Query
 	} else if filter != nil {
@@ -474,10 +474,10 @@ func GetFilesInFolderByID(c echo.Context, folderID string, database *db.Postgres
 	// Set up pagination
 	pageSize, pageToken := GetPaginationParams(filter)
 
-	// List all files within the folder (include shortcutDetails to resolve shortcuts)
+	// List all files within the folder (include shortcutDetails to resolve shortcuts, owners to detect shared files)
 	r, err := srv.Files.List().
 		Q(query).
-		Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension, shortcutDetails)").
+		Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension, shortcutDetails, owners)").
 		PageToken(pageToken).
 		PageSize(pageSize).
 		Do()
@@ -490,26 +490,28 @@ func GetFilesInFolderByID(c echo.Context, folderID string, database *db.Postgres
 		// Resolve shortcut to target file for sync check
 		fileIDForSync, fileNameForSync, mimeTypeForSync := resolveShortcutForSync(srv, i, c.Request().Context())
 
+		// Determine if file is shared by checking owner (O(1), no extra API/DB calls)
+		isShared := len(i.Owners) > 0 && i.Owners[0].EmailAddress != userDetails.Email
+
 		if i.MimeType != "application/vnd.google-apps.folder" {
 			i.Name = addGoogleAppsFileExtension(i.Name, i.MimeType)
 			fileNameForSync = addGoogleAppsFileExtension(fileNameForSync, mimeTypeForSync)
-			synced := isFileSyncedWithMap(syncedMap, fileIDForSync, fileNameForSync, mimeTypeForSync, userDetails.Email, folderName, false)
+			synced := isFileSyncedWithMap(syncedMap, fileIDForSync, fileNameForSync, mimeTypeForSync, userDetails.Email, folderName, isShared)
 			files = append(files, createFilesJSON(i, synced, ""))
 		} else {
 			// Check sync with folder path prefix for nested folders
-			synced := isFileSyncedWithMap(syncedMap, fileIDForSync, fileNameForSync, mimeTypeForSync, userDetails.Email, folderName, false)
+			synced := isFileSyncedWithMap(syncedMap, fileIDForSync, fileNameForSync, mimeTypeForSync, userDetails.Email, folderName, isShared)
 			if synced {
 				// Recursively check if all files in this nested folder are synced
-				nestedFiles, err := GetFilesInFolderByID(c, i.Id, database, userID)
-				if err == nil {
-					allSynced := true
-					for _, nestedFile := range nestedFiles.Files {
-						if !nestedFile.Synced {
-							allSynced = false
-							break
-						}
-					}
-					synced = allSynced
+				// Use helper function that checks ALL pages, not just the first page
+				nestedFolderPath := folderName
+				if nestedFolderPath != "" {
+					nestedFolderPath = fmt.Sprintf("%s/%s_%s", nestedFolderPath, fileIDForSync, fileNameForSync)
+				} else {
+					nestedFolderPath = fmt.Sprintf("%s_%s", fileIDForSync, fileNameForSync)
+				}
+				if allNestedSynced := checkAllFilesInFolderSyncedRecursive(c, fileIDForSync, database, userID, syncedMap, userDetails.Email, nestedFolderPath); !allNestedSynced {
+					synced = false
 				}
 			}
 
@@ -525,30 +527,30 @@ func GetFilesInFolderByID(c echo.Context, folderID string, database *db.Postgres
 	}, nil
 }
 
-// GetFilesInFolder retrieves all files within a specific folder from Google Drive
-func GetFolderNameAndFilesInFolderByID(c echo.Context, folderID string) (string, []*FilesJSON, error) {
+// GetFilesInFolder retrieves all files within a specific folder from Google Drive(need to comment out this function)
+// func GetFolderNameAndFilesInFolderByID(c echo.Context, folderID string) (string, []*FilesJSON, error) {
 
-	srv, err := getDriveService(c)
-	if err != nil {
-		return "", nil, err
-	}
-	folderName, err := getFolderNameByID(srv, folderID)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to get folder name: %v", err)
-	}
-	// List all files within the folder
-	r, err := srv.Files.List().Q(fmt.Sprintf("'%s' in parents", folderID)).Fields("files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").Do()
-	if err != nil {
-		return folderName, nil, fmt.Errorf("failed to retrieve files: %v", err)
-	}
+// 	srv, err := getDriveService(c)
+// 	if err != nil {
+// 		return "", nil, err
+// 	}
+// 	folderName, err := getFolderNameByID(srv, folderID)
+// 	if err != nil {
+// 		return "", nil, fmt.Errorf("failed to get folder name: %v", err)
+// 	}
+// 	// List all files within the folder
+// 	r, err := srv.Files.List().Q(fmt.Sprintf("'%s' in parents and trashed=false", folderID)).Fields("files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").Do()
+// 	if err != nil {
+// 		return folderName, nil, fmt.Errorf("failed to retrieve files: %v", err)
+// 	}
 
-	var files []*FilesJSON
-	for _, f := range r.Files {
-		files = append(files, createFilesJSON(f, false, ""))
-	}
+// 	var files []*FilesJSON
+// 	for _, f := range r.Files {
+// 		files = append(files, createFilesJSON(f, false, ""))
+// 	}
 
-	return folderName, files, nil
-}
+// 	return folderName, files, nil
+// }
 
 // Helper function to get folder ID by name
 // func getFolderIDByName(srv *drive.Service, folderName string) (string, error) {
@@ -564,17 +566,17 @@ func GetFolderNameAndFilesInFolderByID(c echo.Context, folderID string) (string,
 // }
 
 // Helper function to get folder ID by name
-func getFolderNameByID(srv *drive.Service, folderID string) (string, error) {
+// func getFolderNameByID(srv *drive.Service, folderID string) (string, error) {
 
-	r, err := srv.Files.List().Q(fmt.Sprintf("id='%s' and mimeType='application/vnd.google-apps.folder'", folderID)).Fields("files(name)").Do()
-	if err != nil {
-		return "", fmt.Errorf("failed to retrieve folder ID: %v", err)
-	}
-	if len(r.Files) == 0 {
-		return "", fmt.Errorf("folder '%s' not found", folderID)
-	}
-	return r.Files[0].Name, nil
-}
+// 	r, err := srv.Files.List().Q(fmt.Sprintf("id='%s' and mimeType='application/vnd.google-apps.folder' and trashed=false", folderID)).Fields("files(name)").Do()
+// 	if err != nil {
+// 		return "", fmt.Errorf("failed to retrieve folder ID: %v", err)
+// 	}
+// 	if len(r.Files) == 0 {
+// 		return "", fmt.Errorf("folder '%s' not found", folderID)
+// 	}
+// 	return r.Files[0].Name, nil
+// }
 
 // Helper function to determine file type based on MIME type
 func getFileType(mimeType string) string {
@@ -810,7 +812,7 @@ func GetFileNamesInRoot(c echo.Context, database *db.PostgresDb, userID string) 
 	}
 
 	// Build query
-	query := "'root' in parents"
+	query := "'root' in parents and trashed=false"
 	if filter != nil && filter.Query != "" {
 		query = filter.Query
 	} else if filter != nil {
@@ -832,7 +834,7 @@ func GetFileNamesInRoot(c echo.Context, database *db.PostgresDb, userID string) 
 	}
 
 	// Process files using syncedMap instead of satelliteObjects
-	files := processRootFilesWithMap(response.Files, syncedMap, c, userDetails.Email)
+	files := processRootFilesWithMap(response.Files, syncedMap, c, userDetails.Email, database, userID)
 
 	return &PaginatedFilesResponse{
 		Files:         files,
@@ -883,7 +885,7 @@ func GetSharedFiles(c echo.Context, database *db.PostgresDb, userID string) (*Pa
 	}
 
 	// Build query
-	query := "sharedWithMe=true"
+	query := "sharedWithMe=true and trashed=false"
 	if filter != nil && filter.Query != "" {
 		query = filter.Query
 	} else if filter != nil {
@@ -905,7 +907,7 @@ func GetSharedFiles(c echo.Context, database *db.PostgresDb, userID string) (*Pa
 	}
 
 	// Process files using syncedMap instead of satelliteObjects
-	files := processSharedFilesWithMap(response.Files, syncedMap, c, userDetails.Email)
+	files := processSharedFilesWithMap(response.Files, syncedMap, c, userDetails.Email, database, userID)
 
 	return &PaginatedFilesResponse{
 		Files:         files,
@@ -937,6 +939,11 @@ func ParseFilter(filterParam string) (*GoogleDriveFilter, error) {
 
 func applyFiltersToQuery(baseQuery string, filter *GoogleDriveFilter) string {
 	query := baseQuery
+
+	// Always exclude trashed files unless already in query
+	if !strings.Contains(query, "trashed") {
+		query += " and trashed=false"
+	}
 
 	// Apply folder/file filters
 	if filter.FolderOnly {
@@ -970,40 +977,144 @@ func GetPaginationParams(filter *GoogleDriveFilter) (int64, string) {
 }
 
 // processSharedFilesWithMap processes shared files using synced_objects map instead of Satellite API
-func processSharedFilesWithMap(driveFiles []*drive.File, syncedMap map[string]bool, c echo.Context, userEmail string) []*FilesJSON {
+func processSharedFilesWithMap(driveFiles []*drive.File, syncedMap map[string]bool, c echo.Context, userEmail string, database *db.PostgresDb, userID string) []*FilesJSON {
 	var files []*FilesJSON
 
 	for _, file := range driveFiles {
-		// Check sync status for shared files - paths are: email/shared with me/filename
-		synced := isFileSyncedWithMap(syncedMap, file.Id, file.Name, file.MimeType, userEmail, "", true)
+		// Resolve shortcut to target file for sync check
+		srv, err := getDriveService(c)
+		if err == nil {
+			fileIDForSync, fileNameForSync, mimeTypeForSync := resolveShortcutForSync(srv, file, c.Request().Context())
 
-		if file.MimeType == "application/vnd.google-apps.folder" && synced {
-			// Check if all files in folder are synced
-			// Note: This requires database access, but we can't pass it here easily
-			// For now, we'll skip the recursive check for shared folders
-			// TODO: Update checkFolderSyncStatus to accept database and userID
+			// Determine if file is shared by checking owner (O(1), no extra API/DB calls)
+			// Note: Files from GetSharedFiles query are already shared, but we check owner for consistency
+			isShared := len(file.Owners) > 0 && file.Owners[0].EmailAddress != userEmail
+
+			// Check sync status for shared files - paths are: email/shared with me/filename
+			synced := isFileSyncedWithMap(syncedMap, fileIDForSync, fileNameForSync, mimeTypeForSync, userEmail, "", isShared)
+
+			// For folders, check if all nested files are synced
+			// If placeholder exists OR all nested files are synced, consider folder as synced
+			// This handles cases where placeholder wasn't created but all files were uploaded
+			if mimeTypeForSync == "application/vnd.google-apps.folder" {
+				folderPath := fmt.Sprintf("%s_%s", fileIDForSync, fileNameForSync)
+				allNestedSynced := checkAllFilesInFolderSyncedRecursive(c, fileIDForSync, database, userID, syncedMap, userEmail, folderPath)
+				// Folder is synced if placeholder exists OR all nested files are synced
+				synced = synced || allNestedSynced
+			}
+
+			files = append(files, createFilesJSON(file, synced, ""))
+		} else {
+			// Fallback if service can't be created
+			synced := isFileSyncedWithMap(syncedMap, file.Id, file.Name, file.MimeType, userEmail, "", true)
+			files = append(files, createFilesJSON(file, synced, ""))
 		}
-
-		files = append(files, createFilesJSON(file, synced, ""))
 	}
 
 	return files
 }
 
 // processRootFilesWithMap processes root files using synced_objects map instead of Satellite API
-func processRootFilesWithMap(driveFiles []*drive.File, syncedMap map[string]bool, c echo.Context, userEmail string) []*FilesJSON {
+func processRootFilesWithMap(driveFiles []*drive.File, syncedMap map[string]bool, c echo.Context, userEmail string, database *db.PostgresDb, userID string) []*FilesJSON {
 	var files []*FilesJSON
 
 	for _, file := range driveFiles {
-		// Check sync status - scheduled processor uses fileID_filename format
-		// For folders, isFileSyncedWithMap already checks for .file_placeholder files
-		// Recursive folder checking is handled when user navigates into folders via GetFilesInFolderByID
-		synced := isFileSyncedWithMap(syncedMap, file.Id, file.Name, file.MimeType, userEmail, "", false)
+		// Resolve shortcut to target file for sync check
+		srv, err := getDriveService(c)
+		if err == nil {
+			fileIDForSync, fileNameForSync, mimeTypeForSync := resolveShortcutForSync(srv, file, c.Request().Context())
 
-		files = append(files, createFilesJSON(file, synced, ""))
+			// Check sync status - scheduled processor uses fileID_filename format
+			synced := isFileSyncedWithMap(syncedMap, fileIDForSync, fileNameForSync, mimeTypeForSync, userEmail, "", false)
+			if mimeTypeForSync == "application/vnd.google-apps.folder" && synced {
+				folderPath := fmt.Sprintf("%s_%s", fileIDForSync, fileNameForSync)
+				if allNestedSynced := checkAllFilesInFolderSyncedRecursive(c, fileIDForSync, database, userID, syncedMap, userEmail, folderPath); !allNestedSynced {
+					synced = false
+				}
+			}
+
+			files = append(files, createFilesJSON(file, synced, ""))
+		} else {
+			// Fallback if service can't be created
+			synced := isFileSyncedWithMap(syncedMap, file.Id, file.Name, file.MimeType, userEmail, "", false)
+			files = append(files, createFilesJSON(file, synced, ""))
+		}
 	}
 
 	return files
+}
+
+// checkAllFilesInFolderSyncedRecursive recursively checks if all files in a folder are synced
+// This function handles pagination to check ALL files, not just the first page
+func checkAllFilesInFolderSyncedRecursive(c echo.Context, folderID string, database *db.PostgresDb, userID string, syncedMap map[string]bool, userEmail string, folderPath string) bool {
+	srv, err := getDriveService(c)
+	if err != nil {
+		return false
+	}
+
+	pageToken := ""
+	for {
+		query := fmt.Sprintf("'%s' in parents and trashed=false", folderID)
+		listCall := srv.Files.List().Q(query).Fields("nextPageToken, files(id, name, mimeType, shortcutDetails, owners)")
+
+		if pageToken != "" {
+			listCall = listCall.PageToken(pageToken)
+		}
+
+		r, err := listCall.Do()
+		if err != nil {
+			logger.Warn(c.Request().Context(), "Failed to list files in folder for sync check",
+				logger.String("folder_id", folderID),
+				logger.ErrorField(err))
+			return false
+		}
+
+		// Process files in this page
+		hasFiles := false
+		for _, file := range r.Files {
+			hasFiles = true
+			// Resolve shortcut to target file for sync check
+			fileIDForSync, fileNameForSync, mimeTypeForSync := resolveShortcutForSync(srv, file, c.Request().Context())
+
+			// Determine if file is shared by checking owner (O(1), no extra API/DB calls)
+			isShared := len(file.Owners) > 0 && file.Owners[0].EmailAddress != userEmail
+
+			// Use mimeTypeForSync (resolved) to check if it's a folder, not file.MimeType
+			if mimeTypeForSync != "application/vnd.google-apps.folder" {
+				// For files, isFileSyncedWithMap will add the extension
+				if !isFileSyncedWithMap(syncedMap, fileIDForSync, fileNameForSync, mimeTypeForSync, userEmail, folderPath, isShared) {
+					return false
+				}
+			} else {
+				// For folders, check if folder placeholder exists
+				if !isFileSyncedWithMap(syncedMap, fileIDForSync, fileNameForSync, mimeTypeForSync, userEmail, folderPath, isShared) {
+					return false
+				}
+				// Recursively check nested folder
+				nestedFolderPath := folderPath
+				if nestedFolderPath != "" {
+					nestedFolderPath = fmt.Sprintf("%s/%s_%s", nestedFolderPath, fileIDForSync, fileNameForSync)
+				} else {
+					nestedFolderPath = fmt.Sprintf("%s_%s", fileIDForSync, fileNameForSync)
+				}
+				if !checkAllFilesInFolderSyncedRecursive(c, fileIDForSync, database, userID, syncedMap, userEmail, nestedFolderPath) {
+					return false
+				}
+			}
+		}
+
+		// If no more pages and no files found, folder is empty and considered synced
+		if !hasFiles && r.NextPageToken == "" {
+			return true
+		}
+
+		if r.NextPageToken == "" {
+			break
+		}
+		pageToken = r.NextPageToken
+	}
+
+	return true
 }
 
 // getAlternateBasePath returns the opposite base path (shared vs regular) for checking alternate locations
@@ -1074,23 +1185,30 @@ func isFileSyncedWithMap(syncedMap map[string]bool, fileID, fileName, mimeType, 
 		path1 := baseFolderPath + "/"
 		path2 := baseFolderPath + "/.file_placeholder"
 
-		// For nested folders, also check the opposite path (regular vs shared) and root paths
+		// Also check root paths in case folder was uploaded as root folder
+		rootBasePath := fmt.Sprintf("%s/%s_%s", userEmail, fileID, fileName)
+		sharedRootBasePath := fmt.Sprintf("%s/shared with me/%s_%s", userEmail, fileID, fileName)
+
+		// For nested folders, also check the opposite path (regular vs shared)
 		if folderPath != "" {
 			altFullPath := fmt.Sprintf("%s/%s/%s_%s%s", altBasePath, folderPath, fileID, fileName, ext)
 			altBaseFolderPath := strings.TrimSuffix(altFullPath, ext)
 			path3 := altBaseFolderPath + "/"
 			path4 := altBaseFolderPath + "/.file_placeholder"
 
-			// Also check root paths in case folder was uploaded as root folder
-			rootBasePath := fmt.Sprintf("%s/%s_%s", userEmail, fileID, fileName)
-			sharedRootBasePath := fmt.Sprintf("%s/shared with me/%s_%s", userEmail, fileID, fileName)
-
 			return syncedMap[path1] || syncedMap[path2] || syncedMap[path3] || syncedMap[path4] ||
 				syncedMap[rootBasePath+"/"] || syncedMap[rootBasePath+"/.file_placeholder"] ||
 				syncedMap[sharedRootBasePath+"/"] || syncedMap[sharedRootBasePath+"/.file_placeholder"]
 		}
 
-		return syncedMap[path1] || syncedMap[path2]
+		// For root folders, also check alternate path (regular vs shared) and root paths
+		altRootBasePath := fmt.Sprintf("%s/%s_%s", altBasePath, fileID, fileName)
+		path3 := altRootBasePath + "/"
+		path4 := altRootBasePath + "/.file_placeholder"
+
+		return syncedMap[path1] || syncedMap[path2] || syncedMap[path3] || syncedMap[path4] ||
+			syncedMap[rootBasePath+"/"] || syncedMap[rootBasePath+"/.file_placeholder"] ||
+			syncedMap[sharedRootBasePath+"/"] || syncedMap[sharedRootBasePath+"/.file_placeholder"]
 	}
 
 	// For files in nested folders, also check the opposite path (regular vs shared)

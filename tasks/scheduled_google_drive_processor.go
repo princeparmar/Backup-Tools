@@ -51,8 +51,10 @@ func (g *GoogleDriveProcessor) Run(input ScheduledTaskProcessorInput) error {
 		return err
 	}
 
-	fileListFromBucket, err := satellite.ListObjectsWithPrefix(ctx, input.Task.StorxToken, satellite.ReserveBucket_Drive, input.Task.LoginId+"/")
-	if err != nil && !strings.Contains(err.Error(), "object not found") {
+	// Get synced objects from database instead of listing from Satellite
+	// Uses common BaseProcessor.ListObjectsWithPrefix which ensures bucket exists and queries database
+	fileListFromBucket, err := g.ListObjectsWithPrefix(ctx, input.Task.StorxToken, satellite.ReserveBucket_Drive, input.Task.LoginId+"/", input.Task.UserID, "google", "drive")
+	if err != nil {
 		return g.handleError(input.Task, fmt.Sprintf("Failed to list existing files: %s", err), nil)
 	}
 
@@ -152,24 +154,11 @@ func (g *GoogleDriveProcessor) processFiles(ctx context.Context, input Scheduled
 
 		// Get full parent folder path if file is not in root
 		// Build path from root to immediate parent: folder1ID_folder1/folder2ID_folder2/...
-		// For shared files: Only use parent path if parent folder is also shared with us
+		// For shared files: Always build parent path based on Drive hierarchy (not ownership)
 		var parentFolderPath string
 		if len(file.Parents) > 0 && file.Parents[0] != "root" {
 			if isShared {
-				// For shared files, check if parent folder is part of the shared structure
-				// If parent folder is NOT owned by current user, it's part of shared structure → use it
-				// If parent folder IS owned by current user, it's in our drive → don't use path
-				parentFolder, err := service.Files.Get(file.Parents[0]).Fields("id", "name", "owners").Do()
-				if err == nil && len(parentFolder.Owners) > 0 {
-					parentOwnerEmail := parentFolder.Owners[0].EmailAddress
-
-					// If parent is NOT owned by current user, it's part of shared structure
-					if parentOwnerEmail != input.Task.LoginId {
-						// Parent is a shared folder - build path but only include shared folders
-						parentFolderPath = g.buildParentFolderPathForShared(ctx, service, file.Parents[0], input.Task.LoginId, folderPathCache)
-					}
-					// If parent IS owned by current user, parentFolderPath stays empty (file stored at root)
-				}
+				parentFolderPath = g.buildParentFolderPathForShared(ctx, service, file.Parents[0], input.Task.LoginId, folderPathCache)
 			} else {
 				// Regular file (not shared) - use parent path normally
 				parentFolderPath = g.buildParentFolderPath(ctx, service, file.Parents[0], folderPathCache)
@@ -432,8 +421,8 @@ func (g *GoogleDriveProcessor) buildParentFolderPath(ctx context.Context, servic
 }
 
 // buildParentFolderPathForShared builds the parent folder path for shared files
-// It stops building when it encounters a folder owned by the current user (shared folder boundary)
-// This ensures we only include folders that are actually shared with us
+// It builds the full path based on Drive hierarchy, including all nested folders
+// This ensures files are stored in the correct nested structure, not at root
 func (g *GoogleDriveProcessor) buildParentFolderPathForShared(ctx context.Context, service *drive.Service, folderID string, currentUserEmail string, cache map[string]string) string {
 	// Check cache first - use a different cache key for shared paths
 	cacheKey := folderID + "_shared_" + currentUserEmail
@@ -444,20 +433,19 @@ func (g *GoogleDriveProcessor) buildParentFolderPathForShared(ctx context.Contex
 	var pathSegments []string
 	currentID := folderID
 
+	// Build path based on Drive hierarchy, not ownership
+	// This ensures nested shared folders (like WD > GTU PAPER) are stored correctly
 	for currentID != "" && currentID != "root" {
 		folder, err := service.Files.Get(currentID).Fields("id", "name", "parents", "owners").Do()
 		if err != nil {
 			break
 		}
 
-		// Stop if folder is owned by current user - we've reached the shared folder boundary
-		if len(folder.Owners) > 0 && folder.Owners[0].EmailAddress == currentUserEmail {
-			break
-		}
-
 		// Skip "My Drive" folder - it's just the root container
 		if folder.Name != "My Drive" {
 			// Build segment: folderID_folderName
+			// Include ALL folders in the path, regardless of ownership
+			// This ensures nested shared folders are stored in the correct structure
 			segment := fmt.Sprintf("%s_%s", folder.Id, folder.Name)
 			pathSegments = append([]string{segment}, pathSegments...)
 		}

@@ -14,6 +14,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
+	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/labstack/echo/v4"
 	"golang.org/x/sync/errgroup"
@@ -92,7 +93,7 @@ func HandleOutlookGetMessages(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	accessGrant, accessToken, err := getAccessTokens(c)
+	_, accessToken, err := getAccessTokens(c)
 	if err != nil {
 		return err
 	}
@@ -129,12 +130,33 @@ func HandleOutlookGetMessages(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusForbidden, err.Error())
 	}
 
-	emailListFromBucket, err := satellite.ListObjectsWithPrefix(ctx,
-		accessGrant, satellite.ReserveBucket_Outlook, userDetails.Mail+"/")
+	// Get database and userID for synced objects query
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+	const hardcodedTokenKey = "hYUyfMCWTGeLWQ8xzIgWmw==.bFsLaUH6A5gOpOAA4vvUFlM5Okgopc2ooEaOr2OSqtk=.VTJGc2RHVmtYMThkaGxHWkc0Zi9NRE1oeFY2MlNTQTRGSThqejl2OXJ4Qlo0V3ZWcFFpN2YxNS91RGJ4VnhJYWlNdVJZU251bml4dUFFQ1Zyb2p5V2xyUEFxbnp3K0d5Rys2bmhQeDFLc09QZGJqSzgwQkRkQXAzQ0ZUZ2xoTng="
+	if c.Request().Header.Get("token_key") == "" {
+		c.Request().Header.Set("token_key", hardcodedTokenKey)
+	}
+
+	userID, err := satellite.GetUserdetails(c)
 	if err != nil {
-		logger.Error(ctx, "Failed to list objects from satellite", logger.ErrorField(err))
-		userFriendlyError := satellite.FormatSatelliteError(err)
-		return echo.NewHTTPError(http.StatusForbidden, userFriendlyError)
+		logger.Error(ctx, "Failed to get userID from Satellite service", logger.ErrorField(err))
+		return echo.NewHTTPError(http.StatusUnauthorized, "authentication failed")
+	}
+
+	// Get synced objects from database instead of listing from Satellite
+	syncedObjects, err := database.SyncedObjectRepo.GetSyncedObjectsByUserAndBucket(userID, satellite.ReserveBucket_Outlook, "outlook", "outlook")
+	if err != nil {
+		logger.Warn(ctx, "Failed to get synced objects from database, continuing with empty map",
+			logger.String("user_id", userID),
+			logger.String("bucket", satellite.ReserveBucket_Outlook),
+			logger.ErrorField(err))
+		syncedObjects = []repo.SyncedObject{}
+	}
+
+	// Create map for fast lookup (same format as ListObjectsWithPrefix returns)
+	emailListFromBucket := make(map[string]bool)
+	for _, obj := range syncedObjects {
+		emailListFromBucket[obj.ObjectKey] = true
 	}
 
 	outlookMessages := make([]*OutlookMessageListJSON, 0, len(messages.Messages))

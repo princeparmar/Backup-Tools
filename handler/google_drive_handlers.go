@@ -5,18 +5,15 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"path"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
-	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 
 	"github.com/labstack/echo/v4"
-	"golang.org/x/sync/errgroup"
 )
 
 // Get all files names in a google drive even in folder
@@ -87,20 +84,6 @@ func HandleSharedGoogleDriveFileNames(c echo.Context) error {
 	}
 	return c.JSON(http.StatusOK, fileNames)
 }
-
-// // List all files in a folder given the folder name
-// func HandleListAllFolderFiles(c echo.Context) error {
-// 	ctx := c.Request().Context()
-// 	var err error
-// 	defer monitor.Mon.Task()(&ctx)(&err)
-
-// 	folderName := c.Param("name")
-// 	fileNames, err := google.GetFilesInFolder(c, folderName)
-// 	if err != nil {
-// 		return HandleGoogleDriveError(c, err, "retrieve files from Google Drive folder")
-// 	}
-// 	return c.JSON(http.StatusOK, fileNames)
-// }
 
 // List all files in a folder given the folder ID
 func HandleListAllFolderFilesByID(c echo.Context) error {
@@ -339,71 +322,72 @@ func HandleSatelliteDriveFolder(c echo.Context) error {
 	}
 	return c.JSON(http.StatusOK, o)
 }
-func HandleSyncAllFolderFilesByID(c echo.Context) error {
-	ctx := c.Request().Context()
-	var err error
-	defer monitor.Mon.Task()(&ctx)(&err)
 
-	folderID := c.Param("id")
-	folderName, fileNames, err := google.GetFolderNameAndFilesInFolderByID(c, folderID)
-	if err != nil {
-		return HandleGoogleDriveError(c, err, "retrieve folder and files from Google Drive")
-	}
-	// If folder is empty, create an empty folder
+// func HandleSyncAllFolderFilesByID(c echo.Context) error {
+// 	ctx := c.Request().Context()
+// 	var err error
+// 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accesGrant == "" {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "access token not found",
-		})
-	}
-	err = satellite.UploadObject(context.Background(), accesGrant, "google-drive", folderName+"/", nil)
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"error": fmt.Sprintf("failed to upload file to Satellite: %v", err),
-		})
-	}
+// 	folderID := c.Param("id")
+// 	folderName, fileNames, err := google.GetFolderNameAndFilesInFolderByID(c, folderID)
+// 	if err != nil {
+// 		return HandleGoogleDriveError(c, err, "retrieve folder and files from Google Drive")
+// 	}
+// 	// If folder is empty, create an empty folder
 
-	g, ctx := errgroup.WithContext(c.Request().Context())
-	g.SetLimit(10)
+// 	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
+// 	if accesGrant == "" {
+// 		return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 			"error": "access token not found",
+// 		})
+// 	}
+// 	err = satellite.UploadObject(context.Background(), accesGrant, "google-drive", folderName+"/", nil)
+// 	if err != nil {
+// 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+// 			"error": fmt.Sprintf("failed to upload file to Satellite: %v", err),
+// 		})
+// 	}
 
-	processedIDs, failedIDs := utils.NewLockedArray(), utils.NewLockedArray()
-	for _, file := range fileNames {
-		func(file *google.FilesJSON) {
-			g.Go(func() error {
-				name, data, err := google.GetFile(c, file.ID)
-				if err != nil {
+// 	g, ctx := errgroup.WithContext(c.Request().Context())
+// 	g.SetLimit(10)
 
-					failedIDs.Add(file.ID)
-					return nil
+// 	processedIDs, failedIDs := utils.NewLockedArray(), utils.NewLockedArray()
+// 	for _, file := range fileNames {
+// 		func(file *google.FilesJSON) {
+// 			g.Go(func() error {
+// 				name, data, err := google.GetFile(c, file.ID)
+// 				if err != nil {
 
-				}
+// 					failedIDs.Add(file.ID)
+// 					return nil
 
-				err = satellite.UploadObject(ctx, accesGrant, "google-drive", path.Join("shared with me", name), data)
-				if err != nil {
-					failedIDs.Add(file.ID)
-					return nil
-				}
-				processedIDs.Add(file.ID)
-				return nil
+// 				}
 
-			})
-		}(file)
-	}
-	if err := g.Wait(); err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error":         err.Error(),
-			"failed_ids":    failedIDs.Get(),
-			"processed_ids": processedIDs.Get(),
-		})
-	}
+// 				err = satellite.UploadObject(ctx, accesGrant, "google-drive", path.Join("shared with me", name), data)
+// 				if err != nil {
+// 					failedIDs.Add(file.ID)
+// 					return nil
+// 				}
+// 				processedIDs.Add(file.ID)
+// 				return nil
 
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":       "all files were successfully uploaded from Google drive to Satellite",
-		"failed_ids":    failedIDs.Get(),
-		"processed_ids": processedIDs.Get(),
-	})
-}
+// 			})
+// 		}(file)
+// 	}
+// 	if err := g.Wait(); err != nil {
+// 		return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 			"error":         err.Error(),
+// 			"failed_ids":    failedIDs.Get(),
+// 			"processed_ids": processedIDs.Get(),
+// 		})
+// 	}
+
+// 	return c.JSON(http.StatusOK, map[string]interface{}{
+// 		"message":       "all files were successfully uploaded from Google drive to Satellite",
+// 		"failed_ids":    failedIDs.Get(),
+// 		"processed_ids": processedIDs.Get(),
+// 	})
+// }
 
 // Sends file from Google Drive to Satellite
 func HandleSendFileFromGoogleDriveToSatellite(c echo.Context) error {
