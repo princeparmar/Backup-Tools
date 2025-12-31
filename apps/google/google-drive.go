@@ -495,7 +495,7 @@ func GetFilesInFolderByID(c echo.Context, folderID string, database *db.Postgres
 
 		if i.MimeType != "application/vnd.google-apps.folder" {
 			i.Name = addGoogleAppsFileExtension(i.Name, i.MimeType)
-			fileNameForSync = addGoogleAppsFileExtension(fileNameForSync, mimeTypeForSync)
+			// Don't add extension to fileNameForSync - isFileSyncedWithMap will add it internally based on mimeType
 			synced := isFileSyncedWithMap(syncedMap, fileIDForSync, fileNameForSync, mimeTypeForSync, userDetails.Email, folderName, isShared)
 			files = append(files, createFilesJSON(i, synced, ""))
 		} else {
@@ -895,10 +895,10 @@ func GetSharedFiles(c echo.Context, database *db.PostgresDb, userID string) (*Pa
 	// Set up pagination
 	pageSize, pageToken := GetPaginationParams(filter)
 
-	// Fetch files from Google Drive
+	// Fetch files from Google Drive (include owners to detect shared files)
 	response, err := srv.Files.List().
 		Q(query).
-		Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").
+		Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension, owners)").
 		PageToken(pageToken).
 		PageSize(pageSize).
 		Do()

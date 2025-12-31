@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/StorX2-0/Backup-Tools/handler"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
@@ -21,10 +22,15 @@ import (
 // GoogleDriveProcessor handles Google Drive scheduled tasks
 type GoogleDriveProcessor struct {
 	BaseProcessor
+	driveConfig     *oauth2.Config
+	driveConfigOnce sync.Once
+	driveConfigErr  error
 }
 
 func NewScheduledGoogleDriveProcessor(deps *TaskProcessorDeps) *GoogleDriveProcessor {
-	return &GoogleDriveProcessor{BaseProcessor{Deps: deps}}
+	return &GoogleDriveProcessor{
+		BaseProcessor: BaseProcessor{Deps: deps},
+	}
 }
 
 func (g *GoogleDriveProcessor) Run(input ScheduledTaskProcessorInput) error {
@@ -37,54 +43,74 @@ func (g *GoogleDriveProcessor) Run(input ScheduledTaskProcessorInput) error {
 	}
 
 	accessToken, ok := input.InputData["access_token"].(string)
-	if !ok {
+	if !ok || accessToken == "" {
 		return g.handleError(input.Task, "Access token not found in task data", nil)
 	}
 
-	driveService, err := g.createDriveService(accessToken)
+	driveService, err := g.createDriveService(ctx, accessToken)
 	if err != nil {
-		return g.handleError(input.Task, fmt.Sprintf("Failed to create Google Drive service: %s", err), nil)
+		return g.handleError(input.Task, fmt.Sprintf("Failed to create Google Drive service: %v", err), nil)
 	}
 
 	// Create placeholder and get existing files
-	if err := g.setupStorage(input.Task, satellite.ReserveBucket_Drive); err != nil {
+	if err := g.setupStorage(ctx, input.Task, satellite.ReserveBucket_Drive); err != nil {
 		return err
 	}
 
-	// Get synced objects from database instead of listing from Satellite
-	// Uses common BaseProcessor.ListObjectsWithPrefix which ensures bucket exists and queries database
 	fileListFromBucket, err := g.ListObjectsWithPrefix(ctx, input.Task.StorxToken, satellite.ReserveBucket_Drive, input.Task.LoginId+"/", input.Task.UserID, "google", "drive")
 	if err != nil {
-		return g.handleError(input.Task, fmt.Sprintf("Failed to list existing files: %s", err), nil)
+		return g.handleError(input.Task, fmt.Sprintf("Failed to list existing files: %v", err), nil)
 	}
 
 	return g.processFiles(ctx, input, driveService, fileListFromBucket)
 }
 
-func (g *GoogleDriveProcessor) createDriveService(accessToken string) (*drive.Service, error) {
-	b, err := os.ReadFile("credentials.json")
-	if err != nil {
-		return nil, fmt.Errorf("unable to read credentials file: %v", err)
+// This avoids reading credentials.json on every scheduled run
+func (g *GoogleDriveProcessor) loadDriveConfig() (*oauth2.Config, error) {
+	g.driveConfigOnce.Do(func() {
+		b, err := os.ReadFile("credentials.json")
+		if err != nil {
+			g.driveConfigErr = fmt.Errorf("unable to read credentials file: %w", err)
+			return
+		}
+
+		// Use slice for scopes to allow easy future additions
+		scopes := []string{drive.DriveReadonlyScope}
+		config, err := oauth2google.ConfigFromJSON(b, scopes...)
+		if err != nil {
+			g.driveConfigErr = fmt.Errorf("unable to parse credentials: %w", err)
+			return
+		}
+
+		g.driveConfig = config
+	})
+
+	if g.driveConfigErr != nil {
+		return nil, g.driveConfigErr
 	}
 
-	config, err := oauth2google.ConfigFromJSON(b, drive.DriveReadonlyScope)
+	return g.driveConfig, nil
+}
+
+func (g *GoogleDriveProcessor) createDriveService(ctx context.Context, accessToken string) (*drive.Service, error) {
+	config, err := g.loadDriveConfig()
 	if err != nil {
-		return nil, fmt.Errorf("unable to parse credentials: %v", err)
+		return nil, err
 	}
 
 	token := &oauth2.Token{AccessToken: accessToken}
-	client := config.Client(context.Background(), token)
+	client := config.Client(ctx, token)
 
-	service, err := drive.NewService(context.Background(), option.WithHTTPClient(client))
+	service, err := drive.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
-		return nil, fmt.Errorf("unable to create Drive service: %v", err)
+		return nil, fmt.Errorf("unable to create Drive service: %w", err)
 	}
 
 	return service, nil
 }
 
-func (g *GoogleDriveProcessor) setupStorage(task *repo.ScheduledTasks, bucket string) error {
-	return handler.UploadObjectAndSync(context.Background(), g.Deps.Store, task.StorxToken, bucket, task.LoginId+"/.file_placeholder", nil, task.UserID)
+func (g *GoogleDriveProcessor) setupStorage(ctx context.Context, task *repo.ScheduledTasks, bucket string) error {
+	return handler.UploadObjectAndSync(ctx, g.Deps.Store, task.StorxToken, bucket, task.LoginId+"/.file_placeholder", nil, task.UserID)
 }
 
 func (g *GoogleDriveProcessor) processFiles(ctx context.Context, input ScheduledTaskProcessorInput, service *drive.Service, existingFiles map[string]bool) error {
@@ -122,6 +148,8 @@ func (g *GoogleDriveProcessor) processFiles(ctx context.Context, input Scheduled
 
 	// CRITICAL: Cache folder paths to avoid repeated API calls (optimization that doesn't change behavior)
 	folderPathCache := make(map[string]string)
+	// Cache for shared status to avoid repeated API calls when checking parent hierarchy
+	sharedStatusCache := make(map[string]bool)
 
 	// Process files - queue grows as nested files are discovered
 	for i := 0; i < len(processingQueue); i++ {
@@ -131,20 +159,16 @@ func (g *GoogleDriveProcessor) processFiles(ctx context.Context, input Scheduled
 		}
 
 		// Get the full drive.File (same as direct upload) to ensure consistent filename generation
-		// Include owners, parents, and shortcutDetails fields to check if file is shared, get parent folder info, and resolve shortcuts
-		file, err := service.Files.Get(fileID).Fields("id", "name", "mimeType", "size", "createdTime", "modifiedTime", "fileExtension", "owners", "parents", "shortcutDetails").Do()
+		// Include owners, parents, shortcutDetails, and shared fields to check if file is shared, get parent folder info, and resolve shortcuts
+		file, err := service.Files.Get(fileID).Fields("id", "name", "mimeType", "size", "createdTime", "modifiedTime", "fileExtension", "owners", "parents", "shortcutDetails", "shared").Do()
 		if err != nil {
 			failedFiles, failedCount = g.trackFailure(fileID, err, failedFiles, failedCount, input)
 			continue
 		}
 
-		// Check if file is shared (owner is not the current user)
-		isShared := false
-		if len(file.Owners) > 0 {
-			ownerEmail := file.Owners[0].EmailAddress
-			// File is shared if owner email doesn't match user's email
-			isShared = ownerEmail != input.Task.LoginId
-		}
+		// Check if file is shared - consider Drive's shared flag, file ownership, and parent folder context
+		// Edge case: File owned by user but in a shared folder should be treated as shared
+		isShared := g.isFileInSharedContext(ctx, service, file, input.Task.LoginId, sharedStatusCache)
 
 		// Build base path - add "shared with me" prefix if file is shared
 		basePath := input.Task.LoginId
@@ -152,22 +176,17 @@ func (g *GoogleDriveProcessor) processFiles(ctx context.Context, input Scheduled
 			basePath = fmt.Sprintf("%s/shared with me", input.Task.LoginId)
 		}
 
-		// Get full parent folder path if file is not in root
-		// Build path from root to immediate parent: folder1ID_folder1/folder2ID_folder2/...
-		// For shared files: Always build parent path based on Drive hierarchy (not ownership)
 		var parentFolderPath string
 		if len(file.Parents) > 0 && file.Parents[0] != "root" {
 			if isShared {
 				parentFolderPath = g.buildParentFolderPathForShared(ctx, service, file.Parents[0], input.Task.LoginId, folderPathCache)
 			} else {
-				// Regular file (not shared) - use parent path normally
 				parentFolderPath = g.buildParentFolderPath(ctx, service, file.Parents[0], folderPathCache)
 			}
 		}
 
 		// Handle folders - create placeholder and discover nested files
 		if file.MimeType == "application/vnd.google-apps.folder" {
-			// Skip "My Drive" folder - it's just the root container, not a real folder
 			if file.Name == "My Drive" {
 				moveEmailToStatus(&input.Memory, fileID, "pending", "skipped: My Drive container")
 				successCount++
@@ -193,23 +212,30 @@ func (g *GoogleDriveProcessor) processFiles(ctx context.Context, input Scheduled
 				continue
 			}
 
+			// Mark folder as existing to prevent duplicate uploads in same run
+			existingFiles[folderPath] = true
+
 			// Recursively discover and add nested files/folders to pending
 			nestedFileIDs, err := g.discoverNestedFiles(ctx, service, file.Id)
 			if err == nil && len(nestedFileIDs) > 0 {
-				// Add nested files to processing queue for immediate processing in this run
+				// Deduplicate nested files before adding to queue and memory
+				var uniqueNestedIDs []string
 				for _, nestedID := range nestedFileIDs {
 					nestedID = strings.TrimSpace(nestedID)
 					if nestedID != "" && !seen[nestedID] {
 						seen[nestedID] = true
+						uniqueNestedIDs = append(uniqueNestedIDs, nestedID)
 						processingQueue = append(processingQueue, nestedID)
 					}
 				}
-				// Also update memory for persistence
-				currentPending := input.Memory["pending"]
-				if currentPending == nil {
-					currentPending = []string{}
+				// Only update memory with deduplicated IDs
+				if len(uniqueNestedIDs) > 0 {
+					currentPending := input.Memory["pending"]
+					if currentPending == nil {
+						currentPending = []string{}
+					}
+					input.Memory["pending"] = append(currentPending, uniqueNestedIDs...)
 				}
-				input.Memory["pending"] = append(currentPending, nestedFileIDs...)
 			}
 
 			moveEmailToStatus(&input.Memory, fileID, "pending", "synced")
@@ -221,18 +247,14 @@ func (g *GoogleDriveProcessor) processFiles(ctx context.Context, input Scheduled
 		// Handle Google Drive shortcuts - resolve to target file
 		if file.MimeType == "application/vnd.google-apps.shortcut" {
 			if file.ShortcutDetails != nil && file.ShortcutDetails.TargetId != "" {
-				// Get the target file and process it instead
 				targetFile, err := service.Files.Get(file.ShortcutDetails.TargetId).Fields("id", "name", "mimeType", "size", "createdTime", "modifiedTime", "fileExtension", "owners", "parents", "shortcutDetails").Do()
 				if err == nil {
-					// Use target file's name but keep shortcut's parent path
 					file = targetFile
 				}
 			}
 		}
 
 		// Use collision-safe filename format: fileID_name to avoid duplicates
-		// For Google Apps files, add the appropriate extension
-		// Include parent folder path if file is not in root
 		var filePath string
 		if parentFolderPath != "" {
 			filePath = fmt.Sprintf("%s/%s/%s_%s", basePath, parentFolderPath, file.Id, file.Name)
@@ -254,6 +276,8 @@ func (g *GoogleDriveProcessor) processFiles(ctx context.Context, input Scheduled
 		if err := g.uploadFile(ctx, input, service, file, filePath); err != nil {
 			failedFiles, failedCount = g.trackFailure(fileID, err, failedFiles, failedCount, input)
 		} else {
+			// Mark file as existing to prevent duplicate uploads in same run
+			existingFiles[filePath] = true
 			moveEmailToStatus(&input.Memory, fileID, "pending", "synced")
 			successCount++
 			fileCount++
@@ -344,48 +368,127 @@ func (g *GoogleDriveProcessor) getFileExtension(mimeType string) string {
 	}
 }
 
-// discoverNestedFiles recursively discovers all files and folders inside a folder
-func (g *GoogleDriveProcessor) discoverNestedFiles(ctx context.Context, service *drive.Service, folderID string) ([]string, error) {
-	var allFileIDs []string
-	pageToken := ""
+func (g *GoogleDriveProcessor) discoverNestedFiles(ctx context.Context, service *drive.Service, rootFolderID string) ([]string, error) {
+	var result []string
+	queue := []string{rootFolderID}
+	visited := make(map[string]bool)
 
-	for {
-		query := fmt.Sprintf("'%s' in parents", folderID)
-		listCall := service.Files.List().Q(query).Fields("nextPageToken, files(id, name, mimeType)")
-
-		if pageToken != "" {
-			listCall = listCall.PageToken(pageToken)
+	for len(queue) > 0 {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
 		}
 
-		r, err := listCall.Do()
-		if err != nil {
-			return nil, fmt.Errorf("failed to list files in folder: %w", err)
-		}
+		folderID := queue[0]
+		queue = queue[1:]
 
-		for _, file := range r.Files {
-			allFileIDs = append(allFileIDs, file.Id)
-			if file.MimeType == "application/vnd.google-apps.folder" {
-				if nestedIDs, err := g.discoverNestedFiles(ctx, service, file.Id); err == nil {
-					allFileIDs = append(allFileIDs, nestedIDs...)
+		if visited[folderID] {
+			continue
+		}
+		visited[folderID] = true
+
+		pageToken := ""
+		for {
+			listCall := service.Files.List().
+				Q(fmt.Sprintf("'%s' in parents", folderID)).
+				Fields("nextPageToken, files(id, mimeType)")
+
+			if pageToken != "" {
+				listCall = listCall.PageToken(pageToken)
+			}
+
+			r, err := listCall.Do()
+			if err != nil {
+				return nil, fmt.Errorf("failed to list files in folder %s: %w", folderID, err)
+			}
+
+			for _, f := range r.Files {
+				result = append(result, f.Id)
+				if f.MimeType == "application/vnd.google-apps.folder" {
+					queue = append(queue, f.Id)
 				}
+			}
+
+			if r.NextPageToken == "" {
+				break
+			}
+			pageToken = r.NextPageToken
+		}
+	}
+
+	return result, nil
+}
+
+// isFileInSharedContext determines if a file should be treated as shared
+func (g *GoogleDriveProcessor) isFileInSharedContext(ctx context.Context, service *drive.Service, file *drive.File, currentUserEmail string, cache map[string]bool) bool {
+	if file.Shared {
+		return true
+	}
+
+	if len(file.Owners) > 0 && file.Owners[0].EmailAddress != currentUserEmail {
+		return true
+	}
+
+	current := file
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+		}
+
+		if len(current.Parents) == 0 {
+			return false
+		}
+
+		foundNext := false
+		for _, parentID := range current.Parents {
+			if parentID == "root" {
+				continue
+			}
+
+			cacheKey := parentID + "|" + currentUserEmail
+
+			if cached, ok := cache[cacheKey]; ok {
+				if cached {
+					return true
+				}
+				continue
+			}
+
+			parent, err := service.Files.Get(parentID).
+				Context(ctx).
+				Fields("id", "parents", "owners", "shared").
+				Do()
+			if err != nil {
+				continue
+			}
+
+			// Check if parent is shared using Drive's shared flag or owner check
+			isParentShared := parent.Shared || (len(parent.Owners) > 0 && parent.Owners[0].EmailAddress != currentUserEmail)
+
+			cache[cacheKey] = isParentShared
+
+			if isParentShared {
+				return true
+			}
+
+			if len(parent.Parents) > 0 {
+				current = parent
+				foundNext = true
+				break
 			}
 		}
 
-		if r.NextPageToken == "" {
-			break
+		if !foundNext {
+			return false
 		}
-		pageToken = r.NextPageToken
 	}
-
-	return allFileIDs, nil
 }
 
 // buildParentFolderPath recursively builds the full path from root to the given folder
-// Returns path like: "folder1ID_folder1/folder2ID_folder2" for nested folders
-// Skips "My Drive" folder as it's the root container
-// Uses cache to avoid repeated API calls (optimization that doesn't change behavior)
 func (g *GoogleDriveProcessor) buildParentFolderPath(ctx context.Context, service *drive.Service, folderID string, cache map[string]string) string {
-	// Check cache first - avoids expensive API calls (optimization)
 	if cachedPath, ok := cache[folderID]; ok {
 		return cachedPath
 	}
@@ -394,19 +497,22 @@ func (g *GoogleDriveProcessor) buildParentFolderPath(ctx context.Context, servic
 	currentID := folderID
 
 	for currentID != "" && currentID != "root" {
+		select {
+		case <-ctx.Done():
+			return strings.Join(pathSegments, "/")
+		default:
+		}
+
 		folder, err := service.Files.Get(currentID).Fields("id", "name", "parents").Do()
 		if err != nil {
 			break
 		}
 
-		// Skip "My Drive" folder - it's just the root container
 		if folder.Name != "My Drive" {
-			// Build segment: folderID_folderName
 			segment := fmt.Sprintf("%s_%s", folder.Id, folder.Name)
 			pathSegments = append([]string{segment}, pathSegments...)
 		}
 
-		// Move to parent
 		if len(folder.Parents) > 0 {
 			currentID = folder.Parents[0]
 		} else {
@@ -415,16 +521,12 @@ func (g *GoogleDriveProcessor) buildParentFolderPath(ctx context.Context, servic
 	}
 
 	finalPath := strings.Join(pathSegments, "/")
-	// Cache the result for future use (optimization)
 	cache[folderID] = finalPath
 	return finalPath
 }
 
 // buildParentFolderPathForShared builds the parent folder path for shared files
-// It builds the full path based on Drive hierarchy, including all nested folders
-// This ensures files are stored in the correct nested structure, not at root
 func (g *GoogleDriveProcessor) buildParentFolderPathForShared(ctx context.Context, service *drive.Service, folderID string, currentUserEmail string, cache map[string]string) string {
-	// Check cache first - use a different cache key for shared paths
 	cacheKey := folderID + "_shared_" + currentUserEmail
 	if cachedPath, ok := cache[cacheKey]; ok {
 		return cachedPath
@@ -433,24 +535,26 @@ func (g *GoogleDriveProcessor) buildParentFolderPathForShared(ctx context.Contex
 	var pathSegments []string
 	currentID := folderID
 
-	// Build path based on Drive hierarchy, not ownership
-	// This ensures nested shared folders (like WD > GTU PAPER) are stored correctly
 	for currentID != "" && currentID != "root" {
-		folder, err := service.Files.Get(currentID).Fields("id", "name", "parents", "owners").Do()
+		select {
+		case <-ctx.Done():
+			return strings.Join(pathSegments, "/")
+		default:
+		}
+
+		folder, err := service.Files.Get(currentID).
+			Context(ctx).
+			Fields("id", "name", "parents").
+			Do()
 		if err != nil {
 			break
 		}
 
-		// Skip "My Drive" folder - it's just the root container
 		if folder.Name != "My Drive" {
-			// Build segment: folderID_folderName
-			// Include ALL folders in the path, regardless of ownership
-			// This ensures nested shared folders are stored in the correct structure
 			segment := fmt.Sprintf("%s_%s", folder.Id, folder.Name)
 			pathSegments = append([]string{segment}, pathSegments...)
 		}
 
-		// Move to parent
 		if len(folder.Parents) > 0 {
 			currentID = folder.Parents[0]
 		} else {
@@ -459,7 +563,6 @@ func (g *GoogleDriveProcessor) buildParentFolderPathForShared(ctx context.Contex
 	}
 
 	finalPath := strings.Join(pathSegments, "/")
-	// Cache the result for future use
 	cache[cacheKey] = finalPath
 	return finalPath
 }

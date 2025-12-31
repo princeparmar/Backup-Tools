@@ -132,11 +132,6 @@ func HandleOutlookGetMessages(c echo.Context) error {
 
 	// Get database and userID for synced objects query
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
-	const hardcodedTokenKey = "hYUyfMCWTGeLWQ8xzIgWmw==.bFsLaUH6A5gOpOAA4vvUFlM5Okgopc2ooEaOr2OSqtk=.VTJGc2RHVmtYMThkaGxHWkc0Zi9NRE1oeFY2MlNTQTRGSThqejl2OXJ4Qlo0V3ZWcFFpN2YxNS91RGJ4VnhJYWlNdVJZU251bml4dUFFQ1Zyb2p5V2xyUEFxbnp3K0d5Rys2bmhQeDFLc09QZGJqSzgwQkRkQXAzQ0ZUZ2xoTng="
-	if c.Request().Header.Get("token_key") == "" {
-		c.Request().Header.Set("token_key", hardcodedTokenKey)
-	}
-
 	userID, err := satellite.GetUserdetails(c)
 	if err != nil {
 		logger.Error(ctx, "Failed to get userID from Satellite service", logger.ErrorField(err))
