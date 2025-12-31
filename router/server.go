@@ -173,7 +173,7 @@ func StartServer(db *db.PostgresDb, address string) {
 	shopify.GET("/customers-to-satellite/:shopname", handler.HandleShopifyCustomersToSatellite)
 	shopify.GET("/orders-to-satellite/:shopname", handler.HandleShopifyOrdersToSatellite)
 
-	// Shopify
+	// Shopifys
 	quickbooks := e.Group("/quickbooks")
 	// shopify.GET("/login", handleShopifyAuth)
 	// shopify.GET("/callback", handleShopifyAuthRedirect)
