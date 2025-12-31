@@ -27,8 +27,7 @@ const (
 
 var defaultScopes = []string{
 	"offline_access",
-	"Mail.Read",
-	"Mail.Write",
+	"Mail.ReadWrite",
 	"openid",
 	"profile",
 	"email",
