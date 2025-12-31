@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"strconv"
+
 	abs "github.com/microsoft/kiota-abstractions-go"
 	msgraph "github.com/microsoftgraph/msgraph-sdk-go"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
@@ -520,9 +522,19 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 
 	// Set received date time if available
 	if message.ReceivedDateTime != "" {
-		receivedDateTime, err := time.Parse(time.RFC3339, message.ReceivedDateTime)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse received date time: %w", err)
+		var receivedDateTime time.Time
+		var err error
+
+		// Check if it's a Unix timestamp in milliseconds (stored format)
+		if timestamp, parseErr := strconv.ParseInt(message.ReceivedDateTime, 10, 64); parseErr == nil {
+			// Convert milliseconds to time.Time
+			receivedDateTime = time.Unix(0, timestamp*int64(time.Millisecond))
+		} else {
+			// Try parsing as RFC3339 format
+			receivedDateTime, err = time.Parse(time.RFC3339, message.ReceivedDateTime)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse received date time: %w", err)
+			}
 		}
 		messageRequest.SetReceivedDateTime(&receivedDateTime)
 	}
