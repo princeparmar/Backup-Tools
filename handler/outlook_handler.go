@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 
@@ -113,11 +112,6 @@ func parseMessageIDs(c echo.Context) ([]string, error) {
 	// Clean and decode IDs
 	for i := range ids {
 		ids[i] = strings.TrimSpace(ids[i])
-
-		// URL decode
-		if urlDecoded, err := url.QueryUnescape(ids[i]); err == nil {
-			ids[i] = urlDecoded
-		}
 
 		// Base64 decode
 		if decoded, err := base64.StdEncoding.DecodeString(ids[i]); err == nil {
