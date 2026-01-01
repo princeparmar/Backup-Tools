@@ -41,49 +41,39 @@ func NewOutlookService(client *outlook.OutlookClient, accessGrant, userEmail str
 
 // DownloadMessagesFromSatellite downloads messages from Satellite and inserts them into Outlook
 func (s *OutlookService) DownloadMessagesFromSatellite(ctx context.Context, keys []string) (*DownloadResult, error) {
-	g, ctx := errgroup.WithContext(ctx)
-	g.SetLimit(10)
-
 	processedIDs, failedIDs := utils.NewLockedArray(), utils.NewLockedArray()
 
 	for _, key := range keys {
-		key := key
 		if key == "" {
 			continue
 		}
-		g.Go(func() error {
-			// Download file from Satellite using the key directly
-			data, err := satellite.DownloadObject(ctx, s.accessGrant, satellite.ReserveBucket_Outlook, key)
-			if err != nil {
-				logger.Error(ctx, "error downloading message from satellite",
-					logger.ErrorField(err), logger.String("key", key))
-				failedIDs.Add(key)
-				return nil
-			}
 
-			// Parse the email data and insert into Outlook
-			var outlookMsg outlook.OutlookMessage
-			if err := json.Unmarshal(data, &outlookMsg); err != nil {
-				logger.Error(ctx, "error unmarshalling message data",
-					logger.ErrorField(err), logger.String("key", key))
-				failedIDs.Add(key)
-				return nil
-			}
+		// Download file from Satellite using the key directly
+		data, err := satellite.DownloadObject(ctx, s.accessGrant, satellite.ReserveBucket_Outlook, key)
+		if err != nil {
+			logger.Error(ctx, "error downloading message from satellite",
+				logger.ErrorField(err), logger.String("key", key))
+			failedIDs.Add(key)
+			continue
+		}
 
-			// Insert message into Outlook
-			if _, err := s.client.InsertMessage(&outlookMsg); err != nil {
-				logger.Error(ctx, "error inserting message into Outlook",
-					logger.ErrorField(err), logger.String("key", key))
-				failedIDs.Add(key)
-			} else {
-				processedIDs.Add(key)
-			}
-			return nil
-		})
-	}
+		// Parse the email data and insert into Outlook
+		var outlookMsg outlook.OutlookMessage
+		if err := json.Unmarshal(data, &outlookMsg); err != nil {
+			logger.Error(ctx, "error unmarshalling message data",
+				logger.ErrorField(err), logger.String("key", key))
+			failedIDs.Add(key)
+			continue
+		}
 
-	if err := g.Wait(); err != nil {
-		return nil, err
+		// Insert message into Outlook
+		if _, err := s.client.InsertMessage(&outlookMsg); err != nil {
+			logger.Error(ctx, "error inserting message into Outlook",
+				logger.ErrorField(err), logger.String("key", key))
+			failedIDs.Add(key)
+		} else {
+			processedIDs.Add(key)
+		}
 	}
 
 	return &DownloadResult{
