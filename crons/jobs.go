@@ -440,6 +440,8 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 			"message":        job.Message,
 			"message_status": job.MessageStatus,
 			"last_run":       job.LastRun,
+			"storx_token":    job.StorxToken,
+			"active":         job.Active,
 		}
 
 		// Update cron job status based on task status
