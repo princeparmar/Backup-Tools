@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/StorX2-0/Backup-Tools/handler"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
@@ -38,6 +39,16 @@ func (g *GoogleDriveProcessor) Run(input ScheduledTaskProcessorInput) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
+	// Process webhook events using access grant from database (auto-sync)
+	// Run in background, non-blocking - process at beginning so webhooks are handled even if sync fails
+	go func() {
+		processCtx := context.Background()
+		if processErr := handler.ProcessWebhookEvents(processCtx, input.Deps.Store, input.Task.StorxToken, 100); processErr != nil {
+			logger.Warn(processCtx, "Failed to process webhook events from auto-sync",
+				logger.ErrorField(processErr))
+		}
+	}()
+
 	if err = input.HeartBeatFunc(); err != nil {
 		return err
 	}
@@ -57,7 +68,9 @@ func (g *GoogleDriveProcessor) Run(input ScheduledTaskProcessorInput) error {
 		return err
 	}
 
-	fileListFromBucket, err := g.ListObjectsWithPrefix(ctx, input.Task.StorxToken, satellite.ReserveBucket_Drive, input.Task.LoginId+"/", input.Task.UserID, "google", "drive")
+	// Get synced objects from database instead of listing from Satellite
+	// Uses common handler.GetSyncedObjectsWithPrefix which ensures bucket exists and queries database
+	fileListFromBucket, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Deps.Store, input.Task.StorxToken, satellite.ReserveBucket_Drive, input.Task.LoginId+"/", input.Task.UserID, "google", "drive")
 	if err != nil {
 		return g.handleError(input.Task, fmt.Sprintf("Failed to list existing files: %v", err), nil)
 	}

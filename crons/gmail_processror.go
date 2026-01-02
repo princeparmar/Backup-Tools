@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/handler"
@@ -61,9 +60,13 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 		return err
 	}
 
-	emailListFromBucket, err := satellite.ListObjectsWithPrefix(context.Background(), input.Job.StorxToken, satellite.ReserveBucket_Gmail, input.Job.Name+"/")
-	if err != nil && !strings.Contains(err.Error(), "object not found") {
-		return err
+	// Get synced objects from database instead of listing from Satellite (OPTIMIZATION)
+	// This is much faster and avoids unnecessary API calls to Satellite
+	// Uses common function that ensures bucket exists and queries database
+	prefix := input.Job.Name + "/"
+	emailListFromBucket, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Database, input.Job.StorxToken, satellite.ReserveBucket_Gmail, prefix, input.Job.UserID, "google", "gmail")
+	if err != nil {
+		return fmt.Errorf("failed to get synced objects: %w", err)
 	}
 
 	err = input.HeartBeatFunc()

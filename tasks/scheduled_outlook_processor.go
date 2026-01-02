@@ -7,6 +7,7 @@ import (
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/handler"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
@@ -26,6 +27,16 @@ func (o *OutlookProcessor) Run(input ScheduledTaskProcessorInput) error {
 	ctx := context.Background()
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
+
+	// Process webhook events using access grant from database (auto-sync)
+	// Run in background, non-blocking - process at beginning so webhooks are handled even if sync fails
+	go func() {
+		processCtx := context.Background()
+		if processErr := handler.ProcessWebhookEvents(processCtx, input.Deps.Store, input.Task.StorxToken, 100); processErr != nil {
+			logger.Warn(processCtx, "Failed to process webhook events from auto-sync",
+				logger.ErrorField(processErr))
+		}
+	}()
 
 	if err = input.HeartBeatFunc(); err != nil {
 		return err
@@ -47,8 +58,8 @@ func (o *OutlookProcessor) Run(input ScheduledTaskProcessorInput) error {
 	}
 
 	// Get synced objects from database instead of listing from Satellite
-	// Uses common BaseProcessor.ListObjectsWithPrefix which ensures bucket exists and queries database
-	emailListFromBucket, err := o.ListObjectsWithPrefix(ctx, input.Task.StorxToken, satellite.ReserveBucket_Outlook, input.Task.LoginId+"/", input.Task.UserID, "outlook", "outlook")
+	// Uses common handler.GetSyncedObjectsWithPrefix which ensures bucket exists and queries database
+	emailListFromBucket, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Deps.Store, input.Task.StorxToken, satellite.ReserveBucket_Outlook, input.Task.LoginId+"/", input.Task.UserID, "outlook", "outlook")
 	if err != nil {
 		return o.handleError(input.Task, fmt.Sprintf("Failed to list existing emails: %s", err), nil)
 	}

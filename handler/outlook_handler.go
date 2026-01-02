@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -93,9 +94,21 @@ func HandleOutlookGetMessages(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	_, accessToken, err := getAccessTokens(c)
+	accessGrant, accessToken, err := getAccessTokens(c)
 	if err != nil {
 		return err
+	}
+
+	// Extract access grant early for webhook processing
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+	if accessGrant != "" {
+		go func() {
+			processCtx := context.Background()
+			if processErr := ProcessWebhookEvents(processCtx, database, accessGrant, 100); processErr != nil {
+				logger.Warn(processCtx, "Failed to process webhook events from listing route",
+					logger.ErrorField(processErr))
+			}
+		}()
 	}
 
 	skip, _ := strconv.Atoi(c.QueryParam("skip"))
@@ -130,8 +143,6 @@ func HandleOutlookGetMessages(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusForbidden, err.Error())
 	}
 
-	// Get database and userID for synced objects query
-	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	userID, err := satellite.GetUserdetails(c)
 	if err != nil {
 		logger.Error(ctx, "Failed to get userID from Satellite service", logger.ErrorField(err))

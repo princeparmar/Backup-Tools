@@ -50,8 +50,8 @@ func (g *GmailProcessor) Run(input ScheduledTaskProcessorInput) error {
 	}
 
 	// Get synced objects from database instead of listing from Satellite
-	// Uses common BaseProcessor.ListObjectsWithPrefix which ensures bucket exists and queries database
-	emailListFromBucket, err := g.ListObjectsWithPrefix(ctx, input.Task.StorxToken, satellite.ReserveBucket_Gmail, input.Task.LoginId+"/", input.Task.UserID, "google", "gmail")
+	// Uses common handler.GetSyncedObjectsWithPrefix which ensures bucket exists and queries database
+	emailListFromBucket, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Deps.Store, input.Task.StorxToken, satellite.ReserveBucket_Gmail, input.Task.LoginId+"/", input.Task.UserID, "google", "gmail")
 	if err != nil {
 		return g.handleError(input.Task, fmt.Sprintf("Failed to list existing emails: %s", err), nil)
 	}

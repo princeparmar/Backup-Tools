@@ -14,7 +14,6 @@ import (
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
-	"storj.io/uplink"
 )
 
 // TaskProcessorDeps contains all dependencies for task processing
@@ -48,49 +47,6 @@ func (b *BaseProcessor) handleError(task *repo.ScheduledTasks, errMsg string, ex
 	existingErrors = append(existingErrors, errMsg)
 	task.Errors = *database.NewDbJsonFromValue(existingErrors)
 	return fmt.Errorf("%s", errMsg)
-}
-
-// ListObjectsWithPrefix ensures bucket exists, then gets objects from database instead of Satellite
-// This is a common function used by all processors (Gmail, Google Drive, Google Photos, Outlook)
-func (b *BaseProcessor) ListObjectsWithPrefix(ctx context.Context, accessGrant, bucketName, prefix, userID, source, objectType string) (map[string]bool, error) {
-	access, err := uplink.ParseAccess(accessGrant)
-	if err != nil {
-		return nil, fmt.Errorf("parse access grant: %w", err)
-	}
-
-	project, err := uplink.OpenProject(ctx, access)
-	if err != nil {
-		return nil, fmt.Errorf("open project: %w", err)
-	}
-	defer project.Close()
-
-	_, err = project.EnsureBucket(ctx, bucketName)
-	if err != nil {
-		_, err = project.CreateBucket(ctx, bucketName)
-		if err != nil {
-			logger.Warn(ctx, "Failed to create bucket, will be created on first upload if needed",
-				logger.String("bucket", bucketName),
-				logger.ErrorField(err))
-		}
-	}
-
-	syncedObjects, err := b.Deps.Store.SyncedObjectRepo.GetSyncedObjectsByUserAndBucket(userID, bucketName, source, objectType)
-	if err != nil {
-		logger.Warn(ctx, "Failed to get synced objects from database, returning empty map",
-			logger.String("bucket", bucketName),
-			logger.String("user_id", userID),
-			logger.ErrorField(err))
-		return make(map[string]bool), nil
-	}
-
-	objects := make(map[string]bool)
-	for _, obj := range syncedObjects {
-		if prefix == "" || strings.HasPrefix(obj.ObjectKey, prefix) {
-			objects[obj.ObjectKey] = true
-		}
-	}
-
-	return objects, nil
 }
 
 func (b *BaseProcessor) updateTaskStats(input *ScheduledTaskProcessorInput, successCount, failedCount int, failedEmails []string) error {

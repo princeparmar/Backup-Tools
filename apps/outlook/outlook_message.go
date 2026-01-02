@@ -30,10 +30,16 @@ func NewOutlookMinimalMessage(message models.Messageable) *OutlookMinimalMessage
 		return nil
 	}
 
+	// Safely extract From address
+	fromAddress := ""
+	if from := message.GetFrom(); from != nil && from.GetEmailAddress() != nil {
+		fromAddress = stringValue(from.GetEmailAddress().GetAddress())
+	}
+
 	result := &OutlookMinimalMessage{
 		ID:               stringValue(message.GetId()),
 		Subject:          stringValue(message.GetSubject()),
-		From:             stringValue(message.GetFrom().GetEmailAddress().GetAddress()),
+		From:             fromAddress,
 		ReceivedDateTime: timeValueInMilliseconds(message.GetReceivedDateTime()),
 		IsRead:           boolValue(message.GetIsRead()),
 		HasAttachments:   boolValue(message.GetHasAttachments()),
@@ -136,27 +142,38 @@ func NewOutlookMessage(message models.Messageable) *OutlookMessage {
 		internetMessageHeaders[stringValue(header.GetName())] = stringValue(header.GetValue())
 	}
 
+	// Safely extract From address
+	fromAddress := ""
+	if from := message.GetFrom(); from != nil && from.GetEmailAddress() != nil {
+		fromAddress = stringValue(from.GetEmailAddress().GetAddress())
+	}
+
+	// Safely extract Body content
+	bodyContent := ""
+	var contentType *models.BodyType
+	var odataType *string
+	if body := message.GetBody(); body != nil {
+		bodyContent = stringValue(body.GetContent())
+		contentType = body.GetContentType()
+		odataType = body.GetOdataType()
+	}
+
 	msg := &OutlookMessage{
 		OutlookMinimalMessage: OutlookMinimalMessage{
 			ID:               stringValue(message.GetId()),
 			Subject:          stringValue(message.GetSubject()),
-			From:             stringValue(message.GetFrom().GetEmailAddress().GetAddress()),
+			From:             fromAddress,
 			ReceivedDateTime: timeValueInMilliseconds(message.GetReceivedDateTime()),
 		},
-		Body:                   stringValue(message.GetBody().GetContent()),
-		ContentType:            message.GetBody().GetContentType(),
-		ODataType:              message.GetBody().GetOdataType(),
+		Body:                   bodyContent,
+		ContentType:            contentType,
+		ODataType:              odataType,
 		HasAttachments:         boolValue(message.GetHasAttachments()),
 		IsRead:                 boolValue(message.GetIsRead()),
 		Importance:             importance,
 		InternetMessageID:      stringValue(message.GetInternetMessageId()),
 		InternetMessageHeaders: internetMessageHeaders,
 		SentDateTime:           timeValue(message.GetSentDateTime()),
-	}
-
-	// Set From address
-	if from := message.GetFrom(); from != nil && from.GetEmailAddress() != nil {
-		msg.From = stringValue(from.GetEmailAddress().GetAddress())
 	}
 
 	// Set Recipients
