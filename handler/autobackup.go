@@ -1009,11 +1009,47 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 	logger.Info(ctx, "Starting update request processing", logger.Int("job_id", jobID))
 
 	if reqBody.Interval != nil {
-		if !validateInterval(*reqBody.Interval, *reqBody.On) {
+		if reqBody.On == nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Request",
+				"error":   "Both interval and on are required together",
+			})
+		}
+
+		onValue := strings.TrimSpace(*reqBody.On)
+		if onValue == "" {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Request",
+				"error":   "On value cannot be empty",
+			})
+		}
+
+		if *reqBody.Interval == "monthly" {
+			day, err := strconv.Atoi(onValue)
+			if err != nil {
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "Invalid Request",
+					"error":   "On value must be a valid number for monthly intervals",
+				})
+			}
+			onValue = strconv.Itoa(day)
+
+			if day == 29 || day == 30 || day == 31 {
+				logger.Warn(ctx, "Invalid monthly date selected",
+					logger.Int("job_id", jobID),
+					logger.Int("day", day))
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "Invalid Request",
+					"error":   "Monthly backups cannot be scheduled on the 29th, 30th or 31st day. Please select a date between 1-28.",
+				})
+			}
+		}
+
+		if !validateInterval(*reqBody.Interval, onValue) {
 			logger.Warn(ctx, "Invalid interval validation",
 				logger.Int("job_id", jobID),
 				logger.String("interval", *reqBody.Interval),
-				logger.String("on", *reqBody.On))
+				logger.String("on", onValue))
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
 				"message": "Invalid Request",
 				"error":   "On is not valid for the given interval",
@@ -1021,11 +1057,11 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 		}
 
 		updateRequest["interval"] = *reqBody.Interval
-		updateRequest["on"] = *reqBody.On
+		updateRequest["on"] = onValue
 		logger.Info(ctx, "Interval and on updated",
 			logger.Int("job_id", jobID),
 			logger.String("interval", *reqBody.Interval),
-			logger.String("on", *reqBody.On))
+			logger.String("on", onValue))
 	}
 
 	if reqBody.Code != nil {
@@ -1330,11 +1366,14 @@ func validateInterval(interval, on string) bool {
 		return true
 	}
 
-	if interval == "monthly" && (on == "30" || on == "29") {
+	// Get allowed values for this interval
+	allowedValues, exists := intervalValues[interval]
+	if !exists {
 		return false
 	}
 
-	for _, v := range intervalValues[interval] {
+	// Check if the value matches any allowed value
+	for _, v := range allowedValues {
 		if v == on {
 			return true
 		}
