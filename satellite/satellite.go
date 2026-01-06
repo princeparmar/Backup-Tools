@@ -313,6 +313,61 @@ func GetUserdetails(c echo.Context) (string, error) {
 	return response.ID, nil
 }
 
+// GetProjectIDFromAccessGrant extracts project_id from access grant
+func GetProjectIDFromAccessGrant(ctx context.Context, accessGrant string) (string, error) {
+	if StorxSatelliteService == "" {
+		return "", nil
+	}
+
+	url := strings.TrimSuffix(StorxSatelliteService, "/") + "/api/v0/public/projects/project-id-from-access-grant"
+
+	payload := struct {
+		AccessGrant string `json:"access_grant"`
+	}{
+		AccessGrant: accessGrant,
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return "", nil
+	}
+
+	req.Header.Set("accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	res, err := client.Do(req)
+	if err != nil {
+		return "", nil
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return "", nil
+	}
+
+	var response struct {
+		ProjectID string `json:"project_id"`
+		Error     string `json:"error"`
+	}
+
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", nil
+	}
+
+	if response.Error != "" {
+		return "", nil
+	}
+
+	return response.ProjectID, nil
+}
+
 // createJWTToken creates a JWT token for email notifications
 func createJWTToken(email, errorMsg, method, secretKey string) (string, error) {
 	claims := jwt.MapClaims{

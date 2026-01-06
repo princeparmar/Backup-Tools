@@ -12,9 +12,12 @@ import (
 	"strings"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/db"
+	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
+	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"golang.org/x/sync/errgroup"
 
@@ -57,8 +60,8 @@ func NewGmailService(client *google.GmailClient, accessGrant, userEmail string) 
 	}
 }
 
-// UploadMessagesToSatellite uploads Gmail messages to Satellite
-func (s *GmailService) UploadMessagesToSatellite(ctx context.Context, messageIDs []string) (*UploadResult, error) {
+// UploadMessagesToSatellite uploads Gmail messages to Satellite and updates synced_objects
+func (s *GmailService) UploadMessagesToSatellite(ctx context.Context, database *db.PostgresDb, messageIDs []string) (*UploadResult, error) {
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(10)
 
@@ -87,7 +90,9 @@ func (s *GmailService) UploadMessagesToSatellite(ctx context.Context, messageIDs
 
 				messagePath := s.userEmail + "/" + utils.GenerateTitleFromGmailMessage(msg)
 
-				err = satellite.UploadObject(ctx, s.accessGrant, "gmail", messagePath, b)
+				// Use helper function to upload and sync
+				// Source and Type are automatically derived from bucket name ("gmail" -> source: "google", type: "gmail")
+				err = UploadObjectAndSync(ctx, database, s.accessGrant, "gmail", messagePath, b, s.userEmail)
 				if err != nil {
 					logger.Info(ctx, "error uploading to satellite", logger.ErrorField(err))
 					failedIDs.Add(id)
@@ -229,72 +234,75 @@ func validateAndProcessRequestIDs(c echo.Context) ([]string, error) {
 	return allIDs, nil
 }
 
-// Helper function to setup Gmail handler with all common validations
-func setupGmailHandler(c echo.Context) (string, *google.GmailClient, error) {
-	// Validate access token
-	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accessGrant == "" {
-		return "", nil, errors.New("access token not found")
-	}
+// // Helper function to setup Gmail handler with all common validations
+// func setupGmailHandler(c echo.Context) (string, *google.GmailClient, error) {
+// 	// Validate access token
+// 	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+// 	if accessGrant == "" {
+// 		return "", nil, errors.New("access token not found")
+// 	}
 
-	// Create Gmail client
-	gmailClient, err := google.NewGmailClient(c)
-	if err != nil {
-		return "", nil, err
-	}
+// 	// Create Gmail client
+// 	gmailClient, err := google.NewGmailClient(c)
+// 	if err != nil {
+// 		return "", nil, err
+// 	}
 
-	return accessGrant, gmailClient, nil
-}
+// 	return accessGrant, gmailClient, nil
+// }
 
-func HandleListGmailMessagesToSatellite(c echo.Context) error {
-	ctx := c.Request().Context()
-	var err error
-	defer monitor.Mon.Task()(&ctx)(&err)
+// func HandleListGmailMessagesToSatellite(c echo.Context) error {
+// 	ctx := c.Request().Context()
+// 	var err error
+// 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	// Setup Gmail handler with all common validations
-	accessGrant, gmailClient, err := setupGmailHandler(c)
-	if err != nil {
-		if err.Error() == "access token not found" {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-		return err
-	}
+// 	// Setup Gmail handler with all common validations
+// 	accessGrant, gmailClient, err := setupGmailHandler(c)
+// 	if err != nil {
+// 		if err.Error() == "access token not found" {
+// 			return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 				"error": err.Error(),
+// 			})
+// 		}
+// 		return err
+// 	}
 
-	// Get user details
-	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
-	if err != nil {
-		return err
-	}
+// 	// Get user details
+// 	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
+// 	if err != nil {
+// 		return err
+// 	}
 
-	if userDetails.Email == "" {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "user email not found, please check access handling",
-		})
-	}
+// 	if userDetails.Email == "" {
+// 		return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 			"error": "user email not found, please check access handling",
+// 		})
+// 	}
 
-	// Parse request IDs
-	allIDs, err := parseRequestIDs(c)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
+// 	// Parse request IDs
+// 	allIDs, err := parseRequestIDs(c)
+// 	if err != nil {
+// 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+// 			"error": err.Error(),
+// 		})
+// 	}
 
-	// Create Gmail service and upload messages
-	gmailService := NewGmailService(gmailClient, accessGrant, userDetails.Email)
-	result, err := gmailService.UploadMessagesToSatellite(c.Request().Context(), allIDs)
-	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error":         err.Error(),
-			"failed_ids":    result.FailedIDs,
-			"processed_ids": result.ProcessedIDs,
-		})
-	}
+// 	// Get database from context
+// 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
-	return c.JSON(http.StatusOK, result)
-}
+// 	// Create Gmail service and upload messages
+// 	gmailService := NewGmailService(gmailClient, accessGrant, userDetails.Email)
+// 	result, err := gmailService.UploadMessagesToSatellite(c.Request().Context(), database, allIDs)
+// 	if err != nil {
+// 		return c.JSON(http.StatusForbidden, map[string]interface{}{
+// 			"error":         err.Error(),
+// 			"failed_ids":    result.FailedIDs,
+// 			"processed_ids": result.ProcessedIDs,
+// 		})
+// 	}
+
+// 	return c.JSON(http.StatusOK, result)
+// }
 
 // handleGmailGetThreadsIDsControlled - fetches threads IDs from Gmail and returns them in JSON format.
 // It uses pagination to fetch threads in chunks of 500.
@@ -302,6 +310,31 @@ func HandleGmailGetThreadsIDsControlled(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
+
+	// Extract access grant early for webhook processing
+	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accessGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "access token not found",
+		})
+	}
+
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		logger.Error(ctx, "Failed to get userID from Satellite service", logger.ErrorField(err))
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"error": "authentication failed",
+		})
+	}
+
+	go func() {
+		processCtx := context.Background()
+		if processErr := ProcessWebhookEvents(processCtx, database, accessGrant, 100); processErr != nil {
+			logger.Warn(processCtx, "Failed to process webhook events from listing route",
+				logger.ErrorField(processErr))
+		}
+	}()
 
 	num := c.QueryParam("num")
 	var numInt int64
@@ -340,30 +373,25 @@ func HandleGmailGetThreadsIDsControlled(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	//threads = append(threads, res.Messages...)
-
-	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accessGrant == "" {
-		return errors.New("access token not found")
-	}
 
 	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
 	if err != nil {
 		return err
 	}
 
-	emailListFromBucket, err := satellite.ListObjectsWithPrefix(context.Background(),
-		accessGrant, satellite.ReserveBucket_Gmail, userDetails.Email+"/")
+	syncedObjects, err := database.SyncedObjectRepo.GetSyncedObjectsByUserAndBucket(userID, satellite.ReserveBucket_Gmail, "google", "gmail")
 	if err != nil {
-		logger.Error(ctx, "Failed to list objects from satellite", logger.ErrorField(err))
-		userFriendlyError := satellite.FormatSatelliteError(err)
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": userFriendlyError,
-		})
+		logger.Error(ctx, "Failed to get synced objects from database", logger.ErrorField(err))
+		syncedObjects = []repo.SyncedObject{}
+	}
+	syncedMap := make(map[string]bool)
+	for _, obj := range syncedObjects {
+		syncedMap[obj.ObjectKey] = true
 	}
 
 	for _, message := range res.Messages {
-		_, synced := emailListFromBucket[userDetails.Email+"/"+utils.GenerateTitleFromGmailMessage(message)]
+		messagePath := userDetails.Email + "/" + utils.GenerateTitleFromGmailMessage(message)
+		synced := syncedMap[messagePath]
 		threads = append(threads, MessageListJSON{Message: *message, Synced: synced})
 	}
 	nextPageToken = res.NextPageToken

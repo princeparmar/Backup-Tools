@@ -9,9 +9,12 @@ import (
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
+	"github.com/StorX2-0/Backup-Tools/db"
+	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
+	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/labstack/echo/v4"
 	"golang.org/x/sync/errgroup"
@@ -150,6 +153,18 @@ func HandleOutlookGetMessages(c echo.Context) error {
 		return err
 	}
 
+	// Extract access grant early for webhook processing
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+	if accessGrant != "" {
+		go func() {
+			processCtx := context.Background()
+			if processErr := ProcessWebhookEvents(processCtx, database, accessGrant, 100); processErr != nil {
+				logger.Warn(processCtx, "Failed to process webhook events from listing route",
+					logger.ErrorField(processErr))
+			}
+		}()
+	}
+
 	skip, _ := strconv.Atoi(c.QueryParam("skip"))
 	limit, _ := strconv.Atoi(c.QueryParam("num"))
 
@@ -182,12 +197,26 @@ func HandleOutlookGetMessages(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusForbidden, err.Error())
 	}
 
-	emailListFromBucket, err := satellite.ListObjectsWithPrefix(ctx,
-		accessGrant, satellite.ReserveBucket_Outlook, userDetails.Mail+"/")
+	userID, err := satellite.GetUserdetails(c)
 	if err != nil {
-		logger.Error(ctx, "Failed to list objects from satellite", logger.ErrorField(err))
-		userFriendlyError := satellite.FormatSatelliteError(err)
-		return echo.NewHTTPError(http.StatusForbidden, userFriendlyError)
+		logger.Error(ctx, "Failed to get userID from Satellite service", logger.ErrorField(err))
+		return echo.NewHTTPError(http.StatusUnauthorized, "authentication failed")
+	}
+
+	// Get synced objects from database instead of listing from Satellite
+	syncedObjects, err := database.SyncedObjectRepo.GetSyncedObjectsByUserAndBucket(userID, satellite.ReserveBucket_Outlook, "outlook", "outlook")
+	if err != nil {
+		logger.Warn(ctx, "Failed to get synced objects from database, continuing with empty map",
+			logger.String("user_id", userID),
+			logger.String("bucket", satellite.ReserveBucket_Outlook),
+			logger.ErrorField(err))
+		syncedObjects = []repo.SyncedObject{}
+	}
+
+	// Create map for fast lookup (same format as ListObjectsWithPrefix returns)
+	emailListFromBucket := make(map[string]bool)
+	for _, obj := range syncedObjects {
+		emailListFromBucket[obj.ObjectKey] = true
 	}
 
 	outlookMessages := make([]*OutlookMessageListJSON, 0, len(messages.Messages))
@@ -265,6 +294,13 @@ func HandleListOutlookMessagesToSatellite(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusForbidden, err.Error())
 	}
 
+	// Get database and userID for syncing
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "authentication failed")
+	}
+
 	return processMessagesConcurrently(c, allIDs, func(echoCtx echo.Context, id string) error {
 		// FIX: Use the echo context parameter
 		reqCtx := echoCtx.Request().Context()
@@ -290,7 +326,7 @@ func HandleListOutlookMessagesToSatellite(c echo.Context) error {
 		}
 
 		messagePath := userDetails.Mail + "/" + utils.GenerateTitleFromOutlookMessage(message)
-		err = satellite.UploadObject(reqCtx, accessGrant, satellite.ReserveBucket_Outlook, messagePath, b)
+		err = UploadObjectAndSync(reqCtx, database, accessGrant, satellite.ReserveBucket_Outlook, messagePath, b, userID)
 		if err != nil {
 			logger.Error(reqCtx, "Failed to upload message to satellite",
 				logger.ErrorField(err), logger.String("id", id), logger.String("path", messagePath))

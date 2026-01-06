@@ -30,10 +30,16 @@ func NewOutlookMinimalMessage(message models.Messageable) *OutlookMinimalMessage
 		return nil
 	}
 
+	// Safely extract From address
+	fromAddress := ""
+	if from := message.GetFrom(); from != nil && from.GetEmailAddress() != nil {
+		fromAddress = stringValue(from.GetEmailAddress().GetAddress())
+	}
+
 	result := &OutlookMinimalMessage{
 		ID:               stringValue(message.GetId()),
 		Subject:          stringValue(message.GetSubject()),
-		From:             stringValue(message.GetFrom().GetEmailAddress().GetAddress()),
+		From:             fromAddress,
 		ReceivedDateTime: timeValueInMilliseconds(message.GetReceivedDateTime()),
 		IsRead:           boolValue(message.GetIsRead()),
 		HasAttachments:   boolValue(message.GetHasAttachments()),

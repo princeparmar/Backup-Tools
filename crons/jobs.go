@@ -22,6 +22,7 @@ type ProcessorInput struct {
 	Task          *repo.TaskListingDB
 	Job           *repo.CronJobListingDB
 	HeartBeatFunc func() error
+	Database      *db.PostgresDb
 }
 
 type Processor interface {
@@ -321,6 +322,7 @@ func (a *AutosyncManager) processTask(ctx context.Context, task *repo.TaskListin
 		InputData: job.InputData,
 		Job:       job,
 		Task:      task,
+		Database:  a.store,
 		HeartBeatFunc: func() error {
 			// Check if task is still running
 			currentTask, err := a.store.TaskRepo.GetTaskByID(task.ID)

@@ -2,7 +2,6 @@ package google
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,9 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -22,6 +19,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
+	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/gphotosuploader/googlemirror/api/photoslibrary/v1"
 
@@ -31,7 +29,6 @@ import (
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
 	gs "google.golang.org/api/storage/v1"
-	"storj.io/uplink"
 )
 
 type FilesJSON struct {
@@ -102,7 +99,7 @@ func GetFileNames(c echo.Context) ([]*FilesJSON, error) {
 	// Loop to handle pagination
 	pageToken := ""
 	for {
-		r, err := srv.Files.List().Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").PageToken(pageToken).Do()
+		r, err := srv.Files.List().Q("trashed=false").Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").PageToken(pageToken).Do()
 		if err != nil {
 			return nil, fmt.Errorf("failed to retrieve files: %v", err)
 		}
@@ -233,34 +230,34 @@ func getExportMimeTypeAndExtension(mimeType string) (string, string) {
 }
 
 // Helper function to sort satellite objects by key
-func sortSatelliteObjects(objects []uplink.Object) {
-	slices.SortStableFunc(objects, func(a, b uplink.Object) int {
-		return cmp.Compare(a.Key, b.Key)
-	})
-}
+// func sortSatelliteObjects(objects []uplink.Object) {
+// 	slices.SortStableFunc(objects, func(a, b uplink.Object) int {
+// 		return cmp.Compare(a.Key, b.Key)
+// 	})
+// }
 
-// Helper function to check if file is synced using binary search
-func isFileSyncedInObjects(objects []uplink.Object, searchPath string) bool {
-	_, found := slices.BinarySearchFunc(objects, searchPath, func(a uplink.Object, b string) int {
-		return cmp.Compare(a.Key, b)
-	})
-	return found
-}
+// // Helper function to check if file is synced using binary search
+// func isFileSyncedInObjects(objects []uplink.Object, searchPath string) bool {
+// 	_, found := slices.BinarySearchFunc(objects, searchPath, func(a uplink.Object, b string) int {
+// 		return cmp.Compare(a.Key, b)
+// 	})
+// 	return found
+// }
 
 // Helper function to check folder sync status
-func checkFolderSyncStatus(c echo.Context, folderID string) (bool, error) {
-	folderFiles, err := GetFilesInFolderByID(c, folderID)
-	if err != nil {
-		return false, err
-	}
+// func checkFolderSyncStatus(c echo.Context, folderID string) (bool, error) {
+// 	folderFiles, err := GetFilesInFolderByID(c, folderID)
+// 	if err != nil {
+// 		return false, err
+// 	}
 
-	for _, v := range folderFiles.Files {
-		if !v.Synced {
-			return false, nil
-		}
-	}
-	return true, nil
-}
+// 	for _, v := range folderFiles.Files {
+// 		if !v.Synced {
+// 			return false, nil
+// 		}
+// 	}
+// 	return true, nil
+// }
 
 // Helper function to get Google Drive service with error handling
 func getDriveService(c echo.Context) (*drive.Service, error) {
@@ -347,87 +344,88 @@ func UploadFile(c echo.Context, name string, data []byte) error {
 	return nil
 }
 
-// GetFilesInFolder retrieves all files within a specific folder from Google Drive
-func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
+// // GetFilesInFolder retrieves all files within a specific folder from Google Drive
+// func GetFilesInFolder(c echo.Context, folderName string) ([]*FilesJSON, error) {
 
-	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accessGrant == "" {
-		return nil, errors.New("access token is missing")
-	}
-	srv, err := getDriveService(c)
-	if err != nil {
-		return nil, err
-	}
+// 	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+// 	if accessGrant == "" {
+// 		return nil, errors.New("access token is missing")
+// 	}
+// 	srv, err := getDriveService(c)
+// 	if err != nil {
+// 		return nil, err
+// 	}
 
-	// Get user email for sync checking
-	userDetails, err := GetGoogleAccountDetailsFromContext(c)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get user email: %w", err)
-	}
-	if userDetails.Email == "" {
-		return nil, errors.New("user email not found, please check access handling")
-	}
+// 	// Get user email for sync checking
+// 	userDetails, err := GetGoogleAccountDetailsFromContext(c)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to get user email: %w", err)
+// 	}
+// 	if userDetails.Email == "" {
+// 		return nil, errors.New("user email not found, please check access handling")
+// 	}
 
-	// Get folder ID by name
-	folderID, err := getFolderIDByName(srv, folderName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get folder ID: %v", err)
-	}
-	folderName, err = GetFolderPathByID(context.Background(), srv, folderID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get folder name: %v", err)
-	}
-	// Files are stored with userEmail prefix, so prepend it to folder path
-	satelliteFolderPath := userDetails.Email + "/" + folderName + "/"
-	o, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", satelliteFolderPath)
-	if err != nil {
-		userFriendlyError := satellite.FormatSatelliteError(err)
-		return nil, fmt.Errorf("%s", userFriendlyError)
-	}
-	sortSatelliteObjects(o)
-	// List all files within the folder
-	r, err := srv.Files.List().Q(fmt.Sprintf("'%s' in parents", folderID)).Fields("files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").Do()
-	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve files: %v", err)
-	}
+// 	// Get folder ID by name
+// 	folderID, err := getFolderIDByName(srv, folderName)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to get folder ID: %v", err)
+// 	}
+// 	folderName, err = GetFolderPathByID(context.Background(), srv, folderID)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to get folder name: %v", err)
+// 	}
+// 	// Files are stored with userEmail prefix, so prepend it to folder path
+// 	satelliteFolderPath := userDetails.Email + "/" + folderName + "/"
+// 	o, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", satelliteFolderPath)
+// 	if err != nil {
+// 		userFriendlyError := satellite.FormatSatelliteError(err)
+// 		return nil, fmt.Errorf("%s", userFriendlyError)
+// 	}
+// 	sortSatelliteObjects(o)
+// 	// List all files within the folder
+// 	r, err := srv.Files.List().Q(fmt.Sprintf("'%s' in parents", folderID)).Fields("files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").Do()
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to retrieve files: %v", err)
+// 	}
 
-	var files []*FilesJSON
-	for _, i := range r.Files {
-		if i.MimeType != "application/vnd.google-apps.folder" {
-			i.Name = addGoogleAppsFileExtension(i.Name, i.MimeType)
-			// Check sync with userEmail prefix
-			filePath := userDetails.Email + "/" + path.Join(folderName, i.Name)
-			synced := isFileSyncedInObjects(o, filePath)
-			files = append(files, createFilesJSON(i, synced, ""))
-		} else {
-			// Check sync with userEmail prefix
-			folderPath := userDetails.Email + "/" + path.Join(folderName, i.Name) + "/"
-			synced := isFileSyncedInObjects(o, folderPath)
-			if synced {
-				synced, _ = checkFolderSyncStatus(c, i.Id)
-			}
+// 	var files []*FilesJSON
+// 	for _, i := range r.Files {
+// 		if i.MimeType != "application/vnd.google-apps.folder" {
+// 			i.Name = addGoogleAppsFileExtension(i.Name, i.MimeType)
+// 			// Check sync with userEmail prefix
+// 			filePath := userDetails.Email + "/" + path.Join(folderName, i.Name)
+// 			synced := isFileSyncedInObjects(o, filePath)
+// 			files = append(files, createFilesJSON(i, synced, ""))
+// 		} else {
+// 			// Check sync with userEmail prefix
+// 			folderPath := userDetails.Email + "/" + path.Join(folderName, i.Name) + "/"
+// 			synced := isFileSyncedInObjects(o, folderPath)
+// 			if synced {
+// 				synced, _ = checkFolderSyncStatus(c, i.Id)
+// 			}
 
-			files = append(files, createFilesJSON(i, synced, ""))
-		}
-	}
+// 			files = append(files, createFilesJSON(i, synced, ""))
+// 		}
+// 	}
 
-	return files, nil
-}
+// 	return files, nil
+// }
 
 // func embeddedSynced(c echo.Context, folderID, folderName string)
 // GetFilesInFolder retrieves all files within a specific folder from Google Drive
-func GetFilesInFolderByID(c echo.Context, folderID string) (*PaginatedFilesResponse, error) {
-
-	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accessGrant == "" {
+func GetFilesInFolderByID(c echo.Context, folderID string, database *db.PostgresDb, userID string) (*PaginatedFilesResponse, error) {
+	// 1. Validate access token
+	if c.Request().Header.Get("ACCESS_TOKEN") == "" {
 		return nil, errors.New("access token is missing")
 	}
+
+	// 2. Create Drive service ONCE
 	srv, err := getDriveService(c)
 	if err != nil {
 		return nil, err
 	}
 
-	// Get user email for sync checking
+	// 3. Get user email
 	userDetails, err := GetGoogleAccountDetailsFromContext(c)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user email: %w", err)
@@ -436,40 +434,54 @@ func GetFilesInFolderByID(c echo.Context, folderID string) (*PaginatedFilesRespo
 		return nil, errors.New("user email not found, please check access handling")
 	}
 
-	folderName, err := GetFolderPathByID(context.Background(), srv, folderID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get folder name: %v", err)
-	}
-	// Files are stored with userEmail prefix, so prepend it to folder path
-	satelliteFolderPath := userDetails.Email + "/" + folderName + "/"
-	o, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", satelliteFolderPath)
-	if err != nil {
-		userFriendlyError := satellite.FormatSatelliteError(err)
-		return nil, fmt.Errorf("%s", userFriendlyError)
-	}
-	sortSatelliteObjects(o)
+	ctx := c.Request().Context()
 
-	// Parse filter
+	// 4. Resolve folder path (same error handling)
+	folderName, err := GetFolderPathByID(ctx, srv, folderID)
+	if err != nil {
+		logger.Warn(ctx, "Failed to get folder path, using empty path",
+			logger.String("folder_id", folderID),
+			logger.ErrorField(err),
+		)
+		folderName = ""
+	}
+
+	// 5. Load synced objects → map (pre-allocated for better performance)
+	syncedObjects, err := database.SyncedObjectRepo.GetSyncedObjectsByUserAndBucket(userID, satellite.ReserveBucket_Drive, "google", "drive")
+	if err != nil {
+		logger.Warn(ctx, "Failed to get synced objects from database, continuing with empty map",
+			logger.String("user_id", userID),
+			logger.String("bucket", satellite.ReserveBucket_Drive),
+			logger.ErrorField(err))
+		syncedObjects = []repo.SyncedObject{}
+	}
+
+	syncedMap := make(map[string]bool, len(syncedObjects))
+	for _, obj := range syncedObjects {
+		syncedMap[obj.ObjectKey] = true
+	}
+
+	// 6. Parse filter
 	filter, err := ParseFilter(c.QueryParam("filter"))
 	if err != nil {
 		return nil, err
 	}
 
-	// Build query
-	query := fmt.Sprintf("'%s' in parents", folderID)
+	// 7. Build query
+	query := fmt.Sprintf("'%s' in parents and trashed=false", folderID)
 	if filter != nil && filter.Query != "" {
 		query = filter.Query
 	} else if filter != nil {
 		query = applyFiltersToQuery(query, filter)
 	}
 
-	// Set up pagination
+	// 8. Set up pagination
 	pageSize, pageToken := GetPaginationParams(filter)
 
-	// List all files within the folder
+	// 9. Fetch files (same API call, all required fields)
 	r, err := srv.Files.List().
 		Q(query).
-		Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").
+		Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension, shortcutDetails, owners)").
 		PageToken(pageToken).
 		PageSize(pageSize).
 		Do()
@@ -477,23 +489,41 @@ func GetFilesInFolderByID(c echo.Context, folderID string) (*PaginatedFilesRespo
 		return nil, fmt.Errorf("failed to retrieve files: %v", err)
 	}
 
-	var files []*FilesJSON
-	for _, i := range r.Files {
-		if i.MimeType != "application/vnd.google-apps.folder" {
-			i.Name = addGoogleAppsFileExtension(i.Name, i.MimeType)
-			// Check sync with userEmail prefix
-			filePath := userDetails.Email + "/" + path.Join(folderName, i.Name)
-			synced := isFileSyncedInObjects(o, filePath)
-			files = append(files, createFilesJSON(i, synced, ""))
-		} else {
-			// Check sync with userEmail prefix
-			folderPath := userDetails.Email + "/" + path.Join(folderName, i.Name) + "/"
-			synced := isFileSyncedInObjects(o, folderPath)
-			if synced {
-				synced, _ = checkFolderSyncStatus(c, i.Id)
-			}
+	// 10. Cache shortcut resolutions (OPTIMIZATION - reduces API calls)
+	shortcutCache := make(map[string]*drive.File)
 
-			files = append(files, createFilesJSON(i, synced, ""))
+	// Pre-allocate slice with capacity
+	files := make([]*FilesJSON, 0, len(r.Files))
+
+	for _, file := range r.Files {
+		// Resolve shortcut with cache (same behavior, but cached)
+		fileIDForSync, fileNameForSync, mimeTypeForSync := resolveShortcutCached(srv, file, shortcutCache, ctx)
+
+		// Determine if file is shared
+		isShared := len(file.Owners) > 0 && file.Owners[0].EmailAddress != userDetails.Email
+
+		if file.MimeType != "application/vnd.google-apps.folder" {
+			// For files: add extension first (same order as original)
+			file.Name = addGoogleAppsFileExtension(file.Name, file.MimeType)
+			// Check sync (fileNameForSync doesn't get extension, isFileSyncedWithMap adds it)
+			synced := isFileSyncedWithMap(syncedMap, fileIDForSync, fileNameForSync, mimeTypeForSync, userDetails.Email, folderName, isShared)
+			files = append(files, createFilesJSON(file, synced, ""))
+		} else {
+			// For folders: check if placeholder exists OR all nested files are synced
+			// This handles cases where placeholder wasn't created but all files were uploaded
+			synced := isFileSyncedWithMap(syncedMap, fileIDForSync, fileNameForSync, mimeTypeForSync, userDetails.Email, folderName, isShared)
+			// Build nested folder path for recursive check
+			nestedFolderPath := folderName
+			if nestedFolderPath != "" {
+				nestedFolderPath = fmt.Sprintf("%s/%s_%s", nestedFolderPath, fileIDForSync, fileNameForSync)
+			} else {
+				nestedFolderPath = fmt.Sprintf("%s_%s", fileIDForSync, fileNameForSync)
+			}
+			// Check if all nested files are synced (pass service and cache to avoid recreating them)
+			allNestedSynced := checkAllFilesInFolderSyncedRecursive(ctx, srv, fileIDForSync, syncedMap, userDetails.Email, nestedFolderPath, shortcutCache)
+			// Folder is synced if placeholder exists OR all nested files are synced
+			synced = synced || allNestedSynced
+			files = append(files, createFilesJSON(file, synced, ""))
 		}
 	}
 
@@ -505,56 +535,56 @@ func GetFilesInFolderByID(c echo.Context, folderID string) (*PaginatedFilesRespo
 	}, nil
 }
 
-// GetFilesInFolder retrieves all files within a specific folder from Google Drive
-func GetFolderNameAndFilesInFolderByID(c echo.Context, folderID string) (string, []*FilesJSON, error) {
+// GetFilesInFolder retrieves all files within a specific folder from Google Drive(need to comment out this function)
+// func GetFolderNameAndFilesInFolderByID(c echo.Context, folderID string) (string, []*FilesJSON, error) {
 
-	srv, err := getDriveService(c)
-	if err != nil {
-		return "", nil, err
-	}
-	folderName, err := getFolderNameByID(srv, folderID)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to get folder name: %v", err)
-	}
-	// List all files within the folder
-	r, err := srv.Files.List().Q(fmt.Sprintf("'%s' in parents", folderID)).Fields("files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").Do()
-	if err != nil {
-		return folderName, nil, fmt.Errorf("failed to retrieve files: %v", err)
-	}
+// 	srv, err := getDriveService(c)
+// 	if err != nil {
+// 		return "", nil, err
+// 	}
+// 	folderName, err := getFolderNameByID(srv, folderID)
+// 	if err != nil {
+// 		return "", nil, fmt.Errorf("failed to get folder name: %v", err)
+// 	}
+// 	// List all files within the folder
+// 	r, err := srv.Files.List().Q(fmt.Sprintf("'%s' in parents and trashed=false", folderID)).Fields("files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").Do()
+// 	if err != nil {
+// 		return folderName, nil, fmt.Errorf("failed to retrieve files: %v", err)
+// 	}
 
-	var files []*FilesJSON
-	for _, f := range r.Files {
-		files = append(files, createFilesJSON(f, false, ""))
-	}
+// 	var files []*FilesJSON
+// 	for _, f := range r.Files {
+// 		files = append(files, createFilesJSON(f, false, ""))
+// 	}
 
-	return folderName, files, nil
-}
-
-// Helper function to get folder ID by name
-func getFolderIDByName(srv *drive.Service, folderName string) (string, error) {
-
-	r, err := srv.Files.List().Q(fmt.Sprintf("name='%s' and mimeType='application/vnd.google-apps.folder'", folderName)).Fields("files(id)").Do()
-	if err != nil {
-		return "", fmt.Errorf("failed to retrieve folder ID: %v", err)
-	}
-	if len(r.Files) == 0 {
-		return "", fmt.Errorf("folder '%s' not found", folderName)
-	}
-	return r.Files[0].Id, nil
-}
+// 	return folderName, files, nil
+// }
 
 // Helper function to get folder ID by name
-func getFolderNameByID(srv *drive.Service, folderID string) (string, error) {
+// func getFolderIDByName(srv *drive.Service, folderName string) (string, error) {
 
-	r, err := srv.Files.List().Q(fmt.Sprintf("id='%s' and mimeType='application/vnd.google-apps.folder'", folderID)).Fields("files(name)").Do()
-	if err != nil {
-		return "", fmt.Errorf("failed to retrieve folder ID: %v", err)
-	}
-	if len(r.Files) == 0 {
-		return "", fmt.Errorf("folder '%s' not found", folderID)
-	}
-	return r.Files[0].Name, nil
-}
+// 	r, err := srv.Files.List().Q(fmt.Sprintf("name='%s' and mimeType='application/vnd.google-apps.folder'", folderName)).Fields("files(id)").Do()
+// 	if err != nil {
+// 		return "", fmt.Errorf("failed to retrieve folder ID: %v", err)
+// 	}
+// 	if len(r.Files) == 0 {
+// 		return "", fmt.Errorf("folder '%s' not found", folderName)
+// 	}
+// 	return r.Files[0].Id, nil
+// }
+
+// Helper function to get folder ID by name
+// func getFolderNameByID(srv *drive.Service, folderID string) (string, error) {
+
+// 	r, err := srv.Files.List().Q(fmt.Sprintf("id='%s' and mimeType='application/vnd.google-apps.folder' and trashed=false", folderID)).Fields("files(name)").Do()
+// 	if err != nil {
+// 		return "", fmt.Errorf("failed to retrieve folder ID: %v", err)
+// 	}
+// 	if len(r.Files) == 0 {
+// 		return "", fmt.Errorf("folder '%s' not found", folderID)
+// 	}
+// 	return r.Files[0].Name, nil
+// }
 
 // Helper function to determine file type based on MIME type
 func getFileType(mimeType string) string {
@@ -748,18 +778,19 @@ func buildDateModifiedQuery(dateModified string) string {
 func formatTime(t time.Time) string { return t.Format("2006-01-02T00:00:00.000Z") }
 
 // This function gets files only in root. It does not list files in folders
-func GetFileNamesInRoot(c echo.Context) (*PaginatedFilesResponse, error) {
-	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accessGrant == "" {
+func GetFileNamesInRoot(c echo.Context, database *db.PostgresDb, userID string) (*PaginatedFilesResponse, error) {
+	// 1. Validate access token
+	if c.Request().Header.Get("ACCESS_TOKEN") == "" {
 		return nil, errors.New("access token is missing")
 	}
 
+	// 2. Create Drive service ONCE
 	srv, err := getDriveService(c)
 	if err != nil {
 		return nil, err
 	}
 
-	// Get user email for sync checking
+	// 3. Get user email
 	userDetails, err := GetGoogleAccountDetailsFromContext(c)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user email: %w", err)
@@ -768,35 +799,44 @@ func GetFileNamesInRoot(c echo.Context) (*PaginatedFilesResponse, error) {
 		return nil, errors.New("user email not found, please check access handling")
 	}
 
-	// Get satellite objects for sync checking - use prefix to only get user's files
-	satelliteObjects, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", userDetails.Email+"/")
-	if err != nil {
-		userFriendlyError := satellite.FormatSatelliteError(err)
-		return nil, fmt.Errorf("%s", userFriendlyError)
-	}
-	sortSatelliteObjects(satelliteObjects)
+	ctx := c.Request().Context()
 
-	// Parse filter
+	// 4. Load synced objects → map (pre-allocated for better performance)
+	syncedObjects, err := database.SyncedObjectRepo.GetSyncedObjectsByUserAndBucket(userID, satellite.ReserveBucket_Drive, "google", "drive")
+	if err != nil {
+		logger.Warn(ctx, "Failed to get synced objects from database, continuing with empty map",
+			logger.String("user_id", userID),
+			logger.String("bucket", satellite.ReserveBucket_Drive),
+			logger.ErrorField(err))
+		syncedObjects = []repo.SyncedObject{}
+	}
+
+	syncedMap := make(map[string]bool, len(syncedObjects))
+	for _, obj := range syncedObjects {
+		syncedMap[obj.ObjectKey] = true
+	}
+
+	// 5. Parse filter
 	filter, err := ParseFilter(c.QueryParam("filter"))
 	if err != nil {
 		return nil, err
 	}
 
-	// Build query
-	query := "'root' in parents"
+	// 6. Build query
+	query := "'root' in parents and trashed=false"
 	if filter != nil && filter.Query != "" {
 		query = filter.Query
 	} else if filter != nil {
 		query = applyFiltersToQuery(query, filter)
 	}
 
-	// Set up pagination
+	// 7. Set up pagination
 	pageSize, pageToken := GetPaginationParams(filter)
 
-	// Fetch files from Google Drive
+	// 8. Fetch files from Google Drive (include shortcutDetails for shortcut resolution)
 	response, err := srv.Files.List().
 		Q(query).
-		Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").
+		Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension, shortcutDetails, owners)").
 		PageToken(pageToken).
 		PageSize(pageSize).
 		Do()
@@ -804,8 +844,11 @@ func GetFileNamesInRoot(c echo.Context) (*PaginatedFilesResponse, error) {
 		return nil, fmt.Errorf("failed to retrieve files: %w", err)
 	}
 
-	// Process files
-	files := processRootFiles(response.Files, satelliteObjects, c, userDetails.Email)
+	// 9. Cache shortcut resolutions (OPTIMIZATION - reduces API calls)
+	shortcutCache := make(map[string]*drive.File)
+
+	// 10. Process files using syncedMap (pass service to avoid recreating it)
+	files := processRootFilesWithMap(response.Files, srv, shortcutCache, syncedMap, ctx, c, userDetails.Email, database, userID)
 
 	return &PaginatedFilesResponse{
 		Files:         files,
@@ -815,17 +858,19 @@ func GetFileNamesInRoot(c echo.Context) (*PaginatedFilesResponse, error) {
 	}, nil
 }
 
-func GetSharedFiles(c echo.Context) (*PaginatedFilesResponse, error) {
-	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accessGrant == "" {
+func GetSharedFiles(c echo.Context, database *db.PostgresDb, userID string) (*PaginatedFilesResponse, error) {
+	// 1. Validate access token
+	if c.Request().Header.Get("ACCESS_TOKEN") == "" {
 		return nil, errors.New("access token not found")
 	}
+
+	// 2. Create Drive service ONCE
 	srv, err := getDriveService(c)
 	if err != nil {
 		return nil, err
 	}
 
-	// Get user email for sync checking
+	// 3. Get user email
 	userDetails, err := GetGoogleAccountDetailsFromContext(c)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user email: %w", err)
@@ -834,35 +879,44 @@ func GetSharedFiles(c echo.Context) (*PaginatedFilesResponse, error) {
 		return nil, errors.New("user email not found, please check access handling")
 	}
 
-	// Get satellite objects for sync checking - shared files are stored with userEmail prefix
-	satelliteObjects, err := satellite.GetFilesInFolder(context.Background(), accessGrant, "google-drive", userDetails.Email+"/shared with me/")
-	if err != nil {
-		userFriendlyError := satellite.FormatSatelliteError(err)
-		return nil, fmt.Errorf("%s", userFriendlyError)
-	}
-	sortSatelliteObjects(satelliteObjects)
+	ctx := c.Request().Context()
 
-	// Parse filter
+	// 4. Load synced objects → map (pre-allocated for better performance)
+	syncedObjects, err := database.SyncedObjectRepo.GetSyncedObjectsByUserAndBucket(userID, satellite.ReserveBucket_Drive, "google", "drive")
+	if err != nil {
+		logger.Warn(ctx, "Failed to get synced objects from database, continuing with empty map",
+			logger.String("user_id", userID),
+			logger.String("bucket", satellite.ReserveBucket_Drive),
+			logger.ErrorField(err))
+		syncedObjects = []repo.SyncedObject{}
+	}
+
+	syncedMap := make(map[string]bool, len(syncedObjects))
+	for _, obj := range syncedObjects {
+		syncedMap[obj.ObjectKey] = true
+	}
+
+	// 5. Parse filter
 	filter, err := ParseFilter(c.QueryParam("filter"))
 	if err != nil {
 		return nil, err
 	}
 
-	// Build query
-	query := "sharedWithMe=true"
+	// 6. Build query
+	query := "sharedWithMe=true and trashed=false"
 	if filter != nil && filter.Query != "" {
 		query = filter.Query
 	} else if filter != nil {
 		query = applyFiltersToQuery(query, filter)
 	}
 
-	// Set up pagination
+	// 7. Set up pagination
 	pageSize, pageToken := GetPaginationParams(filter)
 
-	// Fetch files from Google Drive
+	// 8. Fetch files from Google Drive (include shortcutDetails and owners)
 	response, err := srv.Files.List().
 		Q(query).
-		Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension)").
+		Fields("nextPageToken, files(id, name, mimeType, size, createdTime, fullFileExtension, fileExtension, shortcutDetails, owners)").
 		PageToken(pageToken).
 		PageSize(pageSize).
 		Do()
@@ -870,8 +924,11 @@ func GetSharedFiles(c echo.Context) (*PaginatedFilesResponse, error) {
 		return nil, fmt.Errorf("failed to retrieve shared files: %w", err)
 	}
 
-	// Process files
-	files := processSharedFiles(response.Files, satelliteObjects, c, userDetails.Email)
+	// 9. Cache shortcut resolutions (OPTIMIZATION - reduces API calls)
+	shortcutCache := make(map[string]*drive.File)
+
+	// 10. Process files using syncedMap (pass service to avoid recreating it)
+	files := processSharedFilesWithMap(response.Files, srv, shortcutCache, syncedMap, ctx, c, userDetails.Email, database, userID)
 
 	return &PaginatedFilesResponse{
 		Files:         files,
@@ -904,6 +961,11 @@ func ParseFilter(filterParam string) (*GoogleDriveFilter, error) {
 func applyFiltersToQuery(baseQuery string, filter *GoogleDriveFilter) string {
 	query := baseQuery
 
+	// Always exclude trashed files unless already in query
+	if !strings.Contains(query, "trashed") {
+		query += " and trashed=false"
+	}
+
 	// Apply folder/file filters
 	if filter.FolderOnly {
 		query += " and mimeType = 'application/vnd.google-apps.folder'"
@@ -935,16 +997,32 @@ func GetPaginationParams(filter *GoogleDriveFilter) (int64, string) {
 	return pageSize, pageToken
 }
 
-func processSharedFiles(driveFiles []*drive.File, satelliteObjects []uplink.Object, c echo.Context, userEmail string) []*FilesJSON {
-	var files []*FilesJSON
+// processSharedFilesWithMap processes shared files using synced_objects map instead of Satellite API
+// OPTIMIZED: Accepts Drive service to avoid recreating it for each file
+func processSharedFilesWithMap(driveFiles []*drive.File, srv *drive.Service, shortcutCache map[string]*drive.File, syncedMap map[string]bool, ctx context.Context, c echo.Context, userEmail string, database *db.PostgresDb, userID string) []*FilesJSON {
+	// Pre-allocate slice with capacity
+	files := make([]*FilesJSON, 0, len(driveFiles))
 
 	for _, file := range driveFiles {
-		fullPath := path.Join("shared with me", file.Name)
-		synced := isFileSynced(satelliteObjects, fullPath, file.MimeType, userEmail)
+		// Resolve shortcut with cache (OPTIMIZATION - reduces API calls)
+		fileIDForSync, fileNameForSync, mimeTypeForSync := resolveShortcutCached(srv, file, shortcutCache, ctx)
 
-		if file.MimeType == "application/vnd.google-apps.folder" && synced {
-			// Check if all files in folder are synced
-			synced, _ = checkFolderSyncStatus(c, file.Id)
+		// Determine if file is shared by checking owner (O(1), no extra API/DB calls)
+		// Note: Files from GetSharedFiles query are already shared, but we check owner for consistency
+		isShared := len(file.Owners) > 0 && file.Owners[0].EmailAddress != userEmail
+
+		// Check sync status for shared files - paths are: email/shared with me/filename
+		synced := isFileSyncedWithMap(syncedMap, fileIDForSync, fileNameForSync, mimeTypeForSync, userEmail, "", isShared)
+
+		// For folders, check if all nested files are synced
+		// If placeholder exists OR all nested files are synced, consider folder as synced
+		// This handles cases where placeholder wasn't created but all files were uploaded
+		if mimeTypeForSync == "application/vnd.google-apps.folder" {
+			folderPath := fmt.Sprintf("%s_%s", fileIDForSync, fileNameForSync)
+			// Pass service and cache to avoid recreating them (OPTIMIZATION)
+			allNestedSynced := checkAllFilesInFolderSyncedRecursive(ctx, srv, fileIDForSync, syncedMap, userEmail, folderPath, shortcutCache)
+			// Folder is synced if placeholder exists OR all nested files are synced
+			synced = synced || allNestedSynced
 		}
 
 		files = append(files, createFilesJSON(file, synced, ""))
@@ -953,15 +1031,26 @@ func processSharedFiles(driveFiles []*drive.File, satelliteObjects []uplink.Obje
 	return files
 }
 
-func processRootFiles(driveFiles []*drive.File, satelliteObjects []uplink.Object, c echo.Context, userEmail string) []*FilesJSON {
-	var files []*FilesJSON
+// processRootFilesWithMap processes root files using synced_objects map instead of Satellite API
+// OPTIMIZED: Accepts Drive service to avoid recreating it for each file
+func processRootFilesWithMap(driveFiles []*drive.File, srv *drive.Service, shortcutCache map[string]*drive.File, syncedMap map[string]bool, ctx context.Context, c echo.Context, userEmail string, database *db.PostgresDb, userID string) []*FilesJSON {
+	// Pre-allocate slice with capacity
+	files := make([]*FilesJSON, 0, len(driveFiles))
 
 	for _, file := range driveFiles {
-		synced := isFileSynced(satelliteObjects, file.Name, file.MimeType, userEmail)
+		// Resolve shortcut with cache (OPTIMIZATION - reduces API calls)
+		fileIDForSync, fileNameForSync, mimeTypeForSync := resolveShortcutCached(srv, file, shortcutCache, ctx)
 
-		if file.MimeType == "application/vnd.google-apps.folder" && synced {
-			// Check if all files in folder are synced
-			synced, _ = checkFolderSyncStatus(c, file.Id)
+		// Check sync status - scheduled processor uses fileID_filename format
+		synced := isFileSyncedWithMap(syncedMap, fileIDForSync, fileNameForSync, mimeTypeForSync, userEmail, "", false)
+		if mimeTypeForSync == "application/vnd.google-apps.folder" {
+			// For folders: check if placeholder exists OR all nested files are synced
+			// This handles cases where placeholder wasn't created but all files were uploaded
+			folderPath := fmt.Sprintf("%s_%s", fileIDForSync, fileNameForSync)
+			// Pass service and cache to avoid recreating them (OPTIMIZATION)
+			allNestedSynced := checkAllFilesInFolderSyncedRecursive(ctx, srv, fileIDForSync, syncedMap, userEmail, folderPath, shortcutCache)
+			// Folder is synced if placeholder exists OR all nested files are synced
+			synced = synced || allNestedSynced
 		}
 
 		files = append(files, createFilesJSON(file, synced, ""))
@@ -970,71 +1059,244 @@ func processRootFiles(driveFiles []*drive.File, satelliteObjects []uplink.Object
 	return files
 }
 
-// Helper function to check if a file is synced with proper path handling
-func isFileSynced(satelliteObjects []uplink.Object, filePath, mimeType, userEmail string) bool {
-	searchPath := filePath
-	if mimeType == "application/vnd.google-apps.folder" {
-		searchPath += "/"
+// checkAllFilesInFolderSyncedRecursive recursively checks if all files in a folder are synced
+// OPTIMIZED: Accepts Drive service and shortcut cache to avoid recreating them
+// This function handles pagination to check ALL files, not just the first page
+func checkAllFilesInFolderSyncedRecursive(ctx context.Context, srv *drive.Service, folderID string, syncedMap map[string]bool, userEmail string, folderPath string, shortcutCache map[string]*drive.File) bool {
+	pageToken := ""
+	for {
+		query := fmt.Sprintf("'%s' in parents and trashed=false", folderID)
+		listCall := srv.Files.List().Q(query).Fields("nextPageToken, files(id, name, mimeType, shortcutDetails, owners)")
+
+		if pageToken != "" {
+			listCall = listCall.PageToken(pageToken)
+		}
+
+		r, err := listCall.Do()
+		if err != nil {
+			logger.Warn(ctx, "Failed to list files in folder for sync check",
+				logger.String("folder_id", folderID),
+				logger.ErrorField(err))
+			return false
+		}
+
+		// Process files in this page
+		hasFiles := false
+		for _, file := range r.Files {
+			hasFiles = true
+			// Resolve shortcut with cache (OPTIMIZATION - reduces API calls)
+			fileIDForSync, fileNameForSync, mimeTypeForSync := resolveShortcutCached(srv, file, shortcutCache, ctx)
+
+			// Determine if file is shared by checking owner (O(1), no extra API/DB calls)
+			isShared := len(file.Owners) > 0 && file.Owners[0].EmailAddress != userEmail
+
+			// Use mimeTypeForSync (resolved) to check if it's a folder, not file.MimeType
+			if mimeTypeForSync != "application/vnd.google-apps.folder" {
+				// For files, isFileSyncedWithMap will add the extension
+				if !isFileSyncedWithMap(syncedMap, fileIDForSync, fileNameForSync, mimeTypeForSync, userEmail, folderPath, isShared) {
+					return false
+				}
+			} else {
+				// For nested folders: check if placeholder exists OR all nested files are synced
+				// This handles cases where placeholder wasn't created but all files were uploaded
+				placeholderExists := isFileSyncedWithMap(syncedMap, fileIDForSync, fileNameForSync, mimeTypeForSync, userEmail, folderPath, isShared)
+				// Build nested folder path for recursive check
+				nestedFolderPath := folderPath
+				if nestedFolderPath != "" {
+					nestedFolderPath = fmt.Sprintf("%s/%s_%s", nestedFolderPath, fileIDForSync, fileNameForSync)
+				} else {
+					nestedFolderPath = fmt.Sprintf("%s_%s", fileIDForSync, fileNameForSync)
+				}
+				// Recursively check if all nested files are synced (pass service and cache to avoid recreating them)
+				allNestedSynced := checkAllFilesInFolderSyncedRecursive(ctx, srv, fileIDForSync, syncedMap, userEmail, nestedFolderPath, shortcutCache)
+				// Nested folder is synced if placeholder exists OR all nested files are synced
+				if !placeholderExists && !allNestedSynced {
+					return false
+				}
+			}
+		}
+
+		// If no more pages and no files found, folder is empty and considered synced
+		if !hasFiles && r.NextPageToken == "" {
+			return true
+		}
+
+		if r.NextPageToken == "" {
+			break
+		}
+		pageToken = r.NextPageToken
+	}
+
+	return true
+}
+
+// resolveShortcutCached resolves a shortcut to its target file with caching to reduce API calls
+// Returns target file's ID, name, and MIME type (or shortcut's own if resolution fails)
+// Caches resolved shortcuts to avoid repeated API calls for the same target
+func resolveShortcutCached(srv *drive.Service, file *drive.File, cache map[string]*drive.File, ctx context.Context) (fileID, fileName, mimeType string) {
+	// Regular file - use its own ID
+	if file.MimeType != "application/vnd.google-apps.shortcut" {
+		return file.Id, file.Name, file.MimeType
+	}
+
+	// Shortcut without target - use shortcut ID
+	if file.ShortcutDetails == nil || file.ShortcutDetails.TargetId == "" {
+		return file.Id, file.Name, file.MimeType
+	}
+
+	// Check cache first (OPTIMIZATION - avoids repeated API calls)
+	if cached, ok := cache[file.ShortcutDetails.TargetId]; ok {
+		// Update file for display (IMPORTANT - same as original)
+		file.Name = cached.Name
+		file.MimeType = cached.MimeType
+		return cached.Id, cached.Name, cached.MimeType
+	}
+
+	// Get target file (same API call as original)
+	targetFile, err := srv.Files.Get(file.ShortcutDetails.TargetId).
+		Fields("id", "name", "mimeType").
+		Do()
+	if err != nil {
+		logger.Warn(ctx, "Failed to get target file for shortcut, using shortcut ID",
+			logger.String("shortcut_id", file.Id),
+			logger.String("shortcut_name", file.Name),
+			logger.String("target_id", file.ShortcutDetails.TargetId),
+			logger.ErrorField(err),
+		)
+		return file.Id, file.Name, file.MimeType
+	}
+
+	// Cache the result (OPTIMIZATION - future lookups will use cache)
+	cache[file.ShortcutDetails.TargetId] = targetFile
+
+	// Update file for display (IMPORTANT - same as original)
+	file.Name = targetFile.Name
+	file.MimeType = targetFile.MimeType
+
+	// Use target file's ID and name for sync check (same as original)
+	return targetFile.Id, targetFile.Name, targetFile.MimeType
+}
+
+func isFileSyncedWithMap(syncedMap map[string]bool, fileID, fileName, mimeType, userEmail string, folderPath string, isShared bool) bool {
+	// For Google Apps files, add extension (for regular files like PDFs, fileName already includes extension)
+	_, ext := getExportMimeTypeAndExtension(mimeType)
+
+	// Build base paths once (inline getAlternateBasePath to avoid function call overhead)
+	basePath := userEmail
+	if isShared {
+		basePath = fmt.Sprintf("%s/shared with me", userEmail)
+	}
+
+	var altBasePath string
+	if isShared {
+		altBasePath = userEmail
 	} else {
-		// Add appropriate extensions for Google Apps files
-		searchPath += addGoogleAppsFileExtension("", mimeType)
+		altBasePath = fmt.Sprintf("%s/shared with me", userEmail)
 	}
 
-	// Prepend userEmail to match upload path format
-	if userEmail != "" {
-		searchPath = userEmail + "/" + searchPath
+	// Build full path
+	var fullPath string
+	if folderPath != "" {
+		fullPath = fmt.Sprintf("%s/%s/%s_%s%s", basePath, folderPath, fileID, fileName, ext)
+	} else {
+		fullPath = fmt.Sprintf("%s/%s_%s%s", basePath, fileID, fileName, ext)
 	}
 
-	return isFileSyncedInObjects(satelliteObjects, searchPath)
+	if mimeType == "application/vnd.google-apps.folder" {
+		// For folders, check both with and without .file_placeholder
+		baseFolderPath := strings.TrimSuffix(fullPath, ext)
+		path1 := baseFolderPath + "/"
+		path2 := baseFolderPath + "/.file_placeholder"
+
+		// Also check root paths in case folder was uploaded as root folder
+		rootBasePath := fmt.Sprintf("%s/%s_%s", userEmail, fileID, fileName)
+		sharedRootBasePath := fmt.Sprintf("%s/shared with me/%s_%s", userEmail, fileID, fileName)
+
+		// For nested folders, also check the opposite path (regular vs shared)
+		if folderPath != "" {
+			altFullPath := fmt.Sprintf("%s/%s/%s_%s%s", altBasePath, folderPath, fileID, fileName, ext)
+			altBaseFolderPath := strings.TrimSuffix(altFullPath, ext)
+			path3 := altBaseFolderPath + "/"
+			path4 := altBaseFolderPath + "/.file_placeholder"
+
+			return syncedMap[path1] || syncedMap[path2] || syncedMap[path3] || syncedMap[path4] ||
+				syncedMap[rootBasePath+"/"] || syncedMap[rootBasePath+"/.file_placeholder"] ||
+				syncedMap[sharedRootBasePath+"/"] || syncedMap[sharedRootBasePath+"/.file_placeholder"]
+		}
+
+		// For root folders, also check alternate path (regular vs shared) and root paths
+		altRootBasePath := fmt.Sprintf("%s/%s_%s", altBasePath, fileID, fileName)
+		path3 := altRootBasePath + "/"
+		path4 := altRootBasePath + "/.file_placeholder"
+
+		return syncedMap[path1] || syncedMap[path2] || syncedMap[path3] || syncedMap[path4] ||
+			syncedMap[rootBasePath+"/"] || syncedMap[rootBasePath+"/.file_placeholder"] ||
+			syncedMap[sharedRootBasePath+"/"] || syncedMap[sharedRootBasePath+"/.file_placeholder"]
+	}
+
+	// For files in nested folders, also check the opposite path (regular vs shared)
+	if folderPath != "" {
+		altFullPath := fmt.Sprintf("%s/%s/%s_%s%s", altBasePath, folderPath, fileID, fileName, ext)
+		return syncedMap[fullPath] || syncedMap[altFullPath]
+	}
+
+	return syncedMap[fullPath]
 }
 
 func GetFolderPathByID(ctx context.Context, srv *drive.Service, folderID string) (string, error) {
 	var segments []string
 	for id := folderID; id != "root"; {
-		folder, err := srv.Files.Get(id).Fields("name,parents").Do()
+		folder, err := srv.Files.Get(id).Fields("id,name,parents").Do()
 		if err != nil {
 			return "", fmt.Errorf("unable to retrieve folder metadata: %v", err)
 		}
 		if folder.Name != "My Drive" {
-			segments = append([]string{folder.Name}, segments...)
+			segment := fmt.Sprintf("%s_%s", folder.Id, folder.Name)
+			segments = append([]string{segment}, segments...)
 		}
 		if len(folder.Parents) == 0 {
 			break
 		}
 		id = folder.Parents[0]
 	}
-	return path.Join(segments...), nil
+	return strings.Join(segments, "/"), nil
 }
 
 // GetFileAndPath downloads file from Google Drive by ID and returns path with content
 func GetFileAndPath(c echo.Context, id string) (string, []byte, error) {
+	path, _, data, err := GetFileAndPathWithMimeType(c, id)
+	return path, data, err
+}
+
+// GetFileAndPathWithMimeType downloads file from Google Drive by ID and returns path, MimeType, and content
+func GetFileAndPathWithMimeType(c echo.Context, id string) (string, string, []byte, error) {
 	srv, err := getDriveService(c)
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 
 	file, err := srv.Files.Get(id).Do()
 	if err != nil {
-		return "", nil, fmt.Errorf("unable to retrieve file metadata: %w", err)
+		return "", "", nil, fmt.Errorf("unable to retrieve file metadata: %w", err)
 	}
 
 	p, err := GetFolderPathByID(context.Background(), srv, file.Id)
 	if err != nil {
-		return "", nil, fmt.Errorf("unable to get file path: %w", err)
+		return "", "", nil, fmt.Errorf("unable to get file path: %w", err)
 	}
 
 	res, err := downloadFile(srv, id, file.MimeType, &p)
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	defer res.Body.Close()
 
 	data, err := io.ReadAll(res.Body)
 	if err != nil {
-		return "", nil, fmt.Errorf("unable to read file content: %w", err)
+		return "", "", nil, fmt.Errorf("unable to read file content: %w", err)
 	}
 
-	return p, data, nil
+	return p, file.MimeType, data, nil
 }
 
 // downloadFile handles both regular files and Google Docs export

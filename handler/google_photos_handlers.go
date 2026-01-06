@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -11,9 +12,12 @@ import (
 	"sync"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/db"
+	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
+	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 
 	"github.com/gphotosuploader/google-photos-api-client-go/v2/albums"
@@ -32,6 +36,19 @@ func HandleListGPhotosAlbums(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
+
+	// Extract access grant early for webhook processing
+	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accessGrant != "" {
+		go func() {
+			processCtx := context.Background()
+			database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+			if processErr := ProcessWebhookEvents(processCtx, database, accessGrant, 100); processErr != nil {
+				logger.Warn(processCtx, "Failed to process webhook events from listing route",
+					logger.ErrorField(processErr))
+			}
+		}()
+	}
 
 	client, err := google.NewGPhotosClient(c)
 	if err != nil {
@@ -78,6 +95,18 @@ func HandleListPhotosInAlbum(c echo.Context) error {
 			"error": "access token not found",
 		})
 	}
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+
+	// Extract access grant early for webhook processing
+	if accesGrant != "" {
+		go func() {
+			processCtx := context.Background()
+			if processErr := ProcessWebhookEvents(processCtx, database, accesGrant, 100); processErr != nil {
+				logger.Warn(processCtx, "Failed to process webhook events from listing route",
+					logger.ErrorField(processErr))
+			}
+		}()
+	}
 
 	id := c.Param("ID")
 
@@ -123,7 +152,7 @@ func HandleListPhotosInAlbum(c echo.Context) error {
 		})
 	}
 
-	// Get user email for sync checking
+	// Get user email and userID for sync checking
 	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
 	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
@@ -137,19 +166,39 @@ func HandleListPhotosInAlbum(c echo.Context) error {
 		})
 	}
 
-	listFromSatellite, listErr := satellite.ListObjectsWithPrefix(c.Request().Context(), accesGrant, "google-photos", userDetails.Email+"/")
-	if listErr != nil {
-		logger.Error(ctx, "Failed to list objects from satellite", logger.ErrorField(listErr))
-		userFriendlyError := satellite.FormatSatelliteError(listErr)
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": userFriendlyError,
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		logger.Error(ctx, "Failed to get userID from Satellite service", logger.ErrorField(err))
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"error": "authentication failed",
 		})
+	}
+
+	// Get synced objects from database and create map for fast lookup
+	syncedObjects, err := database.SyncedObjectRepo.GetSyncedObjectsByUserAndBucket(userID, satellite.ReserveBucket_Photos, "google", "photos")
+	if err != nil {
+		logger.Warn(ctx, "Failed to get synced objects from database, continuing with empty map",
+			logger.String("user_id", userID),
+			logger.String("bucket", satellite.ReserveBucket_Photos),
+			logger.ErrorField(err))
+		syncedObjects = []repo.SyncedObject{}
+	}
+
+	syncedMap := make(map[string]bool)
+	for _, obj := range syncedObjects {
+		syncedMap[obj.ObjectKey] = true
 	}
 
 	var photosRespJSON []*AllPhotosJSON
 	for _, v := range paginatedResponse.MediaItems {
-		// Check sync status using userEmail + "/" + filename to match upload path format
-		syncPath := userDetails.Email + "/" + v.Filename
+		// Check sync status - scheduled processor uses photoID_filename format, direct upload uses filename
+		// Format 1: Direct upload - email/filename
+		syncPath1 := userDetails.Email + "/" + v.Filename
+		// Format 2: Scheduled processor - email/photoID_filename
+		syncPath2 := fmt.Sprintf("%s/%s_%s", userDetails.Email, v.ID, v.Filename)
+
+		synced := syncedMap[syncPath1] || syncedMap[syncPath2]
+
 		photosRespJSON = append(photosRespJSON, &AllPhotosJSON{
 			Name:         v.Filename,
 			ID:           v.ID,
@@ -161,7 +210,7 @@ func HandleListPhotosInAlbum(c echo.Context) error {
 			CreationTime: v.MediaMetadata.CreationTime,
 			Width:        v.MediaMetadata.Width,
 			Height:       v.MediaMetadata.Height,
-			Synced:       listFromSatellite[syncPath],
+			Synced:       synced,
 		})
 	}
 
@@ -385,11 +434,13 @@ func HandleSendFileFromGooglePhotosToSatellite(c echo.Context) error {
 	g, ctx := errgroup.WithContext(c.Request().Context())
 	g.SetLimit(10)
 
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+
 	processedIDs, failedIDs := utils.NewLockedArray(), utils.NewLockedArray()
 	for _, id := range allIDs {
 		func(id string) {
 			g.Go(func() error {
-				err := uploadSingleFileFromPhotosToSatellite(ctx, client, id, accesGrant, userDetails.Email)
+				err := uploadSingleFileFromPhotosToSatellite(ctx, client, id, accesGrant, userDetails.Email, database)
 				if err != nil {
 					failedIDs.Add(id)
 					return nil
@@ -417,7 +468,7 @@ func HandleSendFileFromGooglePhotosToSatellite(c echo.Context) error {
 	})
 }
 
-func uploadSingleFileFromPhotosToSatellite(ctx context.Context, client *google.GPotosClient, id, accesGrant, userEmail string) error {
+func uploadSingleFileFromPhotosToSatellite(ctx context.Context, client *google.GPotosClient, id, accesGrant, userEmail string, database *db.PostgresDb) error {
 	item, err := client.GetPhoto(ctx, id)
 	if err != nil {
 		return err
@@ -436,8 +487,10 @@ func uploadSingleFileFromPhotosToSatellite(ctx context.Context, client *google.G
 	// Create path with user email directory: userEmail/filename
 	photoPath := userEmail + "/" + item.Filename
 
-	return satellite.UploadObject(context.Background(), accesGrant, "google-photos", photoPath, body)
-
+	// Use helper function to upload and sync to database
+	// Source and Type are automatically derived from bucket name (hardcoded)
+	// Source: "google", Type: "photos" (from bucket name "google-photos")
+	return UploadObjectAndSync(ctx, database, accesGrant, "google-photos", photoPath, body, userEmail)
 }
 
 func HandleSendAllFilesFromGooglePhotosToSatellite(c echo.Context) error {
@@ -495,8 +548,10 @@ func HandleSendAllFilesFromGooglePhotosToSatellite(c echo.Context) error {
 		})
 	}
 
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+
 	for _, p := range photosRespJSON {
-		err := uploadSingleFileFromPhotosToSatellite(c.Request().Context(), client, p.ID, accesGrant, userDetails.Email)
+		err := uploadSingleFileFromPhotosToSatellite(c.Request().Context(), client, p.ID, accesGrant, userDetails.Email, database)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),
@@ -546,6 +601,8 @@ func HandleSendListFilesFromGooglePhotosToSatellite(c echo.Context) error {
 		})
 	}
 
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+
 	var allIDs []string
 	if strings.Contains(c.Request().Header.Get(echo.HeaderContentType), echo.MIMEApplicationJSON) {
 		// Decode JSON array from request body
@@ -560,7 +617,7 @@ func HandleSendListFilesFromGooglePhotosToSatellite(c echo.Context) error {
 		allIDs = strings.Split(formIDs, ",")
 	}
 	for _, p := range allIDs {
-		err := uploadSingleFileFromPhotosToSatellite(c.Request().Context(), client, p, accesGrant, userDetails.Email)
+		err := uploadSingleFileFromPhotosToSatellite(c.Request().Context(), client, p, accesGrant, userDetails.Email, database)
 		if err != nil {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
 				"error": err.Error(),

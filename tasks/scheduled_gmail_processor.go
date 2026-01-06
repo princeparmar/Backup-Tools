@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/handler"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
@@ -47,16 +49,31 @@ func (g *GmailProcessor) Run(input ScheduledTaskProcessorInput) error {
 		return err
 	}
 
-	emailListFromBucket, err := satellite.ListObjectsWithPrefix(ctx, input.Task.StorxToken, satellite.ReserveBucket_Gmail, input.Task.LoginId+"/")
-	if err != nil && !strings.Contains(err.Error(), "object not found") {
+	// Get synced objects from database instead of listing from Satellite
+	// Uses common handler.GetSyncedObjectsWithPrefix which ensures bucket exists and queries database
+	emailListFromBucket, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Deps.Store, input.Task.StorxToken, satellite.ReserveBucket_Gmail, input.Task.LoginId+"/", input.Task.UserID, "google", "gmail")
+	if err != nil {
 		return g.handleError(input.Task, fmt.Sprintf("Failed to list existing emails: %s", err), nil)
 	}
 
-	return g.processEmails(input, gmailClient, emailListFromBucket)
+	err = g.processEmails(input, gmailClient, emailListFromBucket)
+	if err != nil {
+		return err
+	}
+
+	go func() {
+		processCtx := context.Background()
+		if processErr := handler.ProcessWebhookEvents(processCtx, input.Deps.Store, input.Task.StorxToken, 100); processErr != nil {
+			logger.Warn(processCtx, "Failed to process webhook events from auto-sync",
+				logger.ErrorField(processErr))
+		}
+	}()
+
+	return nil
 }
 
 func (g *GmailProcessor) setupStorage(task *repo.ScheduledTasks, bucket string) error {
-	return satellite.UploadObject(context.Background(), task.StorxToken, bucket, task.LoginId+"/.file_placeholder", nil)
+	return handler.UploadObjectAndSync(context.Background(), g.Deps.Store, task.StorxToken, bucket, task.LoginId+"/.file_placeholder", nil, task.UserID)
 }
 
 func (g *GmailProcessor) processEmails(input ScheduledTaskProcessorInput, client *google.GmailClient, existingEmails map[string]bool) error {
@@ -173,5 +190,5 @@ func (g *GmailProcessor) uploadEmail(input ScheduledTaskProcessorInput, message 
 	if err != nil {
 		return fmt.Errorf("failed to marshal: %v", err)
 	}
-	return satellite.UploadObject(context.TODO(), input.Task.StorxToken, bucket, messagePath, b)
+	return handler.UploadObjectAndSync(context.TODO(), input.Deps.Store, input.Task.StorxToken, bucket, messagePath, b, input.Task.UserID)
 }

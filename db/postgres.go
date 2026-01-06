@@ -11,6 +11,8 @@ type PostgresDb struct {
 	TaskRepo           *repo.TaskRepository
 	ScheduledTasksRepo *repo.ScheduledTasksRepository
 	AuthRepo           *repo.AuthRepository
+	SyncedObjectRepo   *repo.SyncedObjectRepository
+	WebhookEventRepo   *repo.WebhookEventRepository
 }
 
 func NewPostgresStore(dsn string, queryLogging bool) (*PostgresDb, error) {
@@ -26,6 +28,8 @@ func NewPostgresStore(dsn string, queryLogging bool) (*PostgresDb, error) {
 		TaskRepo:           repo.NewTaskRepository(db),
 		ScheduledTasksRepo: repo.NewScheduledTasksRepository(db),
 		AuthRepo:           repo.NewAuthRepository(db),
+		SyncedObjectRepo:   repo.NewSyncedObjectRepository(db),
+		WebhookEventRepo:   repo.NewWebhookEventRepository(db),
 	}, nil
 }
 
@@ -38,6 +42,7 @@ func (s *PostgresDb) Migrate() error {
 		&repo.TaskListingDB{},
 		&repo.ScheduledTasks{},
 		&repo.SyncedObject{},
+		&repo.WebhookEvent{},
 	); err != nil {
 		return err
 	}
