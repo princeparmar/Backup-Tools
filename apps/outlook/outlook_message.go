@@ -142,14 +142,14 @@ func NewOutlookMessage(message models.Messageable) *OutlookMessage {
 		internetMessageHeaders[stringValue(header.GetName())] = stringValue(header.GetValue())
 	}
 
-	// Safely extract From address
+	// Safe From address extraction
 	fromAddress := ""
 	if from := message.GetFrom(); from != nil && from.GetEmailAddress() != nil {
 		fromAddress = stringValue(from.GetEmailAddress().GetAddress())
 	}
 
-	// Safely extract Body content
-	bodyContent := ""
+	// Safe Body extraction
+	var bodyContent string
 	var contentType *models.BodyType
 	var odataType *string
 	if body := message.GetBody(); body != nil {

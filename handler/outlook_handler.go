@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 
@@ -24,6 +23,66 @@ import (
 type OutlookMessageListJSON struct {
 	utils.OutlookMinimalMessage
 	Synced bool `json:"synced"`
+}
+
+// OutlookService provides consolidated Outlook operations
+type OutlookService struct {
+	client      *outlook.OutlookClient
+	accessGrant string
+	userEmail   string
+}
+
+// NewOutlookService creates a new OutlookService instance
+func NewOutlookService(client *outlook.OutlookClient, accessGrant, userEmail string) *OutlookService {
+	return &OutlookService{
+		client:      client,
+		accessGrant: accessGrant,
+		userEmail:   userEmail,
+	}
+}
+
+// DownloadMessagesFromSatellite downloads messages from Satellite and inserts them into Outlook
+func (s *OutlookService) DownloadMessagesFromSatellite(ctx context.Context, keys []string) (*DownloadResult, error) {
+	processedIDs, failedIDs := utils.NewLockedArray(), utils.NewLockedArray()
+
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+
+		// Download file from Satellite using the key directly
+		data, err := satellite.DownloadObject(ctx, s.accessGrant, satellite.ReserveBucket_Outlook, key)
+		if err != nil {
+			logger.Error(ctx, "error downloading message from satellite",
+				logger.ErrorField(err), logger.String("key", key))
+			failedIDs.Add(key)
+			continue
+		}
+
+		// Parse the email data and insert into Outlook
+		var outlookMsg outlook.OutlookMessage
+		if err := json.Unmarshal(data, &outlookMsg); err != nil {
+			logger.Error(ctx, "error unmarshalling message data",
+				logger.ErrorField(err), logger.String("key", key))
+			failedIDs.Add(key)
+			continue
+		}
+
+		// Insert message into Outlook
+		if _, err := s.client.InsertMessage(&outlookMsg); err != nil {
+			logger.Error(ctx, "error inserting message into Outlook",
+				logger.ErrorField(err), logger.String("key", key))
+			failedIDs.Add(key)
+		} else {
+			processedIDs.Add(key)
+		}
+	}
+
+	return &DownloadResult{
+		ProcessedIDs: processedIDs.Get(),
+		FailedIDs:    failedIDs.Get(),
+		Message:      "all outlook messages processed",
+	}, nil
 }
 
 // getAccessTokens extracts and validates access tokens from request
@@ -56,11 +115,6 @@ func parseMessageIDs(c echo.Context) ([]string, error) {
 	// Clean and decode IDs
 	for i := range ids {
 		ids[i] = strings.TrimSpace(ids[i])
-
-		// URL decode
-		if urlDecoded, err := url.QueryUnescape(ids[i]); err == nil {
-			ids[i] = urlDecoded
-		}
 
 		// Base64 decode
 		if decoded, err := base64.StdEncoding.DecodeString(ids[i]); err == nil {
@@ -283,80 +337,47 @@ func HandleListOutlookMessagesToSatellite(c echo.Context) error {
 	})
 }
 
+// HandleOutlookDownloadAndInsert - downloads emails from Satellite and inserts them into Outlook.
+// It uses pagination to download emails in chunks of 10.
 func HandleOutlookDownloadAndInsert(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
+	// Get access token from header
 	accessGrant, accessToken, err := getAccessTokens(c)
 	if err != nil {
-		return err
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "access token not found",
+		})
 	}
 
+	// Validate and process request IDs
 	allIDs, err := parseMessageIDs(c)
 	if err != nil {
-		return err
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
-	if len(allIDs) == 0 || allIDs[0] == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "no keys provided")
-	}
-	if len(allIDs) > 10 {
-		return echo.NewHTTPError(http.StatusBadRequest, "maximum 10 keys allowed")
-	}
-
-	client, err := createOutlookClient(accessToken)
+	// Get Outlook client
+	outlookClient, err := createOutlookClient(accessToken)
 	if err != nil {
 		return err
 	}
 
-	return processMessagesConcurrently(c, allIDs, func(echoCtx echo.Context, key string) error {
-		// FIX: Use the echo context parameter
-		reqCtx := echoCtx.Request().Context()
-		userDetails, err := client.GetCurrentUser()
-		if err != nil {
-			logger.Error(reqCtx, "Failed to get user details", logger.ErrorField(err))
-			return err
-		}
+	// Create Outlook service and download messages
+	outlookService := NewOutlookService(outlookClient, accessGrant, "")
+	result, err := outlookService.DownloadMessagesFromSatellite(c.Request().Context(), allIDs)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error":         err.Error(),
+			"failed_ids":    result.FailedIDs,
+			"processed_ids": result.ProcessedIDs,
+		})
+	}
 
-		msg, err := client.GetMessage(key)
-		if err != nil {
-			logger.Error(reqCtx, "Failed to get message details for key generation",
-				logger.ErrorField(err), logger.String("key", key))
-			return err
-		}
-
-		message := &utils.OutlookMinimalMessage{
-			ID:               msg.ID,
-			Subject:          msg.Subject,
-			From:             msg.From,
-			ReceivedDateTime: msg.ReceivedDateTime,
-		}
-
-		satelliteKey := userDetails.Mail + "/" + utils.GenerateTitleFromOutlookMessage(message)
-		data, err := satellite.DownloadObject(reqCtx, accessGrant, satellite.ReserveBucket_Outlook, satelliteKey)
-		if err != nil {
-			logger.Error(reqCtx, "error downloading message from satellite",
-				logger.ErrorField(err), logger.String("key", key))
-			return err
-		}
-
-		var outlookMsg outlook.OutlookMessage
-		if err := json.Unmarshal(data, &outlookMsg); err != nil {
-			logger.Error(reqCtx, "error unmarshalling message data",
-				logger.ErrorField(err), logger.String("key", key))
-			return err
-		}
-
-		_, err = client.InsertMessage(&outlookMsg)
-		if err != nil {
-			logger.Error(reqCtx, "error inserting message into Outlook",
-				logger.ErrorField(err), logger.String("key", key))
-			return err
-		}
-
-		return nil
-	})
+	return c.JSON(http.StatusOK, result)
 }
 
 // processMessagesConcurrently handles concurrent message processing with error tracking

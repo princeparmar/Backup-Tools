@@ -589,6 +589,10 @@ func FormatSatelliteError(err error) string {
 	}
 	errMsg := err.Error()
 
+	if strings.Contains(errMsg, "uplink:") {
+		return errMsg
+	}
+
 	// Check for permission denied / unauthorized API credentials
 	if strings.Contains(errMsg, "permission denied") &&
 		strings.Contains(errMsg, "Unauthorized API credentials") {
