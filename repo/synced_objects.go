@@ -11,9 +11,9 @@ import (
 type SyncedObject struct {
 	gorm.GormModel
 
-	UserID     string    `json:"user_id" gorm:"not null;uniqueIndex:idx_synced_objects_unique"`
-	BucketName string    `json:"bucket_name" gorm:"not null;uniqueIndex:idx_synced_objects_unique"`
-	ObjectKey  string    `json:"object_key" gorm:"not null;type:varchar(1000);uniqueIndex:idx_synced_objects_unique"`
+	UserID     string    `json:"user_id" gorm:"not null"`
+	BucketName string    `json:"bucket_name" gorm:"not null"`
+	ObjectKey  string    `json:"object_key" gorm:"not null;type:varchar(1000)"`
 	SyncedAt   time.Time `json:"synced_at" gorm:"default:now()"`
 	Source     string    `json:"source" gorm:"not null;type:varchar(1000)"`
 	Type       string    `json:"type" gorm:"not null;type:varchar(1000)"`
@@ -40,7 +40,7 @@ func (r *SyncedObjectRepository) CreateSyncedObject(userID, bucketName, objectKe
 		SyncedAt:   time.Now(),
 	}
 
-	result := r.db.Where("user_id = ? AND bucket_name = ? AND object_key = ?",
+	result := r.db.Where("user_id = ? AND bucket_name = ? AND object_key = ? AND deleted_at IS NULL",
 		userID, bucketName, objectKey).
 		FirstOrCreate(&syncedObject)
 
