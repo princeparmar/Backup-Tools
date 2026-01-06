@@ -35,25 +35,24 @@ func HandleRootGoogleDriveFileNames(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	// Extract access grant early for webhook processing
-	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accessGrant != "" {
-		go func() {
-			processCtx := context.Background()
-			database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
-			if processErr := ProcessWebhookEvents(processCtx, database, accessGrant, 100); processErr != nil {
-				logger.Warn(processCtx, "Failed to process webhook events from listing route",
-					logger.ErrorField(processErr))
-			}
-		}()
-	}
-
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
 	userID, err := satellite.GetUserdetails(c)
 	if err != nil {
 		logger.Error(ctx, "Failed to get userID from Satellite service", logger.ErrorField(err))
 		return HandleGoogleDriveError(c, err, "authentication failed")
+	}
+
+	// Extract access grant early for webhook processing
+	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accessGrant != "" {
+		go func() {
+			processCtx := context.Background()
+			if processErr := ProcessWebhookEvents(processCtx, database, accessGrant, 100); processErr != nil {
+				logger.Warn(processCtx, "Failed to process webhook events from listing route",
+					logger.ErrorField(processErr))
+			}
+		}()
 	}
 
 	response, err := google.GetFileNamesInRoot(c, database, userID)
@@ -78,6 +77,17 @@ func HandleSharedGoogleDriveFileNames(c echo.Context) error {
 		return HandleGoogleDriveError(c, err, "authentication failed")
 	}
 
+	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accessGrant != "" {
+		go func() {
+			processCtx := context.Background()
+			if processErr := ProcessWebhookEvents(processCtx, database, accessGrant, 100); processErr != nil {
+				logger.Warn(processCtx, "Failed to process webhook events from listing route",
+					logger.ErrorField(processErr))
+			}
+		}()
+	}
+
 	fileNames, err := google.GetSharedFiles(c, database, userID)
 	if err != nil {
 		return HandleGoogleDriveError(c, err, "retrieve shared files from Google Drive")
@@ -93,6 +103,16 @@ func HandleListAllFolderFilesByID(c echo.Context) error {
 
 	// Get database and userID for synced_objects query
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accessGrant != "" {
+		go func() {
+			processCtx := context.Background()
+			if processErr := ProcessWebhookEvents(processCtx, database, accessGrant, 100); processErr != nil {
+				logger.Warn(processCtx, "Failed to process webhook events from listing route",
+					logger.ErrorField(processErr))
+			}
+		}()
+	}
 	userID, err := satellite.GetUserdetails(c)
 	if err != nil {
 		logger.Error(ctx, "Failed to get userID from Satellite service", logger.ErrorField(err))

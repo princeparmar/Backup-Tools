@@ -435,69 +435,71 @@ func (g *GoogleDriveProcessor) discoverNestedFiles(ctx context.Context, service 
 
 // isFileInSharedContext determines if a file should be treated as shared
 func (g *GoogleDriveProcessor) isFileInSharedContext(ctx context.Context, service *drive.Service, file *drive.File, currentUserEmail string, cache map[string]bool) bool {
-	if file.Shared {
-		return true
+	userOwnsFile := len(file.Owners) > 0 && file.Owners[0].EmailAddress == currentUserEmail
+
+	if userOwnsFile {
+		current := file
+		for {
+			select {
+			case <-ctx.Done():
+				return false
+			default:
+			}
+
+			if len(current.Parents) == 0 {
+				return false
+			}
+
+			foundNext := false
+			for _, parentID := range current.Parents {
+				if parentID == "root" {
+					continue
+				}
+
+				cacheKey := parentID + "|" + currentUserEmail
+
+				if cached, ok := cache[cacheKey]; ok {
+					if cached {
+						return true
+					}
+					continue
+				}
+
+				parent, err := service.Files.Get(parentID).
+					Context(ctx).
+					Fields("id", "parents", "owners", "shared").
+					Do()
+				if err != nil {
+					continue
+				}
+
+				isParentShared := len(parent.Owners) > 0 && parent.Owners[0].EmailAddress != currentUserEmail
+
+				cache[cacheKey] = isParentShared
+
+				if isParentShared {
+					return true
+				}
+
+				if len(parent.Parents) > 0 {
+					current = parent
+					foundNext = true
+					break
+				}
+			}
+
+			if !foundNext {
+				return false
+			}
+		}
 	}
 
+	// SECOND: If file is NOT owned by current user, it IS "shared with me"
 	if len(file.Owners) > 0 && file.Owners[0].EmailAddress != currentUserEmail {
 		return true
 	}
 
-	current := file
-	for {
-		select {
-		case <-ctx.Done():
-			return false
-		default:
-		}
-
-		if len(current.Parents) == 0 {
-			return false
-		}
-
-		foundNext := false
-		for _, parentID := range current.Parents {
-			if parentID == "root" {
-				continue
-			}
-
-			cacheKey := parentID + "|" + currentUserEmail
-
-			if cached, ok := cache[cacheKey]; ok {
-				if cached {
-					return true
-				}
-				continue
-			}
-
-			parent, err := service.Files.Get(parentID).
-				Context(ctx).
-				Fields("id", "parents", "owners", "shared").
-				Do()
-			if err != nil {
-				continue
-			}
-
-			// Check if parent is shared using Drive's shared flag or owner check
-			isParentShared := parent.Shared || (len(parent.Owners) > 0 && parent.Owners[0].EmailAddress != currentUserEmail)
-
-			cache[cacheKey] = isParentShared
-
-			if isParentShared {
-				return true
-			}
-
-			if len(parent.Parents) > 0 {
-				current = parent
-				foundNext = true
-				break
-			}
-		}
-
-		if !foundNext {
-			return false
-		}
-	}
+	return file.Shared
 }
 
 // buildParentFolderPath recursively builds the full path from root to the given folder

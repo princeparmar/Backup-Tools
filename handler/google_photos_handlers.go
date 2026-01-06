@@ -95,12 +95,12 @@ func HandleListPhotosInAlbum(c echo.Context) error {
 			"error": "access token not found",
 		})
 	}
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
 	// Extract access grant early for webhook processing
 	if accesGrant != "" {
 		go func() {
 			processCtx := context.Background()
-			database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 			if processErr := ProcessWebhookEvents(processCtx, database, accesGrant, 100); processErr != nil {
 				logger.Warn(processCtx, "Failed to process webhook events from listing route",
 					logger.ErrorField(processErr))
@@ -165,9 +165,6 @@ func HandleListPhotosInAlbum(c echo.Context) error {
 			"error": "user email not found, please check access handling",
 		})
 	}
-
-	// Get database and userID for synced_objects query
-	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
 	userID, err := satellite.GetUserdetails(c)
 	if err != nil {

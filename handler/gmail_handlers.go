@@ -234,22 +234,22 @@ func validateAndProcessRequestIDs(c echo.Context) ([]string, error) {
 	return allIDs, nil
 }
 
-// Helper function to setup Gmail handler with all common validations
-func setupGmailHandler(c echo.Context) (string, *google.GmailClient, error) {
-	// Validate access token
-	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accessGrant == "" {
-		return "", nil, errors.New("access token not found")
-	}
+// // Helper function to setup Gmail handler with all common validations
+// func setupGmailHandler(c echo.Context) (string, *google.GmailClient, error) {
+// 	// Validate access token
+// 	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+// 	if accessGrant == "" {
+// 		return "", nil, errors.New("access token not found")
+// 	}
 
-	// Create Gmail client
-	gmailClient, err := google.NewGmailClient(c)
-	if err != nil {
-		return "", nil, err
-	}
+// 	// Create Gmail client
+// 	gmailClient, err := google.NewGmailClient(c)
+// 	if err != nil {
+// 		return "", nil, err
+// 	}
 
-	return accessGrant, gmailClient, nil
-}
+// 	return accessGrant, gmailClient, nil
+// }
 
 // func HandleListGmailMessagesToSatellite(c echo.Context) error {
 // 	ctx := c.Request().Context()
