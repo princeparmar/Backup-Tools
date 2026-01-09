@@ -119,6 +119,7 @@ func StartServer(db *db.PostgresDb, address string) {
 	google.GET("/photos-list-photos-in-album/:ID", handler.HandleListPhotosInAlbum)
 	google.GET("/photos-list-all", handler.HandleListAllPhotos)
 	google.GET("/satellite-to-photos/:name", handler.HandleSendFileFromSatelliteToGooglePhotos)
+	google.POST("/satellite-to-photos", handler.HandleGooglePhotosRestore)
 	google.POST("/photos-to-satellite", handler.HandleSendFileFromGooglePhotosToSatellite)
 	google.POST("/all-photos-from-album-to-satellite", handler.HandleSendAllFilesFromGooglePhotosToSatellite)
 	google.POST("/list-photos-to-satellite", handler.HandleSendListFilesFromGooglePhotosToSatellite)
