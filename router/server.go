@@ -129,6 +129,9 @@ func StartServer(db *db.PostgresDb, address string) {
 	// google.POST("/gmail-list-to-satellite", handler.HandleListGmailMessagesToSatellite) // used by desktop app to sync emails to satellite.
 	google.GET("/query-messages", handler.HandleGmailGetThreadsIDsControlled) // used by desktop app to show email list on backup tools UI.
 
+	// Google Drive restore endpoint (similar to Gmail and Outlook)
+	google.POST("/satellite-to-drive", handler.HandleGoogleDriveDownloadAndRestore)
+
 	// Google Cloud Storage
 	google.GET("/storage-list-buckets/:projectName", handler.HandleStorageListBuckets)
 	google.GET("/storage-list-items/:bucketName", handler.HandleStorageListObjects)

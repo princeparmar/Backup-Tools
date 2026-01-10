@@ -2,6 +2,7 @@ package crons
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/handler"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
@@ -173,7 +175,7 @@ func (g *GoogleDriveProcessor) processFiles(ctx context.Context, input Scheduled
 
 		// Get the full drive.File (same as direct upload) to ensure consistent filename generation
 		// Include owners, parents, shortcutDetails, and shared fields to check if file is shared, get parent folder info, and resolve shortcuts
-		file, err := service.Files.Get(fileID).Fields("id", "name", "mimeType", "size", "createdTime", "modifiedTime", "fileExtension", "owners", "parents", "shortcutDetails", "shared").Do()
+		file, err := service.Files.Get(fileID).Fields("id", "name", "mimeType", "size", "createdTime", "modifiedTime", "fileExtension", "owners", "parents", "shortcutDetails", "shared", "driveId", "starred", "permissions").Do()
 		if err != nil {
 			failedFiles, failedCount = g.trackFailure(fileID, err, failedFiles, failedCount, input)
 			continue
@@ -286,7 +288,13 @@ func (g *GoogleDriveProcessor) processFiles(ctx context.Context, input Scheduled
 			continue
 		}
 
-		if err := g.uploadFile(ctx, input, service, file, filePath); err != nil {
+		// Determine LocationType
+		locationType := "MY_DRIVE"
+		if file.DriveId != "" {
+			locationType = "SHARED_DRIVE"
+		}
+
+		if err := g.uploadFile(ctx, input, service, file, filePath, locationType); err != nil {
 			failedFiles, failedCount = g.trackFailure(fileID, err, failedFiles, failedCount, input)
 		} else {
 			// Mark file as existing to prevent duplicate uploads in same run
@@ -310,7 +318,7 @@ func (g *GoogleDriveProcessor) trackFailure(fileID string, err error, failedFile
 	return failedFiles, failedCount
 }
 
-func (g *GoogleDriveProcessor) uploadFile(ctx context.Context, input ScheduledTaskProcessorInput, service *drive.Service, file *drive.File, filePath string) error {
+func (g *GoogleDriveProcessor) uploadFile(ctx context.Context, input ScheduledTaskProcessorInput, service *drive.Service, file *drive.File, filePath string, locationType string) error {
 	var resp *http.Response
 	var err error
 
@@ -342,10 +350,50 @@ func (g *GoogleDriveProcessor) uploadFile(ctx context.Context, input ScheduledTa
 		return fmt.Errorf("failed to read file data: %v", err)
 	}
 
-	// Upload file content to satellite and sync to database
-	// Metadata is handled by the backend via Google Drive API and database tracking
-	// No need to upload separate metadata.json file
-	return handler.UploadObjectAndSync(ctx, input.Deps.Store, input.Task.StorxToken, satellite.ReserveBucket_Drive, filePath, fileData, input.Task.UserID)
+	// Map permissions
+	var permissions []google.DrivePermission
+	for _, p := range file.Permissions {
+		permissions = append(permissions, google.DrivePermission{
+			Type:         p.Type,
+			Role:         p.Role,
+			EmailAddress: p.EmailAddress,
+		})
+	}
+
+	// Determine file type
+	fileType := "file"
+	if file.MimeType == "application/vnd.google-apps.folder" {
+		fileType = "folder"
+	}
+
+	// Create metadata object
+	metadata := google.DriveFileMetadata{
+		Key:          filePath,
+		Type:         fileType,
+		Name:         file.Name,
+		MimeType:     file.MimeType,
+		Parents:      file.Parents,
+		DriveID:      file.DriveId,
+		LocationType: locationType,
+		Permissions:  permissions,
+		ModifiedTime: file.ModifiedTime,
+		Starred:      file.Starred,
+	}
+
+	// Create backup item
+	backupItem := google.DriveBackupItem{
+		Metadata: metadata,
+		Content:  fileData,
+	}
+
+	jsonData, err := json.Marshal(backupItem)
+	if err != nil {
+		return fmt.Errorf("failed to marshal drive file: %v", err)
+	}
+
+	// Upload JSON content to satellite and sync to database
+	// Metadata is now included in the JSON object
+	return handler.UploadObjectAndSync(ctx, input.Deps.Store, input.Task.StorxToken, satellite.ReserveBucket_Drive, filePath, jsonData, input.Task.UserID)
 }
 
 func (g *GoogleDriveProcessor) getExportMimeType(mimeType string) string {
