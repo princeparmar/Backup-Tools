@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -366,16 +367,69 @@ func HandleOutlookDownloadAndInsert(c echo.Context) error {
 		return err
 	}
 
+	// Get user details for notification
+	userDetails, err := outlookClient.GetCurrentUser()
+	if err != nil {
+		logger.Warn(ctx, "Failed to get user details for notification", logger.ErrorField(err))
+		userDetails = &outlook.OutlookUser{}
+	}
+
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		logger.Error(ctx, "Failed to get userID from Satellite service", logger.ErrorField(err))
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "authentication failed"})
+	}
+
+	// Send start notification
+	priority := "normal"
+	startData := map[string]interface{}{
+		"event":      "outlook_restore_started",
+		"level":      2,
+		"login_id":   userDetails.Mail,
+		"method":     "outlook",
+		"type":       "restore",
+		"timestamp":  "now",
+		"item_count": len(allIDs),
+	}
+	satellite.SendNotificationAsync(ctx, userID, "Outlook Restore Started", fmt.Sprintf("Restore of %d messages for %s has started", len(allIDs), userDetails.Mail), &priority, startData, nil)
+
 	// Create Outlook service and download messages
 	outlookService := NewOutlookService(outlookClient, accessGrant, "")
 	result, err := outlookService.DownloadMessagesFromSatellite(c.Request().Context(), allIDs)
 	if err != nil {
+		// Send failure notification
+		failPriority := "high"
+		failData := map[string]interface{}{
+			"event":     "outlook_restore_failed",
+			"level":     4,
+			"login_id":  userDetails.Mail,
+			"method":    "outlook",
+			"type":      "restore",
+			"timestamp": "now",
+			"error":     err.Error(),
+		}
+		satellite.SendNotificationAsync(context.Background(), userID, "Outlook Restore Failed", fmt.Sprintf("Restore for %s failed: %v", userDetails.Mail, err), &failPriority, failData, nil)
+
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error":         err.Error(),
 			"failed_ids":    result.FailedIDs,
 			"processed_ids": result.ProcessedIDs,
 		})
 	}
+
+	// Send completion notification
+	compPriority := "normal"
+	compData := map[string]interface{}{
+		"event":           "outlook_restore_completed",
+		"level":           2,
+		"login_id":        userDetails.Mail,
+		"method":          "outlook",
+		"type":            "restore",
+		"timestamp":       "now",
+		"processed_count": len(result.ProcessedIDs),
+		"failed_count":    len(result.FailedIDs),
+	}
+	satellite.SendNotificationAsync(ctx, userID, "Outlook Restore Completed", fmt.Sprintf("Restore for %s completed. %d succeeded, %d failed", userDetails.Mail, len(result.ProcessedIDs), len(result.FailedIDs)), &compPriority, compData, nil)
 
 	return c.JSON(http.StatusOK, result)
 }

@@ -741,6 +741,25 @@ func HandleGoogleDriveDownloadAndRestore(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, map[string]string{"error": "failed to get user email"})
 	}
 
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		logger.Error(ctx, "Failed to get userID from Satellite service", logger.ErrorField(err))
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "authentication failed"})
+	}
+
+	// Send start notification
+	priority := "normal"
+	startData := map[string]interface{}{
+		"event":      "google_drive_restore_started",
+		"level":      2,
+		"login_id":   userDetails.Email,
+		"method":     "google_drive",
+		"type":       "restore",
+		"timestamp":  "now",
+		"item_count": len(allKeys),
+	}
+	satellite.SendNotificationAsync(ctx, userID, "Google Drive Restore Started", fmt.Sprintf("Restore of %d items for %s has started", len(allKeys), userDetails.Email), &priority, startData, nil)
+
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(10)
 
@@ -776,12 +795,39 @@ func HandleGoogleDriveDownloadAndRestore(c echo.Context) error {
 	}
 
 	if err := g.Wait(); err != nil {
+		// Send failure notification
+		failPriority := "high"
+		failData := map[string]interface{}{
+			"event":     "google_drive_restore_failed",
+			"level":     4,
+			"login_id":  userDetails.Email,
+			"method":    "google_drive",
+			"type":      "restore",
+			"timestamp": "now",
+			"error":     err.Error(),
+		}
+		satellite.SendNotificationAsync(context.Background(), userID, "Google Drive Restore Failed", fmt.Sprintf("Restore for %s failed: %v", userDetails.Email, err), &failPriority, failData, nil)
+
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"error":          err.Error(),
 			"failed_keys":    failedKeys.Get(),
 			"processed_keys": processedKeys.Get(),
 		})
 	}
+
+	// Send completion notification
+	compPriority := "normal"
+	compData := map[string]interface{}{
+		"event":           "google_drive_restore_completed",
+		"level":           2,
+		"login_id":        userDetails.Email,
+		"method":          "google_drive",
+		"type":            "restore",
+		"timestamp":       "now",
+		"processed_count": len(processedKeys.Get()),
+		"failed_count":    len(failedKeys.Get()),
+	}
+	satellite.SendNotificationAsync(ctx, userID, "Google Drive Restore Completed", fmt.Sprintf("Restore for %s completed. %d succeeded, %d failed", userDetails.Email, len(processedKeys.Get()), len(failedKeys.Get())), &compPriority, compData, nil)
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message":        "Google Drive restore completed",

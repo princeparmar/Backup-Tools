@@ -1005,14 +1005,60 @@ func HandleGooglePhotosRestore(c echo.Context) error {
 		})
 	}
 
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		logger.Error(ctx, "Failed to get userID from Satellite service", logger.ErrorField(err))
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "authentication failed"})
+	}
+
+	// Send start notification
+	priority := "normal"
+	startData := map[string]interface{}{
+		"event":      "google_photos_restore_started",
+		"level":      2,
+		"login_id":   userDetails.Email,
+		"method":     "google_photos",
+		"type":       "restore",
+		"timestamp":  "now",
+		"item_count": len(allKeys),
+	}
+	satellite.SendNotificationAsync(ctx, userID, "Google Photos Restore Started", fmt.Sprintf("Restore of %d photos for %s has started", len(allKeys), userDetails.Email), &priority, startData, nil)
+
 	// 5. Create Photos Service and Restore
 	photosService := NewPhotosService(client, accessGrant, userDetails.Email)
 	result, err := photosService.RestorePhotosFromSatellite(ctx, allKeys)
 	if err != nil {
+		// Send failure notification
+		failPriority := "high"
+		failData := map[string]interface{}{
+			"event":     "google_photos_restore_failed",
+			"level":     4,
+			"login_id":  userDetails.Email,
+			"method":    "google_photos",
+			"type":      "restore",
+			"timestamp": "now",
+			"error":     err.Error(),
+		}
+		satellite.SendNotificationAsync(context.Background(), userID, "Google Photos Restore Failed", fmt.Sprintf("Restore for %s failed: %v", userDetails.Email, err), &failPriority, failData, nil)
+
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
+
+	// Send completion notification
+	compPriority := "normal"
+	compData := map[string]interface{}{
+		"event":           "google_photos_restore_completed",
+		"level":           2,
+		"login_id":        userDetails.Email,
+		"method":          "google_photos",
+		"type":            "restore",
+		"timestamp":       "now",
+		"processed_count": len(result.ProcessedIDs),
+		"failed_count":    len(result.FailedIDs),
+	}
+	satellite.SendNotificationAsync(ctx, userID, "Google Photos Restore Completed", fmt.Sprintf("Restore for %s completed. %d succeeded, %d failed", userDetails.Email, len(result.ProcessedIDs), len(result.FailedIDs)), &compPriority, compData, nil)
 
 	return c.JSON(http.StatusOK, result)
 }

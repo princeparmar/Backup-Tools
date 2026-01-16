@@ -428,16 +428,68 @@ func HandleGmailDownloadAndInsert(c echo.Context) error {
 		return err
 	}
 
+	// Get user details for notification
+	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
+	if err != nil || userDetails.Email == "" {
+		logger.Warn(ctx, "Failed to get user email for notification", logger.ErrorField(err))
+	}
+
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		logger.Error(ctx, "Failed to get userID from Satellite service", logger.ErrorField(err))
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "authentication failed"})
+	}
+
+	// Send start notification
+	priority := "normal"
+	startData := map[string]interface{}{
+		"event":      "gmail_restore_started",
+		"level":      2,
+		"login_id":   userDetails.Email,
+		"method":     "gmail",
+		"type":       "restore",
+		"timestamp":  "now",
+		"item_count": len(allIDs),
+	}
+	satellite.SendNotificationAsync(ctx, userID, "Gmail Restore Started", fmt.Sprintf("Restore of %d messages for %s has started", len(allIDs), userDetails.Email), &priority, startData, nil)
+
 	// Create Gmail service and download messages
 	gmailService := NewGmailService(gmailClient, accessGrant, "")
 	result, err := gmailService.DownloadMessagesFromSatellite(c.Request().Context(), allIDs)
 	if err != nil {
+		// Send failure notification
+		failPriority := "high"
+		failData := map[string]interface{}{
+			"event":     "gmail_restore_failed",
+			"level":     4,
+			"login_id":  userDetails.Email,
+			"method":    "gmail",
+			"type":      "restore",
+			"timestamp": "now",
+			"error":     err.Error(),
+		}
+		satellite.SendNotificationAsync(context.Background(), userID, "Gmail Restore Failed", fmt.Sprintf("Restore for %s failed: %v", userDetails.Email, err), &failPriority, failData, nil)
+
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error":         err.Error(),
 			"failed_ids":    result.FailedIDs,
 			"processed_ids": result.ProcessedIDs,
 		})
 	}
+
+	// Send completion notification
+	compPriority := "normal"
+	compData := map[string]interface{}{
+		"event":           "gmail_restore_completed",
+		"level":           2,
+		"login_id":        userDetails.Email,
+		"method":          "gmail",
+		"type":            "restore",
+		"timestamp":       "now",
+		"processed_count": len(result.ProcessedIDs),
+		"failed_count":    len(result.FailedIDs),
+	}
+	satellite.SendNotificationAsync(ctx, userID, "Gmail Restore Completed", fmt.Sprintf("Restore for %s completed. %d succeeded, %d failed", userDetails.Email, len(result.ProcessedIDs), len(result.FailedIDs)), &compPriority, compData, nil)
 
 	return c.JSON(http.StatusOK, result)
 }
