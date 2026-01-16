@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/db"
@@ -1358,6 +1359,22 @@ type RestoreContext struct {
 	LocationType string
 }
 
+var (
+	GlobalFolderCache  sync.Map
+	folderCreationLock sync.Mutex
+	folderLocks        = make(map[string]*sync.Mutex)
+)
+
+// getFolderLock returns a mutex for a specific folder key, creating it if necessary
+func getFolderLock(key string) *sync.Mutex {
+	folderCreationLock.Lock()
+	defer folderCreationLock.Unlock()
+	if _, ok := folderLocks[key]; !ok {
+		folderLocks[key] = &sync.Mutex{}
+	}
+	return folderLocks[key]
+}
+
 func NewRestoreContext(srv *drive.Service, userEmail string) *RestoreContext {
 	return &RestoreContext{
 		Service:      srv,
@@ -1374,7 +1391,6 @@ func (rc *RestoreContext) ValidateAccess(ctx context.Context, metadata *DriveFil
 			return fmt.Errorf("shared drive ID is missing")
 		}
 		if _, err := rc.Service.Drives.Get(metadata.DriveID).Do(); err != nil {
-			logger.Warn(ctx, "User lost access to shared drive, fallback to My Drive", logger.String("drive_id", metadata.DriveID), logger.ErrorField(err))
 			rc.LocationType = "MY_DRIVE"
 			rc.DriveID = ""
 		} else {
@@ -1389,35 +1405,68 @@ func (rc *RestoreContext) ValidateAccess(ctx context.Context, metadata *DriveFil
 	return nil
 }
 
+// isOwnedByUser checks if the user is one of the owners of the file
+func isOwnedByUser(owners []*drive.User, email string) bool {
+	for _, o := range owners {
+		if strings.EqualFold(o.EmailAddress, email) {
+			return true
+		}
+	}
+	return false
+}
+
 func parseIDName(segment string) (string, string) {
 	parts := strings.SplitN(segment, "_", 2)
-	if len(parts) == 2 {
-		return parts[0], parts[1]
+	if len(parts) != 2 {
+		return "", segment
 	}
-	return "", segment
+
+	id, name := parts[0], parts[1]
+
+	subParts := strings.SplitN(name, "_", 2)
+	if len(subParts) == 2 {
+		potentialID := subParts[0]
+		if !strings.Contains(potentialID, " ") && len(potentialID) > 10 {
+			return potentialID, subParts[1]
+		}
+	}
+
+	return id, name
 }
 
 func (rc *RestoreContext) GetOrCreateFolder(ctx context.Context, folderPath, parentID string) (string, error) {
-	cacheKey := parentID + ":" + folderPath
+	folderName := filepath.Base(folderPath)
+	cacheKey := parentID + ":" + folderName
 	if id, ok := rc.FolderCache[cacheKey]; ok {
 		return id, nil
 	}
 
-	folderName := filepath.Base(folderPath)
-	id, name := parseIDName(folderName)
+	mu := getFolderLock(cacheKey)
+	mu.Lock()
+	defer mu.Unlock()
 
-	// Check by ID first if available
-	if id != "" {
-		f, err := rc.Service.Files.Get(id).Fields("id, parents, trashed").Do()
-		if err == nil && !f.Trashed {
-			rc.FolderCache[cacheKey] = f.Id
-			return f.Id, nil
+	if val, ok := GlobalFolderCache.Load(cacheKey); ok {
+		if idStr, ok := val.(string); ok {
+			rc.FolderCache[cacheKey] = idStr
+			return idStr, nil
 		}
 	}
 
-	// Check by Name in parent
-	query := fmt.Sprintf("name='%s' and '%s' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false", escapeSingleQuotes(name), parentID)
+	var id, name string
+	id, name = parseIDName(folderName)
 
+	if id != "" {
+		f, err := rc.Service.Files.Get(id).Fields("id, parents, trashed").Do()
+		if err == nil {
+			if !f.Trashed {
+				rc.FolderCache[cacheKey] = f.Id
+				GlobalFolderCache.Store(cacheKey, f.Id)
+				return f.Id, nil
+			}
+		}
+	}
+
+	query := fmt.Sprintf("name='%s' and '%s' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false", escapeSingleQuotes(name), parentID)
 	listCall := rc.Service.Files.List().Q(query).Fields("files(id)")
 	if rc.DriveID != "" {
 		listCall = listCall.SupportsAllDrives(true).IncludeItemsFromAllDrives(true).Corpora("drive").DriveId(rc.DriveID)
@@ -1430,7 +1479,66 @@ func (rc *RestoreContext) GetOrCreateFolder(ctx context.Context, folderPath, par
 
 	if len(r.Files) > 0 {
 		rc.FolderCache[cacheKey] = r.Files[0].Id
+		GlobalFolderCache.Store(cacheKey, r.Files[0].Id)
 		return r.Files[0].Id, nil
+	}
+
+	if strings.Contains(name, "_") {
+		parts := strings.SplitN(name, "_", 2)
+		if len(parts) == 2 {
+			potentialPrefix := parts[0]
+			potentialName := parts[1]
+
+			if !strings.Contains(potentialPrefix, " ") {
+				queryFallback := fmt.Sprintf("name='%s' and '%s' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false", escapeSingleQuotes(potentialName), parentID)
+				listCallFallback := rc.Service.Files.List().Q(queryFallback).Fields("files(id)")
+				if rc.DriveID != "" {
+					listCallFallback = listCallFallback.SupportsAllDrives(true).IncludeItemsFromAllDrives(true).Corpora("drive").DriveId(rc.DriveID)
+				}
+
+				rFallback, err := listCallFallback.Do()
+				if err == nil && len(rFallback.Files) > 0 {
+					rc.FolderCache[cacheKey] = rFallback.Files[0].Id
+					GlobalFolderCache.Store(cacheKey, rFallback.Files[0].Id)
+					return rFallback.Files[0].Id, nil
+				}
+				name = potentialName
+			}
+		}
+	}
+
+	if rc.LocationType != "SHARED_WITH_ME" {
+		queryTrashed := fmt.Sprintf("name='%s' and '%s' in parents and mimeType='application/vnd.google-apps.folder' and trashed=true", escapeSingleQuotes(name), parentID)
+		listCallTrashed := rc.Service.Files.List().Q(queryTrashed).Fields("files(id)")
+		if rc.DriveID != "" {
+			listCallTrashed = listCallTrashed.SupportsAllDrives(true).IncludeItemsFromAllDrives(true).Corpora("drive").DriveId(rc.DriveID)
+		}
+
+		rTrashed, err := listCallTrashed.Do()
+		if err != nil || len(rTrashed.Files) == 0 {
+			queryTrashedGlobal := fmt.Sprintf("name='%s' and mimeType='application/vnd.google-apps.folder' and trashed=true", escapeSingleQuotes(name))
+			listCallTrashedGlobal := rc.Service.Files.List().Q(queryTrashedGlobal).Fields("files(id)")
+			if rc.DriveID != "" {
+				listCallTrashedGlobal = listCallTrashedGlobal.SupportsAllDrives(true).IncludeItemsFromAllDrives(true).Corpora("drive").DriveId(rc.DriveID)
+			}
+			rTrashed, _ = listCallTrashedGlobal.Do()
+		}
+
+		if rTrashed != nil && len(rTrashed.Files) > 0 {
+			folderID := rTrashed.Files[0].Id
+			fUpdate := &drive.File{Trashed: false}
+			fUpdate.ForceSendFields = []string{"Trashed"}
+			updateCall := rc.Service.Files.Update(folderID, fUpdate).AddParents(parentID).RemoveParents("root")
+			if rc.DriveID != "" {
+				updateCall = updateCall.SupportsAllDrives(true)
+			}
+
+			if _, err := updateCall.Do(); err == nil {
+				rc.FolderCache[cacheKey] = folderID
+				GlobalFolderCache.Store(cacheKey, folderID)
+				return folderID, nil
+			}
+		}
 	}
 
 	folder := &drive.File{
@@ -1449,6 +1557,7 @@ func (rc *RestoreContext) GetOrCreateFolder(ctx context.Context, folderPath, par
 	}
 
 	rc.FolderCache[cacheKey] = created.Id
+	GlobalFolderCache.Store(cacheKey, created.Id)
 	return created.Id, nil
 }
 
@@ -1468,6 +1577,9 @@ func (rc *RestoreContext) RebuildFolderHierarchy(ctx context.Context, key string
 
 	currentPath := ""
 	for _, folderName := range parts[:len(parts)-1] {
+		if folderName == rc.UserEmail {
+			continue
+		}
 		currentPath = filepath.Join(currentPath, folderName)
 		var err error
 		parentID, err = rc.GetOrCreateFolder(ctx, currentPath, parentID)
@@ -1479,8 +1591,8 @@ func (rc *RestoreContext) RebuildFolderHierarchy(ctx context.Context, key string
 }
 
 func (rc *RestoreContext) CheckFileExists(ctx context.Context, fileName, parentID string) (*drive.File, error) {
-	query := fmt.Sprintf("name='%s' and '%s' in parents and trashed=false", escapeSingleQuotes(fileName), parentID)
-	listCall := rc.Service.Files.List().Q(query).Fields("files(id, name, trashed)")
+	query := fmt.Sprintf("name='%s' and '%s' in parents", escapeSingleQuotes(fileName), parentID)
+	listCall := rc.Service.Files.List().Q(query).Fields("files(id, name, parents, trashed, owners(emailAddress))")
 	if rc.DriveID != "" {
 		listCall = listCall.SupportsAllDrives(true).IncludeItemsFromAllDrives(true).Corpora("drive").DriveId(rc.DriveID)
 	}
@@ -1489,9 +1601,27 @@ func (rc *RestoreContext) CheckFileExists(ctx context.Context, fileName, parentI
 	if err != nil {
 		return nil, err
 	}
-	if len(r.Files) > 0 {
-		return r.Files[0], nil
+
+	var trashedFile *drive.File
+
+	for _, f := range r.Files {
+		if !f.Trashed {
+			for _, p := range f.Parents {
+				if p == parentID {
+					return f, nil
+				}
+			}
+		} else {
+			if trashedFile == nil {
+				trashedFile = f
+			}
+		}
 	}
+
+	if trashedFile != nil {
+		return trashedFile, nil
+	}
+
 	return nil, nil
 }
 
@@ -1504,46 +1634,52 @@ func (rc *RestoreContext) RestoreFile(ctx context.Context, metadata *DriveFileMe
 	fileName := filepath.Base(metadata.Key)
 	id, name := parseIDName(fileName)
 
-	// Check by ID first
 	if id != "" {
-		f, err := rc.Service.Files.Get(id).Fields("id, name, trashed").Do()
+		getCall := rc.Service.Files.Get(id).Fields("id, name, trashed, owners(emailAddress)")
+		if rc.DriveID != "" {
+			getCall = getCall.SupportsAllDrives(true)
+		}
+		f, err := getCall.Do()
 		if err == nil {
-			if f.Trashed {
-				updateCall := rc.Service.Files.Update(f.Id, &drive.File{Trashed: false})
-				if rc.DriveID != "" {
-					updateCall = updateCall.SupportsAllDrives(true)
+			if isOwnedByUser(f.Owners, rc.UserEmail) {
+				if f.Trashed {
+					fUpdate := &drive.File{Trashed: false}
+					fUpdate.ForceSendFields = []string{"Trashed"}
+					updateCall := rc.Service.Files.Update(f.Id, fUpdate).AddParents(parentID).RemoveParents("root")
+					if rc.DriveID != "" {
+						updateCall = updateCall.SupportsAllDrives(true)
+					}
+					if _, err := updateCall.Do(); err != nil {
+						return fmt.Errorf("failed to restore from trash: %w", err)
+					}
+					return rc.UpdateFileMetadata(ctx, f.Id, metadata)
 				}
-				if _, err := updateCall.Do(); err != nil {
-					return fmt.Errorf("failed to restore from trash: %w", err)
-				}
-				return rc.UpdateFileMetadata(ctx, f.Id, metadata)
+				return nil
 			}
-			// File exists and is not trashed. Skip to avoid duplicate.
-			logger.Info(ctx, "File exists with same ID, skipping", logger.String("file_id", id))
-			return nil
 		}
 	}
 
-	// Check by Name in parent
 	existingFile, err := rc.CheckFileExists(ctx, name, parentID)
 	if err != nil {
 		return err
 	}
 
 	if existingFile != nil {
-		if existingFile.Trashed {
-			updateCall := rc.Service.Files.Update(existingFile.Id, &drive.File{Trashed: false})
-			if rc.DriveID != "" {
-				updateCall = updateCall.SupportsAllDrives(true)
+		if isOwnedByUser(existingFile.Owners, rc.UserEmail) {
+			if existingFile.Trashed {
+				fUpdate := &drive.File{Trashed: false}
+				fUpdate.ForceSendFields = []string{"Trashed"}
+				updateCall := rc.Service.Files.Update(existingFile.Id, fUpdate).AddParents(parentID).RemoveParents("root")
+				if rc.DriveID != "" {
+					updateCall = updateCall.SupportsAllDrives(true)
+				}
+				if _, err := updateCall.Do(); err != nil {
+					return fmt.Errorf("failed to restore from trash: %w", err)
+				}
+				return rc.UpdateFileMetadata(ctx, existingFile.Id, metadata)
 			}
-			if _, err := updateCall.Do(); err != nil {
-				return fmt.Errorf("failed to restore from trash: %w", err)
-			}
-			return rc.UpdateFileMetadata(ctx, existingFile.Id, metadata)
+			return nil
 		}
-		// File exists and is not trashed. Skip to avoid duplicate.
-		logger.Info(ctx, "File exists with same Name, skipping", logger.String("file_name", name))
-		return nil
 	}
 
 	return rc.CreateFile(ctx, name, parentID, metadata, fileBytes)
@@ -1551,11 +1687,10 @@ func (rc *RestoreContext) RestoreFile(ctx context.Context, metadata *DriveFileMe
 
 func (rc *RestoreContext) CreateFile(ctx context.Context, fileName, parentID string, metadata *DriveFileMetadata, fileBytes []byte) error {
 	file := &drive.File{
-		Name:         fileName,
-		Parents:      []string{parentID},
-		MimeType:     metadata.MimeType,
-		ModifiedTime: metadata.ModifiedTime,
-		Starred:      metadata.Starred,
+		Name:     fileName,
+		Parents:  []string{parentID},
+		MimeType: metadata.MimeType,
+		Starred:  metadata.Starred,
 	}
 
 	createCall := rc.Service.Files.Create(file).Fields("id, name")
@@ -1571,7 +1706,13 @@ func (rc *RestoreContext) CreateFile(ctx context.Context, fileName, parentID str
 		return fmt.Errorf("failed to create file: %w", err)
 	}
 
-	if len(metadata.Permissions) > 0 {
+	// Update metadata (ModifiedTime) after creation
+	if err := rc.UpdateFileMetadata(ctx, created.Id, metadata); err != nil {
+		logger.Warn(ctx, "Failed to update file metadata after creation", logger.String("file_id", created.Id), logger.ErrorField(err))
+	}
+
+	// OPTIMIZATION: Skip permission restore for SHARED_WITH_ME as they are newly owned files
+	if len(metadata.Permissions) > 0 && rc.LocationType != "SHARED_WITH_ME" {
 		rc.ApplyPermissions(ctx, created.Id, metadata.Permissions)
 	}
 	return nil
@@ -1581,12 +1722,11 @@ func (rc *RestoreContext) UpdateFileMetadata(ctx context.Context, fileID string,
 	file := &drive.File{
 		Starred: metadata.Starred,
 	}
-
-	updateCall := rc.Service.Files.Update(fileID, file)
-
 	if metadata.ModifiedTime != "" {
 		file.ModifiedTime = metadata.ModifiedTime
 	}
+
+	updateCall := rc.Service.Files.Update(fileID, file)
 
 	if rc.DriveID != "" {
 		updateCall = updateCall.SupportsAllDrives(true)
@@ -1596,8 +1736,15 @@ func (rc *RestoreContext) UpdateFileMetadata(ctx context.Context, fileID string,
 }
 
 func (rc *RestoreContext) ApplyPermissions(ctx context.Context, fileID string, permissions []DrivePermission) {
-	// Fetch existing permissions to avoid duplicates
-	existingPerms, err := rc.Service.Permissions.List(fileID).Fields("permissions(type, role, emailAddress)").Do()
+	if rc.LocationType == "SHARED_WITH_ME" {
+		return
+	}
+
+	listCall := rc.Service.Permissions.List(fileID).Fields("permissions(type, role, emailAddress)")
+	if rc.DriveID != "" {
+		listCall = listCall.SupportsAllDrives(true)
+	}
+	existingPerms, err := listCall.Do()
 	existingMap := make(map[string]bool)
 	if err == nil {
 		for _, p := range existingPerms.Permissions {
@@ -1625,9 +1772,7 @@ func (rc *RestoreContext) ApplyPermissions(ctx context.Context, fileID string, p
 		if rc.DriveID != "" {
 			createCall = createCall.SupportsAllDrives(true)
 		}
-		if _, err := createCall.Do(); err != nil {
-			logger.Warn(ctx, "Failed to apply permission", logger.String("file_id", fileID), logger.ErrorField(err))
-		}
+		createCall.Do()
 	}
 }
 
@@ -1640,6 +1785,9 @@ func (rc *RestoreContext) RestoreFolder(ctx context.Context, metadata *DriveFile
 	parts := strings.Split(metadata.Key, "/")
 	currentPath := ""
 	for _, folderName := range parts {
+		if folderName == rc.UserEmail {
+			continue
+		}
 		currentPath = filepath.Join(currentPath, folderName)
 		var err error
 		parentID, err = rc.GetOrCreateFolder(ctx, currentPath, parentID)
