@@ -110,19 +110,24 @@ func calculateNextBackup(job repo.CronJobListingDB) *time.Time {
 	}
 
 	now := time.Now()
-	base := now
+	// Use today at 00:00:00 as the reference for date comparisons
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	// If the job has already run today, we must look for the next occurrence starting from tomorrow.
+	// Otherwise, we can include today in our search.
+	startSearchingFrom := today
 	if job.LastRun != nil {
-		base = *job.LastRun
+		lastRunDate := time.Date(job.LastRun.Year(), job.LastRun.Month(), job.LastRun.Day(), 0, 0, 0, 0, job.LastRun.Location())
+		if !lastRunDate.Before(today) {
+			startSearchingFrom = today.AddDate(0, 0, 1)
+		}
 	}
 
 	var next time.Time
 
 	switch job.Interval {
 	case "daily":
-		next = base.Add(24 * time.Hour)
-		for !next.After(now) {
-			next = next.Add(24 * time.Hour)
-		}
+		next = startSearchingFrom
 
 	case "weekly":
 		if job.On == "" {
@@ -132,8 +137,8 @@ func calculateNextBackup(job repo.CronJobListingDB) *time.Time {
 		if target < 0 {
 			return nil
 		}
-		next = base
-		for next.Weekday() != time.Weekday(target) || !next.After(now) {
+		next = startSearchingFrom
+		for next.Weekday() != time.Weekday(target) {
 			next = next.AddDate(0, 0, 1)
 		}
 
@@ -145,8 +150,12 @@ func calculateNextBackup(job repo.CronJobListingDB) *time.Time {
 		if err != nil || day < 1 || day > 31 {
 			return nil
 		}
-		next = base
-		for !next.After(now) {
+
+		// Start with the 'day' in the month of 'startSearchingFrom'
+		next = time.Date(startSearchingFrom.Year(), startSearchingFrom.Month(), day, 0, 0, 0, 0, startSearchingFrom.Location())
+
+		// If this date is before our startSearchingFrom, move to next month
+		if next.Before(startSearchingFrom) {
 			next = addOneMonthSameDay(next, day)
 		}
 
@@ -154,6 +163,7 @@ func calculateNextBackup(job repo.CronJobListingDB) *time.Time {
 		return nil
 	}
 
+	// Set a default time (e.g., 00:00:00) for the next backup
 	return &next
 }
 

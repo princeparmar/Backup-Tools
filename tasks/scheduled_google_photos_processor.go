@@ -149,18 +149,71 @@ func (g *GooglePhotosProcessor) processPhotos(ctx context.Context, input Schedul
 			return err
 		}
 
-		// Check if this is an album ID (try to get album info first)
+		// 1. Handle Encoded Album Photos (Format: ALBUM|AlbumID|AlbumTitle|PhotoID)
+		if strings.HasPrefix(itemID, "ALBUM|") {
+			parts := strings.Split(itemID, "|")
+			if len(parts) >= 4 {
+				albumID := parts[1]
+				albumTitle := parts[2]
+				photoID := parts[3]
+
+				// Create Album Folder Placeholder if not exists
+				albumPath := fmt.Sprintf("%s/%s_%s/.file_placeholder", input.Task.LoginId, albumID, albumTitle)
+				if _, exists := existingPhotos[albumPath]; !exists {
+					if err := handler.UploadObjectAndSync(ctx, input.Deps.Store, input.Task.StorxToken, satellite.ReserveBucket_Photos, albumPath, nil, input.Task.UserID); err == nil {
+						existingPhotos[albumPath] = true
+					}
+				}
+
+				// Get the photo details
+				mediaItem, err := client.GetPhoto(ctx, photoID)
+				if err != nil {
+					failedPhotos, failedCount = g.trackFailure(itemID, err, failedPhotos, failedCount, input)
+					continue
+				}
+
+				// Construct Path with Album: LoginId/AlbumID_AlbumTitle/PhotoID_Filename
+				photoPath := fmt.Sprintf("%s/%s_%s/%s_%s", input.Task.LoginId, albumID, albumTitle, mediaItem.ID, mediaItem.Filename)
+
+				if _, exists := existingPhotos[photoPath]; exists {
+					moveEmailToStatus(&input.Memory, itemID, "pending", "skipped: already exists in storage")
+					successCount++
+					continue
+				}
+
+				if err := g.uploadPhoto(ctx, input, mediaItem, photoPath); err != nil {
+					failedPhotos, failedCount = g.trackFailure(itemID, err, failedPhotos, failedCount, input)
+				} else {
+					existingPhotos[photoPath] = true
+					moveEmailToStatus(&input.Memory, itemID, "pending", "synced")
+					successCount++
+				}
+				continue
+			}
+		}
+
+		// 2. Check if this is an album ID (try to get album info first)
 		album, err := client.Albums.GetById(ctx, itemID)
 		if err == nil && album != nil {
 			// This is an album - discover all photos in it
 			nestedPhotoIDs, err := g.discoverPhotosInAlbum(ctx, client, album.ID)
 			if err == nil && len(nestedPhotoIDs) > 0 {
-				// Add nested photos to processing queue for immediate processing in this run
+				// Sanitize title for path usage
+				safeTitle := strings.ReplaceAll(album.Title, "/", "_")
+				safeTitle = strings.ReplaceAll(safeTitle, "|", "-")
+
+				// Add nested photos to processing queue with encoded info
+				var newEncodedIDs []string
 				for _, nestedID := range nestedPhotoIDs {
 					nestedID = strings.TrimSpace(nestedID)
-					if nestedID != "" && !seen[nestedID] {
-						seen[nestedID] = true
-						processingQueue = append(processingQueue, nestedID)
+					if nestedID != "" {
+						// Encode: ALBUM|AlbumID|AlbumTitle|PhotoID
+						encodedID := fmt.Sprintf("ALBUM|%s|%s|%s", album.ID, safeTitle, nestedID)
+						if !seen[encodedID] {
+							seen[encodedID] = true
+							processingQueue = append(processingQueue, encodedID)
+							newEncodedIDs = append(newEncodedIDs, encodedID)
+						}
 					}
 				}
 				// Also update memory for persistence
@@ -168,7 +221,7 @@ func (g *GooglePhotosProcessor) processPhotos(ctx context.Context, input Schedul
 				if currentPending == nil {
 					currentPending = []string{}
 				}
-				input.Memory["pending"] = append(currentPending, nestedPhotoIDs...)
+				input.Memory["pending"] = append(currentPending, newEncodedIDs...)
 			}
 
 			moveEmailToStatus(&input.Memory, itemID, "pending", "synced")
@@ -176,7 +229,7 @@ func (g *GooglePhotosProcessor) processPhotos(ctx context.Context, input Schedul
 			continue
 		}
 
-		// Not an album - treat as photo ID
+		// 3. Not an album - treat as standalone photo ID
 		mediaItem, err := client.GetPhoto(ctx, itemID)
 		if err != nil {
 			failedPhotos, failedCount = g.trackFailure(itemID, err, failedPhotos, failedCount, input)
@@ -194,6 +247,7 @@ func (g *GooglePhotosProcessor) processPhotos(ctx context.Context, input Schedul
 		if err := g.uploadPhoto(ctx, input, mediaItem, photoPath); err != nil {
 			failedPhotos, failedCount = g.trackFailure(itemID, err, failedPhotos, failedCount, input)
 		} else {
+			existingPhotos[photoPath] = true
 			moveEmailToStatus(&input.Memory, itemID, "pending", "synced")
 			successCount++
 		}

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/db"
@@ -272,6 +273,11 @@ func getDriveService(c echo.Context) (*drive.Service, error) {
 	}
 
 	return srv, nil
+}
+
+// GetDriveService is a public wrapper for getDriveService
+func GetDriveService(c echo.Context) (*drive.Service, error) {
+	return getDriveService(c)
 }
 
 func clientUsingToken(token string) (*http.Client, error) {
@@ -1323,4 +1329,505 @@ func downloadFile(srv *drive.Service, id, mimeType string, path *string) (*http.
 	}
 
 	return res, nil
+}
+
+// DriveFileMetadata represents metadata stored in backup for each file/folder
+type DriveFileMetadata struct {
+	Key          string            `json:"key"`
+	Type         string            `json:"type"`
+	Name         string            `json:"name"`
+	MimeType     string            `json:"mime_type"`
+	Parents      []string          `json:"parents"`
+	DriveID      string            `json:"drive_id"`
+	LocationType string            `json:"location_type"`
+	Permissions  []DrivePermission `json:"permissions"`
+	ModifiedTime string            `json:"modified_time"`
+	Starred      bool              `json:"starred"`
+}
+
+type DrivePermission struct {
+	Type         string `json:"type"`
+	Role         string `json:"role"`
+	EmailAddress string `json:"email_address"`
+}
+
+type RestoreContext struct {
+	Service      *drive.Service
+	FolderCache  map[string]string
+	UserEmail    string
+	DriveID      string
+	LocationType string
+}
+
+var (
+	GlobalFolderCache  sync.Map
+	folderCreationLock sync.Mutex
+	folderLocks        = make(map[string]*sync.Mutex)
+)
+
+// getFolderLock returns a mutex for a specific folder key, creating it if necessary
+func getFolderLock(key string) *sync.Mutex {
+	folderCreationLock.Lock()
+	defer folderCreationLock.Unlock()
+	if _, ok := folderLocks[key]; !ok {
+		folderLocks[key] = &sync.Mutex{}
+	}
+	return folderLocks[key]
+}
+
+func NewRestoreContext(srv *drive.Service, userEmail string) *RestoreContext {
+	return &RestoreContext{
+		Service:      srv,
+		FolderCache:  make(map[string]string),
+		UserEmail:    userEmail,
+		LocationType: "MY_DRIVE",
+	}
+}
+
+func (rc *RestoreContext) ValidateAccess(ctx context.Context, metadata *DriveFileMetadata) error {
+	switch metadata.LocationType {
+	case "SHARED_DRIVE":
+		if metadata.DriveID == "" {
+			return fmt.Errorf("shared drive ID is missing")
+		}
+		if _, err := rc.Service.Drives.Get(metadata.DriveID).Do(); err != nil {
+			rc.LocationType = "MY_DRIVE"
+			rc.DriveID = ""
+		} else {
+			rc.LocationType = "SHARED_DRIVE"
+			rc.DriveID = metadata.DriveID
+		}
+	case "SHARED_WITH_ME", "MY_DRIVE":
+		rc.LocationType = "MY_DRIVE"
+	default:
+		return fmt.Errorf("unknown location type: %s", metadata.LocationType)
+	}
+	return nil
+}
+
+// isOwnedByUser checks if the user is one of the owners of the file
+func isOwnedByUser(owners []*drive.User, email string) bool {
+	for _, o := range owners {
+		if strings.EqualFold(o.EmailAddress, email) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseIDName(segment string) (string, string) {
+	parts := strings.SplitN(segment, "_", 2)
+	if len(parts) != 2 {
+		return "", segment
+	}
+
+	id, name := parts[0], parts[1]
+
+	subParts := strings.SplitN(name, "_", 2)
+	if len(subParts) == 2 {
+		potentialID := subParts[0]
+		if !strings.Contains(potentialID, " ") && len(potentialID) > 10 {
+			return potentialID, subParts[1]
+		}
+	}
+
+	return id, name
+}
+
+func (rc *RestoreContext) GetOrCreateFolder(ctx context.Context, folderPath, parentID string) (string, error) {
+	folderName := filepath.Base(folderPath)
+	cacheKey := parentID + ":" + folderName
+	if id, ok := rc.FolderCache[cacheKey]; ok {
+		return id, nil
+	}
+
+	mu := getFolderLock(cacheKey)
+	mu.Lock()
+	defer mu.Unlock()
+
+	if val, ok := GlobalFolderCache.Load(cacheKey); ok {
+		if idStr, ok := val.(string); ok {
+			rc.FolderCache[cacheKey] = idStr
+			return idStr, nil
+		}
+	}
+
+	var id, name string
+	id, name = parseIDName(folderName)
+
+	if id != "" {
+		f, err := rc.Service.Files.Get(id).Fields("id, parents, trashed").Do()
+		if err == nil {
+			if !f.Trashed {
+				rc.FolderCache[cacheKey] = f.Id
+				GlobalFolderCache.Store(cacheKey, f.Id)
+				return f.Id, nil
+			}
+		}
+	}
+
+	query := fmt.Sprintf("name='%s' and '%s' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false", escapeSingleQuotes(name), parentID)
+	listCall := rc.Service.Files.List().Q(query).Fields("files(id)")
+	if rc.DriveID != "" {
+		listCall = listCall.SupportsAllDrives(true).IncludeItemsFromAllDrives(true).Corpora("drive").DriveId(rc.DriveID)
+	}
+
+	r, err := listCall.Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to check folder existence: %w", err)
+	}
+
+	if len(r.Files) > 0 {
+		rc.FolderCache[cacheKey] = r.Files[0].Id
+		GlobalFolderCache.Store(cacheKey, r.Files[0].Id)
+		return r.Files[0].Id, nil
+	}
+
+	if strings.Contains(name, "_") {
+		parts := strings.SplitN(name, "_", 2)
+		if len(parts) == 2 {
+			potentialPrefix := parts[0]
+			potentialName := parts[1]
+
+			if !strings.Contains(potentialPrefix, " ") {
+				queryFallback := fmt.Sprintf("name='%s' and '%s' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false", escapeSingleQuotes(potentialName), parentID)
+				listCallFallback := rc.Service.Files.List().Q(queryFallback).Fields("files(id)")
+				if rc.DriveID != "" {
+					listCallFallback = listCallFallback.SupportsAllDrives(true).IncludeItemsFromAllDrives(true).Corpora("drive").DriveId(rc.DriveID)
+				}
+
+				rFallback, err := listCallFallback.Do()
+				if err == nil && len(rFallback.Files) > 0 {
+					rc.FolderCache[cacheKey] = rFallback.Files[0].Id
+					GlobalFolderCache.Store(cacheKey, rFallback.Files[0].Id)
+					return rFallback.Files[0].Id, nil
+				}
+				name = potentialName
+			}
+		}
+	}
+
+	if rc.LocationType != "SHARED_WITH_ME" {
+		queryTrashed := fmt.Sprintf("name='%s' and '%s' in parents and mimeType='application/vnd.google-apps.folder' and trashed=true", escapeSingleQuotes(name), parentID)
+		listCallTrashed := rc.Service.Files.List().Q(queryTrashed).Fields("files(id)")
+		if rc.DriveID != "" {
+			listCallTrashed = listCallTrashed.SupportsAllDrives(true).IncludeItemsFromAllDrives(true).Corpora("drive").DriveId(rc.DriveID)
+		}
+
+		rTrashed, err := listCallTrashed.Do()
+		if err != nil || len(rTrashed.Files) == 0 {
+			queryTrashedGlobal := fmt.Sprintf("name='%s' and mimeType='application/vnd.google-apps.folder' and trashed=true", escapeSingleQuotes(name))
+			listCallTrashedGlobal := rc.Service.Files.List().Q(queryTrashedGlobal).Fields("files(id)")
+			if rc.DriveID != "" {
+				listCallTrashedGlobal = listCallTrashedGlobal.SupportsAllDrives(true).IncludeItemsFromAllDrives(true).Corpora("drive").DriveId(rc.DriveID)
+			}
+			rTrashed, _ = listCallTrashedGlobal.Do()
+		}
+
+		if rTrashed != nil && len(rTrashed.Files) > 0 {
+			folderID := rTrashed.Files[0].Id
+			fUpdate := &drive.File{Trashed: false}
+			fUpdate.ForceSendFields = []string{"Trashed"}
+			updateCall := rc.Service.Files.Update(folderID, fUpdate).AddParents(parentID).RemoveParents("root")
+			if rc.DriveID != "" {
+				updateCall = updateCall.SupportsAllDrives(true)
+			}
+
+			if _, err := updateCall.Do(); err == nil {
+				rc.FolderCache[cacheKey] = folderID
+				GlobalFolderCache.Store(cacheKey, folderID)
+				return folderID, nil
+			}
+		}
+	}
+
+	folder := &drive.File{
+		Name:     name,
+		MimeType: "application/vnd.google-apps.folder",
+		Parents:  []string{parentID},
+	}
+	createCall := rc.Service.Files.Create(folder).Fields("id")
+	if rc.DriveID != "" {
+		createCall = createCall.SupportsAllDrives(true)
+	}
+
+	created, err := createCall.Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to create folder: %w", err)
+	}
+
+	rc.FolderCache[cacheKey] = created.Id
+	GlobalFolderCache.Store(cacheKey, created.Id)
+	return created.Id, nil
+}
+
+func (rc *RestoreContext) RebuildFolderHierarchy(ctx context.Context, key string) (string, error) {
+	parts := strings.Split(key, "/")
+	if len(parts) <= 1 {
+		if rc.DriveID != "" {
+			return rc.DriveID, nil
+		}
+		return "root", nil
+	}
+
+	parentID := "root"
+	if rc.DriveID != "" {
+		parentID = rc.DriveID
+	}
+
+	currentPath := ""
+	for _, folderName := range parts[:len(parts)-1] {
+		if folderName == rc.UserEmail {
+			continue
+		}
+		currentPath = filepath.Join(currentPath, folderName)
+		var err error
+		parentID, err = rc.GetOrCreateFolder(ctx, currentPath, parentID)
+		if err != nil {
+			return "", err
+		}
+	}
+	return parentID, nil
+}
+
+func (rc *RestoreContext) CheckFileExists(ctx context.Context, fileName, parentID string) (*drive.File, error) {
+	query := fmt.Sprintf("name='%s' and '%s' in parents", escapeSingleQuotes(fileName), parentID)
+	listCall := rc.Service.Files.List().Q(query).Fields("files(id, name, parents, trashed, owners(emailAddress))")
+	if rc.DriveID != "" {
+		listCall = listCall.SupportsAllDrives(true).IncludeItemsFromAllDrives(true).Corpora("drive").DriveId(rc.DriveID)
+	}
+
+	r, err := listCall.Do()
+	if err != nil {
+		return nil, err
+	}
+
+	var trashedFile *drive.File
+
+	for _, f := range r.Files {
+		if !f.Trashed {
+			for _, p := range f.Parents {
+				if p == parentID {
+					return f, nil
+				}
+			}
+		} else {
+			if trashedFile == nil {
+				trashedFile = f
+			}
+		}
+	}
+
+	if trashedFile != nil {
+		return trashedFile, nil
+	}
+
+	return nil, nil
+}
+
+func (rc *RestoreContext) RestoreFile(ctx context.Context, metadata *DriveFileMetadata, fileBytes []byte) error {
+	parentID, err := rc.RebuildFolderHierarchy(ctx, metadata.Key)
+	if err != nil {
+		return err
+	}
+
+	fileName := filepath.Base(metadata.Key)
+	id, name := parseIDName(fileName)
+
+	if id != "" {
+		getCall := rc.Service.Files.Get(id).Fields("id, name, trashed, owners(emailAddress)")
+		if rc.DriveID != "" {
+			getCall = getCall.SupportsAllDrives(true)
+		}
+		f, err := getCall.Do()
+		if err == nil {
+			if isOwnedByUser(f.Owners, rc.UserEmail) {
+				if f.Trashed {
+					fUpdate := &drive.File{Trashed: false}
+					fUpdate.ForceSendFields = []string{"Trashed"}
+					updateCall := rc.Service.Files.Update(f.Id, fUpdate).AddParents(parentID).RemoveParents("root")
+					if rc.DriveID != "" {
+						updateCall = updateCall.SupportsAllDrives(true)
+					}
+					if _, err := updateCall.Do(); err != nil {
+						return fmt.Errorf("failed to restore from trash: %w", err)
+					}
+					return rc.UpdateFileMetadata(ctx, f.Id, metadata)
+				}
+				return nil
+			}
+		}
+	}
+
+	existingFile, err := rc.CheckFileExists(ctx, name, parentID)
+	if err != nil {
+		return err
+	}
+
+	if existingFile != nil {
+		if isOwnedByUser(existingFile.Owners, rc.UserEmail) {
+			if existingFile.Trashed {
+				fUpdate := &drive.File{Trashed: false}
+				fUpdate.ForceSendFields = []string{"Trashed"}
+				updateCall := rc.Service.Files.Update(existingFile.Id, fUpdate).AddParents(parentID).RemoveParents("root")
+				if rc.DriveID != "" {
+					updateCall = updateCall.SupportsAllDrives(true)
+				}
+				if _, err := updateCall.Do(); err != nil {
+					return fmt.Errorf("failed to restore from trash: %w", err)
+				}
+				return rc.UpdateFileMetadata(ctx, existingFile.Id, metadata)
+			}
+			return nil
+		}
+	}
+
+	return rc.CreateFile(ctx, name, parentID, metadata, fileBytes)
+}
+
+func (rc *RestoreContext) CreateFile(ctx context.Context, fileName, parentID string, metadata *DriveFileMetadata, fileBytes []byte) error {
+	file := &drive.File{
+		Name:     fileName,
+		Parents:  []string{parentID},
+		MimeType: metadata.MimeType,
+		Starred:  metadata.Starred,
+	}
+
+	createCall := rc.Service.Files.Create(file).Fields("id, name")
+	if rc.DriveID != "" {
+		createCall = createCall.SupportsAllDrives(true)
+	}
+	if len(fileBytes) > 0 {
+		createCall = createCall.Media(bytes.NewReader(fileBytes))
+	}
+
+	created, err := createCall.Do()
+	if err != nil {
+		return fmt.Errorf("failed to create file: %w", err)
+	}
+
+	// Update metadata (ModifiedTime) after creation
+	if err := rc.UpdateFileMetadata(ctx, created.Id, metadata); err != nil {
+		logger.Warn(ctx, "Failed to update file metadata after creation", logger.String("file_id", created.Id), logger.ErrorField(err))
+	}
+
+	// OPTIMIZATION: Skip permission restore for SHARED_WITH_ME as they are newly owned files
+	if len(metadata.Permissions) > 0 && rc.LocationType != "SHARED_WITH_ME" {
+		rc.ApplyPermissions(ctx, created.Id, metadata.Permissions)
+	}
+	return nil
+}
+
+func (rc *RestoreContext) UpdateFileMetadata(ctx context.Context, fileID string, metadata *DriveFileMetadata) error {
+	file := &drive.File{
+		Starred: metadata.Starred,
+	}
+	if metadata.ModifiedTime != "" {
+		file.ModifiedTime = metadata.ModifiedTime
+	}
+
+	updateCall := rc.Service.Files.Update(fileID, file)
+
+	if rc.DriveID != "" {
+		updateCall = updateCall.SupportsAllDrives(true)
+	}
+	_, err := updateCall.Do()
+	return err
+}
+
+func (rc *RestoreContext) ApplyPermissions(ctx context.Context, fileID string, permissions []DrivePermission) {
+	if rc.LocationType == "SHARED_WITH_ME" {
+		return
+	}
+
+	listCall := rc.Service.Permissions.List(fileID).Fields("permissions(type, role, emailAddress)")
+	if rc.DriveID != "" {
+		listCall = listCall.SupportsAllDrives(true)
+	}
+	existingPerms, err := listCall.Do()
+	existingMap := make(map[string]bool)
+	if err == nil {
+		for _, p := range existingPerms.Permissions {
+			key := fmt.Sprintf("%s:%s:%s", p.Type, p.Role, p.EmailAddress)
+			existingMap[key] = true
+		}
+	}
+
+	for _, perm := range permissions {
+		if perm.Role == "owner" {
+			continue
+		}
+
+		key := fmt.Sprintf("%s:%s:%s", perm.Type, perm.Role, perm.EmailAddress)
+		if existingMap[key] {
+			continue
+		}
+
+		createCall := rc.Service.Permissions.Create(fileID, &drive.Permission{
+			Type:         perm.Type,
+			Role:         perm.Role,
+			EmailAddress: perm.EmailAddress,
+		}).SendNotificationEmail(false)
+
+		if rc.DriveID != "" {
+			createCall = createCall.SupportsAllDrives(true)
+		}
+		createCall.Do()
+	}
+}
+
+func (rc *RestoreContext) RestoreFolder(ctx context.Context, metadata *DriveFileMetadata) error {
+	parentID := "root"
+	if rc.DriveID != "" {
+		parentID = rc.DriveID
+	}
+
+	parts := strings.Split(metadata.Key, "/")
+	currentPath := ""
+	for _, folderName := range parts {
+		if folderName == rc.UserEmail {
+			continue
+		}
+		currentPath = filepath.Join(currentPath, folderName)
+		var err error
+		parentID, err = rc.GetOrCreateFolder(ctx, currentPath, parentID)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ParseBackupMetadata(data []byte) (*DriveFileMetadata, error) {
+	var metadata DriveFileMetadata
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return nil, err
+	}
+	return &metadata, nil
+}
+
+type DriveBackupItem struct {
+	Metadata DriveFileMetadata `json:"metadata"`
+	Content  []byte            `json:"content,omitempty"`
+}
+
+func RestoreFromBackup(ctx context.Context, srv *drive.Service, userEmail string, metadataJSON, fileBytes []byte) error {
+	metadata, err := ParseBackupMetadata(metadataJSON)
+	if err != nil {
+		return err
+	}
+
+	rc := NewRestoreContext(srv, userEmail)
+	if err := rc.ValidateAccess(ctx, metadata); err != nil {
+		return err
+	}
+
+	if metadata.Type == "folder" {
+		return rc.RestoreFolder(ctx, metadata)
+	}
+	return rc.RestoreFile(ctx, metadata, fileBytes)
+}
+
+func escapeSingleQuotes(s string) string {
+	return strings.ReplaceAll(s, "'", "\\'")
 }
