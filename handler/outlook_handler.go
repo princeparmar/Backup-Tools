@@ -490,11 +490,16 @@ func HandleMicrosoftAuthRedirect(c echo.Context) error {
 		})
 	}
 
-	logger.Info(ctx, "Redirecting to Microsoft OAuth URL",
-		logger.String("redirect_url", authURL),
+	logger.Info(ctx, "Returning Microsoft OAuth URL to client",
+		logger.String("auth_url", authURL),
 		logger.String("request_host", c.Request().Host),
 		logger.String("request_url", c.Request().URL.String()),
 	)
 
-	return c.Redirect(http.StatusTemporaryRedirect, authURL)
+	// Return URL as JSON instead of redirecting server-side
+	// This prevents proxy from rewriting the Microsoft OAuth URL
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"auth_url": authURL,
+		"message":  "Redirect to this URL for Microsoft OAuth",
+	})
 }
