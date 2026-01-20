@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 )
 
@@ -35,14 +36,26 @@ var defaultScopes = []string{
 }
 
 // BuildAuthURL builds the Microsoft OAuth authorization URL
-func BuildAuthURL() (string, error) {
+func BuildAuthURL(ctx context.Context) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	clientID := utils.GetEnvWithKey("OUTLOOK_CLIENT_ID")
 	redirectURI := utils.GetEnvWithKey("OUTLOOK_REDIRECT_URI")
 
+	logger.Info(ctx, "Building Microsoft OAuth authorization URL",
+		logger.String("base_auth_url", authURL),
+		logger.String("redirect_uri", redirectURI),
+		logger.String("scopes", strings.Join(defaultScopes, " ")),
+	)
+
 	if clientID == "" {
+		logger.Error(ctx, "OUTLOOK_CLIENT_ID environment variable is not set")
 		return "", fmt.Errorf("OUTLOOK_CLIENT_ID environment variable is not set")
 	}
 	if redirectURI == "" {
+		logger.Error(ctx, "OUTLOOK_REDIRECT_URI environment variable is not set")
 		return "", fmt.Errorf("OUTLOOK_REDIRECT_URI environment variable is not set")
 	}
 
@@ -55,7 +68,15 @@ func BuildAuthURL() (string, error) {
 	params.Set("response_mode", "query")
 	params.Set("scope", scope)
 
-	return authURL + "?" + params.Encode(), nil
+	finalURL := authURL + "?" + params.Encode()
+
+	logger.Info(ctx, "Microsoft OAuth authorization URL built successfully",
+		logger.String("final_url", finalURL),
+		logger.String("expected_base", "https://login.microsoftonline.com"),
+		logger.Bool("url_starts_with_expected", strings.HasPrefix(finalURL, "https://login.microsoftonline.com")),
+	)
+
+	return finalURL, nil
 }
 
 func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {

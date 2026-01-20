@@ -482,13 +482,19 @@ func HandleMicrosoftAuthRedirect(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	authURL, err := outlook.BuildAuthURL()
+	authURL, err := outlook.BuildAuthURL(ctx)
 	if err != nil {
 		logger.Error(ctx, "Failed to build Outlook auth URL", logger.ErrorField(err))
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"error": "Failed to build authorization URL: " + err.Error(),
 		})
 	}
+
+	logger.Info(ctx, "Redirecting to Microsoft OAuth URL",
+		logger.String("redirect_url", authURL),
+		logger.String("request_host", c.Request().Host),
+		logger.String("request_url", c.Request().URL.String()),
+	)
 
 	return c.Redirect(http.StatusTemporaryRedirect, authURL)
 }
