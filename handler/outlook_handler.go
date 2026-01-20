@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -490,5 +491,29 @@ func HandleMicrosoftAuthRedirect(c echo.Context) error {
 		})
 	}
 
-	return c.Redirect(http.StatusTemporaryRedirect, authURL)
+	// Validate that the URL is absolute and points to Microsoft's OAuth endpoint
+	parsedURL, err := url.Parse(authURL)
+	if err != nil {
+		logger.Error(ctx, "Invalid auth URL format", logger.ErrorField(err), logger.String("auth_url", authURL))
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"error": "Invalid authorization URL format",
+		})
+	}
+
+	// Ensure the URL points to Microsoft's OAuth endpoint, not our own server
+	if parsedURL.Host != "login.microsoftonline.com" {
+		logger.Error(ctx, "Auth URL host mismatch", 
+			logger.String("expected_host", "login.microsoftonline.com"),
+			logger.String("actual_host", parsedURL.Host),
+			logger.String("auth_url", authURL))
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"error": "Invalid authorization URL host",
+		})
+	}
+
+	// Use http.Redirect directly to ensure the Location header is set correctly
+	// and not modified by any middleware or proxy
+	c.Response().Header().Set("Location", authURL)
+	c.Response().WriteHeader(http.StatusTemporaryRedirect)
+	return nil
 }
