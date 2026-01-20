@@ -44,12 +44,6 @@ func BuildAuthURL(ctx context.Context) (string, error) {
 	clientID := utils.GetEnvWithKey("OUTLOOK_CLIENT_ID")
 	redirectURI := utils.GetEnvWithKey("OUTLOOK_REDIRECT_URI")
 
-	logger.Info(ctx, "Building Microsoft OAuth authorization URL",
-		logger.String("base_auth_url", authURL),
-		logger.String("redirect_uri", redirectURI),
-		logger.String("scopes", strings.Join(defaultScopes, " ")),
-	)
-
 	if clientID == "" {
 		logger.Error(ctx, "OUTLOOK_CLIENT_ID environment variable is not set")
 		return "", fmt.Errorf("OUTLOOK_CLIENT_ID environment variable is not set")
@@ -58,6 +52,28 @@ func BuildAuthURL(ctx context.Context) (string, error) {
 		logger.Error(ctx, "OUTLOOK_REDIRECT_URI environment variable is not set")
 		return "", fmt.Errorf("OUTLOOK_REDIRECT_URI environment variable is not set")
 	}
+
+	// Validate and normalize the redirect URI to ensure it's a proper absolute URL
+	parsedURI, err := url.Parse(redirectURI)
+	if err != nil {
+		logger.Error(ctx, "Invalid redirect URI format", logger.ErrorField(err), logger.String("redirect_uri", redirectURI))
+		return "", fmt.Errorf("invalid redirect URI format: %v", err)
+	}
+
+	// Ensure the redirect URI is an absolute URL with https scheme
+	if parsedURI.Scheme == "" || parsedURI.Host == "" {
+		logger.Error(ctx, "Redirect URI must be an absolute URL", logger.String("redirect_uri", redirectURI))
+		return "", fmt.Errorf("redirect URI must be an absolute URL (e.g., https://storx.io/backup/microsoft/callback)")
+	}
+
+	// Reconstruct the redirect URI to ensure proper formatting
+	redirectURI = parsedURI.String()
+
+	logger.Info(ctx, "Building Microsoft OAuth authorization URL",
+		logger.String("base_auth_url", authURL),
+		logger.String("redirect_uri", redirectURI),
+		logger.String("scopes", strings.Join(defaultScopes, " ")),
+	)
 
 	scope := strings.Join(defaultScopes, " ")
 
