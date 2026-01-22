@@ -486,6 +486,15 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.Cron
 		}
 		return "Your automatic backup encountered an authentication issue with Google. We're retrying the backup automatically."
 
+	case strings.Contains(errMsg, "Access is denied") ||
+		strings.Contains(errMsg, "invalid_grant") ||
+		(strings.Contains(errMsg, "microsoftgraph") && (strings.Contains(errMsg, "401") || strings.Contains(errMsg, "403"))) ||
+		(strings.Contains(errMsg, "Microsoft Graph API") && (strings.Contains(errMsg, "401") || strings.Contains(errMsg, "403"))):
+		if task.RetryCount == repo.MaxRetryCount-1 {
+			return "Your automatic backup has been temporarily disabled due to invalid Microsoft Outlook credentials. Please update your Outlook account permissions and reactivate the backup from your dashboard."
+		}
+		return "Your automatic backup encountered an authentication issue with Microsoft Outlook. We're retrying the backup automatically."
+
 	case strings.Contains(errMsg, "uplink: permission") || strings.Contains(errMsg, "uplink: invalid access"):
 		return "Your automatic backup has been temporarily disabled due to insufficient StorX permissions. Please update your StorX permissions and reactivate the backup from your dashboard."
 
@@ -495,7 +504,7 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.Cron
 		return "Your automatic backup has been temporarily disabled due to network connectivity issues. Please check your internet connection and reactivate the backup from your dashboard."
 
 	default:
-		return "Your automatic backup has been temporarily disabled due to a technical issue. Please check your backup configuration and reactivate from your dashboard."
+		return "Your automatic backup encountered a technical issue. We're retrying the backup automatically."
 	}
 }
 
@@ -519,6 +528,20 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 			task.Message = "Google Credentials are invalid. Retrying..."
 		}
 
+	case strings.Contains(errMsg, "Access is denied") ||
+		strings.Contains(errMsg, "invalid_grant") ||
+		(strings.Contains(errMsg, "microsoftgraph") && (strings.Contains(errMsg, "401") || strings.Contains(errMsg, "403"))) ||
+		(strings.Contains(errMsg, "Microsoft Graph API") && (strings.Contains(errMsg, "401") || strings.Contains(errMsg, "403"))):
+		if task.RetryCount == repo.MaxRetryCount-1 {
+			(*job.InputData.Json())["refresh_token"] = ""
+			job.Active = false
+			job.Message = "Invalid Microsoft Outlook credentials. Please update the credentials and reactivate the automatic backup"
+			task.Message = "Microsoft Outlook Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
+		} else {
+			job.Message = "Invalid Microsoft Outlook credentials. Retrying..."
+			task.Message = "Microsoft Outlook Credentials are invalid. Retrying..."
+		}
+
 	case strings.Contains(errMsg, "uplink: permission") || strings.Contains(errMsg, "uplink: invalid access"):
 		job.StorxToken = ""
 		job.Active = false
@@ -528,14 +551,12 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 	case strings.Contains(errMsg, "could not create bucket") ||
 		strings.Contains(errMsg, "tcp connector failed") ||
 		strings.Contains(errMsg, "connection attempt failed"):
-		job.Active = false
 		job.Message = "Automatic backup failed due to network issues. Please check your connection and reactivate."
 		task.Message = "Task failed due to network connectivity issues. Job has been deactivated."
 
 	default:
-		job.Active = false
-		job.Message = "Automatic backup failed. Please check the configuration and reactivate."
-		task.Message = "Task failed. Job has been deactivated."
+		job.Message = "Automatic backup encountered an error. Retrying..."
+		task.Message = "Task encountered an error. Retrying..."
 
 	}
 }
