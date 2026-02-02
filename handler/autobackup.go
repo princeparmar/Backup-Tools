@@ -1243,6 +1243,7 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 		if *reqBody.Active {
 			updateRequest["message"] = "You Automatic backup is activated. it will start processing first backup soon"
 			updateRequest["message_status"] = repo.JobMessageStatusInfo
+			updateRequest["auto_deactivated"] = false
 			logger.Info(ctx, "Job activated", logger.Int("job_id", jobID))
 		} else {
 			updateRequest["message"] = "You Automatic backup is deactivated. it will not process any backup"
@@ -1618,7 +1619,8 @@ func HandleAutomaticSyncStats(c echo.Context) error {
 		defer wg.Done()
 		errFailed = db.Session(&gorm.Session{}).
 			Model(&repo.CronJobListingDB{}).
-			Where("user_id = ? AND active = ? AND message_status = ?", userID, true, repo.JobMessageStatusError).
+			Where("user_id = ? AND ((active = ? AND message_status = ?) OR auto_deactivated = ?)",
+				userID, true, repo.JobMessageStatusError, true).
 			Count(&failedSyncs).Error
 	}()
 
