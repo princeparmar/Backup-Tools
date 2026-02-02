@@ -76,6 +76,8 @@ type CronJobListingDB struct {
 	// Hidden column for scheduled tasks - when true, hides the cron job from the live view
 	// Default is false, and it gets reset to false when a new task is created
 	Hidden bool `json:"hidden" gorm:"default:false"`
+	// When user fixes the error and reactivates, this should be set to false
+	AutoDeactivated bool `json:"autodeactivated" gorm:"column:auto_deactivated;default:false"`
 }
 
 // TaskMemory represents the memory state of a task

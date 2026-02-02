@@ -439,11 +439,12 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 	// Save job to database if job exists
 	if job != nil {
 		updateMap := map[string]interface{}{
-			"message":        job.Message,
-			"message_status": job.MessageStatus,
-			"last_run":       job.LastRun,
-			"storx_token":    job.StorxToken,
-			"active":         job.Active,
+			"message":          job.Message,
+			"message_status":   job.MessageStatus,
+			"last_run":         job.LastRun,
+			"storx_token":      job.StorxToken,
+			"active":           job.Active,
+			"auto_deactivated": job.AutoDeactivated,
 		}
 
 		// Update cron job status based on task status
@@ -514,6 +515,7 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 	switch {
 	case job.StorxToken == "":
 		job.Active = false
+		job.AutoDeactivated = true
 		job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
 		task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
 
@@ -521,6 +523,7 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		if task.RetryCount == repo.MaxRetryCount-1 {
 			(*job.InputData.Json())["refresh_token"] = ""
 			job.Active = false
+			job.AutoDeactivated = true
 			job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
 			task.Message = "Google Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
 		} else {
@@ -535,6 +538,7 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		if task.RetryCount == repo.MaxRetryCount-1 {
 			(*job.InputData.Json())["refresh_token"] = ""
 			job.Active = false
+			job.AutoDeactivated = true
 			job.Message = "Invalid Microsoft Outlook credentials. Please update the credentials and reactivate the automatic backup"
 			task.Message = "Microsoft Outlook Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
 		} else {
@@ -545,6 +549,7 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 	case strings.Contains(errMsg, "uplink: permission") || strings.Contains(errMsg, "uplink: invalid access"):
 		job.StorxToken = ""
 		job.Active = false
+		job.AutoDeactivated = true
 		job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
 		task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
 
