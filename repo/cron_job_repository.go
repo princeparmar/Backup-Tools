@@ -281,29 +281,63 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 	var res []CronJobListingDB
 	tx := r.db.Begin()
 
-	// The raw SQL query
+	// Pre-aggregate failed task counts in a subquery; outer query has no GROUP BY so FOR UPDATE is allowed (PostgreSQL forbids FOR UPDATE with GROUP BY).
+	// Parameter order: fail_status, startOfDay, endOfDay, message, status_not_in_1, status_not_in_2,
+	// startOfDay, failed_status, startOfDay, endOfDay, maxRetry, weekday, day, task_running, task_pushed
 	sqlQuery := `
-		SELECT *
-		FROM cron_job_listing_dbs
-		WHERE active = true
-		AND (message is null or message != ?)
-		AND (last_run IS NULL OR DATE(last_run) != ?)
-		AND (interval = 'daily'
-				OR (interval = 'weekly' AND "on" = ?)
-			OR (interval = 'monthly' AND "on" = ?))
-		AND id not in (
-			SELECT DISTINCT cron_job_id FROM task_listing_dbs
-			WHERE status IN (?, ?)
+		SELECT c.*
+		FROM cron_job_listing_dbs c
+		WHERE c.id IN (
+			SELECT c2.id
+			FROM cron_job_listing_dbs c2
+			LEFT JOIN (
+				SELECT cron_job_id, COUNT(*) AS fail_count
+				FROM task_listing_dbs
+				WHERE status = ?
+				AND created_at >= ? AND created_at < ?
+				GROUP BY cron_job_id
+			) t_fail ON t_fail.cron_job_id = c2.id
+			WHERE c2.active = true
+			AND (c2.message IS NULL OR c2.message != ?)
+			AND c2.status NOT IN (?, ?)
+			AND (
+				c2.last_run IS NULL
+				OR c2.last_run < ?
+				OR (
+					c2.status = ?
+					AND c2.last_run >= ? AND c2.last_run < ?
+					AND COALESCE(t_fail.fail_count, 0) < ?
+				)
+			)
+			AND (
+				c2.interval = 'daily'
+				OR (c2.interval = 'weekly' AND c2."on" = ?)
+				OR (c2.interval = 'monthly' AND c2."on" = ?)
+			)
+			AND NOT EXISTS (
+				SELECT 1
+				FROM task_listing_dbs t
+				WHERE t.cron_job_id = c2.id
+				AND t.status IN (?, ?)
+			)
+			AND c2.deleted_at IS NULL
+			LIMIT 10
 		)
-		AND deleted_at is null
-		LIMIT 10
-		FOR UPDATE
+		FOR UPDATE OF c
 	`
 
-	// Execute the raw SQL query and store the result in the cronJobs slice
-	rawQuery := tx.Raw(sqlQuery, JobMessagePushToQueue, time.Now().Format("2006-01-02"),
-		time.Now().Weekday().String(),
-		fmt.Sprint(time.Now().Day()),
+	// Calculate time range for today (midnight to midnight) for index-friendly queries
+	now := time.Now()
+	location := now.Location()
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location)
+	endOfDay := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, location)
+
+	rawQuery := tx.Raw(sqlQuery,
+		TaskStatusFailed, startOfDay, endOfDay,
+		JobMessagePushToQueue,
+		JobStatusInQueue, JobStatusInProgress,
+		startOfDay, JobStatusFailed, startOfDay, endOfDay, MaxRetryCount,
+		now.Weekday().String(), fmt.Sprint(now.Day()),
 		TaskStatusRunning, TaskStatusPushed)
 
 	scanResult := rawQuery.Scan(&res)
@@ -312,10 +346,11 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 		return nil, fmt.Errorf("error getting jobs to process: %v", scanResult.Error)
 	}
 
-	// update message to "push to queue" and message status to "info"
+	// Claim job: message, message_status, and status so another worker won't pick it if this one crashes before creating the task
 	for i := range res {
 		res[i].Message = JobMessagePushToQueue
 		res[i].MessageStatus = JobMessageStatusInfo
+		res[i].Status = JobStatusInQueue
 
 		if err := tx.Save(&res[i]).Error; err != nil {
 			tx.Rollback()

@@ -485,7 +485,7 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.Cron
 		if task.RetryCount == repo.MaxRetryCount-1 {
 			return "Your automatic backup has been temporarily disabled due to invalid Google credentials. Please update your Google account permissions and reactivate the backup from your dashboard."
 		}
-		return "Your automatic backup encountered an authentication issue with Google. We're retrying the backup automatically."
+		return fmt.Sprintf("Your automatic backup encountered an authentication issue with Google. We're retrying automatically (attempt %d of %d).", task.RetryCount, repo.MaxRetryCount)
 
 	case strings.Contains(errMsg, "Access is denied") ||
 		strings.Contains(errMsg, "invalid_grant") ||
@@ -494,7 +494,7 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.Cron
 		if task.RetryCount == repo.MaxRetryCount-1 {
 			return "Your automatic backup has been temporarily disabled due to invalid Microsoft Outlook credentials. Please update your Outlook account permissions and reactivate the backup from your dashboard."
 		}
-		return "Your automatic backup encountered an authentication issue with Microsoft Outlook. We're retrying the backup automatically."
+		return fmt.Sprintf("Your automatic backup encountered an authentication issue with Microsoft Outlook. We're retrying automatically (attempt %d of %d).", task.RetryCount, repo.MaxRetryCount)
 
 	case strings.Contains(errMsg, "uplink: permission") || strings.Contains(errMsg, "uplink: invalid access"):
 		return "Your automatic backup has been temporarily disabled due to insufficient StorX permissions. Please update your StorX permissions and reactivate the backup from your dashboard."
@@ -505,7 +505,7 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.Cron
 		return "Your automatic backup has been temporarily disabled due to network connectivity issues. Please check your internet connection and reactivate the backup from your dashboard."
 
 	default:
-		return "Your automatic backup encountered a technical issue. We're retrying the backup automatically."
+		return fmt.Sprintf("Your automatic backup encountered a technical issue. We're retrying automatically (attempt %d of %d).", task.RetryCount, repo.MaxRetryCount)
 	}
 }
 
@@ -527,8 +527,8 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 			job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
 			task.Message = "Google Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
 		} else {
-			job.Message = "Invalid google credentials. Retrying..."
-			task.Message = "Google Credentials are invalid. Retrying..."
+			job.Message = fmt.Sprintf("Invalid Google credentials. Attempt %d of %d failed. Retrying automatically...", task.RetryCount, repo.MaxRetryCount)
+			task.Message = fmt.Sprintf("Google credentials invalid. Attempt %d of %d failed. Retrying automatically...", task.RetryCount, repo.MaxRetryCount)
 		}
 
 	case strings.Contains(errMsg, "Access is denied") ||
@@ -542,8 +542,8 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 			job.Message = "Invalid Microsoft Outlook credentials. Please update the credentials and reactivate the automatic backup"
 			task.Message = "Microsoft Outlook Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
 		} else {
-			job.Message = "Invalid Microsoft Outlook credentials. Retrying..."
-			task.Message = "Microsoft Outlook Credentials are invalid. Retrying..."
+			job.Message = fmt.Sprintf("Invalid Microsoft Outlook credentials. Attempt %d of %d failed. Retrying automatically...", task.RetryCount, repo.MaxRetryCount)
+			task.Message = fmt.Sprintf("Microsoft Outlook credentials invalid. Attempt %d of %d failed. Retrying automatically...", task.RetryCount, repo.MaxRetryCount)
 		}
 
 	case strings.Contains(errMsg, "uplink: permission") || strings.Contains(errMsg, "uplink: invalid access"):
@@ -560,8 +560,7 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		task.Message = "Task failed due to network connectivity issues. Job has been deactivated."
 
 	default:
-		job.Message = "Automatic backup encountered an error. Retrying..."
-		task.Message = "Task encountered an error. Retrying..."
-
+		job.Message = fmt.Sprintf("Automatic backup encountered an error. Attempt %d of %d failed. Retrying automatically...", task.RetryCount, repo.MaxRetryCount)
+		task.Message = fmt.Sprintf("Task encountered an error. Attempt %d of %d failed. Retrying automatically...", task.RetryCount, repo.MaxRetryCount)
 	}
 }
