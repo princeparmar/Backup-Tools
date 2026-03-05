@@ -560,7 +560,7 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		task.Message = "Task failed due to network connectivity issues. Job has been deactivated."
 
 	default:
-		job.Message = fmt.Sprintf("Automatic backup encountered an error. Attempt %d of %d failed. Retrying automatically...", task.RetryCount, repo.MaxRetryCount)
-		task.Message = fmt.Sprintf("Task encountered an error. Attempt %d of %d failed. Retrying automatically...", task.RetryCount, repo.MaxRetryCount)
+		job.Message = "Automatic backup encountered an error. Job will be retried automatically..."
+		task.Message = "Task encountered an error. Task will be retried automatically..."
 	}
 }
