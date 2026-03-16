@@ -86,3 +86,12 @@ func (r *OAuthCredentialRepository) GetByUserIDAndSourceAndEmail(userID, source,
 	}
 	return &cred, nil
 }
+
+// ClearRefreshTokenByID sets refresh_token to empty for the given credential ID (e.g. when cron detects invalid Google credentials).
+func (r *OAuthCredentialRepository) ClearRefreshTokenByID(id uint) error {
+	res := r.db.Model(&OAuthCredentialDB{}).Where("id = ?", id).Update("refresh_token", "")
+	if res != nil && res.Error != nil {
+		return fmt.Errorf("error clearing oauth credential refresh token: %v", res.Error)
+	}
+	return nil
+}

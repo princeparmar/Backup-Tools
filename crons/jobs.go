@@ -481,7 +481,9 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.Cron
 	case job.StorxToken == "":
 		return "Your automatic backup has been temporarily disabled due to insufficient permissions. Please update your StorX permissions and reactivate the backup from your dashboard."
 
-	case strings.Contains(errMsg, "googleapi: Error 401"):
+	case strings.Contains(errMsg, "googleapi: Error 401") ||
+		strings.Contains(errMsg, "oauth credential not found") ||
+		strings.Contains(errMsg, "refresh token not found"):
 		if task.RetryCount == repo.MaxRetryCount-1 {
 			return "Your automatic backup has been temporarily disabled due to invalid Google credentials. Please update your Google account permissions and reactivate the backup from your dashboard."
 		}
@@ -519,9 +521,20 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
 		task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
 
-	case strings.Contains(errMsg, "googleapi: Error 401"):
+	case strings.Contains(errMsg, "googleapi: Error 401") ||
+		strings.Contains(errMsg, "oauth credential not found") ||
+		strings.Contains(errMsg, "refresh token not found"):
 		if task.RetryCount == repo.MaxRetryCount-1 {
-			(*job.InputData.Json())["refresh_token"] = ""
+			// Gmail stores refresh token in oauth_credentials (via credential_id); clear it there. Only clear in job input_data for legacy jobs that still have refresh_token.
+			if job.InputData != nil && job.InputData.Json() != nil {
+				inputData := job.InputData.Json()
+				if credID, ok := (*inputData)["credential_id"].(float64); ok && credID > 0 {
+					_ = a.store.OAuthCredentialRepo.ClearRefreshTokenByID(uint(credID))
+				}
+				if _, hasKey := (*inputData)["refresh_token"]; hasKey {
+					(*inputData)["refresh_token"] = ""
+				}
+			}
 			job.Active = false
 			job.AutoDeactivated = true
 			job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
