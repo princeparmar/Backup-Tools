@@ -17,6 +17,9 @@ type TaskListingDB struct {
 
 	CronJobID uint `gorm:"constraint:OnDelete:CASCADE;" json:"cron_job_id"` // Add delete cascade here
 
+	// BackupEmail is legacy; account to backup is now determined by the job's input_data["email"] and job name (one job per account).
+	BackupEmail string `json:"backup_email,omitempty" gorm:"column:backup_email"`
+
 	// Status will be one of the following: "pushed", "running", "success", "failed"
 	Status string `json:"status"`
 
@@ -177,7 +180,8 @@ func (r *TaskRepository) GetTaskByID(ID uint) (*TaskListingDB, error) {
 	return &res, nil
 }
 
-// CreateTaskForCronJob creates a new task for a cron job
+// CreateTaskForCronJob creates a new task for a cron job.
+// Account to backup is determined by the job (input_data["email"] / job name); BackupEmail on task is legacy.
 func (r *TaskRepository) CreateTaskForCronJob(cronJobID uint) (*TaskListingDB, error) {
 	tx := r.db.Begin()
 

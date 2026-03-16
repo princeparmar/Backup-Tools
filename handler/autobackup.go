@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -23,6 +24,15 @@ import (
 )
 
 var Err error
+
+var (
+	allowedMethods = map[string]bool{
+		"gmail": true, "outlook": true, "psql_database": true, "mysql_database": true,
+	}
+	allowedSyncTypes = map[string]bool{
+		"one_time": true, "daily": true,
+	}
+)
 
 var intervalValues = map[string][]string{
 	"monthly": {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13",
@@ -321,6 +331,7 @@ func HandleAutomaticSyncDetails(c echo.Context) error {
 	})
 }
 
+// HandleAutomaticSyncCreate creates backup jobs. Gmail: emails[] + Bearer token (from POST /auth/google/connect). Same response shape for Outlook later.
 func HandleAutomaticSyncCreate(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
@@ -332,47 +343,62 @@ func HandleAutomaticSyncCreate(c echo.Context) error {
 	}
 
 	syncType := c.QueryParam("sync_type")
-	method := c.Param("method")
-
-	// Set to daily if empty and validate
 	if syncType == "" {
 		syncType = "daily"
 	}
-	if syncType != "one_time" && syncType != "daily" {
+	if !allowedSyncTypes[syncType] {
 		return jsonErrorMsg(http.StatusBadRequest, "Invalid Request", "invalid sync type")
 	}
 
-	// Validate method
-	if method != "gmail" && method != "outlook" && method != "psql_database" && method != "mysql_database" {
+	method := c.Param("method")
+	if !allowedMethods[method] {
 		return jsonErrorMsg(http.StatusBadRequest, "Invalid Request", "invalid method")
 	}
 
-	// Parse request body and extract common fields
 	var reqBody struct {
-		Code         string `json:"code"`
-		Name         string `json:"name"`
-		DatabaseName string `json:"database_name"`
-		Host         string `json:"host"`
-		Port         string `json:"port"`
-		Username     string `json:"username"`
-		Password     string `json:"password"`
+		Code         string   `json:"code"`
+		Name         string   `json:"name"`
+		Emails       []string `json:"emails"`
+		DatabaseName string   `json:"database_name"`
+		Host         string   `json:"host"`
+		Port         string   `json:"port"`
+		Username     string   `json:"username"`
+		Password     string   `json:"password"`
 	}
-
 	if err := c.Bind(&reqBody); err != nil {
 		return jsonError(http.StatusBadRequest, "Invalid Request", err)
 	}
 
-	// Process based on method
-	var name string
-	var config map[string]interface{}
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
 	switch method {
 	case "gmail":
-		name, config, err = ProcessGmailMethod(reqBody.Code)
+		connectedEmail, accessToken, refreshToken, credErr := GetGoogleCredentialsFromRequest(c)
+		if credErr != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": credErr.Error()})
+		}
+		toCreate, err := normalizeGmailEmails(reqBody.Emails, connectedEmail)
+		if err != nil {
+			return err
+		}
+		logger.Info(ctx, "Creating backup jobs", logger.String("user_id", userID), logger.String("method", method), logger.Int("accounts", len(toCreate)))
+		if err := validateGmailAdminDomain(ctx, toCreate, connectedEmail, accessToken); err != nil {
+			return err
+		}
+		cred, err := getOrCreateOAuthCredential(database, userID, "gmail", connectedEmail, refreshToken)
+		if err != nil {
+			return err
+		}
+		success, failed := createJobsForEmails(ctx, c, userID, method, syncType, cred.ID, toCreate, database)
+		return respondSyncCreate(c, syncType, success, failed, nil, nil)
 	case "outlook":
-		name, config, err = ProcessOutlookMethod(reqBody.Code)
+		name, config, err := ProcessOutlookMethod(reqBody.Code)
+		if err != nil {
+			return err
+		}
+		return createSingleSyncJobAndRespond(ctx, c, userID, method, syncType, name, config, database)
 	case "psql_database", "mysql_database":
-		name, config, err = ProcessDatabaseMethod(DatabaseConnection{
+		name, config, err := ProcessDatabaseMethod(DatabaseConnection{
 			Name:         reqBody.Name,
 			DatabaseName: reqBody.DatabaseName,
 			Host:         reqBody.Host,
@@ -380,58 +406,211 @@ func HandleAutomaticSyncCreate(c echo.Context) error {
 			Username:     reqBody.Username,
 			Password:     reqBody.Password,
 		})
+		if err != nil {
+			return err
+		}
+		return createSingleSyncJobAndRespond(ctx, c, userID, method, syncType, name, config, database)
+	default:
+		return jsonErrorMsg(http.StatusBadRequest, "Invalid Request", "invalid method")
 	}
+}
 
+// --- Sync create helpers (shared for Gmail and future Outlook) ---
+func syncCreateMessage(syncType string) string {
+	if syncType == "one_time" {
+		return "One-time Automatic Backup Created Successfully"
+	}
+	return "Daily Automatic Backup Created Successfully"
+}
+
+// getOrCreateOAuthCredential returns existing credential for (userID, source, email) or creates one. One row per connection.
+func getOrCreateOAuthCredential(database *db.PostgresDb, userID, source, email, refreshToken string) (*repo.OAuthCredentialDB, error) {
+	cred, err := database.OAuthCredentialRepo.GetByUserIDAndSourceAndEmail(userID, source, email)
 	if err != nil {
-		return err
+		return nil, echo.NewHTTPError(http.StatusInternalServerError, map[string]interface{}{"error": "Failed to lookup credentials"})
 	}
+	if cred != nil {
+		return cred, nil
+	}
+	cred = &repo.OAuthCredentialDB{
+		UserID:       userID,
+		Email:        email,
+		Source:       source,
+		RefreshToken: refreshToken,
+	}
+	if err := database.OAuthCredentialRepo.Create(cred); err != nil {
+		return nil, echo.NewHTTPError(http.StatusInternalServerError, map[string]interface{}{"error": "Failed to store credentials"})
+	}
+	return cred, nil
+}
 
-	// Create the sync job
+// normalizeGmailEmails dedupes and validates; empty list => [connectedEmail].
+func normalizeGmailEmails(emails []string, connectedEmail string) ([]string, error) {
+	if len(emails) == 0 {
+		return []string{connectedEmail}, nil
+	}
+	seen := make(map[string]bool)
+	var out []string
+	for _, e := range emails {
+		e = strings.TrimSpace(e)
+		if e == "" || seen[e] || !isValidEmail(e) {
+			continue
+		}
+		seen[e] = true
+		out = append(out, e)
+	}
+	if len(out) == 0 {
+		return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"error": "No valid emails provided"})
+	}
+	return out, nil
+}
+
+// validateGmailAdminDomain ensures admin can backup other accounts (same domain). Single IsUserAdmin call when needed.
+func validateGmailAdminDomain(ctx context.Context, toCreate []string, connectedEmail, accessToken string) error {
+	adminDomain := google.ExtractDomainFromEmail(connectedEmail)
+	needsAdminCheck := false
+	for _, e := range toCreate {
+		if e != connectedEmail {
+			needsAdminCheck = true
+			break
+		}
+	}
+	if !needsAdminCheck {
+		return nil
+	}
+	if adminDomain == "" {
+		return echo.NewHTTPError(http.StatusForbidden, map[string]interface{}{"error": "Only admins can backup other users' accounts"})
+	}
+	for _, e := range toCreate {
+		if e != connectedEmail && google.ExtractDomainFromEmail(e) != adminDomain {
+			return echo.NewHTTPError(http.StatusForbidden, map[string]interface{}{"error": "Only admins can backup accounts from their own domain"})
+		}
+	}
+	adminOK, err := google.IsUserAdmin(ctx, accessToken, connectedEmail)
+	if err != nil || !adminOK {
+		return echo.NewHTTPError(http.StatusForbidden, map[string]interface{}{"error": "Only Google Workspace admins can backup other users' accounts"})
+	}
+	return nil
+}
+
+// buildCronNotification returns the standard notification payload for cron_created events.
+func buildCronNotification(method, name, syncType string, jobID uint) map[string]interface{} {
+	m := map[string]interface{}{
+		"event": "cron_created", "level": 2, "method": method, "name": name, "type": syncType, "timestamp": "now",
+	}
+	if jobID > 0 {
+		m["job_id"] = jobID
+	}
+	return m
+}
+
+// createJobsForEmails creates one job per email; collects success/failed. Sends one batch notification when multiple accounts.
+// Refresh token is resolved from oauth_credentials via credID at cron run time; no need to store it in job input_data.
+func createJobsForEmails(ctx context.Context, c echo.Context, userID, method, syncType string, credID uint, emails []string, database *db.PostgresDb) (success, failed []map[string]interface{}) {
+	success = make([]map[string]interface{}, 0, len(emails))
+	failed = make([]map[string]interface{}, 0)
+	priority := "normal"
+	batchNotify := len(emails) > 1
+	for _, targetEmail := range emails {
+		config := map[string]interface{}{
+			"credential_id": credID,
+			"email":         targetEmail,
+		}
+		data, createErr := createSyncJob(userID, targetEmail, method, syncType, config, c)
+		if createErr != nil {
+			failed = append(failed, map[string]interface{}{"email": targetEmail, "error": extractCreateJobError(createErr)})
+			continue
+		}
+		cronJob, ok := data.(*repo.CronJobListingDB)
+		if !ok {
+			failed = append(failed, map[string]interface{}{"email": targetEmail, "error": "invalid job response"})
+			continue
+		}
+		item := map[string]interface{}{"email": targetEmail, "job_id": cronJob.ID}
+		if syncType == "one_time" {
+			task, taskErr := database.TaskRepo.CreateTaskForCronJob(cronJob.ID)
+			if taskErr != nil {
+				failed = append(failed, map[string]interface{}{"email": targetEmail, "error": "job created but task failed: " + taskErr.Error()})
+				continue
+			}
+			item["task_id"] = task.ID
+		}
+		success = append(success, item)
+		if !batchNotify {
+			notificationData := buildCronNotification(method, targetEmail, syncType, cronJob.ID)
+			satellite.SendNotificationAsync(ctx, userID, "Automatic Backup Created for "+method, fmt.Sprintf("Your automatic backup for %s has been created successfully", targetEmail), &priority, notificationData, nil)
+		}
+	}
+	if batchNotify && len(success) > 0 {
+		notificationData := buildCronNotification(method, "", syncType, 0)
+		notificationData["count"] = len(success)
+		satellite.SendNotificationAsync(ctx, userID, "Automatic Backup Created for "+method, fmt.Sprintf("Your automatic backup for %d account(s) has been created successfully", len(success)), &priority, notificationData, nil)
+	}
+	return success, failed
+}
+
+func extractCreateJobError(createErr error) string {
+	var httpErr *echo.HTTPError
+	if errors.As(createErr, &httpErr) && httpErr.Message != nil {
+		if m, ok := httpErr.Message.(map[string]interface{}); ok && m["message"] != nil {
+			return fmt.Sprintf("%v", m["message"])
+		}
+		return fmt.Sprintf("%v", httpErr.Message)
+	}
+	return createErr.Error()
+}
+
+// respondSyncCreate sends unified response: message, success, failed. Optional data/task for single-job (Outlook/DB).
+// Gmail bulk path passes singleJobData=nil so no job config (tokens) is ever sent; success/failed contain only email, job_id, task_id.
+func respondSyncCreate(c echo.Context, syncType string, success, failed []map[string]interface{}, singleJobData interface{}, task interface{}) error {
+	resp := map[string]interface{}{
+		"message": syncCreateMessage(syncType),
+		"success": success,
+		"failed":  failed,
+	}
+	if singleJobData != nil {
+		resp["data"] = singleJobData
+		if job, ok := singleJobData.(*repo.CronJobListingDB); ok {
+			repo.MaskTokenForCronJobDB(job)
+		}
+	}
+	if task != nil {
+		resp["task"] = task
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// createSingleSyncJobAndRespond creates one job (Outlook/DB), sends notification, returns unified success/failed response.
+func createSingleSyncJobAndRespond(ctx context.Context, c echo.Context, userID, method, syncType, name string, config map[string]interface{}, database *db.PostgresDb) error {
 	data, err := createSyncJob(userID, name, method, syncType, config, c)
 	if err != nil {
 		return err
 	}
-
-	// Send notification for cron job creation
 	priority := "normal"
-	notificationData := map[string]interface{}{
-		"event":     "cron_created",
-		"level":     2,
-		"method":    method,
-		"name":      name,
-		"type":      syncType,
-		"timestamp": "now", // Required by notification template
-	}
+	var jobID uint
 	if cronJob, ok := data.(*repo.CronJobListingDB); ok {
-		notificationData["job_id"] = cronJob.ID
+		jobID = cronJob.ID
 	}
+	notificationData := buildCronNotification(method, name, syncType, jobID)
 	satellite.SendNotificationAsync(ctx, userID, "Automatic Backup Created for "+method, fmt.Sprintf("Your automatic backup for %s has been created successfully", name), &priority, notificationData, nil)
 
-	return sendSyncResponse(c, syncType, data)
-}
-
-// Method processing functions
-func ProcessGmailMethod(code string) (string, map[string]interface{}, error) {
-	if code == "" {
-		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Code is required")
+	cronJob, _ := data.(*repo.CronJobListingDB)
+	success := []map[string]interface{}{}
+	failed := []map[string]interface{}{}
+	var task interface{}
+	if cronJob != nil {
+		item := map[string]interface{}{"email": cronJob.Name, "job_id": cronJob.ID}
+		if syncType == "one_time" {
+			t, err := database.TaskRepo.CreateTaskForCronJob(cronJob.ID)
+			if err != nil {
+				return jsonError(http.StatusInternalServerError, "Failed to create task for one-time backup", err)
+			}
+			item["task_id"] = t.ID
+			task = t
+		}
+		success = append(success, item)
 	}
-
-	tok, err := google.ExchangeCodeForToken(code)
-	if err != nil {
-		return "", nil, jsonError(http.StatusBadRequest, "Invalid Code. Not able to generate auth token from code", err)
-	}
-
-	userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(tok.AccessToken)
-	if err != nil || userDetails.Email == "" {
-		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid")
-	}
-
-	config := map[string]interface{}{
-		"refresh_token": tok.RefreshToken,
-		"email":         userDetails.Email,
-	}
-
-	return userDetails.Email, config, nil
+	return respondSyncCreate(c, syncType, success, failed, data, task)
 }
 
 func ProcessOutlookMethod(code string) (string, map[string]interface{}, error) {
@@ -600,32 +779,6 @@ func getServiceName(method string) string {
 	}
 }
 
-func sendSyncResponse(c echo.Context, syncType string, data interface{}) error {
-	message := "Daily Automatic Backup Created Successfully"
-	response := map[string]interface{}{
-		"message": message,
-		"data":    data,
-	}
-
-	if syncType == "one_time" {
-		cronJobData, ok := data.(*repo.CronJobListingDB)
-		if !ok {
-			return jsonErrorMsg(http.StatusInternalServerError, "Invalid data type returned")
-		}
-
-		database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
-		task, err := database.TaskRepo.CreateTaskForCronJob(cronJobData.ID)
-		if err != nil {
-			return jsonError(http.StatusInternalServerError, "Failed to create task for one-time backup", err)
-		}
-
-		response["message"] = "One-time Automatic Backup Created Successfully"
-		response["task"] = task
-	}
-
-	return c.JSON(http.StatusOK, response)
-}
-
 // Common error functions
 func jsonErrorMsg(status int, message string, details ...string) error {
 	detailMsg := ""
@@ -653,6 +806,20 @@ func handleDBError(err error) *echo.HTTPError {
 		return jsonError(http.StatusBadRequest, "Email already exists", err)
 	}
 	return jsonError(http.StatusInternalServerError, "Internal Server Error", err)
+}
+
+// mergeJobInputData returns a new map with existing job.InputData merged with updates.
+func mergeJobInputData(job *repo.CronJobListingDB, updates map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{})
+	if job.InputData != nil && job.InputData.Json() != nil {
+		for k, v := range *job.InputData.Json() {
+			out[k] = v
+		}
+	}
+	for k, v := range updates {
+		out[k] = v
+	}
+	return out
 }
 
 func HandleAutomaticSyncCreateTask(c echo.Context) error {
@@ -690,15 +857,24 @@ func HandleAutomaticSyncCreateTask(c echo.Context) error {
 		return sendJSONError(c, http.StatusBadRequest, "one time backup is already running wait for it to complete", nil)
 	}
 
+	// One job = one account; create a single task for this job.
 	task, err := database.TaskRepo.CreateTaskForCronJob(job.ID)
 	if err != nil {
 		return sendJSONError(c, http.StatusInternalServerError, "Failed to create task", err)
 	}
-
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Task created successfully",
 		"data":    task,
 	})
+}
+
+func isValidEmail(s string) bool {
+	s = strings.TrimSpace(s)
+	if len(s) < 4 || !strings.Contains(s, "@") {
+		return false
+	}
+	at := strings.LastIndex(s, "@")
+	return at > 0 && at < len(s)-1
 }
 
 // New helper function to reduce duplication in error responses
@@ -840,7 +1016,7 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 			}
 
 			logger.Info(ctx, "Processing Google OAuth code for one-time sync", logger.Int("job_id", jobID))
-			tok, err := google.ExchangeCodeForToken(*reqBody.Code)
+			tok, err := google.ExchangeCodeForTokenWithAdminScope(*reqBody.Code)
 			if err != nil {
 				logger.Error(ctx, "Failed to get refresh token from code",
 					logger.Int("job_id", jobID),
@@ -881,9 +1057,10 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 				})
 			}
 
-			updateRequest["input_data"] = map[string]interface{}{
+			updateRequest["input_data"] = mergeJobInputData(job, map[string]interface{}{
 				"refresh_token": tok.RefreshToken,
-			}
+				"email":         userDetails.Email,
+			})
 			logger.Info(ctx, "Google OAuth token updated successfully for one-time sync",
 				logger.Int("job_id", jobID),
 				logger.String("email", userDetails.Email))
@@ -955,9 +1132,9 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 				})
 			}
 
-			updateRequest["input_data"] = map[string]interface{}{
+			updateRequest["input_data"] = mergeJobInputData(job, map[string]interface{}{
 				"refresh_token": *reqBody.RefreshToken,
-			}
+			})
 			logger.Info(ctx, "Outlook refresh token updated successfully for one-time sync",
 				logger.Int("job_id", jobID),
 				logger.String("email", userDetails.Mail))
@@ -1090,7 +1267,7 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 		}
 
 		logger.Info(ctx, "Processing Google OAuth code", logger.Int("job_id", jobID))
-		tok, err := google.ExchangeCodeForToken(*reqBody.Code)
+		tok, err := google.ExchangeCodeForTokenWithAdminScope(*reqBody.Code)
 		if err != nil {
 			logger.Error(ctx, "Failed to get refresh token from code",
 				logger.Int("job_id", jobID),
@@ -1131,9 +1308,10 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 			})
 		}
 
-		updateRequest["input_data"] = map[string]interface{}{
+		updateRequest["input_data"] = mergeJobInputData(job, map[string]interface{}{
 			"refresh_token": tok.RefreshToken,
-		}
+			"email":         userDetails.Email,
+		})
 		logger.Info(ctx, "Google OAuth token updated successfully",
 			logger.Int("job_id", jobID),
 			logger.String("email", userDetails.Email))
@@ -1148,13 +1326,13 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 			})
 		}
 
-		updateRequest["input_data"] = map[string]interface{}{
+		updateRequest["input_data"] = mergeJobInputData(job, map[string]interface{}{
 			"host":          reqBody.DatabaseConnection.Host,
 			"port":          reqBody.DatabaseConnection.Port,
 			"username":      reqBody.DatabaseConnection.Username,
 			"password":      reqBody.DatabaseConnection.Password,
 			"database_name": reqBody.DatabaseConnection.DatabaseName,
-		}
+		})
 		logger.Info(ctx, "Database connection updated",
 			logger.Int("job_id", jobID),
 			logger.String("host", reqBody.DatabaseConnection.Host),
@@ -1214,9 +1392,9 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 			})
 		}
 
-		updateRequest["input_data"] = map[string]interface{}{
+		updateRequest["input_data"] = mergeJobInputData(job, map[string]interface{}{
 			"refresh_token": *reqBody.RefreshToken,
-		}
+		})
 		logger.Info(context.Background(), "Outlook token updated successfully",
 			logger.Int("job_id", jobID),
 			logger.String("email", userDetails.Mail))

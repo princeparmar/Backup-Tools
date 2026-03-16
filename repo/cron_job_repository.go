@@ -600,9 +600,17 @@ func (r *CronJobRepository) validateJobForActivation(job *CronJobListingDB) erro
 
 	switch job.Method {
 	case "gmail":
-		// Check if refresh_token exists in input_data
+		// Gmail: either credential_id (token-in-header flow) or refresh_token (legacy) required
+		if credID, ok := inputData["credential_id"]; ok && credID != nil {
+			if v, ok := credID.(float64); ok && v > 0 {
+				break
+			}
+			if v, ok := credID.(uint); ok && v > 0 {
+				break
+			}
+		}
 		if refreshToken, exists := inputData["refresh_token"]; !exists || refreshToken == "" {
-			return fmt.Errorf("refresh_token is required in input_data for gmail method")
+			return fmt.Errorf("credential_id or refresh_token is required in input_data for gmail method")
 		}
 	case "outlook":
 		// Check if refresh_token exists in input_data

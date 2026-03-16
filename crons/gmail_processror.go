@@ -40,9 +40,22 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 		return err
 	}
 
-	refreshToken, ok := (*input.Job.InputData.Json())["refresh_token"].(string)
-	if !ok {
-		return fmt.Errorf("refresh token not found")
+	// Resolve refresh_token: from oauth_credentials (credential_id) or from job input_data (legacy).
+	var refreshToken string
+	inputData := input.Job.InputData.Json()
+	if inputData != nil {
+		if credID, ok := (*inputData)["credential_id"].(float64); ok && credID > 0 {
+			refreshToken, err = input.Database.OAuthCredentialRepo.GetRefreshTokenByID(uint(credID))
+			if err != nil {
+				return fmt.Errorf("oauth credential not found: %w", err)
+			}
+		}
+	}
+	if refreshToken == "" && inputData != nil {
+		refreshToken, _ = (*inputData)["refresh_token"].(string)
+	}
+	if refreshToken == "" {
+		return fmt.Errorf("refresh token not found (set credential_id or refresh_token in job)")
 	}
 
 	newToken, err := google.AuthTokenUsingRefreshToken(refreshToken)
@@ -55,7 +68,17 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 		return err
 	}
 
-	err = handler.UploadObjectAndSync(context.Background(), input.Database, input.Job.StorxToken, satellite.ReserveBucket_Gmail, input.Job.Name+"/.file_placeholder", nil, input.Job.UserID)
+	// One job = one account. userID from job input_data email or job name (storage path same).
+	userID := "me"
+	pathPrefix := input.Job.Name
+	if input.Job.InputData != nil && input.Job.InputData.Json() != nil {
+		if email, ok := (*input.Job.InputData.Json())["email"].(string); ok && email != "" {
+			userID = email
+			pathPrefix = email
+		}
+	}
+
+	err = handler.UploadObjectAndSync(context.Background(), input.Database, input.Job.StorxToken, satellite.ReserveBucket_Gmail, pathPrefix+"/.file_placeholder", nil, input.Job.UserID)
 	if err != nil {
 		return err
 	}
@@ -63,7 +86,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 	// Get synced objects from database instead of listing from Satellite (OPTIMIZATION)
 	// This is much faster and avoids unnecessary API calls to Satellite
 	// Uses common function that ensures bucket exists and queries database
-	prefix := input.Job.Name + "/"
+	prefix := pathPrefix + "/"
 	emailListFromBucket, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Database, input.Job.StorxToken, satellite.ReserveBucket_Gmail, prefix, input.Job.UserID, "google", "gmail")
 	if err != nil {
 		return fmt.Errorf("failed to get synced objects: %w", err)
@@ -81,7 +104,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 	emptyLoopCount := 0
 
 	for {
-		res, err := gmailClient.GetUserMessagesControlled(*input.Job.TaskMemory.GmailNextToken, "CATEGORY_PERSONAL", 500, nil)
+		res, err := gmailClient.GetUserMessagesWithUserID(userID, *input.Job.TaskMemory.GmailNextToken, "CATEGORY_PERSONAL", 500, nil)
 		if err != nil {
 			return err
 		}
@@ -98,7 +121,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 				continue
 			}
 
-			messagePath := input.Job.Name + "/" + utils.GenerateTitleFromGmailMessage(message)
+			messagePath := pathPrefix + "/" + utils.GenerateTitleFromGmailMessage(message)
 			_, synced := emailListFromBucket[messagePath]
 			if synced {
 				continue
