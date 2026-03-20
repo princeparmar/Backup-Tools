@@ -49,6 +49,24 @@ type DownloadResult struct {
 	Message      string   `json:"message"`
 }
 
+type gmailAccountCount struct {
+	Email      string `json:"email"`
+	EmailCount int64  `json:"email_count"`
+}
+
+type gmailGroupedEmails struct {
+	AdminEmail      string              `json:"admin_email"`
+	EmailCount      int64               `json:"email_count"`
+	ConnectedEmails []gmailAccountCount `json:"connected_emails"`
+}
+
+type gmailCorporateAdminResponse struct {
+	Account     string             `json:"account"`
+	AccountType string             `json:"account_type"`
+	Count       int                `json:"count"`
+	Grouped     gmailGroupedEmails `json:"grouped_emails"`
+}
+
 // GmailService provides consolidated Gmail operations
 type GmailService struct {
 	client      *google.GmailClient
@@ -728,7 +746,16 @@ func HandleGmailCorporateDomainUsers(c echo.Context) error {
 	}
 
 	domain := google.ExtractDomainFromEmail(userDetails.Email)
-	resp := map[string]interface{}{"account_type": accountType, "account": userDetails.Email, "users": []map[string]interface{}{}, "count": 0}
+	resp := gmailCorporateAdminResponse{
+		Account:     userDetails.Email,
+		AccountType: accountType,
+		Count:       0,
+		Grouped: gmailGroupedEmails{
+			AdminEmail:      userDetails.Email,
+			EmailCount:      0,
+			ConnectedEmails: []gmailAccountCount{},
+		},
+	}
 	if domain == "" {
 		return c.JSON(http.StatusOK, resp)
 	}
@@ -743,15 +770,26 @@ func HandleGmailCorporateDomainUsers(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "Failed to create Gmail client"})
 	}
 
-	accounts := make([]map[string]interface{}, 0, len(users))
+	accounts := make([]gmailAccountCount, 0, len(users))
+	connectedAccounts := make([]gmailAccountCount, 0, len(users))
+	adminCount, adminCountErr := gmailClient.GetUserMessageCount(userDetails.Email)
+	if adminCountErr != nil {
+		logger.Warn(ctx, "Get message count failed for admin user", logger.String("email", userDetails.Email), logger.ErrorField(adminCountErr))
+	}
 	for _, email := range users {
+		if email == userDetails.Email {
+			continue
+		}
 		count, countErr := gmailClient.GetUserMessageCount(email)
 		if countErr != nil {
 			logger.Warn(ctx, "Get message count failed for user", logger.String("email", email), logger.ErrorField(countErr))
 		}
-		accounts = append(accounts, map[string]interface{}{"email": email, "email_count": count})
+		entry := gmailAccountCount{Email: email, EmailCount: count}
+		accounts = append(accounts, entry)
+		connectedAccounts = append(connectedAccounts, entry)
 	}
-	resp["users"] = accounts
-	resp["count"] = len(accounts)
+	resp.Count = len(accounts)
+	resp.Grouped.EmailCount = adminCount
+	resp.Grouped.ConnectedEmails = connectedAccounts
 	return c.JSON(http.StatusOK, resp)
 }

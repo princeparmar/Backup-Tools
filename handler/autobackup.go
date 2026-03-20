@@ -16,7 +16,6 @@ import (
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
-	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/labstack/echo/v4"
@@ -111,7 +110,8 @@ func HandleAutomaticSyncListForUser(c echo.Context) error {
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Automatic Backup Accounts List",
-		"data":    response,
+		"success": response,
+		"failed":  []interface{}{},
 	})
 }
 func calculateNextBackup(job repo.CronJobListingDB) *time.Time {
@@ -327,7 +327,8 @@ func HandleAutomaticSyncDetails(c echo.Context) error {
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Automatic Backup Account Details",
-		"data":    jobDetails,
+		"success": []*repo.CronJobListingDB{jobDetails},
+		"failed":  []interface{}{},
 	})
 }
 
@@ -389,7 +390,8 @@ func HandleAutomaticSyncCreate(c echo.Context) error {
 		if err != nil {
 			return err
 		}
-		success, failed := createJobsForEmails(ctx, c, userID, method, syncType, cred.ID, toCreate, database)
+		parentID := getCorporateParentID(connectedEmail, toCreate)
+		success, failed := createJobsForEmails(ctx, c, userID, method, syncType, cred.ID, toCreate, parentID, database)
 		return respondSyncCreate(c, syncType, success, failed, nil, nil)
 	case "outlook":
 		name, config, err := ProcessOutlookMethod(reqBody.Code)
@@ -504,9 +506,21 @@ func buildCronNotification(method, name, syncType string, jobID uint) map[string
 	return m
 }
 
+// getCorporateParentID returns connected admin email for corporate selections (at least one target differs from connectedEmail).
+// Personal/self backups keep parent_id null.
+func getCorporateParentID(connectedEmail string, targets []string) *string {
+	for _, e := range targets {
+		if e != connectedEmail {
+			parent := connectedEmail
+			return &parent
+		}
+	}
+	return nil
+}
+
 // createJobsForEmails creates one job per email; collects success/failed. Sends one batch notification when multiple accounts.
 // Refresh token is resolved from oauth_credentials via credID at cron run time; no need to store it in job input_data.
-func createJobsForEmails(ctx context.Context, c echo.Context, userID, method, syncType string, credID uint, emails []string, database *db.PostgresDb) (success, failed []map[string]interface{}) {
+func createJobsForEmails(ctx context.Context, c echo.Context, userID, method, syncType string, credID uint, emails []string, parentID *string, database *db.PostgresDb) (success, failed []map[string]interface{}) {
 	success = make([]map[string]interface{}, 0, len(emails))
 	failed = make([]map[string]interface{}, 0)
 	priority := "normal"
@@ -516,7 +530,7 @@ func createJobsForEmails(ctx context.Context, c echo.Context, userID, method, sy
 			"credential_id": credID,
 			"email":         targetEmail,
 		}
-		data, createErr := createSyncJob(userID, targetEmail, method, syncType, config, c)
+		data, createErr := createSyncJob(userID, targetEmail, method, syncType, config, parentID, c)
 		if createErr != nil {
 			failed = append(failed, map[string]interface{}{"email": targetEmail, "error": extractCreateJobError(createErr)})
 			continue
@@ -560,8 +574,8 @@ func extractCreateJobError(createErr error) string {
 	return createErr.Error()
 }
 
-// respondSyncCreate sends unified response: message, success, failed. Optional data/task for single-job (Outlook/DB).
-// Gmail bulk path passes singleJobData=nil so no job config (tokens) is ever sent; success/failed contain only email, job_id, task_id.
+// respondSyncCreate sends unified response: message, success, failed. For single-job (Outlook/DB) the job is placed in success[0]; no separate "data".
+// Gmail bulk path passes singleJobData=nil; success/failed contain only email, job_id, task_id.
 func respondSyncCreate(c echo.Context, syncType string, success, failed []map[string]interface{}, singleJobData interface{}, task interface{}) error {
 	resp := map[string]interface{}{
 		"message": syncCreateMessage(syncType),
@@ -569,9 +583,9 @@ func respondSyncCreate(c echo.Context, syncType string, success, failed []map[st
 		"failed":  failed,
 	}
 	if singleJobData != nil {
-		resp["data"] = singleJobData
 		if job, ok := singleJobData.(*repo.CronJobListingDB); ok {
 			repo.MaskTokenForCronJobDB(job)
+			resp["success"] = []*repo.CronJobListingDB{job}
 		}
 	}
 	if task != nil {
@@ -582,7 +596,7 @@ func respondSyncCreate(c echo.Context, syncType string, success, failed []map[st
 
 // createSingleSyncJobAndRespond creates one job (Outlook/DB), sends notification, returns unified success/failed response.
 func createSingleSyncJobAndRespond(ctx context.Context, c echo.Context, userID, method, syncType, name string, config map[string]interface{}, database *db.PostgresDb) error {
-	data, err := createSyncJob(userID, name, method, syncType, config, c)
+	data, err := createSyncJob(userID, name, method, syncType, config, nil, c)
 	if err != nil {
 		return err
 	}
@@ -683,7 +697,7 @@ func ProcessDatabaseMethod(reqBody DatabaseConnection) (string, map[string]inter
 }
 
 // Helper functions
-func createSyncJob(userID, name, method, syncType string, config map[string]interface{}, c echo.Context) (interface{}, error) {
+func createSyncJob(userID, name, method, syncType string, config map[string]interface{}, parentID *string, c echo.Context) (interface{}, error) {
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
 	// Check for existing jobs using original name (before adding timestamp)
@@ -691,7 +705,7 @@ func createSyncJob(userID, name, method, syncType string, config map[string]inte
 		return nil, err
 	}
 
-	data, err := database.CronJobRepo.CreateCronJobForUser(userID, name, method, syncType, config)
+	data, err := database.CronJobRepo.CreateCronJobForUser(userID, name, method, syncType, config, parentID)
 	if err != nil {
 		return nil, handleDBError(err)
 	}
@@ -888,6 +902,177 @@ func sendJSONError(c echo.Context, status int, message string, err error) error 
 	return c.JSON(status, response)
 }
 
+type AutomaticBackupUpdateRequest struct {
+	Interval           *string             `json:"interval"`
+	On                 *string             `json:"on"`
+	Code               *string             `json:"code"`
+	RefreshToken       *string             `json:"refresh_token"`
+	DatabaseConnection *DatabaseConnection `json:"database_connection"`
+	StorxToken         *string             `json:"storx_token"`
+	Active             *bool               `json:"active"`
+}
+
+func httpErr(status int, message string, errText string) error {
+	return echo.NewHTTPError(status, map[string]interface{}{"message": message, "error": errText})
+}
+
+func buildUpdateRequestForJob(ctx context.Context, job *repo.CronJobListingDB, reqBody AutomaticBackupUpdateRequest, jobID int) (map[string]interface{}, error) {
+	updateRequest := map[string]interface{}{}
+
+	if job.SyncType == "one_time" {
+		if reqBody.Interval != nil || reqBody.On != nil || reqBody.DatabaseConnection != nil || reqBody.Active != nil {
+			return nil, httpErr(http.StatusBadRequest, "Invalid Request", "For one-time sync jobs, only storx_token and code for outlook/gmail updates are allowed")
+		}
+		if reqBody.StorxToken != nil {
+			if *reqBody.StorxToken == "" {
+				return nil, httpErr(http.StatusBadRequest, "Invalid Request", "storx_token cannot be empty")
+			}
+			updateRequest["storx_token"] = *reqBody.StorxToken
+			extractAndStoreProjectID(ctx, *reqBody.StorxToken, updateRequest, jobID, "one-time")
+		}
+		if reqBody.Code != nil {
+			if job.Method != "gmail" {
+				return nil, httpErr(http.StatusBadRequest, "Invalid Request", "code update is only allowed for gmail method")
+			}
+			tok, err := google.ExchangeCodeForTokenWithAdminScope(*reqBody.Code)
+			if err != nil {
+				return nil, httpErr(http.StatusBadRequest, "Invalid Code. Not able to generate auth token from code", err.Error())
+			}
+			userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(tok.AccessToken)
+			if err != nil {
+				return nil, httpErr(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid", err.Error())
+			}
+			if userDetails.Email == "" {
+				return nil, httpErr(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid", "getting empty email id from google token")
+			}
+			if userDetails.Email != job.Name {
+				return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "email id mismatch"})
+			}
+			updateRequest["input_data"] = mergeJobInputData(job, map[string]interface{}{"refresh_token": tok.RefreshToken, "email": userDetails.Email})
+		}
+		if reqBody.RefreshToken != nil {
+			if job.Method != "outlook" {
+				return nil, httpErr(http.StatusBadRequest, "Invalid Request", "refresh_token update is only allowed for outlook method")
+			}
+			authToken, err := outlook.AuthTokenUsingRefreshToken(*reqBody.RefreshToken)
+			if err != nil {
+				return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. Not able to generate auth token from refresh token", err.Error())
+			}
+			client, err := outlook.NewOutlookClientUsingToken(authToken)
+			if err != nil {
+				return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err.Error())
+			}
+			userDetails, err := client.GetCurrentUser()
+			if err != nil {
+				return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err.Error())
+			}
+			if userDetails.Mail == "" {
+				return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", "getting empty email id from outlook token")
+			}
+			if userDetails.Mail != job.Name {
+				return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "email id mismatch"})
+			}
+			updateRequest["input_data"] = mergeJobInputData(job, map[string]interface{}{"refresh_token": *reqBody.RefreshToken})
+		}
+		if len(updateRequest) == 0 {
+			return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "No valid update fields provided. Only storx_token, code (gmail), and refresh_token (outlook) are allowed"})
+		}
+		return updateRequest, nil
+	}
+
+	if (reqBody.Interval != nil && reqBody.On == nil) || (reqBody.On != nil && reqBody.Interval == nil) {
+		return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "Both interval and on are required together"})
+	}
+	if reqBody.Interval != nil {
+		onValue := strings.TrimSpace(*reqBody.On)
+		if onValue == "" {
+			return nil, httpErr(http.StatusBadRequest, "Invalid Request", "On value cannot be empty")
+		}
+		if *reqBody.Interval == "monthly" {
+			day, err := strconv.Atoi(onValue)
+			if err != nil {
+				return nil, httpErr(http.StatusBadRequest, "Invalid Request", "On value must be a valid number for monthly intervals")
+			}
+			onValue = strconv.Itoa(day)
+			if day == 29 || day == 30 || day == 31 {
+				return nil, httpErr(http.StatusBadRequest, "Invalid Request", "Monthly backups cannot be scheduled on the 29th, 30th or 31st day. Please select a date between 1-28.")
+			}
+		}
+		if !validateInterval(*reqBody.Interval, onValue) {
+			return nil, httpErr(http.StatusBadRequest, "Invalid Request", "On is not valid for the given interval")
+		}
+		updateRequest["interval"] = *reqBody.Interval
+		updateRequest["on"] = onValue
+	}
+	if reqBody.Code != nil {
+		if job.Method != "gmail" {
+			return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "refresh token is not allowed for this method"})
+		}
+		tok, err := google.ExchangeCodeForTokenWithAdminScope(*reqBody.Code)
+		if err != nil {
+			return nil, httpErr(http.StatusBadRequest, "Invalid Code. Not able to generate auth token from code", err.Error())
+		}
+		userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(tok.AccessToken)
+		if err != nil {
+			return nil, httpErr(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid", err.Error())
+		}
+		if userDetails.Email == "" {
+			return nil, httpErr(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid", "getting empty email id from google token")
+		}
+		if userDetails.Email != job.Name {
+			return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "email id mismatch"})
+		}
+		updateRequest["input_data"] = mergeJobInputData(job, map[string]interface{}{"refresh_token": tok.RefreshToken, "email": userDetails.Email})
+	} else if reqBody.DatabaseConnection != nil {
+		if job.Method != "database" {
+			return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "database connection is not allowed for this method"})
+		}
+		updateRequest["input_data"] = mergeJobInputData(job, map[string]interface{}{
+			"host":          reqBody.DatabaseConnection.Host,
+			"port":          reqBody.DatabaseConnection.Port,
+			"username":      reqBody.DatabaseConnection.Username,
+			"password":      reqBody.DatabaseConnection.Password,
+			"database_name": reqBody.DatabaseConnection.DatabaseName,
+		})
+	} else if reqBody.RefreshToken != nil {
+		if job.Method != "outlook" {
+			return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "refresh token is not allowed for this method"})
+		}
+		authToken, err := outlook.AuthTokenUsingRefreshToken(*reqBody.RefreshToken)
+		if err != nil {
+			return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. Not able to generate auth token from refresh token", err.Error())
+		}
+		client, err := outlook.NewOutlookClientUsingToken(authToken)
+		if err != nil {
+			return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err.Error())
+		}
+		userDetails, err := client.GetCurrentUser()
+		if err != nil {
+			return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err.Error())
+		}
+		if userDetails.Mail == "" {
+			return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", "getting empty email id from outlook token")
+		}
+		updateRequest["input_data"] = mergeJobInputData(job, map[string]interface{}{"refresh_token": *reqBody.RefreshToken})
+	}
+	if reqBody.StorxToken != nil {
+		updateRequest["storx_token"] = *reqBody.StorxToken
+		extractAndStoreProjectID(ctx, *reqBody.StorxToken, updateRequest, jobID, "daily")
+	}
+	if reqBody.Active != nil {
+		updateRequest["active"] = *reqBody.Active
+		if *reqBody.Active {
+			updateRequest["message"] = "You Automatic backup is activated. it will start processing first backup soon"
+			updateRequest["message_status"] = repo.JobMessageStatusInfo
+			updateRequest["auto_deactivated"] = false
+		} else {
+			updateRequest["message"] = "You Automatic backup is deactivated. it will not process any backup"
+			updateRequest["message_status"] = repo.JobMessageStatusInfo
+		}
+	}
+	return updateRequest, nil
+}
+
 func HandleAutomaticBackupUpdate(c echo.Context) error {
 
 	ctx := c.Request().Context()
@@ -940,23 +1125,7 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 		logger.String("job_method", job.Method),
 		logger.Bool("job_active", job.Active))
 
-	type DatabaseConnection struct {
-		DatabaseName string `json:"database_name"`
-		Host         string `json:"host"`
-		Port         string `json:"port"`
-		Username     string `json:"username"`
-		Password     string `json:"password"`
-	}
-
-	var reqBody struct {
-		Interval           *string             `json:"interval"`
-		On                 *string             `json:"on"`
-		Code               *string             `json:"code"`
-		RefreshToken       *string             `json:"refresh_token"`
-		DatabaseConnection *DatabaseConnection `json:"database_connection"`
-		StorxToken         *string             `json:"storx_token"`
-		Active             *bool               `json:"active"`
-	}
+	var reqBody AutomaticBackupUpdateRequest
 
 	if err := c.Bind(&reqBody); err != nil {
 		logger.Error(ctx, "Failed to bind request body",
@@ -968,466 +1137,13 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 		})
 	}
 
-	// For one-time syncs, only allow storx_token and refresh_token (outlook) updates
-	if job.SyncType == "one_time" {
-		// Block updates to interval, on, code, database_connection, active
-		if reqBody.Interval != nil || reqBody.On != nil ||
-			reqBody.DatabaseConnection != nil || reqBody.Active != nil {
-			logger.Warn(ctx, "Attempt to update restricted fields for one-time sync",
-				logger.Int("job_id", jobID))
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "Invalid Request",
-				"error":   "For one-time sync jobs, only storx_token and code for outlook/gmail updates are allowed",
-			})
+	updateRequest, err := buildUpdateRequestForJob(ctx, job, reqBody, jobID)
+	if err != nil {
+		var httpErr *echo.HTTPError
+		if errors.As(err, &httpErr) {
+			return c.JSON(httpErr.Code, httpErr.Message)
 		}
-
-		updateRequest := map[string]interface{}{}
-		logger.Info(ctx, "Processing one-time sync update", logger.Int("job_id", jobID))
-
-		// Handle storx_token update for one-time syncs
-		if reqBody.StorxToken != nil {
-			if *reqBody.StorxToken == "" {
-				logger.Warn(ctx, "Empty storx_token provided for one-time sync",
-					logger.Int("job_id", jobID))
-				return c.JSON(http.StatusBadRequest, map[string]interface{}{
-					"message": "Invalid Request",
-					"error":   "storx_token cannot be empty",
-				})
-			}
-			updateRequest["storx_token"] = *reqBody.StorxToken
-
-			// Extract project_id from storx_token and store it
-			extractAndStoreProjectID(ctx, *reqBody.StorxToken, updateRequest, jobID, "one-time")
-
-			logger.Info(ctx, "Storx token updated for one-time sync",
-				logger.Int("job_id", jobID))
-		}
-
-		// Handle code update for one-time syncs (gmail only)
-		if reqBody.Code != nil {
-			if job.Method != "gmail" {
-				logger.Warn(ctx, "Code update attempted for non-gmail one-time sync",
-					logger.Int("job_id", jobID),
-					logger.String("current_method", job.Method))
-				return c.JSON(http.StatusBadRequest, map[string]interface{}{
-					"message": "Invalid Request",
-					"error":   "code update is only allowed for gmail method",
-				})
-			}
-
-			logger.Info(ctx, "Processing Google OAuth code for one-time sync", logger.Int("job_id", jobID))
-			tok, err := google.ExchangeCodeForTokenWithAdminScope(*reqBody.Code)
-			if err != nil {
-				logger.Error(ctx, "Failed to get refresh token from code",
-					logger.Int("job_id", jobID),
-					logger.ErrorField(err))
-				return c.JSON(http.StatusBadRequest, map[string]interface{}{
-					"message": "Invalid Code. Not able to generate auth token from code",
-					"error":   err.Error(),
-				})
-			}
-
-			// Get User Email
-			userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(tok.AccessToken)
-			if err != nil {
-				logger.Error(ctx, "Failed to get Google account details",
-					logger.Int("job_id", jobID),
-					logger.ErrorField(err))
-				return c.JSON(http.StatusBadRequest, map[string]interface{}{
-					"message": "Invalid Code. May be it is expired or invalid",
-					"error":   err.Error(),
-				})
-			}
-
-			if userDetails.Email == "" {
-				logger.Error(ctx, "Empty email received from Google token", logger.Int("job_id", jobID))
-				return c.JSON(http.StatusBadRequest, map[string]interface{}{
-					"message": "Invalid Code. May be it is expired or invalid",
-					"error":   "getting empty email id from google token",
-				})
-			}
-
-			if userDetails.Email != job.Name {
-				logger.Warn(ctx, "Email mismatch in Google OAuth for one-time sync",
-					logger.Int("job_id", jobID),
-					logger.String("token_email", userDetails.Email),
-					logger.String("job_email", job.Name))
-				return c.JSON(http.StatusBadRequest, map[string]interface{}{
-					"message": "email id mismatch",
-				})
-			}
-
-			updateRequest["input_data"] = mergeJobInputData(job, map[string]interface{}{
-				"refresh_token": tok.RefreshToken,
-				"email":         userDetails.Email,
-			})
-			logger.Info(ctx, "Google OAuth token updated successfully for one-time sync",
-				logger.Int("job_id", jobID),
-				logger.String("email", userDetails.Email))
-		}
-
-		// Handle refresh_token update for one-time syncs (outlook only)
-		if reqBody.RefreshToken != nil {
-			if job.Method != "outlook" {
-				logger.Warn(ctx, "Refresh token update attempted for non-outlook one-time sync",
-					logger.Int("job_id", jobID),
-					logger.String("current_method", job.Method))
-				return c.JSON(http.StatusBadRequest, map[string]interface{}{
-					"message": "Invalid Request",
-					"error":   "refresh_token update is only allowed for outlook method",
-				})
-			}
-
-			logger.Info(ctx, "Processing Outlook refresh token for one-time sync", logger.Int("job_id", jobID))
-			// Get new access token using refresh token
-			authToken, err := outlook.AuthTokenUsingRefreshToken(*reqBody.RefreshToken)
-			if err != nil {
-				logger.Error(ctx, "Failed to get auth token from refresh token",
-					logger.Int("job_id", jobID),
-					logger.ErrorField(err))
-				return c.JSON(http.StatusBadRequest, map[string]interface{}{
-					"message": "Invalid Refresh Token. Not able to generate auth token from refresh token",
-					"error":   err.Error(),
-				})
-			}
-
-			// Create Outlook client and get user details
-			client, err := outlook.NewOutlookClientUsingToken(authToken)
-			if err != nil {
-				logger.Error(ctx, "Failed to create Outlook client",
-					logger.Int("job_id", jobID),
-					logger.ErrorField(err))
-				return c.JSON(http.StatusBadRequest, map[string]interface{}{
-					"message": "Invalid Refresh Token. May be it is expired or invalid",
-					"error":   err.Error(),
-				})
-			}
-
-			userDetails, err := client.GetCurrentUser()
-			if err != nil {
-				logger.Error(ctx, "Failed to get Outlook user details",
-					logger.Int("job_id", jobID),
-					logger.ErrorField(err))
-				return c.JSON(http.StatusBadRequest, map[string]interface{}{
-					"message": "Invalid Refresh Token. May be it is expired or invalid",
-					"error":   err.Error(),
-				})
-			}
-
-			if userDetails.Mail == "" {
-				logger.Error(ctx, "Empty email received from Outlook token", logger.Int("job_id", jobID))
-				return c.JSON(http.StatusBadRequest, map[string]interface{}{
-					"message": "Invalid Refresh Token. May be it is expired or invalid",
-					"error":   "getting empty email id from outlook token",
-				})
-			}
-
-			if userDetails.Mail != job.Name {
-				logger.Warn(ctx, "Email mismatch in Outlook refresh token update",
-					logger.Int("job_id", jobID),
-					logger.String("token_email", userDetails.Mail),
-					logger.String("job_email", job.Name))
-				return c.JSON(http.StatusBadRequest, map[string]interface{}{
-					"message": "email id mismatch",
-				})
-			}
-
-			updateRequest["input_data"] = mergeJobInputData(job, map[string]interface{}{
-				"refresh_token": *reqBody.RefreshToken,
-			})
-			logger.Info(ctx, "Outlook refresh token updated successfully for one-time sync",
-				logger.Int("job_id", jobID),
-				logger.String("email", userDetails.Mail))
-		}
-
-		// If no valid updates were provided
-		if len(updateRequest) == 0 {
-			logger.Warn(ctx, "No valid update fields provided for one-time sync",
-				logger.Int("job_id", jobID))
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "No valid update fields provided. Only storx_token, code (gmail), and refresh_token (outlook) are allowed",
-			})
-		}
-
-		logger.Info(ctx, "Updating one-time sync job in database",
-			logger.Int("job_id", jobID),
-			logger.Int("update_fields_count", len(updateRequest)))
-
-		err = database.CronJobRepo.UpdateCronJobByID(uint(jobID), updateRequest)
-		if err != nil {
-			logger.Error(ctx, "Failed to update one-time sync job in database",
-				logger.Int("job_id", jobID),
-				logger.ErrorField(err))
-			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-				"message": "Failed to update job",
-				"error":   err.Error(),
-			})
-		}
-
-		data, err := database.CronJobRepo.GetCronJobByID(uint(jobID))
-		if err != nil {
-			logger.Error(ctx, "Failed to retrieve updated one-time sync job data",
-				logger.Int("job_id", jobID),
-				logger.ErrorField(err))
-			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-				"message": "internal server error",
-				"error":   err.Error(),
-			})
-		}
-
-		logger.Info(ctx, "One-time sync update completed successfully",
-			logger.Int("job_id", jobID),
-			logger.String("job_name", data.Name))
-
-		return c.JSON(http.StatusOK, map[string]interface{}{
-			"message": "Automatic backup updated successfully",
-			"data":    data,
-		})
-	}
-
-	// Validate interval and on together (for daily syncs)
-	if (reqBody.Interval != nil && reqBody.On == nil) ||
-		(reqBody.On != nil && reqBody.Interval == nil) {
-		logger.Warn(ctx, "Invalid interval/on combination",
-			logger.Int("job_id", jobID),
-			logger.Bool("has_interval", reqBody.Interval != nil),
-			logger.Bool("has_on", reqBody.On != nil))
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "Both interval and on are required together",
-		})
-	}
-
-	updateRequest := map[string]interface{}{}
-	logger.Info(ctx, "Starting update request processing", logger.Int("job_id", jobID))
-
-	if reqBody.Interval != nil {
-		if reqBody.On == nil {
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "Invalid Request",
-				"error":   "Both interval and on are required together",
-			})
-		}
-
-		onValue := strings.TrimSpace(*reqBody.On)
-		if onValue == "" {
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "Invalid Request",
-				"error":   "On value cannot be empty",
-			})
-		}
-
-		if *reqBody.Interval == "monthly" {
-			day, err := strconv.Atoi(onValue)
-			if err != nil {
-				return c.JSON(http.StatusBadRequest, map[string]interface{}{
-					"message": "Invalid Request",
-					"error":   "On value must be a valid number for monthly intervals",
-				})
-			}
-			onValue = strconv.Itoa(day)
-
-			if day == 29 || day == 30 || day == 31 {
-				logger.Warn(ctx, "Invalid monthly date selected",
-					logger.Int("job_id", jobID),
-					logger.Int("day", day))
-				return c.JSON(http.StatusBadRequest, map[string]interface{}{
-					"message": "Invalid Request",
-					"error":   "Monthly backups cannot be scheduled on the 29th, 30th or 31st day. Please select a date between 1-28.",
-				})
-			}
-		}
-
-		if !validateInterval(*reqBody.Interval, onValue) {
-			logger.Warn(ctx, "Invalid interval validation",
-				logger.Int("job_id", jobID),
-				logger.String("interval", *reqBody.Interval),
-				logger.String("on", onValue))
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "Invalid Request",
-				"error":   "On is not valid for the given interval",
-			})
-		}
-
-		updateRequest["interval"] = *reqBody.Interval
-		updateRequest["on"] = onValue
-		logger.Info(ctx, "Interval and on updated",
-			logger.Int("job_id", jobID),
-			logger.String("interval", *reqBody.Interval),
-			logger.String("on", onValue))
-	}
-
-	if reqBody.Code != nil {
-		if job.Method != "gmail" {
-			logger.Warn(ctx, "Code update attempted for non-gmail method",
-				logger.Int("job_id", jobID),
-				logger.String("current_method", job.Method))
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "refresh token is not allowed for this method",
-			})
-		}
-
-		logger.Info(ctx, "Processing Google OAuth code", logger.Int("job_id", jobID))
-		tok, err := google.ExchangeCodeForTokenWithAdminScope(*reqBody.Code)
-		if err != nil {
-			logger.Error(ctx, "Failed to get refresh token from code",
-				logger.Int("job_id", jobID),
-				logger.ErrorField(err))
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "Invalid Code. Not able to generate auth token from code",
-				"error":   err.Error(),
-			})
-		}
-
-		// Get User Email
-		userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(tok.AccessToken)
-		if err != nil {
-			logger.Error(ctx, "Failed to get Google account details",
-				logger.Int("job_id", jobID),
-				logger.ErrorField(err))
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "Invalid Code. May be it is expired or invalid",
-				"error":   err.Error(),
-			})
-		}
-
-		if userDetails.Email == "" {
-			logger.Error(ctx, "Empty email received from Google token", logger.Int("job_id", jobID))
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "Invalid Code. May be it is expired or invalid",
-				"error":   "getting empty email id from google token",
-			})
-		}
-
-		if userDetails.Email != job.Name {
-			logger.Warn(ctx, "Email mismatch in Google OAuth",
-				logger.Int("job_id", jobID),
-				logger.String("token_email", userDetails.Email),
-				logger.String("job_email", job.Name))
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "email id mismatch",
-			})
-		}
-
-		updateRequest["input_data"] = mergeJobInputData(job, map[string]interface{}{
-			"refresh_token": tok.RefreshToken,
-			"email":         userDetails.Email,
-		})
-		logger.Info(ctx, "Google OAuth token updated successfully",
-			logger.Int("job_id", jobID),
-			logger.String("email", userDetails.Email))
-
-	} else if reqBody.DatabaseConnection != nil {
-		if job.Method != "database" {
-			logger.Warn(ctx, "Database connection update attempted for non-database method",
-				logger.Int("job_id", jobID),
-				logger.String("current_method", job.Method))
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "database connection is not allowed for this method",
-			})
-		}
-
-		updateRequest["input_data"] = mergeJobInputData(job, map[string]interface{}{
-			"host":          reqBody.DatabaseConnection.Host,
-			"port":          reqBody.DatabaseConnection.Port,
-			"username":      reqBody.DatabaseConnection.Username,
-			"password":      reqBody.DatabaseConnection.Password,
-			"database_name": reqBody.DatabaseConnection.DatabaseName,
-		})
-		logger.Info(ctx, "Database connection updated",
-			logger.Int("job_id", jobID),
-			logger.String("host", reqBody.DatabaseConnection.Host),
-			logger.String("database", reqBody.DatabaseConnection.DatabaseName))
-
-	} else if reqBody.RefreshToken != nil {
-		if job.Method != "outlook" {
-			logger.Warn(ctx, "Refresh token update attempted for non-outlook method",
-				logger.Int("job_id", jobID),
-				logger.String("current_method", job.Method))
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "refresh token is not allowed for this method",
-			})
-		}
-
-		logger.Info(ctx, "Processing Outlook refresh token", logger.Int("job_id", jobID))
-		// Get new access token using refresh token
-		authToken, err := outlook.AuthTokenUsingRefreshToken(*reqBody.RefreshToken)
-		if err != nil {
-			logger.Error(ctx, "Failed to get auth token from refresh token",
-				logger.Int("job_id", jobID),
-				logger.ErrorField(err))
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "Invalid Refresh Token. Not able to generate auth token from refresh token",
-				"error":   err.Error(),
-			})
-		}
-
-		// Create Outlook client and get user details
-		client, err := outlook.NewOutlookClientUsingToken(authToken)
-		if err != nil {
-			logger.Error(ctx, "Failed to create Outlook client",
-				logger.Int("job_id", jobID),
-				logger.ErrorField(err))
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "Invalid Refresh Token. May be it is expired or invalid",
-				"error":   err.Error(),
-			})
-		}
-
-		userDetails, err := client.GetCurrentUser()
-		if err != nil {
-			logger.Error(ctx, "Failed to get Outlook user details",
-				logger.Int("job_id", jobID),
-				logger.ErrorField(err))
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "Invalid Refresh Token. May be it is expired or invalid",
-				"error":   err.Error(),
-			})
-		}
-
-		if userDetails.Mail == "" {
-			logger.Error(ctx, "Empty email received from Outlook token", logger.Int("job_id", jobID))
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "Invalid Refresh Token. May be it is expired or invalid",
-				"error":   "getting empty email id from outlook token",
-			})
-		}
-
-		updateRequest["input_data"] = mergeJobInputData(job, map[string]interface{}{
-			"refresh_token": *reqBody.RefreshToken,
-		})
-		logger.Info(context.Background(), "Outlook token updated successfully",
-			logger.Int("job_id", jobID),
-			logger.String("email", userDetails.Mail))
-	}
-
-	if reqBody.StorxToken != nil {
-		updateRequest["storx_token"] = *reqBody.StorxToken
-
-		logger.Info(ctx, "Attempting to extract project_id from storx_token",
-			logger.Int("job_id", jobID),
-			logger.String("storx_token_length", fmt.Sprintf("%d", len(*reqBody.StorxToken))),
-			logger.String("storx_token_prefix", utils.MaskString(*reqBody.StorxToken)))
-
-		// Extract project_id from storx_token and store it
-		extractAndStoreProjectID(ctx, *reqBody.StorxToken, updateRequest, jobID, "daily")
-
-		logger.Info(ctx, "Storx token updated",
-			logger.Int("job_id", jobID),
-			logger.Bool("has_storx_token", true))
-	}
-
-	if reqBody.Active != nil {
-		updateRequest["active"] = *reqBody.Active
-		if *reqBody.Active {
-			updateRequest["message"] = "You Automatic backup is activated. it will start processing first backup soon"
-			updateRequest["message_status"] = repo.JobMessageStatusInfo
-			updateRequest["auto_deactivated"] = false
-			logger.Info(ctx, "Job activated", logger.Int("job_id", jobID))
-		} else {
-			updateRequest["message"] = "You Automatic backup is deactivated. it will not process any backup"
-			updateRequest["message_status"] = repo.JobMessageStatusInfo
-			logger.Info(ctx, "Job deactivated", logger.Int("job_id", jobID))
-		}
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Request", "error": err.Error()})
 	}
 
 	logger.Info(ctx, "Updating job in database",
@@ -1461,9 +1177,99 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 		logger.String("job_name", data.Name),
 		logger.Bool("job_active", data.Active))
 
+	repo.MaskTokenForCronJobDB(data)
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Automatic backup updated successfully",
-		"data":    data,
+		"success": []*repo.CronJobListingDB{data},
+		"failed":  []interface{}{},
+	})
+}
+
+// HandleAutomaticBackupBulkUpdateByParent updates all Gmail jobs for a corporate admin parent_id
+// resolved from the same encrypted Google token used in create flow.
+func HandleAutomaticBackupBulkUpdateByParent(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	method := c.Param("method")
+	if method != "gmail" {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   "bulk update by parent_id is currently supported only for gmail method",
+		})
+	}
+
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "Authentication required",
+			"error":   err.Error(),
+		})
+	}
+
+	connectedEmail, _, _, credErr := GetGoogleCredentialsFromRequest(c)
+	if credErr != nil {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   credErr.Error(),
+		})
+	}
+
+	var reqBody AutomaticBackupUpdateRequest
+	if err := c.Bind(&reqBody); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid request body",
+			"error":   err.Error(),
+		})
+	}
+
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+	jobs, err := database.CronJobRepo.GetJobsByUserAndParentIDAndMethod(userID, connectedEmail, "gmail")
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"message": "Failed to fetch jobs for parent",
+			"error":   err.Error(),
+		})
+	}
+	if len(jobs) == 0 {
+		return c.JSON(http.StatusNotFound, map[string]interface{}{
+			"message": "No jobs found for parent_id",
+			"error":   "no gmail jobs found for this parent",
+		})
+	}
+
+	success := make([]*repo.CronJobListingDB, 0, len(jobs))
+	failed := make([]map[string]interface{}, 0)
+	for _, job := range jobs {
+		jobUpdate, buildErr := buildUpdateRequestForJob(ctx, &job, reqBody, int(job.ID))
+		if buildErr != nil {
+			var httpErr *echo.HTTPError
+			if errors.As(buildErr, &httpErr) {
+				failed = append(failed, map[string]interface{}{"job_id": job.ID, "email": job.Name, "error": fmt.Sprintf("%v", httpErr.Message)})
+			} else {
+				failed = append(failed, map[string]interface{}{"job_id": job.ID, "email": job.Name, "error": buildErr.Error()})
+			}
+			continue
+		}
+		if updErr := database.CronJobRepo.UpdateCronJobByID(job.ID, jobUpdate); updErr != nil {
+			failed = append(failed, map[string]interface{}{"job_id": job.ID, "email": job.Name, "error": updErr.Error()})
+			continue
+		}
+		updatedJob, getErr := database.CronJobRepo.GetCronJobByID(job.ID)
+		if getErr != nil {
+			failed = append(failed, map[string]interface{}{"job_id": job.ID, "email": job.Name, "error": getErr.Error()})
+			continue
+		}
+		repo.MaskTokenForCronJobDB(updatedJob)
+		success = append(success, updatedJob)
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message":   "Automatic backup bulk update completed successfully",
+		"parent_id": connectedEmail,
+		"success":   success,
+		"failed":    failed,
 	})
 }
 

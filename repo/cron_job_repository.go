@@ -43,6 +43,7 @@ type CronJobListingDB struct {
 	gorm.GormModel
 
 	UserID         string `json:"user_id" gorm:"column:user_id;uniqueIndex:idx_name_sync_type_user"`
+	ParentID       *string `json:"parent_id,omitempty" gorm:"column:parent_id;index:idx_parent_id"`
 	StorjProjectID string `json:"storj_project_id" gorm:"column:storj_project_id;index:idx_storj_project_id"` // Storj project ID extracted from access grant
 
 	// Name + SyncType + UserID should be unique
@@ -376,6 +377,16 @@ func (r *CronJobRepository) GetJobByIDForUser(userID string, jobID uint) (*CronJ
 	return &res, nil
 }
 
+// GetJobsByUserAndParentIDAndMethod retrieves all jobs for a user grouped under a parent_id for a specific method.
+func (r *CronJobRepository) GetJobsByUserAndParentIDAndMethod(userID, parentID, method string) ([]CronJobListingDB, error) {
+	var res []CronJobListingDB
+	db := r.db.Where("user_id = ? AND parent_id = ? AND method = ?", userID, parentID, method).Order("created_at DESC").Find(&res)
+	if db != nil && db.Error != nil {
+		return nil, fmt.Errorf("error getting cron jobs for user/parent/method: %v", db.Error)
+	}
+	return res, nil
+}
+
 // GetCronJobByID retrieves a cron job by ID
 func (r *CronJobRepository) GetCronJobByID(ID uint) (*CronJobListingDB, error) {
 	var res CronJobListingDB
@@ -405,9 +416,10 @@ func (r *CronJobRepository) GetAccessGrantByProjectID(projectID, method string) 
 }
 
 // CreateCronJobForUser creates a new cron job for a user
-func (r *CronJobRepository) CreateCronJobForUser(userID, name, method string, syncType string, inputData map[string]interface{}) (*CronJobListingDB, error) {
+func (r *CronJobRepository) CreateCronJobForUser(userID, name, method string, syncType string, inputData map[string]interface{}, parentID *string) (*CronJobListingDB, error) {
 	data := CronJobListingDB{
 		UserID:    userID,
+		ParentID:  parentID,
 		Name:      name,
 		Method:    method,
 		SyncType:  syncType,
