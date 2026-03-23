@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/db"
@@ -61,10 +62,11 @@ type gmailGroupedEmails struct {
 }
 
 type gmailCorporateAdminResponse struct {
-	Account     string             `json:"account"`
-	AccountType string             `json:"account_type"`
-	Count       int                `json:"count"`
-	Grouped     gmailGroupedEmails `json:"grouped_emails"`
+	Account         string                           `json:"account"`
+	AccountType     string                           `json:"account_type"`
+	Count           int                              `json:"count"`
+	Grouped         gmailGroupedEmails               `json:"grouped_emails"`
+	DelegationSetup *google.WorkspaceDelegationSetup `json:"delegation_setup,omitempty"`
 }
 
 // GmailService provides consolidated Gmail operations
@@ -735,17 +737,19 @@ func HandleGmailCorporateDomainUsers(c echo.Context) error {
 	}
 
 	accountType := "personal"
-	if adminOK, adminErr := google.IsUserAdmin(ctx, accessToken, userDetails.Email); adminErr == nil && adminOK {
-		accountType = "admin_workspace"
-	} else if adminErr == nil {
-		accountType = "employee_workspace"
+	domain := google.ExtractDomainFromEmail(userDetails.Email)
+	if domain != "" {
+		if adminOK, adminErr := google.IsUserAdmin(ctx, accessToken, userDetails.Email); adminErr == nil && adminOK {
+			accountType = "admin_workspace"
+		} else if adminErr == nil {
+			accountType = "employee_workspace"
+		}
 	}
 
 	if accountType != "admin_workspace" {
 		return c.JSON(http.StatusOK, map[string]interface{}{"account_type": accountType, "email": userDetails.Email})
 	}
 
-	domain := google.ExtractDomainFromEmail(userDetails.Email)
 	resp := gmailCorporateAdminResponse{
 		Account:     userDetails.Email,
 		AccountType: accountType,
@@ -756,6 +760,11 @@ func HandleGmailCorporateDomainUsers(c echo.Context) error {
 			ConnectedEmails: []gmailAccountCount{},
 		},
 	}
+	if setup, setupErr := google.GetWorkspaceDelegationSetup(); setupErr == nil {
+		resp.DelegationSetup = setup
+	} else {
+		logger.Warn(ctx, "Workspace delegation setup details unavailable", logger.ErrorField(setupErr))
+	}
 	if domain == "" {
 		return c.JSON(http.StatusOK, resp)
 	}
@@ -763,33 +772,64 @@ func HandleGmailCorporateDomainUsers(c echo.Context) error {
 	users, err := google.ListAllDomainUsers(ctx, accessToken, domain)
 	if err != nil {
 		logger.Warn(ctx, "List domain users failed", logger.ErrorField(err))
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "Failed to list domain users"})
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "Failed to list domain users. Check admin permissions or domain access."})
 	}
-	gmailClient, err := google.NewGmailClientUsingToken(accessToken)
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "Failed to create Gmail client"})
+	if len(users) == 0 {
+		return c.JSON(http.StatusOK, resp)
 	}
 
-	accounts := make([]gmailAccountCount, 0, len(users))
-	connectedAccounts := make([]gmailAccountCount, 0, len(users))
-	adminCount, adminCountErr := gmailClient.GetUserMessageCount(userDetails.Email)
+	// Bound external API latency for this endpoint.
+	countCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	adminSess, err := google.NewWorkspaceGmailSession(countCtx, accessToken, userDetails.Email, userDetails.Email)
+	if err != nil {
+		logger.Warn(ctx, "Gmail session for admin failed", logger.ErrorField(err))
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "Failed to create Gmail client for admin"})
+	}
+	adminCount, adminCountErr := adminSess.Client.GetUserMessageCount(adminSess.APIUser)
 	if adminCountErr != nil {
 		logger.Warn(ctx, "Get message count failed for admin user", logger.String("email", userDetails.Email), logger.ErrorField(adminCountErr))
 	}
+
+	// Compute domain-user counts concurrently with a small limit to reduce latency.
+	targetUsers := make([]string, 0, len(users))
 	for _, email := range users {
-		if email == userDetails.Email {
-			continue
+		if email != userDetails.Email {
+			targetUsers = append(targetUsers, email)
 		}
-		count, countErr := gmailClient.GetUserMessageCount(email)
-		if countErr != nil {
-			logger.Warn(ctx, "Get message count failed for user", logger.String("email", email), logger.ErrorField(countErr))
-		}
-		entry := gmailAccountCount{Email: email, EmailCount: count}
-		accounts = append(accounts, entry)
-		connectedAccounts = append(connectedAccounts, entry)
 	}
-	resp.Count = len(accounts)
+	results := make([]gmailAccountCount, len(targetUsers))
+	g, gctx := errgroup.WithContext(countCtx)
+	g.SetLimit(5)
+	for i, email := range targetUsers {
+		i, email := i, email
+		g.Go(func() error {
+			entry := gmailAccountCount{Email: email, EmailCount: 0}
+			sess, sessErr := google.NewWorkspaceGmailSession(gctx, accessToken, userDetails.Email, email)
+			if sessErr != nil {
+				logger.Warn(ctx, "Gmail session for domain user failed", logger.String("email", email), logger.ErrorField(sessErr))
+				results[i] = entry
+				return nil
+			}
+			count, countErr := sess.Client.GetUserMessageCount(sess.APIUser)
+			if countErr != nil {
+				logger.Warn(ctx, "Get message count failed for user",
+					logger.String("email", email),
+					logger.String("admin", userDetails.Email),
+					logger.ErrorField(countErr))
+				results[i] = entry
+				return nil
+			}
+			entry.EmailCount = count
+			results[i] = entry
+			return nil
+		})
+	}
+	_ = g.Wait()
+
+	resp.Count = len(results)
 	resp.Grouped.EmailCount = adminCount
-	resp.Grouped.ConnectedEmails = connectedAccounts
+	resp.Grouped.ConnectedEmails = results
 	return c.JSON(http.StatusOK, resp)
 }

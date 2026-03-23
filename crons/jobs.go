@@ -481,6 +481,14 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.Cron
 	case job.StorxToken == "":
 		return "Your automatic backup has been temporarily disabled due to insufficient permissions. Please update your StorX permissions and reactivate the backup from your dashboard."
 
+	case strings.Contains(errMsg, "Delegation denied") ||
+		(strings.Contains(errMsg, "googleapi: Error 403") && strings.Contains(errMsg, "Delegation")):
+		// Workspace: Admin must authorize OAuth client for domain-wide delegation + Gmail scopes for impersonated users.
+		if task.RetryCount >= repo.MaxRetryCount {
+			return "Google Workspace blocked access to a mailbox (domain-wide delegation). Ask your admin to add this app's OAuth client in Admin Console → Security → API controls → Domain-wide delegation, with the required Gmail scopes, or remove mailboxes that cannot be delegated."
+		}
+		return fmt.Sprintf("Google Workspace delegation issue while accessing a mailbox. Retrying (attempt %d of %d). If this continues, your admin must enable domain-wide delegation for this app.", task.RetryCount, repo.MaxRetryCount)
+
 	case strings.Contains(errMsg, "googleapi: Error 401") ||
 		strings.Contains(errMsg, "oauth credential not found") ||
 		strings.Contains(errMsg, "refresh token not found"):
@@ -520,6 +528,19 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		job.AutoDeactivated = true
 		job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
 		task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
+
+	case strings.Contains(errMsg, "Delegation denied") ||
+		(strings.Contains(errMsg, "googleapi: Error 403") && strings.Contains(errMsg, "Delegation")):
+		// Not an invalid refresh token — admin must allow domain-wide delegation for this OAuth client + scopes.
+		if task.RetryCount >= repo.MaxRetryCount {
+			job.Active = false
+			job.AutoDeactivated = true
+			job.Message = "Google Workspace denied access to this mailbox (delegation). Ask your admin to enable domain-wide delegation for this app or adjust which accounts are backed up."
+			task.Message = "Delegation denied by Google Workspace. Your admin must authorize this app for domain-wide delegation (Gmail scopes) for the affected users."
+		} else {
+			job.Message = fmt.Sprintf("Google Workspace delegation denied. Attempt %d of %d failed. Retrying...", task.RetryCount, repo.MaxRetryCount)
+			task.Message = fmt.Sprintf("Delegation denied for a mailbox (see logs). Attempt %d of %d. Retrying...", task.RetryCount, repo.MaxRetryCount)
+		}
 
 	case strings.Contains(errMsg, "googleapi: Error 401") ||
 		strings.Contains(errMsg, "oauth credential not found") ||

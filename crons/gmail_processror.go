@@ -10,6 +10,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
+	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 )
 
@@ -42,13 +43,15 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 
 	// Resolve refresh_token: from oauth_credentials (credential_id) or from job input_data (legacy).
 	var refreshToken string
+	var oauthCred *repo.OAuthCredentialDB
 	inputData := input.Job.InputData.Json()
 	if inputData != nil {
 		if credID, ok := (*inputData)["credential_id"].(float64); ok && credID > 0 {
-			refreshToken, err = input.Database.OAuthCredentialRepo.GetRefreshTokenByID(uint(credID))
+			oauthCred, err = input.Database.OAuthCredentialRepo.GetByID(uint(credID))
 			if err != nil {
 				return fmt.Errorf("oauth credential not found: %w", err)
 			}
+			refreshToken = oauthCred.RefreshToken
 		}
 	}
 	if refreshToken == "" && inputData != nil {
@@ -63,20 +66,28 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 		return fmt.Errorf("error while generating auth token: %s", err)
 	}
 
-	gmailClient, err := google.NewGmailClientUsingToken(newToken)
-	if err != nil {
-		return err
-	}
-
-	// One job = one account. userID from job input_data email or job name (storage path same).
-	userID := "me"
+	// One job = one account. Mailbox from input_data.email or job name (storage path same).
+	mailbox := "me"
 	pathPrefix := input.Job.Name
 	if input.Job.InputData != nil && input.Job.InputData.Json() != nil {
 		if email, ok := (*input.Job.InputData.Json())["email"].(string); ok && email != "" {
-			userID = email
+			mailbox = email
 			pathPrefix = email
 		}
 	}
+
+	connectedEmail := ""
+	if oauthCred != nil {
+		connectedEmail = oauthCred.Email
+	}
+
+	// Corporate: other users' mailboxes need service account + domain-wide delegation (not user refresh token).
+	gmailSession, err := google.NewWorkspaceGmailSession(ctx, newToken, connectedEmail, mailbox)
+	if err != nil {
+		return err
+	}
+	gmailClient := gmailSession.Client
+	gmailAPIUser := gmailSession.APIUser
 
 	err = handler.UploadObjectAndSync(context.Background(), input.Database, input.Job.StorxToken, satellite.ReserveBucket_Gmail, pathPrefix+"/.file_placeholder", nil, input.Job.UserID)
 	if err != nil {
@@ -104,7 +115,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 	emptyLoopCount := 0
 
 	for {
-		res, err := gmailClient.GetUserMessagesWithUserID(userID, *input.Job.TaskMemory.GmailNextToken, "CATEGORY_PERSONAL", 500, nil)
+		res, err := gmailClient.GetUserMessagesWithUserID(gmailAPIUser, *input.Job.TaskMemory.GmailNextToken, "CATEGORY_PERSONAL", 500, nil)
 		if err != nil {
 			return err
 		}
