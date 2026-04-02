@@ -16,6 +16,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/labstack/echo/v4"
@@ -300,6 +301,14 @@ func HandleAutomaticSyncDetails(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "Authentication required",
+			"error":   err.Error(),
+		})
+	}
+
 	jobID, err := strconv.Atoi(c.Param("job_id"))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -309,7 +318,7 @@ func HandleAutomaticSyncDetails(c echo.Context) error {
 	}
 
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
-	jobDetails, err := database.CronJobRepo.GetCronJobByID(uint(jobID))
+	jobDetails, err := database.CronJobRepo.GetJobByIDForUser(userID, uint(jobID))
 	if err != nil {
 		if strings.Contains(err.Error(), "record not found") {
 			return c.JSON(http.StatusNotFound, map[string]interface{}{
@@ -324,12 +333,29 @@ func HandleAutomaticSyncDetails(c echo.Context) error {
 	}
 
 	repo.MaskTokenForCronJobDB(jobDetails)
+	enrichGmailJobInputDataWithOAuthRefresh(database, userID, jobDetails)
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Automatic Backup Account Details",
 		"success": []*repo.CronJobListingDB{jobDetails},
 		"failed":  []interface{}{},
 	})
+}
+
+// enrichGmailJobInputDataWithOAuthRefresh sets input_data.refresh_token (masked) from oauth_credentials when credential_id is set.
+func enrichGmailJobInputDataWithOAuthRefresh(database *db.PostgresDb, userID string, job *repo.CronJobListingDB) {
+	if job == nil || job.Method != "gmail" {
+		return
+	}
+	credID, ok := gmailCredentialIDFromJob(job)
+	if !ok {
+		return
+	}
+	cred, err := database.OAuthCredentialRepo.GetByIDAndUser(credID, userID)
+	if err != nil {
+		return
+	}
+	(*job.InputData.Json())["refresh_token"] = utils.MaskString(cred.RefreshToken)
 }
 
 // HandleAutomaticSyncCreate creates backup jobs. Gmail: emails[] + Bearer token (from POST /auth/google/connect). Same response shape for Outlook later.
@@ -830,10 +856,87 @@ func mergeJobInputData(job *repo.CronJobListingDB, updates map[string]interface{
 			out[k] = v
 		}
 	}
-	for k, v := range updates {
-		out[k] = v
+	if updates != nil {
+		for k, v := range updates {
+			out[k] = v
+		}
 	}
 	return out
+}
+
+// gmailCredentialIDFromJob returns oauth_credentials.id from job input_data (JSON numbers decode as float64).
+func gmailCredentialIDFromJob(job *repo.CronJobListingDB) (uint, bool) {
+	if job == nil || job.InputData == nil || job.InputData.Json() == nil {
+		return 0, false
+	}
+	v, ok := (*job.InputData.Json())["credential_id"].(float64)
+	if !ok || v <= 0 {
+		return 0, false
+	}
+	return uint(v), true
+}
+
+func gmailInputDataAfterCodeReauth(database *db.PostgresDb, userID string, job *repo.CronJobListingDB, code string) (map[string]interface{}, error) {
+	tok, err := google.ExchangeCodeForTokenWithAdminScope(code)
+	if err != nil {
+		return nil, httpErr(http.StatusBadRequest, "Invalid Code. Not able to generate auth token from code", err.Error())
+	}
+	userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(tok.AccessToken)
+	if err != nil {
+		return nil, httpErr(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid", err.Error())
+	}
+	if userDetails.Email == "" {
+		return nil, httpErr(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid", "getting empty email id from google token")
+	}
+
+	tokenEmail := strings.TrimSpace(userDetails.Email)
+
+	if credID, ok := gmailCredentialIDFromJob(job); ok {
+		cred, err := database.OAuthCredentialRepo.GetByIDAndUser(credID, userID)
+		if err != nil {
+			return nil, httpErr(http.StatusBadRequest, "Invalid Request", "oauth credential not found for this job")
+		}
+		if !strings.EqualFold(tokenEmail, strings.TrimSpace(cred.Email)) {
+			return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "email id mismatch"})
+		}
+		if err := database.OAuthCredentialRepo.UpdateRefreshTokenForUser(credID, userID, tok.RefreshToken); err != nil {
+			return nil, httpErr(http.StatusInternalServerError, "Failed to update credentials", err.Error())
+		}
+		out := mergeJobInputData(job, nil)
+		delete(out, "refresh_token")
+		return out, nil
+	}
+
+	if !strings.EqualFold(tokenEmail, strings.TrimSpace(job.Name)) {
+		return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "email id mismatch"})
+	}
+	return mergeJobInputData(job, map[string]interface{}{
+		"refresh_token": tok.RefreshToken,
+		"email":         userDetails.Email,
+	}), nil
+}
+
+// outlookInputDataAfterRefreshToken validates the refresh token matches the job mailbox, returns merged input_data.
+func outlookInputDataAfterRefreshToken(job *repo.CronJobListingDB, refreshToken string) (map[string]interface{}, error) {
+	authToken, err := outlook.AuthTokenUsingRefreshToken(refreshToken)
+	if err != nil {
+		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. Not able to generate auth token from refresh token", err.Error())
+	}
+	client, err := outlook.NewOutlookClientUsingToken(authToken)
+	if err != nil {
+		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err.Error())
+	}
+	userDetails, err := client.GetCurrentUser()
+	if err != nil {
+		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err.Error())
+	}
+	if strings.TrimSpace(userDetails.Mail) == "" {
+		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", "getting empty email id from outlook token")
+	}
+	if !strings.EqualFold(strings.TrimSpace(userDetails.Mail), strings.TrimSpace(job.Name)) {
+		return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "email id mismatch"})
+	}
+	return mergeJobInputData(job, map[string]interface{}{"refresh_token": refreshToken}), nil
 }
 
 func HandleAutomaticSyncCreateTask(c echo.Context) error {
@@ -916,7 +1019,7 @@ func httpErr(status int, message string, errText string) error {
 	return echo.NewHTTPError(status, map[string]interface{}{"message": message, "error": errText})
 }
 
-func buildUpdateRequestForJob(ctx context.Context, job *repo.CronJobListingDB, reqBody AutomaticBackupUpdateRequest, jobID int) (map[string]interface{}, error) {
+func buildUpdateRequestForJob(ctx context.Context, database *db.PostgresDb, userID string, job *repo.CronJobListingDB, reqBody AutomaticBackupUpdateRequest, jobID int) (map[string]interface{}, error) {
 	updateRequest := map[string]interface{}{}
 
 	if job.SyncType == "one_time" {
@@ -934,45 +1037,21 @@ func buildUpdateRequestForJob(ctx context.Context, job *repo.CronJobListingDB, r
 			if job.Method != "gmail" {
 				return nil, httpErr(http.StatusBadRequest, "Invalid Request", "code update is only allowed for gmail method")
 			}
-			tok, err := google.ExchangeCodeForTokenWithAdminScope(*reqBody.Code)
+			in, err := gmailInputDataAfterCodeReauth(database, userID, job, *reqBody.Code)
 			if err != nil {
-				return nil, httpErr(http.StatusBadRequest, "Invalid Code. Not able to generate auth token from code", err.Error())
+				return nil, err
 			}
-			userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(tok.AccessToken)
-			if err != nil {
-				return nil, httpErr(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid", err.Error())
-			}
-			if userDetails.Email == "" {
-				return nil, httpErr(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid", "getting empty email id from google token")
-			}
-			if userDetails.Email != job.Name {
-				return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "email id mismatch"})
-			}
-			updateRequest["input_data"] = mergeJobInputData(job, map[string]interface{}{"refresh_token": tok.RefreshToken, "email": userDetails.Email})
+			updateRequest["input_data"] = in
 		}
 		if reqBody.RefreshToken != nil {
 			if job.Method != "outlook" {
 				return nil, httpErr(http.StatusBadRequest, "Invalid Request", "refresh_token update is only allowed for outlook method")
 			}
-			authToken, err := outlook.AuthTokenUsingRefreshToken(*reqBody.RefreshToken)
+			in, err := outlookInputDataAfterRefreshToken(job, *reqBody.RefreshToken)
 			if err != nil {
-				return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. Not able to generate auth token from refresh token", err.Error())
+				return nil, err
 			}
-			client, err := outlook.NewOutlookClientUsingToken(authToken)
-			if err != nil {
-				return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err.Error())
-			}
-			userDetails, err := client.GetCurrentUser()
-			if err != nil {
-				return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err.Error())
-			}
-			if userDetails.Mail == "" {
-				return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", "getting empty email id from outlook token")
-			}
-			if userDetails.Mail != job.Name {
-				return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "email id mismatch"})
-			}
-			updateRequest["input_data"] = mergeJobInputData(job, map[string]interface{}{"refresh_token": *reqBody.RefreshToken})
+			updateRequest["input_data"] = in
 		}
 		if len(updateRequest) == 0 {
 			return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "No valid update fields provided. Only storx_token, code (gmail), and refresh_token (outlook) are allowed"})
@@ -1008,21 +1087,11 @@ func buildUpdateRequestForJob(ctx context.Context, job *repo.CronJobListingDB, r
 		if job.Method != "gmail" {
 			return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "refresh token is not allowed for this method"})
 		}
-		tok, err := google.ExchangeCodeForTokenWithAdminScope(*reqBody.Code)
+		in, err := gmailInputDataAfterCodeReauth(database, userID, job, *reqBody.Code)
 		if err != nil {
-			return nil, httpErr(http.StatusBadRequest, "Invalid Code. Not able to generate auth token from code", err.Error())
+			return nil, err
 		}
-		userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(tok.AccessToken)
-		if err != nil {
-			return nil, httpErr(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid", err.Error())
-		}
-		if userDetails.Email == "" {
-			return nil, httpErr(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid", "getting empty email id from google token")
-		}
-		if userDetails.Email != job.Name {
-			return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "email id mismatch"})
-		}
-		updateRequest["input_data"] = mergeJobInputData(job, map[string]interface{}{"refresh_token": tok.RefreshToken, "email": userDetails.Email})
+		updateRequest["input_data"] = in
 	} else if reqBody.DatabaseConnection != nil {
 		if job.Method != "database" {
 			return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "database connection is not allowed for this method"})
@@ -1038,22 +1107,11 @@ func buildUpdateRequestForJob(ctx context.Context, job *repo.CronJobListingDB, r
 		if job.Method != "outlook" {
 			return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "refresh token is not allowed for this method"})
 		}
-		authToken, err := outlook.AuthTokenUsingRefreshToken(*reqBody.RefreshToken)
+		in, err := outlookInputDataAfterRefreshToken(job, *reqBody.RefreshToken)
 		if err != nil {
-			return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. Not able to generate auth token from refresh token", err.Error())
+			return nil, err
 		}
-		client, err := outlook.NewOutlookClientUsingToken(authToken)
-		if err != nil {
-			return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err.Error())
-		}
-		userDetails, err := client.GetCurrentUser()
-		if err != nil {
-			return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err.Error())
-		}
-		if userDetails.Mail == "" {
-			return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", "getting empty email id from outlook token")
-		}
-		updateRequest["input_data"] = mergeJobInputData(job, map[string]interface{}{"refresh_token": *reqBody.RefreshToken})
+		updateRequest["input_data"] = in
 	}
 	if reqBody.StorxToken != nil {
 		updateRequest["storx_token"] = *reqBody.StorxToken
@@ -1137,7 +1195,7 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 		})
 	}
 
-	updateRequest, err := buildUpdateRequestForJob(ctx, job, reqBody, jobID)
+	updateRequest, err := buildUpdateRequestForJob(ctx, database, userID, job, reqBody, jobID)
 	if err != nil {
 		var httpErr *echo.HTTPError
 		if errors.As(err, &httpErr) {
@@ -1242,7 +1300,7 @@ func HandleAutomaticBackupBulkUpdateByParent(c echo.Context) error {
 	success := make([]*repo.CronJobListingDB, 0, len(jobs))
 	failed := make([]map[string]interface{}, 0)
 	for _, job := range jobs {
-		jobUpdate, buildErr := buildUpdateRequestForJob(ctx, &job, reqBody, int(job.ID))
+		jobUpdate, buildErr := buildUpdateRequestForJob(ctx, database, userID, &job, reqBody, int(job.ID))
 		if buildErr != nil {
 			var httpErr *echo.HTTPError
 			if errors.As(buildErr, &httpErr) {

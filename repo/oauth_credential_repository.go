@@ -95,3 +95,18 @@ func (r *OAuthCredentialRepository) ClearRefreshTokenByID(id uint) error {
 	}
 	return nil
 }
+
+// UpdateRefreshTokenForUser sets refresh_token for a row owned by userID (id + user_id match).
+func (r *OAuthCredentialRepository) UpdateRefreshTokenForUser(id uint, userID string, refreshToken string) error {
+	if refreshToken == "" {
+		return fmt.Errorf("refresh token is empty")
+	}
+	res := r.db.Model(&OAuthCredentialDB{}).Where("id = ? AND user_id = ?", id, userID).Update("refresh_token", refreshToken)
+	if res != nil && res.Error != nil {
+		return fmt.Errorf("error updating oauth credential refresh token: %v", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("oauth credential not found or access denied")
+	}
+	return nil
+}
