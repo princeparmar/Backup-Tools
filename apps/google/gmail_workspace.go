@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
+
 	"golang.org/x/oauth2/google"
 	"golang.org/x/oauth2/jwt"
 	"google.golang.org/api/gmail/v1"
@@ -17,7 +19,7 @@ import (
 
 // WorkspaceGmailSession is a Gmail API client plus the userId to pass to users.* calls.
 // With service-account delegation, the token already represents the mailbox, so APIUser must be "me".
-// With the connected user's OAuth token for their own mailbox, APIUser may be "me" or their email.
+// With a user OAuth token for their own mailbox, APIUser may be "me" or their email.
 type WorkspaceGmailSession struct {
 	Client  *GmailClient
 	APIUser string
@@ -135,35 +137,82 @@ func NewGmailClientWithServiceAccountDelegation(ctx context.Context, subjectEmai
 	return &GmailClient{svc}, nil
 }
 
-// NewWorkspaceGmailSession picks OAuth user token vs service-account delegation so corporate mailboxes work.
-// oauthAccessToken: access token from the connected account's refresh token (any time OAuth path is used).
-// connectedEmail: oauth_credentials.email (admin / connected user); may be empty for legacy jobs.
-// mailbox: Gmail mailbox to read — job input_data.email, or "me", or empty (treated as connected/me).
-func NewWorkspaceGmailSession(ctx context.Context, oauthAccessToken, connectedEmail, mailbox string) (*WorkspaceGmailSession, error) {
-	connectedEmail = strings.TrimSpace(connectedEmail)
+func resolveDelegationSubject(mailbox, oauthAccountEmail string) (string, error) {
+	m := strings.TrimSpace(mailbox)
+	o := strings.TrimSpace(oauthAccountEmail)
+	if m != "" && !strings.EqualFold(m, "me") {
+		return m, nil
+	}
+	if o != "" {
+		return o, nil
+	}
+	return "", fmt.Errorf("delegation requires a target user email")
+}
+
+// delegationSubjectAllowed is false for consumer @gmail.com unless GMAIL_DELEGATION_ALLOW_GMAIL_COM=true.
+func delegationSubjectAllowed(email string) bool {
+	e := strings.ToLower(strings.TrimSpace(email))
+	if e == "" || !strings.Contains(e, "@") {
+		return false
+	}
+	if strings.HasSuffix(e, "@gmail.com") || strings.HasSuffix(e, "@googlemail.com") {
+		return strings.EqualFold(strings.TrimSpace(utils.GetEnvWithKey("GMAIL_DELEGATION_ALLOW_GMAIL_COM")), "true")
+	}
+	return true
+}
+
+// GmailJobUsesDelegationWithoutOAuth is true when backup can skip OAuth refresh and use only domain-wide delegation.
+// oauthAccountEmail is the account that holds the refresh token when it differs from the mailbox (e.g. corporate admin from parent_id).
+func GmailJobUsesDelegationWithoutOAuth(mailbox, oauthAccountEmail string) bool {
+	if !WorkspaceServiceAccountConfigured() {
+		return false
+	}
+	subject, err := resolveDelegationSubject(mailbox, oauthAccountEmail)
+	if err != nil {
+		return false
+	}
+	return delegationSubjectAllowed(subject)
+}
+
+// mailbox: Gmail mailbox to read — job input_data.email, or "me", or empty (treated as primary user).
+func NewWorkspaceGmailSession(ctx context.Context, oauthAccessToken, oauthAccountEmail, mailbox string) (*WorkspaceGmailSession, error) {
+	oauthAccountEmail = strings.TrimSpace(oauthAccountEmail)
 	mailbox = strings.TrimSpace(mailbox)
 	if mailbox == "" {
 		mailbox = "me"
 	}
-	isSameUser := connectedEmail != "" && strings.EqualFold(mailbox, connectedEmail)
+
+	// Delegation-only: no user access token (cron Workspace backup). Impersonates mailbox or OAuth holder.
+	if strings.TrimSpace(oauthAccessToken) == "" && WorkspaceServiceAccountConfigured() {
+		subject, err := resolveDelegationSubject(mailbox, oauthAccountEmail)
+		if err != nil {
+			return nil, err
+		}
+		if !delegationSubjectAllowed(subject) {
+			return nil, fmt.Errorf("gmail backup for %q needs OAuth refresh token, or set GMAIL_DELEGATION_ALLOW_GMAIL_COM=true for @gmail.com Workspace", subject)
+		}
+		c, err := NewGmailClientWithServiceAccountDelegation(ctx, subject)
+		if err != nil {
+			return nil, fmt.Errorf("delegated gmail access failed for %q (check domain-wide delegation + scopes): %w", subject, err)
+		}
+		return &WorkspaceGmailSession{Client: c, APIUser: "me"}, nil
+	}
+
+	isSameUser := oauthAccountEmail != "" && strings.EqualFold(mailbox, oauthAccountEmail)
 	isMe := strings.EqualFold(mailbox, "me")
 
 	switch {
-	// Same mailbox as connected OAuth user -> use refresh-derived user token.
-	case isSameUser:
+	case isSameUser || isMe:
 		c, err := NewGmailClientUsingToken(oauthAccessToken)
 		if err != nil {
 			return nil, err
 		}
-		return &WorkspaceGmailSession{Client: c, APIUser: mailbox}, nil
-	case isMe:
-		c, err := NewGmailClientUsingToken(oauthAccessToken)
-		if err != nil {
-			return nil, err
+		apiUser := "me"
+		if isSameUser {
+			apiUser = mailbox
 		}
-		return &WorkspaceGmailSession{Client: c, APIUser: "me"}, nil
+		return &WorkspaceGmailSession{Client: c, APIUser: apiUser}, nil
 	default:
-		// Different mailbox than connected user, or legacy job without cred row -> delegation.
 		c, err := NewGmailClientWithServiceAccountDelegation(ctx, mailbox)
 		if err != nil {
 			return nil, fmt.Errorf("delegated gmail access failed for %q (check domain-wide delegation + scopes): %w", mailbox, err)

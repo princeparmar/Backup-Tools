@@ -2,12 +2,16 @@ package repo
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/gorm"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
+	gormio "gorm.io/gorm"
 )
 
 // Job message status constants
@@ -42,9 +46,9 @@ const (
 type CronJobListingDB struct {
 	gorm.GormModel
 
-	UserID         string `json:"user_id" gorm:"column:user_id;uniqueIndex:idx_name_sync_type_user"`
+	UserID         string  `json:"user_id" gorm:"column:user_id;uniqueIndex:idx_name_sync_type_user"`
 	ParentID       *string `json:"parent_id,omitempty" gorm:"column:parent_id;index:idx_parent_id"`
-	StorjProjectID string `json:"storj_project_id" gorm:"column:storj_project_id;index:idx_storj_project_id"` // Storj project ID extracted from access grant
+	StorjProjectID string  `json:"storj_project_id" gorm:"column:storj_project_id;index:idx_storj_project_id"` // Storj project ID extracted from access grant
 
 	// Name + SyncType + UserID should be unique
 	Name     string     `json:"name" gorm:"uniqueIndex:idx_name_sync_type_user"`
@@ -77,6 +81,9 @@ type CronJobListingDB struct {
 	// Hidden column for scheduled tasks - when true, hides the cron job from the live view
 	// Default is false, and it gets reset to false when a new task is created
 	Hidden bool `json:"hidden" gorm:"default:false"`
+	// Placeholder: true = OAuth/StorX token holder for Workspace children only (not listed, no scheduled backup).
+	// Set to false when the admin mailbox is included as a normal backup.
+	Placeholder bool `json:"placeholder" gorm:"column:placeholder;default:false"`
 	// When user fixes the error and reactivates, this should be set to false
 	AutoDeactivated bool `json:"autodeactivated" gorm:"column:auto_deactivated;default:false"`
 }
@@ -137,17 +144,6 @@ func NewCronJobRepository(db *gorm.DB) *CronJobRepository {
 	return &CronJobRepository{db: db}
 }
 
-// GetAllCronJobs retrieves all cron jobs
-func (r *CronJobRepository) GetAllCronJobs() ([]CronJobListingDB, error) {
-	var res []CronJobListingDB
-	db := r.db.Find(&res)
-	if db != nil && db.Error != nil {
-		return nil, fmt.Errorf("error getting cron jobs: %v", db.Error)
-	}
-
-	return res, nil
-}
-
 // CronJobFilter represents filter parameters for cron job queries
 type CronJobFilter struct {
 	Name          string `json:"name,omitempty"`          // Filter by name (partial match)
@@ -162,7 +158,7 @@ type CronJobFilter struct {
 // GetAllCronJobsForUser retrieves all cron jobs for a specific user with optional filtering
 func (r *CronJobRepository) GetAllCronJobsForUser(userID string, filter *CronJobFilter) ([]CronJobListingDB, error) {
 	var res []CronJobListingDB
-	query := r.db.Where("user_id = ?", userID)
+	query := r.db.Where("user_id = ?", userID).Where("COALESCE(placeholder, false) = ?", false)
 
 	// Apply filters if provided
 	if filter != nil {
@@ -197,6 +193,16 @@ func (r *CronJobRepository) GetAllCronJobsForUser(userID string, filter *CronJob
 	return res, nil
 }
 
+// GetAllCronJobsForUserUnfiltered returns all cron jobs for a user including placeholder rows (duplicate/conflict checks only).
+func (r *CronJobRepository) GetAllCronJobsForUserUnfiltered(userID string) ([]CronJobListingDB, error) {
+	var res []CronJobListingDB
+	db := r.db.Where("user_id = ?", userID).Order("created_at DESC").Find(&res)
+	if db != nil && db.Error != nil {
+		return nil, fmt.Errorf("error getting cron jobs for user: %v", db.Error)
+	}
+	return res, nil
+}
+
 // GetAllActiveCronJobsForUser retrieves active cron jobs with their failed/running tasks
 func (r *CronJobRepository) GetAllActiveCronJobsForUser(userID string) ([]LiveCronJobListingDB, error) {
 	// Query to get active cron jobs with their failed/running tasks in one go
@@ -210,6 +216,7 @@ func (r *CronJobRepository) GetAllActiveCronJobsForUser(userID string) ([]LiveCr
 		WHERE cj.user_id = $1 
 		AND cj.deleted_at IS NULL
 		AND (cj.hidden = false OR cj.hidden IS NULL)
+		AND COALESCE(cj.placeholder, false) = false
 		ORDER BY cj.id, t.start_time DESC`
 
 	rows, err := r.db.Raw(query, userID).Rows()
@@ -322,6 +329,7 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 				AND t.status IN (?, ?)
 			)
 			AND c2.deleted_at IS NULL
+			AND COALESCE(c2.placeholder, false) = false
 			LIMIT 10
 		)
 		FOR UPDATE OF c
@@ -366,10 +374,10 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 	return res, nil
 }
 
-// GetJobByIDForUser retrieves a specific cron job by ID for a user
+// GetJobByIDForUser retrieves a specific cron job by ID for a user (excludes placeholder token-holder rows).
 func (r *CronJobRepository) GetJobByIDForUser(userID string, jobID uint) (*CronJobListingDB, error) {
 	var res CronJobListingDB
-	db := r.db.Where("user_id = ? AND id = ?", userID, jobID).First(&res)
+	db := r.db.Where("user_id = ? AND id = ?", userID, jobID).Where("COALESCE(placeholder, false) = ?", false).First(&res)
 	if db != nil && db.Error != nil {
 		return nil, fmt.Errorf("error getting cron job for user: %v", db.Error)
 	}
@@ -385,6 +393,97 @@ func (r *CronJobRepository) GetJobsByUserAndParentIDAndMethod(userID, parentID, 
 		return nil, fmt.Errorf("error getting cron jobs for user/parent/method: %v", db.Error)
 	}
 	return res, nil
+}
+
+// FindGmailJobByUserNameSyncType returns the gmail job if it exists; (nil, false, nil) when not found.
+func (r *CronJobRepository) FindGmailJobByUserNameSyncType(userID, name, syncType string) (*CronJobListingDB, bool, error) {
+	var res CronJobListingDB
+	q := r.db.Where("user_id = ? AND name = ? AND method = ? AND sync_type = ?", userID, name, "gmail", syncType).First(&res)
+	if q.Error != nil {
+		if errors.Is(q.Error, gormio.ErrRecordNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("error getting gmail cron job: %w", q.Error)
+	}
+	return &res, true, nil
+}
+
+// GmailConnectedAccountEmail is the admin mailbox (OAuth token row) for a corporate child job.
+// Source of truth is column parent_id only — not input_data.connected_email.
+func GmailConnectedAccountEmail(job *CronJobListingDB) string {
+	if job == nil || job.ParentID == nil {
+		return ""
+	}
+	p := strings.TrimSpace(*job.ParentID)
+	if p == "" || strings.EqualFold(p, strings.TrimSpace(job.Name)) {
+		return ""
+	}
+	return p
+}
+
+// GmailResolvedRefreshToken returns refresh_token from this job, or from the admin row for a Gmail corporate child (via GmailParentRowForCorporateChild).
+func (r *CronJobRepository) GmailResolvedRefreshToken(job *CronJobListingDB) string {
+	if job == nil || job.InputData == nil || job.InputData.Json() == nil {
+		return ""
+	}
+	j := job.InputData.Json()
+	if s, ok := (*j)["refresh_token"].(string); ok {
+		if t := strings.TrimSpace(s); t != "" {
+			return t
+		}
+	}
+	parent, err := r.GmailParentRowForCorporateChild(job)
+	if err != nil || parent == nil || parent.InputData == nil || parent.InputData.Json() == nil {
+		return ""
+	}
+	pj := parent.InputData.Json()
+	if s, ok := (*pj)["refresh_token"].(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return ""
+}
+
+// GmailParentRowForCorporateChild loads the admin cron row when it exists (parent_id = admin, name != admin).
+// If there is no admin backup job row — e.g. only delegated mailboxes were selected — returns (nil, nil), not an error.
+func (r *CronJobRepository) GmailParentRowForCorporateChild(job *CronJobListingDB) (*CronJobListingDB, error) {
+	if job == nil || job.Method != "gmail" {
+		return nil, nil
+	}
+	admin := GmailConnectedAccountEmail(job)
+	if admin == "" {
+		return nil, nil
+	}
+	parent, ok, err := r.FindGmailJobByUserNameSyncType(job.UserID, admin, job.SyncType)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	return parent, nil
+}
+
+// gmailResolvedStringFromLocalOrParent returns trimmed local if non-empty; otherwise the same field from the admin parent row for a Gmail corporate child.
+func (r *CronJobRepository) gmailResolvedStringFromLocalOrParent(job *CronJobListingDB, local string, fromParent func(*CronJobListingDB) string) string {
+	if job == nil {
+		return ""
+	}
+	if t := strings.TrimSpace(local); t != "" {
+		return t
+	}
+	parent, err := r.GmailParentRowForCorporateChild(job)
+	if err != nil || parent == nil {
+		return ""
+	}
+	return strings.TrimSpace(fromParent(parent))
+}
+
+// GmailResolvedStorxToken returns storx_token from this row, or from the parent admin row when this Gmail corporate child has no local token.
+func (r *CronJobRepository) GmailResolvedStorxToken(job *CronJobListingDB) string {
+	if job == nil {
+		return ""
+	}
+	return r.gmailResolvedStringFromLocalOrParent(job, job.StorxToken, func(p *CronJobListingDB) string { return p.StorxToken })
 }
 
 // GetCronJobByID retrieves a cron job by ID
@@ -417,22 +516,30 @@ func (r *CronJobRepository) GetAccessGrantByProjectID(projectID, method string) 
 
 // CreateCronJobForUser creates a new cron job for a user
 func (r *CronJobRepository) CreateCronJobForUser(userID, name, method string, syncType string, inputData map[string]interface{}, parentID *string) (*CronJobListingDB, error) {
+	return r.CreateCronJobForUserWithPlaceholder(userID, name, method, syncType, inputData, parentID, false)
+}
+
+// CreateCronJobForUserWithPlaceholder creates a cron job; when placeholder is true the row is kept inactive and hidden from listings.
+func (r *CronJobRepository) CreateCronJobForUserWithPlaceholder(userID, name, method string, syncType string, inputData map[string]interface{}, parentID *string, placeholder bool) (*CronJobListingDB, error) {
 	data := CronJobListingDB{
-		UserID:    userID,
-		ParentID:  parentID,
-		Name:      name,
-		Method:    method,
-		SyncType:  syncType,
-		InputData: database.NewDbJsonFromValue(inputData),
-		Status:    JobStatusCreated,
-		LastRun:   nil,
+		UserID:      userID,
+		ParentID:    parentID,
+		Name:        name,
+		Method:      method,
+		SyncType:    syncType,
+		InputData:   database.NewDbJsonFromValue(inputData),
+		Status:      JobStatusCreated,
+		LastRun:     nil,
+		Placeholder: placeholder,
 	}
 
 	// Set interval and activation for one-time backups
 	if syncType == "one_time" {
 		data.Interval = "one_time"
 		data.On = ""
-		data.Active = true
+		if !placeholder {
+			data.Active = true
+		}
 	}
 
 	// create new entry in database and return newly created cron job
@@ -530,6 +637,7 @@ func (r *CronJobRepository) UpdateCronJobFieldsForCron(ID uint, fields map[strin
 			"message":        true,
 			"message_status": true,
 			"last_run":       true,
+			"input_data":     true, // e.g. cleared oauth refresh_token after auth failure
 		}
 
 		filteredMap := make(map[string]interface{})
@@ -540,7 +648,7 @@ func (r *CronJobRepository) UpdateCronJobFieldsForCron(ID uint, fields map[strin
 		}
 
 		if len(filteredMap) == 0 {
-			return fmt.Errorf("cannot update one_time sync job: only status, message, message_status, and last_run fields are allowed")
+			return fmt.Errorf("cannot update one_time sync job: only status, message, message_status, last_run, and input_data fields are allowed")
 		}
 
 		updateMap = filteredMap
@@ -626,10 +734,52 @@ func (r *CronJobRepository) DeleteAllJobsAndTasksByEmail(email string) ([]uint, 
 	return deletedJobIDs, taskIDs, nil
 }
 
+const workspaceServiceAccountFile = "workspace-service-account.json"
+
+// gmailDelegationOnlyMayApply mirrors apps/google GmailJobUsesDelegationWithoutOAuth without importing apps/google
+// (avoids import cycle: google → db → repo). Used only for activation checks.
+func gmailDelegationOnlyMayApply(job *CronJobListingDB) bool {
+	if job == nil {
+		return false
+	}
+	if _, err := os.Stat(workspaceServiceAccountFile); err != nil {
+		return false
+	}
+	mailbox := strings.TrimSpace(job.Name)
+	if job.InputData != nil && job.InputData.Json() != nil {
+		inputData := job.InputData.Json()
+		if v, ok := (*inputData)["email"].(string); ok && strings.TrimSpace(v) != "" {
+			mailbox = strings.TrimSpace(v)
+		}
+	}
+	connected := GmailConnectedAccountEmail(job)
+	var subject string
+	switch {
+	case mailbox != "" && !strings.EqualFold(mailbox, "me"):
+		subject = mailbox
+	case connected != "":
+		subject = connected
+	default:
+		return false
+	}
+	e := strings.ToLower(strings.TrimSpace(subject))
+	if e == "" || !strings.Contains(e, "@") {
+		return false
+	}
+	if strings.HasSuffix(e, "@gmail.com") || strings.HasSuffix(e, "@googlemail.com") {
+		return strings.EqualFold(strings.TrimSpace(utils.GetEnvWithKey("GMAIL_DELEGATION_ALLOW_GMAIL_COM")), "true")
+	}
+	return true
+}
+
 // ValidateJobForActivation checks if the job has all required fields and authentication tokens for activation
 func (r *CronJobRepository) validateJobForActivation(job *CronJobListingDB) error {
 	// Validate required fields for activation
-	if job.StorxToken == "" {
+	storx := job.StorxToken
+	if job.Method == "gmail" {
+		storx = r.GmailResolvedStorxToken(job)
+	}
+	if strings.TrimSpace(storx) == "" {
 		return fmt.Errorf("storx_token is required when activating backup")
 	}
 	if job.Interval == "" {
@@ -647,17 +797,16 @@ func (r *CronJobRepository) validateJobForActivation(job *CronJobListingDB) erro
 
 	switch job.Method {
 	case "gmail":
-		// Gmail: either credential_id (token-in-header flow) or refresh_token (legacy) required
-		if credID, ok := inputData["credential_id"]; ok && credID != nil {
-			if v, ok := credID.(float64); ok && v > 0 {
-				break
-			}
-			if v, ok := credID.(uint); ok && v > 0 {
-				break
-			}
+		rt := r.GmailResolvedRefreshToken(job)
+		if rt == "" && !gmailDelegationOnlyMayApply(job) {
+			return fmt.Errorf("refresh_token is required in input_data for gmail method (unless domain-wide delegation is configured for this mailbox)")
 		}
-		if refreshToken, exists := inputData["refresh_token"]; !exists || refreshToken == "" {
-			return fmt.Errorf("credential_id or refresh_token is required in input_data for gmail method")
+		emailVal := strings.TrimSpace(job.Name)
+		if v, ok := inputData["email"].(string); ok && strings.TrimSpace(v) != "" {
+			emailVal = strings.TrimSpace(v)
+		}
+		if emailVal == "" {
+			return fmt.Errorf("email is required in input_data or job name for gmail method")
 		}
 	case "outlook":
 		// Check if refresh_token exists in input_data

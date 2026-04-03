@@ -183,44 +183,6 @@ func (a *AutosyncManager) CreateTaskForAllPendingJobs(ctx context.Context) error
 	return nil
 }
 
-// func (a *AutosyncManager) RefreshGoogleAuthToken() error {
-// 	jobs, err := a.store.GetAllCronJobs()
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	errGroup := errs.Group{}
-
-// 	for _, job := range jobs {
-// 		if job.RefreshToken == "" || !job.Active {
-// 			continue
-// 		}
-
-// 		if !google.IsGoogleTokenExpired(job.AuthToken) {
-// 			continue
-// 		}
-
-// 		newToken, err := google.AuthTokenUsingRefreshToken(job.RefreshToken)
-// 		if err != nil {
-// 			errGroup.Add(err)
-// 			continue
-// 		}
-
-// 		err = a.store.UpdateCronJobByID(job.ID, map[string]interface{}{
-// 			"auth_token": newToken,
-// 		})
-// 		if err != nil {
-// 			errGroup.Add(err)
-// 			fmt.Println("Failed to update job", job.ID, err)
-// 			continue
-// 		}
-
-// 		fmt.Println("Updated Google Auth Token for job", job.ID)
-// 	}
-
-// 	return errGroup.Err()
-// }
-
 func (a *AutosyncManager) ProcessTask(ctx context.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
@@ -446,6 +408,9 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 			"active":           job.Active,
 			"auto_deactivated": job.AutoDeactivated,
 		}
+		if job.InputData != nil {
+			updateMap["input_data"] = job.InputData
+		}
 
 		// Update cron job status based on task status
 		switch task.Status {
@@ -474,11 +439,28 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 	return nil
 }
 
+func (a *AutosyncManager) gmailStorxMissing(job *repo.CronJobListingDB) bool {
+	if job == nil {
+		return true
+	}
+	if job.Method != "gmail" {
+		return strings.TrimSpace(job.StorxToken) == ""
+	}
+	return strings.TrimSpace(a.store.CronJobRepo.GmailResolvedStorxToken(job)) == ""
+}
+
+func (a *AutosyncManager) clearStorxOnUplinkFailure(job *repo.CronJobListingDB) {
+	if job == nil {
+		return
+	}
+	job.StorxToken = ""
+}
+
 func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.CronJobListingDB, task *repo.TaskListingDB) string {
 	errMsg := processErr.Error()
 
 	switch {
-	case job.StorxToken == "":
+	case a.gmailStorxMissing(job):
 		return "Your automatic backup has been temporarily disabled due to insufficient permissions. Please update your StorX permissions and reactivate the backup from your dashboard."
 
 	case strings.Contains(errMsg, "Delegation denied") ||
@@ -519,11 +501,27 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.Cron
 	}
 }
 
+// clearGmailRefreshTokensOnAuthFailure clears refresh_token on this job; if a parent admin row exists, clears it there too (shared OAuth).
+func (a *AutosyncManager) clearGmailRefreshTokensOnAuthFailure(job *repo.CronJobListingDB) {
+	if job == nil || job.Method != "gmail" || job.InputData == nil || job.InputData.Json() == nil {
+		return
+	}
+	inputData := job.InputData.Json()
+	if _, hasKey := (*inputData)["refresh_token"]; hasKey {
+		(*inputData)["refresh_token"] = ""
+	}
+	parent, err := a.store.CronJobRepo.GmailParentRowForCorporateChild(job)
+	if err == nil && parent != nil && parent.InputData != nil && parent.InputData.Json() != nil {
+		(*parent.InputData.Json())["refresh_token"] = ""
+		_ = a.store.CronJobRepo.UpdateCronJobByID(parent.ID, map[string]interface{}{"input_data": parent.InputData})
+	}
+}
+
 func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJobListingDB, task *repo.TaskListingDB) {
 	errMsg := processErr.Error()
 
 	switch {
-	case job.StorxToken == "":
+	case a.gmailStorxMissing(job):
 		job.Active = false
 		job.AutoDeactivated = true
 		job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
@@ -546,16 +544,7 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		strings.Contains(errMsg, "oauth credential not found") ||
 		strings.Contains(errMsg, "refresh token not found"):
 		if task.RetryCount == repo.MaxRetryCount-1 {
-			// Gmail stores refresh token in oauth_credentials (via credential_id); clear it there. Only clear in job input_data for legacy jobs that still have refresh_token.
-			if job.InputData != nil && job.InputData.Json() != nil {
-				inputData := job.InputData.Json()
-				if credID, ok := (*inputData)["credential_id"].(float64); ok && credID > 0 {
-					_ = a.store.OAuthCredentialRepo.ClearRefreshTokenByID(uint(credID))
-				}
-				if _, hasKey := (*inputData)["refresh_token"]; hasKey {
-					(*inputData)["refresh_token"] = ""
-				}
-			}
+			a.clearGmailRefreshTokensOnAuthFailure(job)
 			job.Active = false
 			job.AutoDeactivated = true
 			job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
@@ -581,7 +570,7 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		}
 
 	case strings.Contains(errMsg, "uplink: permission") || strings.Contains(errMsg, "uplink: invalid access"):
-		job.StorxToken = ""
+		a.clearStorxOnUplinkFailure(job)
 		job.Active = false
 		job.AutoDeactivated = true
 		job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"

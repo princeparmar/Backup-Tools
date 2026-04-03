@@ -7,13 +7,12 @@ import (
 
 type PostgresDb struct {
 	*gorm.DB
-	CronJobRepo         *repo.CronJobRepository
-	TaskRepo            *repo.TaskRepository
-	ScheduledTasksRepo  *repo.ScheduledTasksRepository
-	AuthRepo            *repo.AuthRepository
-	SyncedObjectRepo    *repo.SyncedObjectRepository
-	WebhookEventRepo    *repo.WebhookEventRepository
-	OAuthCredentialRepo *repo.OAuthCredentialRepository
+	CronJobRepo        *repo.CronJobRepository
+	TaskRepo           *repo.TaskRepository
+	ScheduledTasksRepo *repo.ScheduledTasksRepository
+	AuthRepo           *repo.AuthRepository
+	SyncedObjectRepo   *repo.SyncedObjectRepository
+	WebhookEventRepo   *repo.WebhookEventRepository
 }
 
 func NewPostgresStore(dsn string, queryLogging bool) (*PostgresDb, error) {
@@ -24,14 +23,13 @@ func NewPostgresStore(dsn string, queryLogging bool) (*PostgresDb, error) {
 	}
 
 	return &PostgresDb{
-		DB:                  db,
-		CronJobRepo:         repo.NewCronJobRepository(db),
-		TaskRepo:            repo.NewTaskRepository(db),
-		ScheduledTasksRepo:  repo.NewScheduledTasksRepository(db),
-		AuthRepo:            repo.NewAuthRepository(db),
-		SyncedObjectRepo:    repo.NewSyncedObjectRepository(db),
-		WebhookEventRepo:    repo.NewWebhookEventRepository(db),
-		OAuthCredentialRepo: repo.NewOAuthCredentialRepository(db),
+		DB:                 db,
+		CronJobRepo:        repo.NewCronJobRepository(db),
+		TaskRepo:           repo.NewTaskRepository(db),
+		ScheduledTasksRepo: repo.NewScheduledTasksRepository(db),
+		AuthRepo:           repo.NewAuthRepository(db),
+		SyncedObjectRepo:   repo.NewSyncedObjectRepository(db),
+		WebhookEventRepo:   repo.NewWebhookEventRepository(db),
 	}, nil
 }
 
@@ -45,7 +43,6 @@ func (s *PostgresDb) Migrate() error {
 		&repo.ScheduledTasks{},
 		&repo.SyncedObject{},
 		&repo.WebhookEvent{},
-		&repo.OAuthCredentialDB{},
 	); err != nil {
 		return err
 	}
