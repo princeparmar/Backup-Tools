@@ -501,30 +501,23 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.Cron
 	}
 }
 
-// clearGmailRefreshTokensOnAuthFailure clears refresh_token on this job; if a parent admin row exists, clears it there too (shared OAuth).
-func (a *AutosyncManager) clearGmailRefreshTokensOnAuthFailure(job *repo.CronJobListingDB) {
-	if job == nil || job.Method != "gmail" || job.InputData == nil || job.InputData.Json() == nil {
-		return
-	}
-	inputData := job.InputData.Json()
-	if _, hasKey := (*inputData)["refresh_token"]; hasKey {
-		(*inputData)["refresh_token"] = ""
-	}
-	parent, err := a.store.CronJobRepo.GmailParentRowForCorporateChild(job)
-	if err == nil && parent != nil && parent.InputData != nil && parent.InputData.Json() != nil {
-		(*parent.InputData.Json())["refresh_token"] = ""
-		_ = a.store.CronJobRepo.UpdateCronJobByID(parent.ID, map[string]interface{}{"input_data": parent.InputData})
-	}
-}
-
 func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJobListingDB, task *repo.TaskListingDB) {
 	errMsg := processErr.Error()
 
 	switch {
 	case a.gmailStorxMissing(job):
+		msg := "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
+		if job.Method == "gmail" {
+			if err := a.store.CronJobRepo.DeactivateGmailWorkspaceTreeForStorxFailure(job, msg); err != nil {
+				logger.Warn(context.Background(), "Failed to deactivate Gmail workspace tree after missing StorX",
+					logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
+			}
+			job.StorxToken = ""
+			job.StorjProjectID = ""
+		}
 		job.Active = false
 		job.AutoDeactivated = true
-		job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
+		job.Message = msg
 		task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
 
 	case strings.Contains(errMsg, "Delegation denied") ||
@@ -544,10 +537,21 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		strings.Contains(errMsg, "oauth credential not found") ||
 		strings.Contains(errMsg, "refresh token not found"):
 		if task.RetryCount == repo.MaxRetryCount-1 {
-			a.clearGmailRefreshTokensOnAuthFailure(job)
+			msg := "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
+			if job.Method == "gmail" {
+				if err := a.store.CronJobRepo.DeactivateGmailWorkspaceTreeForGoogleAuthFailure(job, msg); err != nil {
+					logger.Warn(context.Background(), "Failed to deactivate Gmail workspace tree after Google auth failure",
+						logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
+				}
+				repo.StripGmailRefreshTokenFromCronJobInputData(job)
+			} else if job.InputData != nil && job.InputData.Json() != nil {
+				if _, hasKey := (*job.InputData.Json())["refresh_token"]; hasKey {
+					(*job.InputData.Json())["refresh_token"] = ""
+				}
+			}
 			job.Active = false
 			job.AutoDeactivated = true
-			job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
+			job.Message = msg
 			task.Message = "Google Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
 		} else {
 			job.Message = fmt.Sprintf("Invalid Google credentials. Attempt %d of %d failed. Retrying automatically...", task.RetryCount, repo.MaxRetryCount)
@@ -570,10 +574,20 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		}
 
 	case strings.Contains(errMsg, "uplink: permission") || strings.Contains(errMsg, "uplink: invalid access"):
-		a.clearStorxOnUplinkFailure(job)
+		msg := "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
+		if job.Method == "gmail" {
+			if err := a.store.CronJobRepo.DeactivateGmailWorkspaceTreeForStorxFailure(job, msg); err != nil {
+				logger.Warn(context.Background(), "Failed to deactivate Gmail workspace tree after StorX uplink failure",
+					logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
+			}
+			job.StorxToken = ""
+			job.StorjProjectID = ""
+		} else {
+			a.clearStorxOnUplinkFailure(job)
+		}
 		job.Active = false
 		job.AutoDeactivated = true
-		job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
+		job.Message = msg
 		task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
 
 	case strings.Contains(errMsg, "could not create bucket") ||

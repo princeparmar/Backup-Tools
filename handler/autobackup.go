@@ -130,8 +130,29 @@ func buildGmailParentAccountSummary(database *db.PostgresDb, job *repo.CronJobLi
 	return summary
 }
 
-// splitGmailCorporateChildStorxUpdate routes storx_token / storj_project_id to the admin parent row for Gmail corporate children.
-func splitGmailCorporateChildStorxUpdate(job *repo.CronJobListingDB, updateRequest map[string]interface{}) (parentStorx map[string]interface{}, childUpdate map[string]interface{}) {
+// stripGmailCorporateChildStorxFromAPIResponse clears StorX grant fields on a Gmail child job for JSON only when parent_account
+// is present, so the UI shows tokens once on the admin row instead of duplicating the same masked values on each mailbox.
+func stripGmailCorporateChildStorxFromAPIResponse(job *repo.CronJobListingDB, parentSummary *GmailParentAccountSummary) {
+	if job == nil || parentSummary == nil || job.Method != "gmail" {
+		return
+	}
+	job.StorxToken = ""
+	job.StorjProjectID = ""
+}
+
+func inputDataMapContainsRefreshToken(v interface{}) bool {
+	m, ok := v.(map[string]interface{})
+	if !ok || m == nil {
+		return false
+	}
+	rt, ok := m["refresh_token"].(string)
+	return ok && strings.TrimSpace(rt) != ""
+}
+
+// splitGmailCorporateChildCredentialUpdate routes storx_token, storj_project_id, and Gmail OAuth input_data (refresh_token)
+// to the admin (parent) cron row when this job is a Workspace connected account (parent_id set). Personal Gmail jobs
+// (no parent_id / self-parent) keep the full updateRequest on the same row. Placeholder admin rows are found the same way as normal admin jobs.
+func splitGmailCorporateChildCredentialUpdate(job *repo.CronJobListingDB, updateRequest map[string]interface{}) (parentUpdate map[string]interface{}, childUpdate map[string]interface{}) {
 	if job == nil || job.Method != "gmail" || repo.GmailConnectedAccountEmail(job) == "" {
 		return nil, updateRequest
 	}
@@ -142,37 +163,43 @@ func splitGmailCorporateChildStorxUpdate(job *repo.CronJobListingDB, updateReque
 	if _, ok := updateRequest["storj_project_id"]; ok {
 		hasStorx = true
 	}
-	if !hasStorx {
+	hasOAuthInput := false
+	if raw, ok := updateRequest["input_data"]; ok && inputDataMapContainsRefreshToken(raw) {
+		hasOAuthInput = true
+	}
+	if !hasStorx && !hasOAuthInput {
 		return nil, updateRequest
 	}
-	parentStorx = make(map[string]interface{})
-	if v, ok := updateRequest["storx_token"]; ok {
-		parentStorx["storx_token"] = v
-	}
-	if v, ok := updateRequest["storj_project_id"]; ok {
-		parentStorx["storj_project_id"] = v
-	}
+	parentUpdate = make(map[string]interface{})
 	childUpdate = make(map[string]interface{})
 	for k, v := range updateRequest {
-		if k == "storx_token" || k == "storj_project_id" {
-			continue
+		switch k {
+		case "storx_token", "storj_project_id":
+			parentUpdate[k] = v
+		case "input_data":
+			if hasOAuthInput {
+				parentUpdate[k] = v
+			} else {
+				childUpdate[k] = v
+			}
+		default:
+			childUpdate[k] = v
 		}
-		childUpdate[k] = v
 	}
-	return parentStorx, childUpdate
+	return parentUpdate, childUpdate
 }
 
 func applyAutomaticBackupUpdates(database *db.PostgresDb, job *repo.CronJobListingDB, jobID uint, updateRequest map[string]interface{}) error {
-	parentStorx, childUpdate := splitGmailCorporateChildStorxUpdate(job, updateRequest)
-	if len(parentStorx) > 0 {
+	parentPatch, childUpdate := splitGmailCorporateChildCredentialUpdate(job, updateRequest)
+	if len(parentPatch) > 0 {
 		parent, err := database.CronJobRepo.GmailParentRowForCorporateChild(job)
 		if err != nil {
 			return err
 		}
 		if parent == nil {
-			return fmt.Errorf("gmail corporate parent job not found for storx update")
+			return fmt.Errorf("gmail corporate parent job not found for shared credential update")
 		}
-		if err := database.CronJobRepo.UpdateCronJobByID(parent.ID, parentStorx); err != nil {
+		if err := database.CronJobRepo.UpdateCronJobByID(parent.ID, parentPatch); err != nil {
 			return err
 		}
 	}
@@ -224,10 +251,12 @@ func HandleAutomaticSyncListForUser(c echo.Context) error {
 	response := make([]CronJobResponse, len(maskedJobs))
 	for i := range maskedJobs {
 		j := maskedJobs[i]
+		parent := buildGmailParentAccountSummary(database, &maskedJobs[i])
+		stripGmailCorporateChildStorxFromAPIResponse(&j, parent)
 		response[i] = CronJobResponse{
 			CronJobListingDB: j,
 			NextBackup:       calculateNextBackup(j),
-			ParentAccount:    buildGmailParentAccountSummary(database, &maskedJobs[i]),
+			ParentAccount:    parent,
 		}
 	}
 
@@ -454,11 +483,14 @@ func HandleAutomaticSyncDetails(c echo.Context) error {
 		})
 	}
 
-	copyGmailCorporateChildStorxFromParent(database, jobDetails)
-	repo.MaskTokenForCronJobDB(jobDetails)
+	jobCopy := *jobDetails
+	copyGmailCorporateChildStorxFromParent(database, &jobCopy)
+	repo.MaskTokenForCronJobDB(&jobCopy)
+	parent := buildGmailParentAccountSummary(database, &jobCopy)
+	stripGmailCorporateChildStorxFromAPIResponse(&jobCopy, parent)
 	detail := CronJobDetailResponse{
-		CronJobListingDB: *jobDetails,
-		ParentAccount:    buildGmailParentAccountSummary(database, jobDetails),
+		CronJobListingDB: jobCopy,
+		ParentAccount:    parent,
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
@@ -1063,24 +1095,48 @@ func jobGmailMailbox(job *repo.CronJobListingDB) string {
 	return strings.TrimSpace(job.Name)
 }
 
-// oauthInputDataFromBackupRequest builds merged input_data from code (Gmail) or refresh_token (Outlook).
-func oauthInputDataFromBackupRequest(job *repo.CronJobListingDB, req *AutomaticBackupUpdateRequest) (map[string]interface{}, error) {
+// gmailOAuthMergeBaseJob returns the cron row whose input_data should receive Google OAuth tokens for this job:
+// the admin/parent row for Workspace connected accounts (including placeholder-only admin), otherwise the job itself.
+func gmailOAuthMergeBaseJob(database *db.PostgresDb, job *repo.CronJobListingDB) (*repo.CronJobListingDB, error) {
+	if job == nil || database == nil {
+		return job, nil
+	}
+	adminEmail := repo.GmailConnectedAccountEmail(job)
+	if adminEmail == "" {
+		return job, nil
+	}
+	parent, ok, err := database.CronJobRepo.FindGmailJobByUserNameSyncType(job.UserID, adminEmail, job.SyncType)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || parent == nil {
+		return job, nil
+	}
+	return parent, nil
+}
+
+// oauthInputDataFromBackupRequest builds merged input_data from code (Gmail) or refresh_token (Gmail/Outlook).
+func oauthInputDataFromBackupRequest(database *db.PostgresDb, job *repo.CronJobListingDB, req *AutomaticBackupUpdateRequest) (map[string]interface{}, error) {
 	if req.Code != nil {
 		if job.Method != "gmail" {
 			return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "code update is only allowed for gmail method"})
 		}
-		return gmailInputDataAfterCodeReauth(job, *req.Code)
+		return gmailInputDataAfterCodeReauth(database, job, *req.Code)
 	}
 	if req.RefreshToken != nil {
-		if job.Method != "outlook" {
-			return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "refresh_token update is only allowed for outlook method"})
+		switch job.Method {
+		case "outlook":
+			return outlookInputDataAfterRefreshToken(job, *req.RefreshToken)
+		case "gmail":
+			return gmailInputDataAfterRefreshToken(database, job, *req.RefreshToken)
+		default:
+			return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "refresh_token update is only supported for gmail and outlook methods"})
 		}
-		return outlookInputDataAfterRefreshToken(job, *req.RefreshToken)
 	}
 	return nil, nil
 }
 
-func gmailInputDataAfterCodeReauth(job *repo.CronJobListingDB, code string) (map[string]interface{}, error) {
+func gmailInputDataAfterCodeReauth(database *db.PostgresDb, job *repo.CronJobListingDB, code string) (map[string]interface{}, error) {
 	tok, err := google.ExchangeCodeForTokenWithAdminScope(code)
 	if err != nil {
 		return nil, httpErr(http.StatusBadRequest, "Invalid Code. Not able to generate auth token from code", err.Error())
@@ -1100,7 +1156,39 @@ func gmailInputDataAfterCodeReauth(job *repo.CronJobListingDB, code string) (map
 		return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "email id mismatch"})
 	}
 
-	out := mergeJobInputData(job, map[string]interface{}{"refresh_token": tok.RefreshToken})
+	mergeBase, err := gmailOAuthMergeBaseJob(database, job)
+	if err != nil {
+		return nil, err
+	}
+	out := mergeJobInputData(mergeBase, map[string]interface{}{"refresh_token": tok.RefreshToken})
+	delete(out, "credential_id")
+	delete(out, "connected_email")
+	return out, nil
+}
+
+func gmailInputDataAfterRefreshToken(database *db.PostgresDb, job *repo.CronJobListingDB, refreshToken string) (map[string]interface{}, error) {
+	accessToken, err := google.AuthTokenUsingRefreshToken(refreshToken)
+	if err != nil {
+		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. Not able to generate auth token from refresh token", err.Error())
+	}
+	userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(accessToken)
+	if err != nil {
+		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err.Error())
+	}
+	if userDetails.Email == "" {
+		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", "getting empty email id from google token")
+	}
+	tokenEmail := strings.TrimSpace(userDetails.Email)
+	mailbox := jobGmailMailbox(job)
+	connected := repo.GmailConnectedAccountEmail(job)
+	if !strings.EqualFold(tokenEmail, mailbox) && (connected == "" || !strings.EqualFold(tokenEmail, connected)) {
+		return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "email id mismatch"})
+	}
+	mergeBase, err := gmailOAuthMergeBaseJob(database, job)
+	if err != nil {
+		return nil, err
+	}
+	out := mergeJobInputData(mergeBase, map[string]interface{}{"refresh_token": refreshToken})
 	delete(out, "credential_id")
 	delete(out, "connected_email")
 	return out, nil
@@ -1198,12 +1286,12 @@ func httpErr(status int, message string, errText string) error {
 	return echo.NewHTTPError(status, map[string]interface{}{"message": message, "error": errText})
 }
 
-func buildUpdateRequestForJob(ctx context.Context, job *repo.CronJobListingDB, reqBody AutomaticBackupUpdateRequest, jobID int) (map[string]interface{}, error) {
+func buildUpdateRequestForJob(ctx context.Context, database *db.PostgresDb, job *repo.CronJobListingDB, reqBody AutomaticBackupUpdateRequest, jobID int) (map[string]interface{}, error) {
 	updateRequest := map[string]interface{}{}
 
 	if job.SyncType == "one_time" {
 		if reqBody.Interval != nil || reqBody.On != nil || reqBody.DatabaseConnection != nil || reqBody.Active != nil {
-			return nil, httpErr(http.StatusBadRequest, "Invalid Request", "For one-time sync jobs, only storx_token and code for outlook/gmail updates are allowed")
+			return nil, httpErr(http.StatusBadRequest, "Invalid Request", "For one-time sync jobs, only storx_token and code or refresh_token for gmail/outlook updates are allowed")
 		}
 		if reqBody.StorxToken != nil {
 			if *reqBody.StorxToken == "" {
@@ -1212,7 +1300,7 @@ func buildUpdateRequestForJob(ctx context.Context, job *repo.CronJobListingDB, r
 			updateRequest["storx_token"] = *reqBody.StorxToken
 			extractAndStoreProjectID(ctx, *reqBody.StorxToken, updateRequest, jobID, "one-time")
 		}
-		in, err := oauthInputDataFromBackupRequest(job, &reqBody)
+		in, err := oauthInputDataFromBackupRequest(database, job, &reqBody)
 		if err != nil {
 			return nil, err
 		}
@@ -1220,7 +1308,7 @@ func buildUpdateRequestForJob(ctx context.Context, job *repo.CronJobListingDB, r
 			updateRequest["input_data"] = in
 		}
 		if len(updateRequest) == 0 {
-			return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "No valid update fields provided. Only storx_token, code (gmail), and refresh_token (outlook) are allowed"})
+			return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "No valid update fields provided. Only storx_token, code (gmail), and refresh_token (gmail or outlook) are allowed"})
 		}
 		return updateRequest, nil
 	}
@@ -1250,7 +1338,7 @@ func buildUpdateRequestForJob(ctx context.Context, job *repo.CronJobListingDB, r
 		updateRequest["on"] = onValue
 	}
 	if reqBody.Code != nil {
-		in, err := oauthInputDataFromBackupRequest(job, &reqBody)
+		in, err := oauthInputDataFromBackupRequest(database, job, &reqBody)
 		if err != nil {
 			return nil, err
 		}
@@ -1269,7 +1357,7 @@ func buildUpdateRequestForJob(ctx context.Context, job *repo.CronJobListingDB, r
 			"database_name": reqBody.DatabaseConnection.DatabaseName,
 		})
 	} else if reqBody.RefreshToken != nil {
-		in, err := oauthInputDataFromBackupRequest(job, &reqBody)
+		in, err := oauthInputDataFromBackupRequest(database, job, &reqBody)
 		if err != nil {
 			return nil, err
 		}
@@ -1334,7 +1422,7 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 		})
 	}
 
-	updateRequest, err := buildUpdateRequestForJob(ctx, job, reqBody, jobID)
+	updateRequest, err := buildUpdateRequestForJob(ctx, database, job, reqBody, jobID)
 	if err != nil {
 		var httpErr *echo.HTTPError
 		if errors.As(err, &httpErr) {
@@ -1367,11 +1455,14 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 		})
 	}
 
-	copyGmailCorporateChildStorxFromParent(database, data)
-	repo.MaskTokenForCronJobDB(data)
+	jobCopy := *data
+	copyGmailCorporateChildStorxFromParent(database, &jobCopy)
+	repo.MaskTokenForCronJobDB(&jobCopy)
+	parent := buildGmailParentAccountSummary(database, &jobCopy)
+	stripGmailCorporateChildStorxFromAPIResponse(&jobCopy, parent)
 	detail := CronJobDetailResponse{
-		CronJobListingDB: *data,
-		ParentAccount:    buildGmailParentAccountSummary(database, data),
+		CronJobListingDB: jobCopy,
+		ParentAccount:    parent,
 	}
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Automatic backup updated successfully",
@@ -1446,7 +1537,7 @@ func HandleAutomaticBackupBulkUpdateByParent(c echo.Context) error {
 	failed := make([]map[string]interface{}, 0)
 	for i := range jobs {
 		job := &jobs[i]
-		jobUpdate, buildErr := buildUpdateRequestForJob(ctx, job, reqBody, int(job.ID))
+		jobUpdate, buildErr := buildUpdateRequestForJob(ctx, database, job, reqBody, int(job.ID))
 		if buildErr != nil {
 			failed = append(failed, bulkGmailUpdateFailure(job.ID, job.Name, buildErr))
 			continue

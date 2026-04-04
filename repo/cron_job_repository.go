@@ -48,7 +48,7 @@ type CronJobListingDB struct {
 
 	UserID         string  `json:"user_id" gorm:"column:user_id;uniqueIndex:idx_name_sync_type_user"`
 	ParentID       *string `json:"parent_id,omitempty" gorm:"column:parent_id;index:idx_parent_id"`
-	StorjProjectID string  `json:"storj_project_id" gorm:"column:storj_project_id;index:idx_storj_project_id"` // Storj project ID extracted from access grant
+	StorjProjectID string  `json:"storj_project_id,omitempty" gorm:"column:storj_project_id;index:idx_storj_project_id"` // Storj project ID extracted from access grant
 
 	// Name + SyncType + UserID should be unique
 	Name     string     `json:"name" gorm:"uniqueIndex:idx_name_sync_type_user"`
@@ -60,7 +60,7 @@ type CronJobListingDB struct {
 	// Change the type from map[string]interface{} to *database.DbJson[map[string]interface{}]
 	InputData *database.DbJson[map[string]interface{}] `json:"input_data" gorm:"type:jsonb"`
 
-	StorxToken string `json:"storx_token"`
+	StorxToken string `json:"storx_token,omitempty"`
 
 	Message string `json:"message"`
 
@@ -484,6 +484,129 @@ func (r *CronJobRepository) GmailResolvedStorxToken(job *CronJobListingDB) strin
 		return ""
 	}
 	return r.gmailResolvedStringFromLocalOrParent(job, job.StorxToken, func(p *CronJobListingDB) string { return p.StorxToken })
+}
+
+// GmailAdminJobForSharedStorx returns the cron row that holds the shared StorX grant for Workspace-style Gmail:
+// the parent admin job for corporate children, or the job itself when it is not under another Gmail backup parent.
+func (r *CronJobRepository) GmailAdminJobForSharedStorx(job *CronJobListingDB) (*CronJobListingDB, error) {
+	if job == nil || job.Method != "gmail" {
+		return nil, nil
+	}
+	parent, err := r.GmailParentRowForCorporateChild(job)
+	if err != nil {
+		return nil, err
+	}
+	if parent != nil {
+		return parent, nil
+	}
+	return job, nil
+}
+
+// DeactivateGmailWorkspaceTreeForStorxFailure clears storx_token / storj_project_id and deactivates the admin job
+// and every Gmail child whose parent_id is that admin mailbox (same user_id and sync_type).
+// Used when StorX is missing or Satellite uplink rejects the access grant so connected accounts do not keep running with a bad token.
+func (r *CronJobRepository) DeactivateGmailWorkspaceTreeForStorxFailure(job *CronJobListingDB, message string) error {
+	if job == nil || job.Method != "gmail" {
+		return nil
+	}
+	admin, err := r.GmailAdminJobForSharedStorx(job)
+	if err != nil {
+		return err
+	}
+	if admin == nil {
+		return nil
+	}
+	adminName := strings.TrimSpace(admin.Name)
+	if adminName == "" {
+		return nil
+	}
+	if strings.TrimSpace(message) == "" {
+		message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
+	}
+	updates := map[string]interface{}{
+		"active":           false,
+		"auto_deactivated": true,
+		"storx_token":      "",
+		"storj_project_id": "",
+		"message":          message,
+		"message_status":   JobMessageStatusError,
+	}
+	q := r.db.Model(&CronJobListingDB{}).
+		Where("user_id = ? AND method = ? AND sync_type = ?", job.UserID, "gmail", job.SyncType).
+		Where("(id = ? OR parent_id = ?)", admin.ID, adminName)
+	return q.Updates(updates).Error
+}
+
+// StripGmailRefreshTokenFromCronJobInputData clears refresh_token in input_data when the key exists (in-memory or before persisting).
+func StripGmailRefreshTokenFromCronJobInputData(job *CronJobListingDB) {
+	if job == nil || job.InputData == nil || job.InputData.Json() == nil {
+		return
+	}
+	if _, ok := (*job.InputData.Json())["refresh_token"]; ok {
+		(*job.InputData.Json())["refresh_token"] = ""
+	}
+}
+
+// DeactivateGmailWorkspaceTreeForGoogleAuthFailure clears refresh_token in input_data on the admin job and every
+// connected Gmail child (same tree as StorX failure), deactivates all of them, and sets a shared error message.
+func (r *CronJobRepository) DeactivateGmailWorkspaceTreeForGoogleAuthFailure(job *CronJobListingDB, message string) error {
+	if job == nil || job.Method != "gmail" {
+		return nil
+	}
+	admin, err := r.GmailAdminJobForSharedStorx(job)
+	if err != nil {
+		return err
+	}
+	if admin == nil {
+		return nil
+	}
+	adminName := strings.TrimSpace(admin.Name)
+	if adminName == "" {
+		return nil
+	}
+	if strings.TrimSpace(message) == "" {
+		message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
+	}
+
+	tx := r.db.Begin()
+	if tx.Error != nil {
+		return fmt.Errorf("error starting transaction: %w", tx.Error)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Rollback()
+		}
+	}()
+
+	var rows []CronJobListingDB
+	if err := tx.Where("user_id = ? AND method = ? AND sync_type = ?", job.UserID, "gmail", job.SyncType).
+		Where("(id = ? OR parent_id = ?)", admin.ID, adminName).
+		Find(&rows).Error; err != nil {
+		return fmt.Errorf("error loading gmail workspace jobs: %w", err)
+	}
+
+	for i := range rows {
+		StripGmailRefreshTokenFromCronJobInputData(&rows[i])
+		updateMap := map[string]interface{}{
+			"active":           false,
+			"auto_deactivated": true,
+			"message":          message,
+			"message_status":   JobMessageStatusError,
+		}
+		if rows[i].InputData != nil {
+			updateMap["input_data"] = rows[i].InputData
+		}
+		if err := tx.Model(&CronJobListingDB{}).Where("id = ?", rows[i].ID).Updates(updateMap).Error; err != nil {
+			return fmt.Errorf("error updating cron job %d: %w", rows[i].ID, err)
+		}
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return fmt.Errorf("error committing gmail auth failure updates: %w", err)
+	}
+	committed = true
+	return nil
 }
 
 // GetCronJobByID retrieves a cron job by ID
