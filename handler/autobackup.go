@@ -684,8 +684,28 @@ func ensureGmailPlaceholderAdminJob(database *db.PostgresDb, userID, syncType, a
 	return err
 }
 
+// dedupeEmailsPreservingOrder drops duplicate addresses (case-insensitive), empty strings, and keeps the first trimmed spelling for API responses.
+func dedupeEmailsPreservingOrder(emails []string) []string {
+	seen := make(map[string]struct{}, len(emails))
+	out := make([]string, 0, len(emails))
+	for _, raw := range emails {
+		t := strings.TrimSpace(raw)
+		if t == "" {
+			continue
+		}
+		key := strings.ToLower(t)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, t)
+	}
+	return out
+}
+
 // createJobsForEmails creates one job per email. Refresh token is stored only on the admin mailbox row; corporate children omit it and resolve from parent. StorX access grant follows the same pattern: set storx_token on the admin job (or via any child update — it is persisted on the parent row).
 func createJobsForEmails(ctx context.Context, c echo.Context, userID, method, syncType string, connectedEmail, refreshToken string, emails []string, parentID *string, database *db.PostgresDb) (success, failed []map[string]interface{}) {
+	emails = dedupeEmailsPreservingOrder(emails)
 	success = make([]map[string]interface{}, 0, len(emails))
 	failed = make([]map[string]interface{}, 0)
 	priority := "normal"
@@ -696,31 +716,41 @@ func createJobsForEmails(ctx context.Context, c echo.Context, userID, method, sy
 		}
 		return success, failed
 	}
+	connTrim := strings.TrimSpace(connectedEmail)
+	connKey := strings.ToLower(connTrim)
 	adminInList := false
-	conn := strings.TrimSpace(connectedEmail)
 	for _, e := range emails {
-		if strings.EqualFold(strings.TrimSpace(e), conn) {
+		if strings.ToLower(e) == connKey {
 			adminInList = true
 			break
 		}
 	}
 	if parentID != nil && !adminInList && method == "gmail" {
-		if err := ensureGmailPlaceholderAdminJob(database, userID, syncType, conn, refreshToken); err != nil {
+		if err := ensureGmailPlaceholderAdminJob(database, userID, syncType, connTrim, refreshToken); err != nil {
 			for _, targetEmail := range emails {
 				failed = append(failed, map[string]interface{}{"email": targetEmail, "error": err.Error()})
 			}
 			return success, failed
 		}
 	}
-	for _, targetEmail := range emails {
-		tEmail := strings.TrimSpace(targetEmail)
-		if method == "gmail" {
-			existing, ok, ferr := database.CronJobRepo.FindGmailJobByUserNameSyncType(userID, tEmail, syncType)
-			if ferr != nil {
-				failed = append(failed, map[string]interface{}{"email": targetEmail, "error": ferr.Error()})
-				continue
+
+	var gmailByLower map[string]*repo.CronJobListingDB
+	if method == "gmail" {
+		var batchErr error
+		gmailByLower, batchErr = database.CronJobRepo.FindGmailJobsByUserSyncTypeAndNames(userID, syncType, emails)
+		if batchErr != nil {
+			for _, targetEmail := range emails {
+				failed = append(failed, map[string]interface{}{"email": targetEmail, "error": batchErr.Error()})
 			}
-			if ok && existing != nil && existing.Placeholder && strings.EqualFold(tEmail, conn) {
+			return success, failed
+		}
+	}
+
+	for _, targetEmail := range emails {
+		tEmail := targetEmail
+		if method == "gmail" {
+			existing := gmailByLower[strings.ToLower(tEmail)]
+			if existing != nil && existing.Placeholder && strings.EqualFold(tEmail, connTrim) {
 				merged := mergeJobInputData(existing, map[string]interface{}{"refresh_token": refreshToken})
 				upd := map[string]interface{}{"placeholder": false, "input_data": merged}
 				if syncType == "one_time" {
@@ -730,11 +760,22 @@ func createJobsForEmails(ctx context.Context, c echo.Context, userID, method, sy
 					failed = append(failed, map[string]interface{}{"email": targetEmail, "error": err.Error()})
 					continue
 				}
+				existing.Placeholder = false
 				item := map[string]interface{}{"email": targetEmail, "job_id": existing.ID}
 				if syncType == "one_time" {
 					task, taskErr := database.TaskRepo.CreateTaskForCronJob(existing.ID)
 					if taskErr != nil {
-						failed = append(failed, map[string]interface{}{"email": targetEmail, "error": "job updated but task failed: " + taskErr.Error()})
+						logger.Warn(ctx, "CreateTaskForCronJob failed after placeholder job was promoted",
+							logger.String("user_id", userID),
+							logger.String("email", targetEmail),
+							logger.String("method", method),
+							logger.String("sync_type", syncType),
+							logger.ErrorField(taskErr))
+						success = append(success, item)
+						if !batchNotify {
+							notificationData := buildCronNotification(method, targetEmail, syncType, existing.ID)
+							satellite.SendNotificationAsync(ctx, userID, "Automatic Backup Created for "+method, fmt.Sprintf("Your automatic backup for %s has been created successfully", targetEmail), &priority, notificationData, nil)
+						}
 						continue
 					}
 					item["task_id"] = task.ID
@@ -751,7 +792,7 @@ func createJobsForEmails(ctx context.Context, c echo.Context, userID, method, sy
 			"email": targetEmail,
 		}
 		// Corporate: store refresh_token only on the admin row (real job or placeholder). All delegated mailboxes omit it and resolve via parent_id + GmailResolvedRefreshToken.
-		isAdminMailbox := strings.EqualFold(strings.TrimSpace(targetEmail), conn)
+		isAdminMailbox := strings.EqualFold(tEmail, connTrim)
 		skipLocalToken := parentID != nil && !isAdminMailbox
 		if !skipLocalToken {
 			config["refresh_token"] = refreshToken
@@ -763,6 +804,12 @@ func createJobsForEmails(ctx context.Context, c echo.Context, userID, method, sy
 		}
 		data, createErr := createSyncJob(userID, targetEmail, method, syncType, config, rowParentID, c)
 		if createErr != nil {
+			logger.Warn(ctx, "createSyncJob failed",
+				logger.String("user_id", userID),
+				logger.String("email", targetEmail),
+				logger.String("method", method),
+				logger.String("sync_type", syncType),
+				logger.ErrorField(createErr))
 			failed = append(failed, map[string]interface{}{"email": targetEmail, "error": extractCreateJobError(createErr)})
 			continue
 		}
@@ -775,7 +822,18 @@ func createJobsForEmails(ctx context.Context, c echo.Context, userID, method, sy
 		if syncType == "one_time" {
 			task, taskErr := database.TaskRepo.CreateTaskForCronJob(cronJob.ID)
 			if taskErr != nil {
-				failed = append(failed, map[string]interface{}{"email": targetEmail, "error": "job created but task failed: " + taskErr.Error()})
+				logger.Warn(ctx, "CreateTaskForCronJob failed after job was created",
+					logger.String("user_id", userID),
+					logger.String("email", targetEmail),
+					logger.String("method", method),
+					logger.String("sync_type", syncType),
+					logger.Int("job_id", int(cronJob.ID)),
+					logger.ErrorField(taskErr))
+				success = append(success, item)
+				if !batchNotify {
+					notificationData := buildCronNotification(method, targetEmail, syncType, cronJob.ID)
+					satellite.SendNotificationAsync(ctx, userID, "Automatic Backup Created for "+method, fmt.Sprintf("Your automatic backup for %s has been created successfully", targetEmail), &priority, notificationData, nil)
+				}
 				continue
 			}
 			item["task_id"] = task.ID
@@ -1293,8 +1351,18 @@ func buildUpdateRequestForJob(ctx context.Context, database *db.PostgresDb, job 
 		if reqBody.Interval != nil || reqBody.On != nil || reqBody.DatabaseConnection != nil || reqBody.Active != nil {
 			return nil, httpErr(http.StatusBadRequest, "Invalid Request", "For one-time sync jobs, only storx_token and code or refresh_token for gmail/outlook updates are allowed")
 		}
+		oauthInputCount := 0
+		if reqBody.Code != nil {
+			oauthInputCount++
+		}
+		if reqBody.RefreshToken != nil {
+			oauthInputCount++
+		}
+		if oauthInputCount > 1 {
+			return nil, httpErr(http.StatusBadRequest, "Invalid Request", "Only one of code or refresh_token may be set in a single request")
+		}
 		if reqBody.StorxToken != nil {
-			if *reqBody.StorxToken == "" {
+			if strings.TrimSpace(*reqBody.StorxToken) == "" {
 				return nil, httpErr(http.StatusBadRequest, "Invalid Request", "storx_token cannot be empty")
 			}
 			updateRequest["storx_token"] = *reqBody.StorxToken
@@ -1308,7 +1376,7 @@ func buildUpdateRequestForJob(ctx context.Context, database *db.PostgresDb, job 
 			updateRequest["input_data"] = in
 		}
 		if len(updateRequest) == 0 {
-			return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "No valid update fields provided. Only storx_token, code (gmail), and refresh_token (gmail or outlook) are allowed"})
+			return nil, httpErr(http.StatusBadRequest, "Invalid Request", "No valid update fields provided. Only storx_token, code (gmail), and refresh_token (gmail or outlook) are allowed")
 		}
 		return updateRequest, nil
 	}
@@ -1337,6 +1405,19 @@ func buildUpdateRequestForJob(ctx context.Context, database *db.PostgresDb, job 
 		updateRequest["interval"] = *reqBody.Interval
 		updateRequest["on"] = onValue
 	}
+	inputKinds := 0
+	if reqBody.Code != nil {
+		inputKinds++
+	}
+	if reqBody.RefreshToken != nil {
+		inputKinds++
+	}
+	if reqBody.DatabaseConnection != nil {
+		inputKinds++
+	}
+	if inputKinds > 1 {
+		return nil, httpErr(http.StatusBadRequest, "Invalid Request", "Only one of code, refresh_token, or database_connection may be set in a single request")
+	}
 	if reqBody.Code != nil {
 		in, err := oauthInputDataFromBackupRequest(database, job, &reqBody)
 		if err != nil {
@@ -1346,15 +1427,19 @@ func buildUpdateRequestForJob(ctx context.Context, database *db.PostgresDb, job 
 			updateRequest["input_data"] = in
 		}
 	} else if reqBody.DatabaseConnection != nil {
-		if job.Method != "database" {
+		if job.Method != "psql_database" && job.Method != "mysql_database" {
 			return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "database connection is not allowed for this method"})
 		}
+		dc := reqBody.DatabaseConnection
+		if strings.TrimSpace(dc.Host) == "" || strings.TrimSpace(dc.DatabaseName) == "" || strings.TrimSpace(dc.Username) == "" {
+			return nil, httpErr(http.StatusBadRequest, "Invalid Request", "database_connection requires non-empty host, database_name, and username")
+		}
 		updateRequest["input_data"] = mergeJobInputData(job, map[string]interface{}{
-			"host":          reqBody.DatabaseConnection.Host,
-			"port":          reqBody.DatabaseConnection.Port,
-			"username":      reqBody.DatabaseConnection.Username,
-			"password":      reqBody.DatabaseConnection.Password,
-			"database_name": reqBody.DatabaseConnection.DatabaseName,
+			"host":          dc.Host,
+			"port":          dc.Port,
+			"username":      dc.Username,
+			"password":      dc.Password,
+			"database_name": dc.DatabaseName,
 		})
 	} else if reqBody.RefreshToken != nil {
 		in, err := oauthInputDataFromBackupRequest(database, job, &reqBody)
@@ -1366,19 +1451,25 @@ func buildUpdateRequestForJob(ctx context.Context, database *db.PostgresDb, job 
 		}
 	}
 	if reqBody.StorxToken != nil {
+		if strings.TrimSpace(*reqBody.StorxToken) == "" {
+			return nil, httpErr(http.StatusBadRequest, "Invalid Request", "storx_token cannot be empty")
+		}
 		updateRequest["storx_token"] = *reqBody.StorxToken
 		extractAndStoreProjectID(ctx, *reqBody.StorxToken, updateRequest, jobID, "daily")
 	}
 	if reqBody.Active != nil {
 		updateRequest["active"] = *reqBody.Active
 		if *reqBody.Active {
-			updateRequest["message"] = "You Automatic backup is activated. it will start processing first backup soon"
+			updateRequest["message"] = "Your automatic backup is activated. It will start processing the first backup soon."
 			updateRequest["message_status"] = repo.JobMessageStatusInfo
 			updateRequest["auto_deactivated"] = false
 		} else {
-			updateRequest["message"] = "You Automatic backup is deactivated. it will not process any backup"
+			updateRequest["message"] = "Your automatic backup is deactivated. It will not process any backups."
 			updateRequest["message_status"] = repo.JobMessageStatusInfo
 		}
+	}
+	if len(updateRequest) == 0 {
+		return nil, httpErr(http.StatusBadRequest, "Invalid Request", "No valid update fields provided")
 	}
 	return updateRequest, nil
 }

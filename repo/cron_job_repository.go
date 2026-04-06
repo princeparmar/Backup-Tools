@@ -408,6 +408,25 @@ func (r *CronJobRepository) FindGmailJobByUserNameSyncType(userID, name, syncTyp
 	return &res, true, nil
 }
 
+// FindGmailJobsByUserSyncTypeAndNames loads all gmail cron rows for user+syncType whose name is in names (one query). Keys are strings.ToLower(strings.TrimSpace(name)).
+func (r *CronJobRepository) FindGmailJobsByUserSyncTypeAndNames(userID, syncType string, names []string) (map[string]*CronJobListingDB, error) {
+	out := make(map[string]*CronJobListingDB)
+	if len(names) == 0 {
+		return out, nil
+	}
+	var rows []CronJobListingDB
+	q := r.db.Where("user_id = ? AND method = ? AND sync_type = ? AND name IN ?", userID, "gmail", syncType, names).Find(&rows)
+	if q.Error != nil {
+		return nil, fmt.Errorf("error batch listing gmail cron jobs: %w", q.Error)
+	}
+	for i := range rows {
+		cp := rows[i]
+		key := strings.ToLower(strings.TrimSpace(cp.Name))
+		out[key] = &cp
+	}
+	return out, nil
+}
+
 // GmailConnectedAccountEmail is the admin mailbox (OAuth token row) for a corporate child job.
 // Source of truth is column parent_id only — not input_data.connected_email.
 func GmailConnectedAccountEmail(job *CronJobListingDB) string {
