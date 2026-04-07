@@ -88,6 +88,9 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 		if tokErr != nil {
 			return fmt.Errorf("error while generating auth token: %s", tokErr)
 		}
+		if strings.TrimSpace(newToken) == "" {
+			return fmt.Errorf("error while generating auth token: empty access token after refresh (check refresh token and OAuth client)")
+		}
 	}
 
 	gmailSession, err := google.NewWorkspaceGmailSession(ctx, newToken, oauthAccountEmail, mailboxForSession)

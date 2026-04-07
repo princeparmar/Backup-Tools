@@ -40,6 +40,8 @@ const (
 // Other constants
 const (
 	MaxRetryCount = 3
+	// MaxFailurePeriods is how many schedule periods (day/week/month) may end in exhausted task retries before the job is deactivated.
+	MaxFailurePeriods = 3
 )
 
 // CronJobListingDB represents a cron job in the database
@@ -86,6 +88,8 @@ type CronJobListingDB struct {
 	Placeholder bool `json:"placeholder" gorm:"column:placeholder;default:false"`
 	// When user fixes the error and reactivates, this should be set to false
 	AutoDeactivated bool `json:"autodeactivated" gorm:"column:auto_deactivated;default:false"`
+	// FailurePeriods counts schedule periods that ended with all per-task retries exhausted (retry_count reached MaxRetryCount). Reset on success or user reactivation.
+	FailurePeriods uint `json:"failure_periods" gorm:"column:failure_periods;default:0"`
 }
 
 // TaskMemory represents the memory state of a task
@@ -284,38 +288,55 @@ func (r *CronJobRepository) GetAllActiveCronJobsForUser(userID string) ([]LiveCr
 	return results, nil
 }
 
+// PeriodStartForInterval returns the start of the current scheduling period in loc for daily / weekly / monthly jobs.
+// Weekly periods begin Monday 00:00 in loc (aligned with interval day checks in GetJobsToProcess).
+func PeriodStartForInterval(interval string, now time.Time, loc *time.Location) time.Time {
+	if loc == nil {
+		loc = time.UTC
+	}
+	n := now.In(loc)
+	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "daily":
+		return time.Date(n.Year(), n.Month(), n.Day(), 0, 0, 0, 0, loc)
+	case "weekly":
+		wd := int(n.Weekday()) // Sunday = 0
+		daysFromMonday := (wd + 6) % 7
+		monday := n.AddDate(0, 0, -daysFromMonday)
+		return time.Date(monday.Year(), monday.Month(), monday.Day(), 0, 0, 0, 0, loc)
+	case "monthly":
+		return time.Date(n.Year(), n.Month(), 1, 0, 0, 0, 0, loc)
+	default:
+		return time.Date(n.Year(), n.Month(), n.Day(), 0, 0, 0, 0, loc)
+	}
+}
+
 // GetJobsToProcess retrieves jobs that are ready to be processed
 func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 	var res []CronJobListingDB
 	tx := r.db.Begin()
 
-	// Pre-aggregate failed task counts in a subquery; outer query has no GROUP BY so FOR UPDATE is allowed (PostgreSQL forbids FOR UPDATE with GROUP BY).
-	// Parameter order: fail_status, startOfDay, endOfDay, message, status_not_in_1, status_not_in_2,
-	// startOfDay, failed_status, startOfDay, endOfDay, maxRetry, weekday, day, task_running, task_pushed
+	// One task creation per schedule period: last_run must be before the period start for this job's interval,
+	// or null. No pushed/running task for the job. Retries on the same row are not new creations.
+	// Parameter order: message, status_not_in_1, status_not_in_2,
+	// dailyPeriodStart, weeklyPeriodStart, monthlyPeriodStart, dailyPeriodStart (ELSE),
+	// weekday, day, task_running, task_pushed
 	sqlQuery := `
 		SELECT c.*
 		FROM cron_job_listing_dbs c
 		WHERE c.id IN (
 			SELECT c2.id
 			FROM cron_job_listing_dbs c2
-			LEFT JOIN (
-				SELECT cron_job_id, COUNT(*) AS fail_count
-				FROM task_listing_dbs
-				WHERE status = ?
-				AND created_at >= ? AND created_at < ?
-				GROUP BY cron_job_id
-			) t_fail ON t_fail.cron_job_id = c2.id
 			WHERE c2.active = true
 			AND (c2.message IS NULL OR c2.message != ?)
 			AND c2.status NOT IN (?, ?)
 			AND (
 				c2.last_run IS NULL
-				OR c2.last_run < ?
-				OR (
-					c2.status = ?
-					AND c2.last_run >= ? AND c2.last_run < ?
-					AND COALESCE(t_fail.fail_count, 0) < ?
-				)
+				OR c2.last_run < CASE c2.interval
+					WHEN 'daily' THEN ?::timestamptz
+					WHEN 'weekly' THEN ?::timestamptz
+					WHEN 'monthly' THEN ?::timestamptz
+					ELSE ?::timestamptz
+				END
 			)
 			AND (
 				c2.interval = 'daily'
@@ -335,17 +356,16 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 		FOR UPDATE OF c
 	`
 
-	// Calculate time range for today (midnight to midnight) for index-friendly queries
 	now := time.Now()
 	location := now.Location()
-	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location)
-	endOfDay := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, location)
+	dailyStart := PeriodStartForInterval("daily", now, location)
+	weeklyStart := PeriodStartForInterval("weekly", now, location)
+	monthlyStart := PeriodStartForInterval("monthly", now, location)
 
 	rawQuery := tx.Raw(sqlQuery,
-		TaskStatusFailed, startOfDay, endOfDay,
 		JobMessagePushToQueue,
 		JobStatusInQueue, JobStatusInProgress,
-		startOfDay, JobStatusFailed, startOfDay, endOfDay, MaxRetryCount,
+		dailyStart, weeklyStart, monthlyStart, dailyStart,
 		now.Weekday().String(), fmt.Sprint(now.Day()),
 		TaskStatusRunning, TaskStatusPushed)
 
@@ -775,11 +795,14 @@ func (r *CronJobRepository) UpdateCronJobFieldsForCron(ID uint, fields map[strin
 	// For one-time sync jobs, only allow specific fields to be updated
 	if existingJob.SyncType == "one_time" {
 		allowedFields := map[string]bool{
-			"status":         true,
-			"message":        true,
-			"message_status": true,
-			"last_run":       true,
-			"input_data":     true, // e.g. cleared oauth refresh_token after auth failure
+			"status":           true,
+			"message":          true,
+			"message_status":   true,
+			"last_run":         true,
+			"input_data":       true, // e.g. cleared oauth refresh_token after auth failure
+			"failure_periods":  true,
+			"active":           true,
+			"auto_deactivated": true,
 		}
 
 		filteredMap := make(map[string]interface{})

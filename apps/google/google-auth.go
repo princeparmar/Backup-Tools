@@ -326,13 +326,41 @@ func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 		return "", fmt.Errorf("error reading response body: %v", err)
 	}
 
-	// Parse the response JSON
+	if resp.StatusCode != http.StatusOK {
+		var oauthErr struct {
+			Error            string `json:"error"`
+			ErrorDescription string `json:"error_description"`
+		}
+		if json.Unmarshal(body, &oauthErr) == nil && oauthErr.Error != "" {
+			msg := oauthErr.Error
+			if oauthErr.ErrorDescription != "" {
+				msg = msg + ": " + oauthErr.ErrorDescription
+			}
+			return "", fmt.Errorf("token refresh failed: %s", msg)
+		}
+		return "", fmt.Errorf("token refresh failed: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	// Parse the success JSON (invalid_grant etc. sometimes still unmarshals with empty access_token — reject that)
 	err = json.Unmarshal(body, &tokenResponse)
 	if err != nil {
 		return "", fmt.Errorf("error parsing response JSON: %v", err)
 	}
+	if strings.TrimSpace(tokenResponse.AccessToken) == "" {
+		var oauthErr struct {
+			Error            string `json:"error"`
+			ErrorDescription string `json:"error_description"`
+		}
+		if json.Unmarshal(body, &oauthErr) == nil && oauthErr.Error != "" {
+			msg := oauthErr.Error
+			if oauthErr.ErrorDescription != "" {
+				msg = msg + ": " + oauthErr.ErrorDescription
+			}
+			return "", fmt.Errorf("token refresh failed: %s", msg)
+		}
+		return "", fmt.Errorf("token refresh returned empty access_token")
+	}
 
-	// Return the access token
 	return tokenResponse.AccessToken, nil
 }
 

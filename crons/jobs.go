@@ -338,7 +338,6 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 	// Handle error case
 	if processErr != nil {
 		task.Status = repo.TaskStatusFailed
-		task.Message = processErr.Error()
 		task.RetryCount++
 
 		// Record task failure
@@ -348,8 +347,12 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 			now := time.Now()
 			job.LastRun = &now
 
-			emailMessage := a.determineErrorMessage(processErr, job, task)
 			a.handleErrorScenarios(processErr, job, task)
+			emailOverride := applyIntervalFailurePeriod(job, task)
+			emailMessage := a.determineErrorMessage(processErr, job, task)
+			if emailOverride != "" {
+				emailMessage = emailOverride
+			}
 
 			// Send email notification
 			go satellite.SendEmailForBackupFailure(context.Background(), job.Name, emailMessage, job.Method)
@@ -367,10 +370,13 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 				"execution": task.Execution,
 			}
 			satellite.SendNotificationAsync(context.Background(), job.UserID, "Automatic Backup Failed", fmt.Sprintf("Automatic backup for %s failed: %s", job.Name, emailMessage), &priority, data, nil)
+		} else {
+			task.Message = processErr.Error()
 		}
 	} else {
 		// Handle success case - send notification
 		if job != nil {
+			job.FailurePeriods = 0
 			priority := "normal"
 			data := map[string]interface{}{
 				"event":     "cron_successfully_completed",
@@ -439,6 +445,26 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 	return nil
 }
 
+// applyIntervalFailurePeriod increments FailurePeriods when per-task retries are exhausted; deactivates the job after MaxFailurePeriods.
+// Returns a non-empty email body override when the job was deactivated for this reason.
+func applyIntervalFailurePeriod(job *repo.CronJobListingDB, task *repo.TaskListingDB) string {
+	if job == nil || task == nil || task.RetryCount < repo.MaxRetryCount {
+		return ""
+	}
+	job.FailurePeriods++
+	if job.FailurePeriods < repo.MaxFailurePeriods {
+		return ""
+	}
+	if !job.Active {
+		return ""
+	}
+	job.Active = false
+	job.AutoDeactivated = true
+	job.Message = cronJobFailurePeriodsExhausted
+	task.Message = cronTaskFailurePeriodsExhausted
+	return cronEmailFailurePeriodsExhausted
+}
+
 func (a *AutosyncManager) gmailStorxMissing(job *repo.CronJobListingDB) bool {
 	if job == nil {
 		return true
@@ -454,6 +480,18 @@ func (a *AutosyncManager) clearStorxOnUplinkFailure(job *repo.CronJobListingDB) 
 		return
 	}
 	job.StorxToken = ""
+}
+
+// gmailRefreshOrTokenExchangeFailure: Gmail-only Google OAuth refresh / token-endpoint errors.
+// invalid_grant must not hit the Outlook branch (same substring for Microsoft and Google).
+func gmailRefreshOrTokenExchangeFailure(job *repo.CronJobListingDB, errMsg string) bool {
+	if job == nil || job.Method != "gmail" {
+		return false
+	}
+	e := strings.ToLower(errMsg)
+	return strings.Contains(e, "invalid_grant") ||
+		strings.Contains(errMsg, "error while generating auth token") ||
+		strings.Contains(e, "error parsing response json")
 }
 
 func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.CronJobListingDB, task *repo.TaskListingDB) string {
@@ -474,13 +512,14 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.Cron
 	case strings.Contains(errMsg, "googleapi: Error 401") ||
 		strings.Contains(errMsg, "oauth credential not found") ||
 		strings.Contains(errMsg, "refresh token not found"):
+		// gmailRefreshOrTokenExchangeFailure(job, errMsg):
 		if task.RetryCount == repo.MaxRetryCount-1 {
 			return cronEmailGoogleAuthFinal
 		}
 		return cronEmailGoogleAuthRetry(task.RetryCount)
 
 	case strings.Contains(errMsg, "Access is denied") ||
-		strings.Contains(errMsg, "invalid_grant") ||
+		(job != nil && job.Method == "outlook" && strings.Contains(strings.ToLower(errMsg), "invalid_grant")) ||
 		(strings.Contains(errMsg, "microsoftgraph") && (strings.Contains(errMsg, "401") || strings.Contains(errMsg, "403"))) ||
 		(strings.Contains(errMsg, "Microsoft Graph API") && (strings.Contains(errMsg, "401") || strings.Contains(errMsg, "403"))):
 		if task.RetryCount == repo.MaxRetryCount-1 {
@@ -535,6 +574,7 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 	case strings.Contains(errMsg, "googleapi: Error 401") ||
 		strings.Contains(errMsg, "oauth credential not found") ||
 		strings.Contains(errMsg, "refresh token not found"):
+		// gmailRefreshOrTokenExchangeFailure(job, errMsg):
 		if task.RetryCount == repo.MaxRetryCount-1 {
 			if job.Method == "gmail" {
 				if err := a.store.CronJobRepo.DeactivateGmailWorkspaceTreeForGoogleAuthFailure(job, cronJobGoogleAuthDeactivate); err != nil {
@@ -557,7 +597,7 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		}
 
 	case strings.Contains(errMsg, "Access is denied") ||
-		strings.Contains(errMsg, "invalid_grant") ||
+		(job != nil && job.Method == "outlook" && strings.Contains(strings.ToLower(errMsg), "invalid_grant")) ||
 		(strings.Contains(errMsg, "microsoftgraph") && (strings.Contains(errMsg, "401") || strings.Contains(errMsg, "403"))) ||
 		(strings.Contains(errMsg, "Microsoft Graph API") && (strings.Contains(errMsg, "401") || strings.Contains(errMsg, "403"))):
 		if task.RetryCount == repo.MaxRetryCount-1 {
@@ -598,7 +638,7 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		task.Message = cronTaskNetworkDeactivated
 
 	default:
-		job.Message = cronJobGenericRetry
-		task.Message = cronTaskGenericRetry
+		job.Message = cronJobGenericRetry(task.RetryCount)
+		task.Message = cronTaskGenericRetry(task.RetryCount)
 	}
 }

@@ -135,11 +135,15 @@ func (r *TaskRepository) GetPushedTask() (*TaskListingDB, error) {
 	}
 
 	// Update status to running and set start time
+	prevStatus := res.Status
 	res.Status = TaskStatusRunning
 	startTime := time.Now()
 	res.StartTime = &startTime
 	res.LastHeartBeat = &startTime
-	res.Message = "Automatic backup started"
+	// Retries reuse the same row; preserve accumulated failure messages. Only reset for a new pushed task.
+	if prevStatus == TaskStatusPushed {
+		res.Message = "Automatic backup started"
+	}
 
 	if err := tx.Save(&res).Error; err != nil {
 		tx.Rollback()

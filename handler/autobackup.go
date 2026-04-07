@@ -1463,6 +1463,7 @@ func buildUpdateRequestForJob(ctx context.Context, database *db.PostgresDb, job 
 			updateRequest["message"] = "Your automatic backup is activated. It will start processing the first backup soon."
 			updateRequest["message_status"] = repo.JobMessageStatusInfo
 			updateRequest["auto_deactivated"] = false
+			updateRequest["failure_periods"] = uint(0)
 		} else {
 			updateRequest["message"] = "Your automatic backup is deactivated. It will not process any backups."
 			updateRequest["message_status"] = repo.JobMessageStatusInfo

@@ -19,6 +19,8 @@ const (
 	cronEmailStorxUplinkFinal = "Your automatic backup has been temporarily disabled due to insufficient StorX permissions. Please update your StorX permissions and reactivate the backup from your dashboard."
 
 	cronEmailNetworkFinal = "Your automatic backup has been temporarily disabled due to network connectivity issues. Please check your internet connection and reactivate the backup from your dashboard."
+
+	cronEmailFailurePeriodsExhausted = "Your automatic backup still failed after we retried each run up to 3 times, on 3 separate scheduled runs (daily, weekly, or monthly—depending on your settings). The backup has been turned off to avoid endless errors. Check the last error in your backup history, fix the underlying issue if you can, then reactivate the backup from your dashboard."
 )
 
 const (
@@ -28,7 +30,7 @@ const (
 
 	cronTplEmailOutlookAuthRetry = "Your automatic backup encountered an authentication issue with Microsoft Outlook. We're retrying automatically (attempt %d of %d)."
 
-	cronTplEmailGenericRetry = "Your automatic backup encountered a technical issue. We're retrying automatically (attempt %d of %d)."
+	cronTplEmailGenericRetry = "Your automatic backup hit an unexpected technical issue. This is attempt %d of %d for the current run—we retry automatically up to 3 times per scheduled run. If this run still fails, we will try again on your next scheduled backup (daily/weekly/monthly). If failures continue across several scheduled runs, the backup will be paused until you reactivate it."
 )
 
 // Job list / detail messages (handleErrorScenarios job.Message).
@@ -43,7 +45,7 @@ const (
 
 	cronJobNetworkFinal = "Automatic backup failed due to network issues. Please check your connection and reactivate."
 
-	cronJobGenericRetry = "Automatic backup encountered an error. Job will be retried automatically..."
+	cronJobFailurePeriodsExhausted = "Backup failed after 3 scheduled runs, each with up to 3 automatic retries. Job has been deactivated—reactivate from your dashboard after fixing the issue."
 )
 
 const (
@@ -66,7 +68,7 @@ const (
 
 	cronTaskNetworkDeactivated = "Task failed due to network connectivity issues. Job has been deactivated."
 
-	cronTaskGenericRetry = "Task encountered an error. Task will be retried automatically..."
+	cronTaskFailurePeriodsExhausted = "Failed after multiple scheduled runs (3 runs × up to 3 retries each). Automatic backup has been deactivated."
 )
 
 const (
@@ -75,6 +77,12 @@ const (
 	cronTplTaskGoogleAuthRetry = "Google credentials invalid. Attempt %d of %d failed. Retrying automatically..."
 
 	cronTplTaskOutlookAuthRetry = "Microsoft Outlook credentials invalid. Attempt %d of %d failed. Retrying automatically..."
+)
+
+const (
+	cronTplJobGenericRetry = "Technical issue (attempt %d of %d this run). Retrying automatically—up to 3 tries per scheduled run; next run per your schedule if this run exhausts retries."
+
+	cronTplTaskGenericRetry = "Attempt %d of %d failed (technical). Automatic retries continue for this run (max 3); if the run still fails, the next try is on your next scheduled backup."
 )
 
 func cronAttempt(attempt uint) (uint, uint) {
@@ -99,6 +107,16 @@ func cronEmailOutlookAuthRetry(attempt uint) string {
 func cronEmailGenericRetry(attempt uint) string {
 	a, m := cronAttempt(attempt)
 	return fmt.Sprintf(cronTplEmailGenericRetry, a, m)
+}
+
+func cronJobGenericRetry(attempt uint) string {
+	a, m := cronAttempt(attempt)
+	return fmt.Sprintf(cronTplJobGenericRetry, a, m)
+}
+
+func cronTaskGenericRetry(attempt uint) string {
+	a, m := cronAttempt(attempt)
+	return fmt.Sprintf(cronTplTaskGenericRetry, a, m)
 }
 
 func cronJobDelegationRetry(attempt uint) string {
