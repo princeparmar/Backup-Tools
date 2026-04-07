@@ -71,12 +71,32 @@ type CronJobResponse struct {
 	repo.CronJobListingDB
 	NextBackup    *time.Time                 `json:"next_backup"`
 	ParentAccount *GmailParentAccountSummary `json:"parent_account,omitempty"`
+	IsAdmin       bool                       `json:"is_admin,omitempty"` // workspace Gmail admin / tree root (computed; not stored)
 }
 
 // CronJobDetailResponse is a single job for GET detail / update responses with optional parent summary.
 type CronJobDetailResponse struct {
 	repo.CronJobListingDB
 	ParentAccount *GmailParentAccountSummary `json:"parent_account,omitempty"`
+	IsAdmin       bool                       `json:"is_admin,omitempty"` // workspace Gmail admin / tree root (computed; not stored)
+}
+
+// gmailWorkspaceJobIsAdmin is true for Workspace admin Gmail cron rows (computed for API; not stored). False for personal-only Gmail and connected accounts.
+func gmailWorkspaceJobIsAdmin(database *db.PostgresDb, job *repo.CronJobListingDB) bool {
+	if database == nil || job == nil || job.Method != "gmail" {
+		return false
+	}
+	if repo.GmailConnectedAccountEmail(job) != "" {
+		return false
+	}
+	if job.Placeholder {
+		return true
+	}
+	children, err := database.CronJobRepo.GetJobsByUserAndParentIDAndMethod(job.UserID, job.Name, "gmail")
+	if err != nil || len(children) == 0 {
+		return false
+	}
+	return true
 }
 
 // gmailParentRowForCorporateChild loads the admin Gmail job when job is a corporate child; nil otherwise.
@@ -209,6 +229,92 @@ func applyAutomaticBackupUpdates(database *db.PostgresDb, job *repo.CronJobListi
 	return nil
 }
 
+func applyStorxUpdateChoiceForLinkedGmailAccounts(job *repo.CronJobListingDB, reqBody AutomaticBackupUpdateRequest) error {
+	if reqBody.StorxToken == nil || reqBody.ApplyStorxToAll == nil || !*reqBody.ApplyStorxToAll {
+		return nil
+	}
+	if job == nil || job.Method != "gmail" {
+		return httpErr(http.StatusBadRequest, "Invalid Request", "apply_storx_to_all_linked_accounts is supported only for gmail method")
+	}
+	return nil
+}
+
+// mergeBulkGmailActivatePatch is activeStateUpdateFields(true) plus interval/on from scheduleTemplate when the target row is missing them.
+func mergeBulkGmailActivatePatch(target *repo.CronJobListingDB, scheduleTemplate *repo.CronJobListingDB) map[string]interface{} {
+	patch := activeStateUpdateFields(true)
+	if target == nil || scheduleTemplate == nil || scheduleTemplate.SyncType == "one_time" {
+		return patch
+	}
+	if strings.TrimSpace(scheduleTemplate.Interval) == "" || strings.TrimSpace(scheduleTemplate.On) == "" {
+		return patch
+	}
+	if strings.TrimSpace(target.Interval) == "" {
+		patch["interval"] = scheduleTemplate.Interval
+	}
+	if strings.TrimSpace(target.On) == "" {
+		patch["on"] = scheduleTemplate.On
+	}
+	return patch
+}
+
+// propagateGmailStorxAllLinkedActive activates the admin row when it is not placeholder, then every linked Gmail child (children are never placeholder).
+// Placeholder admin only holds OAuth/StorX and is skipped for activation.
+// The job in the URL may then be overridden: if specificJobActive is non-nil, that job_id gets that active value only (skipped when that row is placeholder).
+// Request body "active" is only for the edited job; apply_storx_to_all_linked_accounts does not use it for the bulk activate step.
+func propagateGmailStorxAllLinkedActive(database *db.PostgresDb, job *repo.CronJobListingDB, editedJobID uint, specificJobActive *bool) error {
+	if database == nil || job == nil || job.Method != "gmail" {
+		return nil
+	}
+	adminJob, err := database.CronJobRepo.GmailAdminJobForSharedStorx(job)
+	if err != nil {
+		return err
+	}
+	if adminJob == nil || strings.TrimSpace(adminJob.Name) == "" {
+		return nil
+	}
+
+	scheduleTemplate, err := database.CronJobRepo.GetCronJobByID(editedJobID)
+	if err != nil {
+		return err
+	}
+
+	children, err := database.CronJobRepo.GetJobsByUserAndParentIDAndMethod(adminJob.UserID, adminJob.Name, "gmail")
+	if err != nil {
+		return err
+	}
+
+	adminFresh, err := database.CronJobRepo.GetCronJobByID(adminJob.ID)
+	if err != nil {
+		return err
+	}
+	if !adminFresh.Placeholder {
+		if err := database.CronJobRepo.UpdateCronJobByID(adminFresh.ID, mergeBulkGmailActivatePatch(adminFresh, scheduleTemplate)); err != nil {
+			return err
+		}
+	}
+	for i := range children {
+		child := children[i]
+		if err := database.CronJobRepo.UpdateCronJobByID(child.ID, mergeBulkGmailActivatePatch(&child, scheduleTemplate)); err != nil {
+			return err
+		}
+	}
+
+	if specificJobActive != nil {
+		edited, err := database.CronJobRepo.GetCronJobByID(editedJobID)
+		if err != nil {
+			return err
+		}
+		if edited.Placeholder {
+			return nil
+		}
+		override := activeStateUpdateFields(*specificJobActive)
+		if err := database.CronJobRepo.UpdateCronJobByID(editedJobID, override); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func HandleAutomaticSyncListForUser(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
@@ -257,6 +363,7 @@ func HandleAutomaticSyncListForUser(c echo.Context) error {
 			CronJobListingDB: j,
 			NextBackup:       calculateNextBackup(j),
 			ParentAccount:    parent,
+			IsAdmin:          gmailWorkspaceJobIsAdmin(database, &maskedJobs[i]),
 		}
 	}
 
@@ -491,6 +598,7 @@ func HandleAutomaticSyncDetails(c echo.Context) error {
 	detail := CronJobDetailResponse{
 		CronJobListingDB: jobCopy,
 		ParentAccount:    parent,
+		IsAdmin:          gmailWorkspaceJobIsAdmin(database, &jobCopy),
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
@@ -1138,6 +1246,7 @@ type AutomaticBackupUpdateRequest struct {
 	DatabaseConnection *DatabaseConnection `json:"database_connection"`
 	StorxToken         *string             `json:"storx_token"`
 	Active             *bool               `json:"active"`
+	ApplyStorxToAll    *bool               `json:"apply_storx_to_all_linked_accounts"`
 }
 
 // jobGmailMailbox returns input_data.email when set, otherwise job name.
@@ -1344,11 +1453,28 @@ func httpErr(status int, message string, errText string) error {
 	return echo.NewHTTPError(status, map[string]interface{}{"message": message, "error": errText})
 }
 
+func activeStateUpdateFields(active bool) map[string]interface{} {
+	update := map[string]interface{}{
+		"active": active,
+	}
+	if active {
+		update["message"] = "Your automatic backup is activated. It will start processing the first backup soon."
+		update["message_status"] = repo.JobMessageStatusInfo
+		update["auto_deactivated"] = false
+		update["failure_periods"] = uint(0)
+		return update
+	}
+	update["message"] = "Your automatic backup is deactivated. It will not process any backups."
+	update["message_status"] = repo.JobMessageStatusInfo
+	return update
+}
+
 func buildUpdateRequestForJob(ctx context.Context, database *db.PostgresDb, job *repo.CronJobListingDB, reqBody AutomaticBackupUpdateRequest, jobID int) (map[string]interface{}, error) {
 	updateRequest := map[string]interface{}{}
 
 	if job.SyncType == "one_time" {
-		if reqBody.Interval != nil || reqBody.On != nil || reqBody.DatabaseConnection != nil || reqBody.Active != nil {
+		if reqBody.Interval != nil || reqBody.On != nil || reqBody.DatabaseConnection != nil || reqBody.Active != nil ||
+			reqBody.ApplyStorxToAll != nil {
 			return nil, httpErr(http.StatusBadRequest, "Invalid Request", "For one-time sync jobs, only storx_token and code or refresh_token for gmail/outlook updates are allowed")
 		}
 		oauthInputCount := 0
@@ -1458,15 +1584,8 @@ func buildUpdateRequestForJob(ctx context.Context, database *db.PostgresDb, job 
 		extractAndStoreProjectID(ctx, *reqBody.StorxToken, updateRequest, jobID, "daily")
 	}
 	if reqBody.Active != nil {
-		updateRequest["active"] = *reqBody.Active
-		if *reqBody.Active {
-			updateRequest["message"] = "Your automatic backup is activated. It will start processing the first backup soon."
-			updateRequest["message_status"] = repo.JobMessageStatusInfo
-			updateRequest["auto_deactivated"] = false
-			updateRequest["failure_periods"] = uint(0)
-		} else {
-			updateRequest["message"] = "Your automatic backup is deactivated. It will not process any backups."
-			updateRequest["message_status"] = repo.JobMessageStatusInfo
+		for k, v := range activeStateUpdateFields(*reqBody.Active) {
+			updateRequest[k] = v
 		}
 	}
 	if len(updateRequest) == 0 {
@@ -1523,6 +1642,14 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Request", "error": err.Error()})
 	}
 
+	if err := applyStorxUpdateChoiceForLinkedGmailAccounts(job, reqBody); err != nil {
+		var httpErrObj *echo.HTTPError
+		if errors.As(err, &httpErrObj) {
+			return c.JSON(httpErrObj.Code, httpErrObj.Message)
+		}
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Request", "error": err.Error()})
+	}
+
 	err = applyAutomaticBackupUpdates(database, job, uint(jobID), updateRequest)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
@@ -1536,6 +1663,16 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 			"message": "Failed to update job",
 			"error":   err.Error(),
 		})
+	}
+
+	if reqBody.StorxToken != nil && reqBody.ApplyStorxToAll != nil && *reqBody.ApplyStorxToAll {
+		if err := propagateGmailStorxAllLinkedActive(database, job, uint(jobID), reqBody.Active); err != nil {
+			logger.Error(ctx, "Failed to propagate linked Gmail active state after StorX update", logger.Int("job_id", jobID), logger.ErrorField(err))
+			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+				"message": "Failed to update linked accounts",
+				"error":   err.Error(),
+			})
+		}
 	}
 
 	data, err := database.CronJobRepo.GetCronJobByID(uint(jobID))
@@ -1555,6 +1692,7 @@ func HandleAutomaticBackupUpdate(c echo.Context) error {
 	detail := CronJobDetailResponse{
 		CronJobListingDB: jobCopy,
 		ParentAccount:    parent,
+		IsAdmin:          gmailWorkspaceJobIsAdmin(database, &jobCopy),
 	}
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Automatic backup updated successfully",
