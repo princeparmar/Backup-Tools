@@ -55,7 +55,7 @@ func GetWorkspaceDelegationSetup() (*WorkspaceDelegationSetup, error) {
 	return &WorkspaceDelegationSetup{
 		ClientID:         clientID,
 		RequiredScopes:   []string{gmail.GmailReadonlyScope},
-		AdminConsolePath: "Security -> Access and Data Controls -> API controls -> Domain-wide delegation",
+		AdminConsolePath: "Security → Access and Data Controls → API controls → Domain-wide delegation",
 		AdminConsoleURL:  "https://admin.google.com/",
 	}, nil
 }
