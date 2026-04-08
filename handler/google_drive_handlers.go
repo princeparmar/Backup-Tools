@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/db"
@@ -701,18 +702,54 @@ func HandleSendFileFromSatelliteToGoogleDrive(c echo.Context) error {
 // 	})
 // }
 
+// googleDriveErrNeedsGoogleReconnect matches Gmail-style Google API denials plus Drive token/JWT paths.
+func googleDriveErrNeedsGoogleReconnect(err error) bool {
+	if err == nil {
+		return false
+	}
+	e := err.Error()
+	el := strings.ToLower(e)
+	if strings.Contains(el, "googleapi: error 401") || strings.Contains(el, "googleapi: error 403") || strings.Contains(el, "invalid_grant") {
+		return true
+	}
+	switch {
+	case e == "token error":
+		return true
+	case strings.Contains(el, "invalid_token"):
+		return true
+	case strings.Contains(el, "google access token invalid or unverifiable"):
+		return true
+	case strings.Contains(el, "failed to get user email:"):
+		return true
+	case strings.Contains(el, "unable to retrieve google-auth token from jwt"):
+		return true
+	case strings.Contains(el, "unable to retrieve google-auth token from database"):
+		return true
+	case e == "access token is missing":
+		return true
+	default:
+		return false
+	}
+}
+
 // Helper function to handle Google Drive errors with consistent response format
 func HandleGoogleDriveError(c echo.Context, err error, operation string) error {
-	if err.Error() == "token error" {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-			"error": "token expired",
-		})
-	} else {
-		slog.Debug("Error in Google Drive operation", "operation", operation, "error", err)
+	ctx := c.Request().Context()
+	if googleDriveErrNeedsGoogleReconnect(err) {
+		logger.Warn(ctx, "Google Drive operation failed (reconnect Google)",
+			logger.String("operation", operation),
+			logger.ErrorField(err))
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "failed to " + operation,
+			"error": "Google account access has been revoked. Please reconnect your Google account.",
 		})
 	}
+	logger.Warn(ctx, "Google Drive operation failed",
+		logger.String("operation", operation),
+		logger.ErrorField(err))
+	slog.Debug("Error in Google Drive operation", "operation", operation, "error", err)
+	return c.JSON(http.StatusForbidden, map[string]interface{}{
+		"error": "failed to " + operation,
+	})
 }
 
 // HandleGoogleDriveDownloadAndRestore downloads files from Satellite and restores them to Google Drive

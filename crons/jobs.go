@@ -508,6 +508,11 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.Cron
 		// OAuth2 token endpoint failure: do not retry — one shot then final guidance.
 		return cronEmailDelegationFinal
 
+	case job != nil && job.Method == "gmail" &&
+		(strings.Contains(errLower, "access_token_scope_insufficient") ||
+			strings.Contains(errLower, "insufficient authentication scopes")):
+		return cronEmailGoogleInsufficientScope
+
 	case strings.Contains(errMsg, "googleapi: Error 401") ||
 		strings.Contains(errMsg, "oauth credential not found") ||
 		strings.Contains(errMsg, "refresh token not found"):
@@ -566,6 +571,19 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		job.AutoDeactivated = true
 		job.Message = cronJobDelegationFinal
 		task.Message = cronTaskDelegationFinal
+
+	case job != nil && job.Method == "gmail" &&
+		(strings.Contains(errLower, "access_token_scope_insufficient") ||
+			strings.Contains(errLower, "insufficient authentication scopes")):
+		if err := a.store.CronJobRepo.DeactivateGmailWorkspaceTreeForGoogleAuthFailure(job, cronJobGoogleInsufficientScope); err != nil {
+			logger.Warn(context.Background(), "Failed to deactivate Gmail workspace tree after insufficient Gmail scopes",
+				logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
+		}
+		repo.StripGmailRefreshTokenFromCronJobInputData(job)
+		job.Active = false
+		job.AutoDeactivated = true
+		job.Message = cronJobGoogleInsufficientScope
+		task.Message = cronTaskGoogleInsufficientScope
 
 	case strings.Contains(errMsg, "googleapi: Error 401") ||
 		strings.Contains(errMsg, "oauth credential not found") ||
