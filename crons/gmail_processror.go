@@ -77,7 +77,8 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 	refreshToken := input.Database.CronJobRepo.GmailResolvedRefreshToken(input.Job)
 	mailboxForSession, pathPrefix, oauthAccountEmail := gmailMailboxPathAndOAuthHolder(input.Job, refreshToken != "")
 
-	delegationOnly := google.GmailJobUsesDelegationWithoutOAuth(mailboxForSession, oauthAccountEmail)
+	// JWT and requires DWD; without DWD you get unauthorized_client despite a valid admin refresh token.
+	delegationOnly := refreshToken == "" && google.GmailJobUsesDelegationWithoutOAuth(mailboxForSession, oauthAccountEmail)
 	var newToken string
 	if !delegationOnly {
 		if refreshToken == "" {
@@ -86,7 +87,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 		var tokErr error
 		newToken, tokErr = google.AuthTokenUsingRefreshToken(refreshToken)
 		if tokErr != nil {
-			return fmt.Errorf("error while generating auth token: %s", tokErr)
+			return fmt.Errorf("error while generating auth token: %w", tokErr)
 		}
 		if strings.TrimSpace(newToken) == "" {
 			return fmt.Errorf("error while generating auth token: empty access token after refresh (check refresh token and OAuth client)")

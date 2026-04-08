@@ -496,18 +496,17 @@ func gmailRefreshOrTokenExchangeFailure(job *repo.CronJobListingDB, errMsg strin
 
 func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.CronJobListingDB, task *repo.TaskListingDB) string {
 	errMsg := processErr.Error()
+	errLower := strings.ToLower(errMsg)
 
 	switch {
 	case a.gmailStorxMissing(job):
 		return cronEmailStorxInsufficient
 
-	case strings.Contains(errMsg, "Delegation denied") ||
-		(strings.Contains(errMsg, "googleapi: Error 403") && strings.Contains(errMsg, "Delegation")):
-		// Workspace: Admin must authorize OAuth client for domain-wide delegation + Gmail scopes for impersonated users.
-		if task.RetryCount >= repo.MaxRetryCount {
-			return cronEmailDelegationFinal
-		}
-		return cronEmailDelegationRetry(task.RetryCount)
+	case job != nil && job.Method == "gmail" &&
+		(strings.Contains(errLower, "unauthorized_client") ||
+			strings.Contains(errLower, "oauth2:") && strings.Contains(errLower, "cannot fetch token")):
+		// OAuth2 token endpoint failure: do not retry — one shot then final guidance.
+		return cronEmailDelegationFinal
 
 	case strings.Contains(errMsg, "googleapi: Error 401") ||
 		strings.Contains(errMsg, "oauth credential not found") ||
@@ -542,6 +541,7 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.Cron
 
 func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJobListingDB, task *repo.TaskListingDB) {
 	errMsg := processErr.Error()
+	errLower := strings.ToLower(errMsg)
 
 	switch {
 	case a.gmailStorxMissing(job):
@@ -558,18 +558,14 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		job.Message = cronJobStorxInsufficientShort
 		task.Message = cronTaskStorxInsufficientDeactivated
 
-	case strings.Contains(errMsg, "Delegation denied") ||
-		(strings.Contains(errMsg, "googleapi: Error 403") && strings.Contains(errMsg, "Delegation")):
-		// Not an invalid refresh token — admin must allow domain-wide delegation for this OAuth client + scopes.
-		if task.RetryCount >= repo.MaxRetryCount {
-			job.Active = false
-			job.AutoDeactivated = true
-			job.Message = cronJobDelegationFinal
-			task.Message = cronTaskDelegationFinal
-		} else {
-			job.Message = cronJobDelegationRetry(task.RetryCount)
-			task.Message = cronTaskDelegationRetry(task.RetryCount)
-		}
+	case job != nil && job.Method == "gmail" &&
+		(strings.Contains(errLower, "unauthorized_client") ||
+			strings.Contains(errLower, "oauth2:") && strings.Contains(errLower, "cannot fetch token")):
+		// OAuth2 token endpoint failure: deactivate immediately (no per-task retry messaging).
+		job.Active = false
+		job.AutoDeactivated = true
+		job.Message = cronJobDelegationFinal
+		task.Message = cronTaskDelegationFinal
 
 	case strings.Contains(errMsg, "googleapi: Error 401") ||
 		strings.Contains(errMsg, "oauth credential not found") ||

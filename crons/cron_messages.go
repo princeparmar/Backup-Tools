@@ -24,8 +24,6 @@ const (
 )
 
 const (
-	cronTplEmailDelegationRetry = "Google Workspace delegation issue while accessing a mailbox. Retrying (attempt %d of %d). If this continues, your admin must enable domain-wide delegation for this app."
-
 	cronTplEmailGoogleAuthRetry = "Your automatic backup encountered an authentication issue with Google. We're retrying automatically (attempt %d of %d)."
 
 	cronTplEmailOutlookAuthRetry = "Your automatic backup encountered an authentication issue with Microsoft Outlook. We're retrying automatically (attempt %d of %d)."
@@ -49,8 +47,6 @@ const (
 )
 
 const (
-	cronTplJobDelegationRetry = "Google Workspace delegation denied. Attempt %d of %d failed. Retrying..."
-
 	cronTplJobGoogleAuthRetry = "Invalid Google credentials. Attempt %d of %d failed. Retrying automatically..."
 
 	cronTplJobOutlookAuthRetry = "Invalid Microsoft Outlook credentials. Attempt %d of %d failed. Retrying automatically..."
@@ -72,8 +68,6 @@ const (
 )
 
 const (
-	cronTplTaskDelegationRetry = "Delegation denied for a mailbox (see logs). Attempt %d of %d. Retrying..."
-
 	cronTplTaskGoogleAuthRetry = "Google credentials invalid. Attempt %d of %d failed. Retrying automatically..."
 
 	cronTplTaskOutlookAuthRetry = "Microsoft Outlook credentials invalid. Attempt %d of %d failed. Retrying automatically..."
@@ -87,11 +81,6 @@ const (
 
 func cronAttempt(attempt uint) (uint, uint) {
 	return attempt, repo.MaxRetryCount
-}
-
-func cronEmailDelegationRetry(attempt uint) string {
-	a, m := cronAttempt(attempt)
-	return fmt.Sprintf(cronTplEmailDelegationRetry, a, m)
 }
 
 func cronEmailGoogleAuthRetry(attempt uint) string {
@@ -119,11 +108,6 @@ func cronTaskGenericRetry(attempt uint) string {
 	return fmt.Sprintf(cronTplTaskGenericRetry, a, m)
 }
 
-func cronJobDelegationRetry(attempt uint) string {
-	a, m := cronAttempt(attempt)
-	return fmt.Sprintf(cronTplJobDelegationRetry, a, m)
-}
-
 func cronJobGoogleAuthRetry(attempt uint) string {
 	a, m := cronAttempt(attempt)
 	return fmt.Sprintf(cronTplJobGoogleAuthRetry, a, m)
@@ -132,11 +116,6 @@ func cronJobGoogleAuthRetry(attempt uint) string {
 func cronJobOutlookAuthRetry(attempt uint) string {
 	a, m := cronAttempt(attempt)
 	return fmt.Sprintf(cronTplJobOutlookAuthRetry, a, m)
-}
-
-func cronTaskDelegationRetry(attempt uint) string {
-	a, m := cronAttempt(attempt)
-	return fmt.Sprintf(cronTplTaskDelegationRetry, a, m)
 }
 
 func cronTaskGoogleAuthRetry(attempt uint) string {
