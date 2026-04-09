@@ -391,7 +391,7 @@ func HandleGmailGetThreadsIDsControlled(c echo.Context) error {
 		errMsg := strings.ToLower(err.Error())
 		if strings.Contains(errMsg, "googleapi: error 401") || strings.Contains(errMsg, "googleapi: error 403") || strings.Contains(errMsg, "invalid_grant") {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "Google account access has been revoked. Please reconnect your Google account.",
+				"error": "Access to your email account has been revoked. Please reconnect the account to continue syncing your emails.",
 			})
 		}
 		return err
@@ -404,7 +404,7 @@ func HandleGmailGetThreadsIDsControlled(c echo.Context) error {
 		errMsg := strings.ToLower(err.Error())
 		if strings.Contains(errMsg, "googleapi: error 401") || strings.Contains(errMsg, "googleapi: error 403") || strings.Contains(errMsg, "invalid_grant") {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "Google account access has been revoked. Please reconnect your Google account.",
+				"error": "Access to your email account has been revoked. Please reconnect the account to continue syncing your emails.",
 			})
 		}
 		return err
@@ -415,7 +415,7 @@ func HandleGmailGetThreadsIDsControlled(c echo.Context) error {
 		errMsg := strings.ToLower(err.Error())
 		if strings.Contains(errMsg, "googleapi: error 401") || strings.Contains(errMsg, "googleapi: error 403") || strings.Contains(errMsg, "invalid_grant") {
 			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "Google account access has been revoked. Please reconnect your Google account.",
+				"error": "Access to your email account has been revoked. Please reconnect the account to continue syncing your emails.",
 			})
 		}
 		return err

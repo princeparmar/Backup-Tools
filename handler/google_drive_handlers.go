@@ -740,7 +740,7 @@ func HandleGoogleDriveError(c echo.Context, err error, operation string) error {
 			logger.String("operation", operation),
 			logger.ErrorField(err))
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "Google account access has been revoked. Please reconnect your Google account.",
+			"error": "Access to your email account has been revoked. Please reconnect the account to continue syncing your emails.",
 		})
 	}
 	logger.Warn(ctx, "Google Drive operation failed",
