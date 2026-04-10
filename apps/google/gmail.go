@@ -416,9 +416,13 @@ func (filter *GmailFilter) buildGmailQuery() string {
 	return strings.Join(queryParts, " ")
 }
 
-func (client *GmailClient) GetUserMessagesControlled(nextPageToken, label string, num int64, filter *GmailFilter) (*MessagesResponse, error) {
-
-	req := client.Users.Messages.List("me").MaxResults(num)
+// GetUserMessages lists and fetches messages for the given userID ("me" for own mailbox, or email for domain-wide delegation).
+// Used for both personal and corporate Gmail backup.
+func (client *GmailClient) GetUserMessagesWithUserID(userID, nextPageToken, label string, num int64, filter *GmailFilter) (*MessagesResponse, error) {
+	if userID == "" {
+		userID = "me"
+	}
+	req := client.Users.Messages.List(userID).MaxResults(num)
 	if nextPageToken != "" {
 		req.PageToken(nextPageToken)
 	}
@@ -438,7 +442,7 @@ func (client *GmailClient) GetUserMessagesControlled(nextPageToken, label string
 
 	messages := make([]*gmail.Message, 0, len(res.Messages))
 	for _, msg := range res.Messages {
-		if message, err := client.Users.Messages.Get("me", msg.Id).Do(); err == nil {
+		if message, err := client.Users.Messages.Get(userID, msg.Id).Do(); err == nil {
 			messages = append(messages, message)
 		}
 	}
@@ -447,6 +451,21 @@ func (client *GmailClient) GetUserMessagesControlled(nextPageToken, label string
 		Messages:      messages,
 		NextPageToken: res.NextPageToken,
 	}, nil
+}
+
+// GetUserMessagesControlled is a convenience wrapper for the current user ("me"). Preserved for backward compatibility.
+func (client *GmailClient) GetUserMessagesControlled(nextPageToken, label string, num int64, filter *GmailFilter) (*MessagesResponse, error) {
+	return client.GetUserMessagesWithUserID("me", nextPageToken, label, num, filter)
+}
+
+// GetUserMessageCount returns the total number of messages in the mailbox for userID (email or "me").
+// Requires domain-wide delegation when userID is another user's email.
+func (client *GmailClient) GetUserMessageCount(userID string) (int64, error) {
+	profile, err := client.Users.GetProfile(userID).Do()
+	if err != nil {
+		return 0, err
+	}
+	return profile.MessagesTotal, nil
 }
 
 func (client *GmailClient) GetUserMessagesUsingWorkers(nextPageToken string, workerCount int) (*MessagesResponse, error) {

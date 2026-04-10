@@ -52,6 +52,8 @@ func StartServer(db *db.PostgresDb, address string) {
 	e.POST("/satellite-auth", satellite.HandleSatelliteAuthentication)
 	e.POST("/google-auth", googlepack.Autentificate)
 	e.GET("/google-auth", googlepack.Autentificateg)
+	e.POST("/auth/google/connect", handler.HandleGoogleConnect)
+	e.GET("/google/gmail/corporate/domain-users", handler.HandleGmailCorporateDomainUsers)
 	e.GET("/auth/microsoft/start", handler.HandleMicrosoftAuthRedirect)
 	e.GET("/autobackup/summary", handler.HandleAutomaticBackupSummary)
 	e.GET("/autosync/stats", handler.HandleAutomaticSyncStats)
@@ -64,6 +66,7 @@ func StartServer(db *db.PostgresDb, address string) {
 	job.GET("/", handler.HandleAutomaticSyncListForUser)
 	job.GET("/:job_id", handler.HandleAutomaticSyncDetails)
 	job.POST("/:method", handler.HandleAutomaticSyncCreate)
+	job.PUT("/:method/bulk-update", handler.HandleAutomaticBackupBulkUpdateByParent)
 	job.PUT("/:job_id", handler.HandleAutomaticBackupUpdate)
 	job.DELETE("/:job_id", handler.HandleAutomaticSyncDelete)
 

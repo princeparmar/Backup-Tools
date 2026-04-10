@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/db"
@@ -24,8 +25,10 @@ import (
 	"github.com/labstack/echo/v4"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+	admin "google.golang.org/api/admin/directory/v1"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/gmail/v1"
+	"google.golang.org/api/option"
 	gs "google.golang.org/api/storage/v1"
 )
 
@@ -228,23 +231,29 @@ func AuthRequestChecker(c echo.Context) bool {
 	}
 }
 
-func ExchangeCodeForToken(code string) (*oauth2.Token, error) {
+// AdminDirectoryUserReadonlyScope is required for corporate Gmail (admin check, list domain users).
+// Requires domain-wide delegation in Google Workspace Admin Console.
+const AdminDirectoryUserReadonlyScope = "https://www.googleapis.com/auth/admin.directory.user.readonly"
+
+// ExchangeCodeForTokenWithAdminScope returns tokens using Gmail + userinfo + Admin SDK scopes.
+// Use for connect flow and corporate Gmail (admin check, list domain users). Requires domain-wide delegation for Workspace.
+func ExchangeCodeForTokenWithAdminScope(code string) (*oauth2.Token, error) {
 	b, err := os.ReadFile("credentials.json")
 	if err != nil {
-		log.Printf("Unable to read client secret file: %v", err)
+		return nil, fmt.Errorf("reading credentials: %w", err)
 	}
-
-	// get refresh token from code
-	config, err := google.ConfigFromJSON(b, gmail.GmailReadonlyScope, "https://www.googleapis.com/auth/userinfo.email")
+	config, err := google.ConfigFromJSON(b,
+		gmail.GmailReadonlyScope,
+		"https://www.googleapis.com/auth/userinfo.email",
+		AdminDirectoryUserReadonlyScope,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("unable to parse client secret file to config: %v", err)
+		return nil, fmt.Errorf("unable to parse client secret file to config: %w", err)
 	}
-
 	tok, err := config.Exchange(context.TODO(), code)
 	if err != nil {
 		return nil, err
 	}
-
 	return tok, nil
 }
 
@@ -317,13 +326,41 @@ func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 		return "", fmt.Errorf("error reading response body: %v", err)
 	}
 
-	// Parse the response JSON
+	if resp.StatusCode != http.StatusOK {
+		var oauthErr struct {
+			Error            string `json:"error"`
+			ErrorDescription string `json:"error_description"`
+		}
+		if json.Unmarshal(body, &oauthErr) == nil && oauthErr.Error != "" {
+			msg := oauthErr.Error
+			if oauthErr.ErrorDescription != "" {
+				msg = msg + ": " + oauthErr.ErrorDescription
+			}
+			return "", fmt.Errorf("token refresh failed: %s", msg)
+		}
+		return "", fmt.Errorf("token refresh failed: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	// Parse the success JSON (invalid_grant etc. sometimes still unmarshals with empty access_token — reject that)
 	err = json.Unmarshal(body, &tokenResponse)
 	if err != nil {
 		return "", fmt.Errorf("error parsing response JSON: %v", err)
 	}
+	if strings.TrimSpace(tokenResponse.AccessToken) == "" {
+		var oauthErr struct {
+			Error            string `json:"error"`
+			ErrorDescription string `json:"error_description"`
+		}
+		if json.Unmarshal(body, &oauthErr) == nil && oauthErr.Error != "" {
+			msg := oauthErr.Error
+			if oauthErr.ErrorDescription != "" {
+				msg = msg + ": " + oauthErr.ErrorDescription
+			}
+			return "", fmt.Errorf("token refresh failed: %s", msg)
+		}
+		return "", fmt.Errorf("token refresh returned empty access_token")
+	}
 
-	// Return the access token
 	return tokenResponse.AccessToken, nil
 }
 
@@ -396,4 +433,86 @@ func IsGoogleTokenExpired(token string) bool {
 
 	// Token is expired
 	return true
+}
+
+// newAdminDirectoryService creates an Admin SDK Directory service using an access token.
+func newAdminDirectoryService(ctx context.Context, accessToken string) (*admin.Service, error) {
+	client := oauth2.NewClient(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: accessToken}))
+	return admin.NewService(ctx, option.WithHTTPClient(client))
+}
+
+// IsUserAdmin returns whether the given user email has admin privileges in the domain (Admin SDK).
+// accessToken must have scope admin.directory.user.readonly; domain-wide delegation required for cross-user.
+func IsUserAdmin(ctx context.Context, accessToken, userEmail string) (bool, error) {
+	svc, err := newAdminDirectoryService(ctx, accessToken)
+	if err != nil {
+		return false, fmt.Errorf("admin directory service: %w", err)
+	}
+	u, err := svc.Users.Get(strings.TrimSpace(userEmail)).Do()
+	if err != nil {
+		return false, fmt.Errorf("users.get: %w", err)
+	}
+	return u.IsAdmin || u.IsDelegatedAdmin, nil
+}
+
+// CheckUserAdminStatusWithToken resolves access token from refresh token then calls IsUserAdmin.
+func CheckUserAdminStatusWithToken(ctx context.Context, refreshToken, userEmail string) (bool, error) {
+	accessToken, err := AuthTokenUsingRefreshToken(refreshToken)
+	if err != nil {
+		return false, fmt.Errorf("refresh token: %w", err)
+	}
+	return IsUserAdmin(ctx, accessToken, userEmail)
+}
+
+// ListAllDomainUsers returns primary emails of non-suspended users in the domain (Admin SDK).
+// Pagination uses max 500 per page. accessToken must have admin.directory.user.readonly.
+func ListAllDomainUsers(ctx context.Context, accessToken, domain string) ([]string, error) {
+	svc, err := newAdminDirectoryService(ctx, accessToken)
+	if err != nil {
+		return nil, fmt.Errorf("admin directory service: %w", err)
+	}
+	var emails []string
+	pageToken := ""
+	for {
+		call := svc.Users.List().Domain(strings.TrimSpace(domain)).MaxResults(500).OrderBy("email")
+		if pageToken != "" {
+			call = call.PageToken(pageToken)
+		}
+		r, err := call.Do()
+		if err != nil {
+			return nil, fmt.Errorf("users.list: %w", err)
+		}
+		for _, u := range r.Users {
+			if u.Suspended {
+				continue
+			}
+			if u.PrimaryEmail != "" {
+				emails = append(emails, u.PrimaryEmail)
+			}
+		}
+		pageToken = r.NextPageToken
+		if pageToken == "" {
+			break
+		}
+	}
+	return emails, nil
+}
+
+// ListAllDomainUsersWithToken resolves access token from refresh token then lists domain users.
+func ListAllDomainUsersWithToken(ctx context.Context, refreshToken, domain string) ([]string, error) {
+	accessToken, err := AuthTokenUsingRefreshToken(refreshToken)
+	if err != nil {
+		return nil, fmt.Errorf("refresh token: %w", err)
+	}
+	return ListAllDomainUsers(ctx, accessToken, domain)
+}
+
+// ExtractDomainFromEmail returns the domain part of an email (e.g. "user@company.com" -> "company.com").
+func ExtractDomainFromEmail(email string) string {
+	email = strings.TrimSpace(email)
+	at := strings.LastIndex(email, "@")
+	if at == -1 || at == len(email)-1 {
+		return ""
+	}
+	return strings.ToLower(email[at+1:])
 }

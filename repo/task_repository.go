@@ -17,6 +17,9 @@ type TaskListingDB struct {
 
 	CronJobID uint `gorm:"constraint:OnDelete:CASCADE;" json:"cron_job_id"` // Add delete cascade here
 
+	// BackupEmail is legacy; account to backup is now determined by the job's input_data["email"] and job name (one job per account).
+	BackupEmail string `json:"backup_email,omitempty" gorm:"column:backup_email"`
+
 	// Status will be one of the following: "pushed", "running", "success", "failed"
 	Status string `json:"status"`
 
@@ -132,11 +135,15 @@ func (r *TaskRepository) GetPushedTask() (*TaskListingDB, error) {
 	}
 
 	// Update status to running and set start time
+	prevStatus := res.Status
 	res.Status = TaskStatusRunning
 	startTime := time.Now()
 	res.StartTime = &startTime
 	res.LastHeartBeat = &startTime
-	res.Message = "Automatic backup started"
+	// Retries reuse the same row; preserve accumulated failure messages. Only reset for a new pushed task.
+	if prevStatus == TaskStatusPushed {
+		res.Message = "Automatic backup started"
+	}
 
 	if err := tx.Save(&res).Error; err != nil {
 		tx.Rollback()
@@ -177,7 +184,8 @@ func (r *TaskRepository) GetTaskByID(ID uint) (*TaskListingDB, error) {
 	return &res, nil
 }
 
-// CreateTaskForCronJob creates a new task for a cron job
+// CreateTaskForCronJob creates a new task for a cron job.
+// Account to backup is determined by the job (input_data["email"] / job name); BackupEmail on task is legacy.
 func (r *TaskRepository) CreateTaskForCronJob(cronJobID uint) (*TaskListingDB, error) {
 	tx := r.db.Begin()
 

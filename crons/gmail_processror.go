@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/handler"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
+	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 )
 
@@ -19,43 +21,87 @@ func NewGmailProcessor() *gmailProcessor {
 	return &gmailProcessor{}
 }
 
+// gmailMailboxPathAndOAuthHolder derives mailbox session user, StorX path prefix, and OAuth holder email for NewWorkspaceGmailSession.
+func gmailMailboxPathAndOAuthHolder(job *repo.CronJobListingDB, hasRefreshToken bool) (mailboxForSession, storxPathPrefix, oauthAccountEmail string) {
+	if job == nil {
+		return "me", "", ""
+	}
+	mailbox := "me"
+	path := job.Name
+	if job.InputData != nil && job.InputData.Json() != nil {
+		if email, ok := (*job.InputData.Json())["email"].(string); ok && email != "" {
+			mailbox = email
+			path = email
+		}
+	}
+	mailboxForSession = strings.TrimSpace(mailbox)
+	if strings.EqualFold(mailboxForSession, "me") && strings.Contains(path, "@") {
+		mailboxForSession = strings.TrimSpace(path)
+	}
+	oauthAccountEmail = repo.GmailConnectedAccountEmail(job)
+	if oauthAccountEmail == "" && hasRefreshToken {
+		if mailboxForSession != "" && !strings.EqualFold(mailboxForSession, "me") {
+			oauthAccountEmail = mailboxForSession
+		} else if strings.Contains(path, "@") {
+			oauthAccountEmail = strings.TrimSpace(path)
+		}
+	}
+	return mailboxForSession, path, oauthAccountEmail
+}
+
 func (g *gmailProcessor) Run(input ProcessorInput) error {
 
 	ctx := context.Background()
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	// Process webhook events using access grant from database (auto-sync)
-	// Run in background, non-blocking - process at beginning so webhooks are handled even if sync fails
-	go func() {
-		processCtx := context.Background()
-		if processErr := handler.ProcessWebhookEvents(processCtx, input.Database, input.Job.StorxToken, 100); processErr != nil {
-			logger.Warn(processCtx, "Failed to process webhook events from auto-sync",
-				logger.ErrorField(processErr))
-		}
-	}()
-
 	err = input.HeartBeatFunc()
 	if err != nil {
 		return err
 	}
 
-	refreshToken, ok := (*input.Job.InputData.Json())["refresh_token"].(string)
-	if !ok {
-		return fmt.Errorf("refresh token not found")
+	storxToken := input.Database.CronJobRepo.GmailResolvedStorxToken(input.Job)
+	if strings.TrimSpace(storxToken) == "" {
+		return fmt.Errorf("storx access grant not found for this job (set storx_token on the admin mailbox job for corporate backups)")
 	}
 
-	newToken, err := google.AuthTokenUsingRefreshToken(refreshToken)
-	if err != nil {
-		return fmt.Errorf("error while generating auth token: %s", err)
+	// Process webhook events using the same resolved access grant (non-blocking).
+	go func(st string) {
+		processCtx := context.Background()
+		if processErr := handler.ProcessWebhookEvents(processCtx, input.Database, st, 100); processErr != nil {
+			logger.Warn(processCtx, "Failed to process webhook events from auto-sync",
+				logger.ErrorField(processErr))
+		}
+	}(storxToken)
+
+	refreshToken := input.Database.CronJobRepo.GmailResolvedRefreshToken(input.Job)
+	mailboxForSession, pathPrefix, oauthAccountEmail := gmailMailboxPathAndOAuthHolder(input.Job, refreshToken != "")
+
+	// JWT and requires DWD; without DWD you get unauthorized_client despite a valid admin refresh token.
+	delegationOnly := refreshToken == "" && google.GmailJobUsesDelegationWithoutOAuth(mailboxForSession, oauthAccountEmail)
+	var newToken string
+	if !delegationOnly {
+		if refreshToken == "" {
+			return fmt.Errorf("refresh token not found in job input_data (required when not using domain-wide delegation only)")
+		}
+		var tokErr error
+		newToken, tokErr = google.AuthTokenUsingRefreshToken(refreshToken)
+		if tokErr != nil {
+			return fmt.Errorf("error while generating auth token: %w", tokErr)
+		}
+		if strings.TrimSpace(newToken) == "" {
+			return fmt.Errorf("error while generating auth token: empty access token after refresh (check refresh token and OAuth client)")
+		}
 	}
 
-	gmailClient, err := google.NewGmailClientUsingToken(newToken)
+	gmailSession, err := google.NewWorkspaceGmailSession(ctx, newToken, oauthAccountEmail, mailboxForSession)
 	if err != nil {
 		return err
 	}
+	gmailClient := gmailSession.Client
+	gmailAPIUser := gmailSession.APIUser
 
-	err = handler.UploadObjectAndSync(context.Background(), input.Database, input.Job.StorxToken, satellite.ReserveBucket_Gmail, input.Job.Name+"/.file_placeholder", nil, input.Job.UserID)
+	err = handler.UploadObjectAndSync(context.Background(), input.Database, storxToken, satellite.ReserveBucket_Gmail, pathPrefix+"/.file_placeholder", nil, input.Job.UserID)
 	if err != nil {
 		return err
 	}
@@ -63,8 +109,8 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 	// Get synced objects from database instead of listing from Satellite (OPTIMIZATION)
 	// This is much faster and avoids unnecessary API calls to Satellite
 	// Uses common function that ensures bucket exists and queries database
-	prefix := input.Job.Name + "/"
-	emailListFromBucket, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Database, input.Job.StorxToken, satellite.ReserveBucket_Gmail, prefix, input.Job.UserID, "google", "gmail")
+	prefix := pathPrefix + "/"
+	emailListFromBucket, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Database, storxToken, satellite.ReserveBucket_Gmail, prefix, input.Job.UserID, "google", "gmail")
 	if err != nil {
 		return fmt.Errorf("failed to get synced objects: %w", err)
 	}
@@ -81,7 +127,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 	emptyLoopCount := 0
 
 	for {
-		res, err := gmailClient.GetUserMessagesControlled(*input.Job.TaskMemory.GmailNextToken, "CATEGORY_PERSONAL", 500, nil)
+		res, err := gmailClient.GetUserMessagesWithUserID(gmailAPIUser, *input.Job.TaskMemory.GmailNextToken, "CATEGORY_PERSONAL", 500, nil)
 		if err != nil {
 			return err
 		}
@@ -98,7 +144,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 				continue
 			}
 
-			messagePath := input.Job.Name + "/" + utils.GenerateTitleFromGmailMessage(message)
+			messagePath := pathPrefix + "/" + utils.GenerateTitleFromGmailMessage(message)
 			_, synced := emailListFromBucket[messagePath]
 			if synced {
 				continue
@@ -110,7 +156,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 			}
 
 			syncedData = true
-			err = handler.UploadObjectAndSync(context.TODO(), input.Database, input.Job.StorxToken, "gmail", messagePath, b, input.Job.UserID)
+			err = handler.UploadObjectAndSync(context.TODO(), input.Database, storxToken, "gmail", messagePath, b, input.Job.UserID)
 			if err != nil {
 				return err
 			}
@@ -125,7 +171,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 		}
 
 		if emptyLoopCount > 20 {
-			// if we get 5 empty loops, we can break
+			// repeated empty pages — stop pagination
 			*input.Job.TaskMemory.GmailNextToken = ""
 			break
 		}

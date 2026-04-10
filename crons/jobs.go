@@ -183,44 +183,6 @@ func (a *AutosyncManager) CreateTaskForAllPendingJobs(ctx context.Context) error
 	return nil
 }
 
-// func (a *AutosyncManager) RefreshGoogleAuthToken() error {
-// 	jobs, err := a.store.GetAllCronJobs()
-// 	if err != nil {
-// 		return err
-// 	}
-
-// 	errGroup := errs.Group{}
-
-// 	for _, job := range jobs {
-// 		if job.RefreshToken == "" || !job.Active {
-// 			continue
-// 		}
-
-// 		if !google.IsGoogleTokenExpired(job.AuthToken) {
-// 			continue
-// 		}
-
-// 		newToken, err := google.AuthTokenUsingRefreshToken(job.RefreshToken)
-// 		if err != nil {
-// 			errGroup.Add(err)
-// 			continue
-// 		}
-
-// 		err = a.store.UpdateCronJobByID(job.ID, map[string]interface{}{
-// 			"auth_token": newToken,
-// 		})
-// 		if err != nil {
-// 			errGroup.Add(err)
-// 			fmt.Println("Failed to update job", job.ID, err)
-// 			continue
-// 		}
-
-// 		fmt.Println("Updated Google Auth Token for job", job.ID)
-// 	}
-
-// 	return errGroup.Err()
-// }
-
 func (a *AutosyncManager) ProcessTask(ctx context.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
@@ -376,7 +338,6 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 	// Handle error case
 	if processErr != nil {
 		task.Status = repo.TaskStatusFailed
-		task.Message = processErr.Error()
 		task.RetryCount++
 
 		// Record task failure
@@ -386,8 +347,12 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 			now := time.Now()
 			job.LastRun = &now
 
-			emailMessage := a.determineErrorMessage(processErr, job, task)
 			a.handleErrorScenarios(processErr, job, task)
+			emailOverride := applyIntervalFailurePeriod(job, task)
+			emailMessage := a.determineErrorMessage(processErr, job, task)
+			if emailOverride != "" {
+				emailMessage = emailOverride
+			}
 
 			// Send email notification
 			go satellite.SendEmailForBackupFailure(context.Background(), job.Name, emailMessage, job.Method)
@@ -405,10 +370,13 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 				"execution": task.Execution,
 			}
 			satellite.SendNotificationAsync(context.Background(), job.UserID, "Automatic Backup Failed", fmt.Sprintf("Automatic backup for %s failed: %s", job.Name, emailMessage), &priority, data, nil)
+		} else {
+			task.Message = processErr.Error()
 		}
 	} else {
 		// Handle success case - send notification
 		if job != nil {
+			job.FailurePeriods = 0
 			priority := "normal"
 			data := map[string]interface{}{
 				"event":     "cron_successfully_completed",
@@ -446,6 +414,9 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 			"active":           job.Active,
 			"auto_deactivated": job.AutoDeactivated,
 		}
+		if job.InputData != nil {
+			updateMap["input_data"] = job.InputData
+		}
 
 		// Update cron job status based on task status
 		switch task.Status {
@@ -474,94 +445,214 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 	return nil
 }
 
+// applyIntervalFailurePeriod increments FailurePeriods when per-task retries are exhausted; deactivates the job after MaxFailurePeriods.
+// Returns a non-empty email body override when the job was deactivated for this reason.
+func applyIntervalFailurePeriod(job *repo.CronJobListingDB, task *repo.TaskListingDB) string {
+	if job == nil || task == nil || task.RetryCount < repo.MaxRetryCount {
+		return ""
+	}
+	job.FailurePeriods++
+	if job.FailurePeriods < repo.MaxFailurePeriods {
+		return ""
+	}
+	if !job.Active {
+		return ""
+	}
+	job.Active = false
+	job.AutoDeactivated = true
+	job.Message = cronJobFailurePeriodsExhausted
+	task.Message = cronTaskFailurePeriodsExhausted
+	return cronEmailFailurePeriodsExhausted
+}
+
+func (a *AutosyncManager) gmailStorxMissing(job *repo.CronJobListingDB) bool {
+	if job == nil {
+		return true
+	}
+	if job.Method != "gmail" {
+		return strings.TrimSpace(job.StorxToken) == ""
+	}
+	return strings.TrimSpace(a.store.CronJobRepo.GmailResolvedStorxToken(job)) == ""
+}
+
+func (a *AutosyncManager) clearStorxOnUplinkFailure(job *repo.CronJobListingDB) {
+	if job == nil {
+		return
+	}
+	job.StorxToken = ""
+}
+
+// gmailRefreshOrTokenExchangeFailure: Gmail-only Google OAuth refresh / token-endpoint errors.
+// invalid_grant must not hit the Outlook branch (same substring for Microsoft and Google).
+func gmailRefreshOrTokenExchangeFailure(job *repo.CronJobListingDB, errMsg string) bool {
+	if job == nil || job.Method != "gmail" {
+		return false
+	}
+	e := strings.ToLower(errMsg)
+	return strings.Contains(e, "invalid_grant") ||
+		strings.Contains(errMsg, "error while generating auth token") ||
+		strings.Contains(e, "error parsing response json")
+}
+
 func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.CronJobListingDB, task *repo.TaskListingDB) string {
 	errMsg := processErr.Error()
+	errLower := strings.ToLower(errMsg)
 
 	switch {
-	case job.StorxToken == "":
-		return "Your automatic backup has been temporarily disabled due to insufficient permissions. Please update your StorX permissions and reactivate the backup from your dashboard."
+	case a.gmailStorxMissing(job):
+		return cronEmailStorxInsufficient
 
-	case strings.Contains(errMsg, "googleapi: Error 401"):
+	case job != nil && job.Method == "gmail" &&
+		(strings.Contains(errLower, "unauthorized_client") ||
+			strings.Contains(errLower, "oauth2:") && strings.Contains(errLower, "cannot fetch token")):
+		// OAuth2 token endpoint failure: do not retry — one shot then final guidance.
+		return cronEmailDelegationFinal
+
+	case job != nil && job.Method == "gmail" &&
+		(strings.Contains(errLower, "access_token_scope_insufficient") ||
+			strings.Contains(errLower, "insufficient authentication scopes")):
+		return cronEmailGoogleInsufficientScope
+
+	case strings.Contains(errMsg, "googleapi: Error 401") ||
+		strings.Contains(errMsg, "oauth credential not found") ||
+		strings.Contains(errMsg, "refresh token not found"):
+		// gmailRefreshOrTokenExchangeFailure(job, errMsg):
 		if task.RetryCount == repo.MaxRetryCount-1 {
-			return "Your automatic backup has been temporarily disabled due to invalid Google credentials. Please update your Google account permissions and reactivate the backup from your dashboard."
+			return cronEmailGoogleAuthFinal
 		}
-		return "Your automatic backup encountered an authentication issue with Google. We're retrying the backup automatically."
+		return cronEmailGoogleAuthRetry(task.RetryCount)
 
 	case strings.Contains(errMsg, "Access is denied") ||
-		strings.Contains(errMsg, "invalid_grant") ||
+		(job != nil && job.Method == "outlook" && strings.Contains(strings.ToLower(errMsg), "invalid_grant")) ||
 		(strings.Contains(errMsg, "microsoftgraph") && (strings.Contains(errMsg, "401") || strings.Contains(errMsg, "403"))) ||
 		(strings.Contains(errMsg, "Microsoft Graph API") && (strings.Contains(errMsg, "401") || strings.Contains(errMsg, "403"))):
 		if task.RetryCount == repo.MaxRetryCount-1 {
-			return "Your automatic backup has been temporarily disabled due to invalid Microsoft Outlook credentials. Please update your Outlook account permissions and reactivate the backup from your dashboard."
+			return cronEmailOutlookAuthFinal
 		}
-		return "Your automatic backup encountered an authentication issue with Microsoft Outlook. We're retrying the backup automatically."
+		return cronEmailOutlookAuthRetry(task.RetryCount)
 
 	case strings.Contains(errMsg, "uplink: permission") || strings.Contains(errMsg, "uplink: invalid access"):
-		return "Your automatic backup has been temporarily disabled due to insufficient StorX permissions. Please update your StorX permissions and reactivate the backup from your dashboard."
+		return cronEmailStorxUplinkFinal
 
 	case strings.Contains(errMsg, "could not create bucket") ||
 		strings.Contains(errMsg, "tcp connector failed") ||
 		strings.Contains(errMsg, "connection attempt failed"):
-		return "Your automatic backup has been temporarily disabled due to network connectivity issues. Please check your internet connection and reactivate the backup from your dashboard."
+		return cronEmailNetworkFinal
 
 	default:
-		return "Your automatic backup encountered a technical issue. We're retrying the backup automatically."
+		return cronEmailGenericRetry(task.RetryCount)
 	}
 }
 
 func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJobListingDB, task *repo.TaskListingDB) {
 	errMsg := processErr.Error()
+	errLower := strings.ToLower(errMsg)
 
 	switch {
-	case job.StorxToken == "":
+	case a.gmailStorxMissing(job):
+		if job.Method == "gmail" {
+			if err := a.store.CronJobRepo.DeactivateGmailWorkspaceTreeForStorxFailure(job, cronJobStorxInsufficientShort); err != nil {
+				logger.Warn(context.Background(), "Failed to deactivate Gmail workspace tree after missing StorX",
+					logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
+			}
+			job.StorxToken = ""
+			job.StorjProjectID = ""
+		}
 		job.Active = false
 		job.AutoDeactivated = true
-		job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
-		task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
+		job.Message = cronJobStorxInsufficientShort
+		task.Message = cronTaskStorxInsufficientDeactivated
 
-	case strings.Contains(errMsg, "googleapi: Error 401"):
+	case job != nil && job.Method == "gmail" &&
+		(strings.Contains(errLower, "unauthorized_client") ||
+			strings.Contains(errLower, "oauth2:") && strings.Contains(errLower, "cannot fetch token")):
+		// OAuth2 token endpoint failure: deactivate immediately (no per-task retry messaging).
+		job.Active = false
+		job.AutoDeactivated = true
+		job.Message = cronJobDelegationFinal
+		task.Message = cronTaskDelegationFinal
+
+	case job != nil && job.Method == "gmail" &&
+		(strings.Contains(errLower, "access_token_scope_insufficient") ||
+			strings.Contains(errLower, "insufficient authentication scopes")):
+		if err := a.store.CronJobRepo.DeactivateGmailWorkspaceTreeForGoogleAuthFailure(job, cronJobGoogleInsufficientScope); err != nil {
+			logger.Warn(context.Background(), "Failed to deactivate Gmail workspace tree after insufficient Gmail scopes",
+				logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
+		}
+		repo.StripGmailRefreshTokenFromCronJobInputData(job)
+		job.Active = false
+		job.AutoDeactivated = true
+		job.Message = cronJobGoogleInsufficientScope
+		task.Message = cronTaskGoogleInsufficientScope
+
+	case strings.Contains(errMsg, "googleapi: Error 401") ||
+		strings.Contains(errMsg, "oauth credential not found") ||
+		strings.Contains(errMsg, "refresh token not found"):
+		// gmailRefreshOrTokenExchangeFailure(job, errMsg):
 		if task.RetryCount == repo.MaxRetryCount-1 {
-			(*job.InputData.Json())["refresh_token"] = ""
+			if job.Method == "gmail" {
+				if err := a.store.CronJobRepo.DeactivateGmailWorkspaceTreeForGoogleAuthFailure(job, cronJobGoogleAuthDeactivate); err != nil {
+					logger.Warn(context.Background(), "Failed to deactivate Gmail workspace tree after Google auth failure",
+						logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
+				}
+				repo.StripGmailRefreshTokenFromCronJobInputData(job)
+			} else if job.InputData != nil && job.InputData.Json() != nil {
+				if _, hasKey := (*job.InputData.Json())["refresh_token"]; hasKey {
+					(*job.InputData.Json())["refresh_token"] = ""
+				}
+			}
 			job.Active = false
 			job.AutoDeactivated = true
-			job.Message = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
-			task.Message = "Google Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
+			job.Message = cronJobGoogleAuthDeactivate
+			task.Message = cronTaskGoogleAuthDeactivated
 		} else {
-			job.Message = "Invalid google credentials. Retrying..."
-			task.Message = "Google Credentials are invalid. Retrying..."
+			job.Message = cronJobGoogleAuthRetry(task.RetryCount)
+			task.Message = cronTaskGoogleAuthRetry(task.RetryCount)
 		}
 
 	case strings.Contains(errMsg, "Access is denied") ||
-		strings.Contains(errMsg, "invalid_grant") ||
+		(job != nil && job.Method == "outlook" && strings.Contains(strings.ToLower(errMsg), "invalid_grant")) ||
 		(strings.Contains(errMsg, "microsoftgraph") && (strings.Contains(errMsg, "401") || strings.Contains(errMsg, "403"))) ||
 		(strings.Contains(errMsg, "Microsoft Graph API") && (strings.Contains(errMsg, "401") || strings.Contains(errMsg, "403"))):
 		if task.RetryCount == repo.MaxRetryCount-1 {
-			(*job.InputData.Json())["refresh_token"] = ""
+			if job.InputData != nil && job.InputData.Json() != nil {
+				if _, hasKey := (*job.InputData.Json())["refresh_token"]; hasKey {
+					(*job.InputData.Json())["refresh_token"] = ""
+				}
+			}
 			job.Active = false
 			job.AutoDeactivated = true
-			job.Message = "Invalid Microsoft Outlook credentials. Please update the credentials and reactivate the automatic backup"
-			task.Message = "Microsoft Outlook Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
+			job.Message = cronJobOutlookAuthDeactivate
+			task.Message = cronTaskOutlookAuthDeactivated
 		} else {
-			job.Message = "Invalid Microsoft Outlook credentials. Retrying..."
-			task.Message = "Microsoft Outlook Credentials are invalid. Retrying..."
+			job.Message = cronJobOutlookAuthRetry(task.RetryCount)
+			task.Message = cronTaskOutlookAuthRetry(task.RetryCount)
 		}
 
 	case strings.Contains(errMsg, "uplink: permission") || strings.Contains(errMsg, "uplink: invalid access"):
-		job.StorxToken = ""
+		if job.Method == "gmail" {
+			if err := a.store.CronJobRepo.DeactivateGmailWorkspaceTreeForStorxFailure(job, cronJobStorxInsufficientShort); err != nil {
+				logger.Warn(context.Background(), "Failed to deactivate Gmail workspace tree after StorX uplink failure",
+					logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
+			}
+			job.StorxToken = ""
+			job.StorjProjectID = ""
+		} else {
+			a.clearStorxOnUplinkFailure(job)
+		}
 		job.Active = false
 		job.AutoDeactivated = true
-		job.Message = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
-		task.Message = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
+		job.Message = cronJobStorxInsufficientShort
+		task.Message = cronTaskStorxInsufficientDeactivated
 
 	case strings.Contains(errMsg, "could not create bucket") ||
 		strings.Contains(errMsg, "tcp connector failed") ||
 		strings.Contains(errMsg, "connection attempt failed"):
-		job.Message = "Automatic backup failed due to network issues. Please check your connection and reactivate."
-		task.Message = "Task failed due to network connectivity issues. Job has been deactivated."
+		job.Message = cronJobNetworkFinal
+		task.Message = cronTaskNetworkDeactivated
 
 	default:
-		job.Message = "Automatic backup encountered an error. Retrying..."
-		task.Message = "Task encountered an error. Retrying..."
-
+		job.Message = cronJobGenericRetry(task.RetryCount)
+		task.Message = cronTaskGenericRetry(task.RetryCount)
 	}
 }
