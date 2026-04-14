@@ -76,6 +76,17 @@ func (r *SyncedObjectRepository) DeleteSyncedObject(bucketName, objectKey string
 	return nil
 }
 
+func (r *SyncedObjectRepository) DeleteSyncedObjectsByBucketAndKeys(bucketName string, objectKeys []string) error {
+	if len(objectKeys) == 0 {
+		return nil
+	}
+	result := r.db.Where("bucket_name = ? AND object_key IN ?", bucketName, objectKeys).Delete(&SyncedObject{})
+	if result != nil && result.Error != nil {
+		return fmt.Errorf("error batch deleting synced objects: %v", result.Error)
+	}
+	return nil
+}
+
 // GetSyncedObjectsByUserAndBucket retrieves all synced objects for a user and bucket
 // source and type are optional filters - pass empty strings to ignore them
 func (r *SyncedObjectRepository) GetSyncedObjectsByUserAndBucket(userID, bucketName, source, objectType string) ([]SyncedObject, error) {
@@ -97,4 +108,20 @@ func (r *SyncedObjectRepository) GetSyncedObjectsByUserAndBucket(userID, bucketN
 	}
 
 	return syncedObjects, nil
+}
+
+func (r *SyncedObjectRepository) PermanentDeleteSyncedObjectsSoftDeletedBefore(before time.Time, limit int) (int64, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	sub := r.db.Model(&SyncedObject{}).Unscoped().
+		Select("id").
+		Where("deleted_at IS NOT NULL AND deleted_at < ?", before).
+		Limit(limit)
+
+	result := r.db.Unscoped().Where("id IN (?)", sub).Delete(&SyncedObject{})
+	if result.Error != nil {
+		return 0, fmt.Errorf("error permanently deleting soft-deleted synced objects: %v", result.Error)
+	}
+	return result.RowsAffected, nil
 }
