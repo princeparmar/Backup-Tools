@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/db"
@@ -31,11 +32,17 @@ import (
 )
 
 const (
-	maxRequestBodySize = 5 << 20 // 5 MB
-	requiredRSAKeySize = 256     // 2048 bits minimum
-	uuidStringLength   = 36
-	uuidByteLength     = 16
-	oaepLabel          = "storx-webhook" // OAEP label for domain separation
+	maxRequestBodySize              = 5 << 20
+	requiredRSAKeySize              = 256
+	uuidStringLength                = 36
+	uuidByteLength                  = 16
+	oaepLabel                       = "storx-webhook"
+	webhookFixedWorkers             = 3
+	webhookDeleteChunkSize          = 500
+	webhookMaxSyncDeleteRetries     = 3
+	webhookProcessedRetention       = 24 * time.Hour
+	syncedObjectSoftDeletedPurgeAge = 30 * 24 * time.Hour
+	webhookCleanupDeleteBatchSize   = 5000
 )
 
 var (
@@ -53,27 +60,23 @@ var (
 	}
 )
 
-// TableChangeEvent represents a database change event from StorXMonitor
 type TableChangeEvent struct {
-	Operation string          `json:"operation"` // "INSERT", "UPDATE", "DELETE"
-	Table     string          `json:"table"`     // "objects", "users", "projects", etc.
+	Operation string          `json:"operation"`
+	Table     string          `json:"table"`
 	Timestamp time.Time       `json:"timestamp"`
-	Data      json.RawMessage `json:"data,omitempty"`     // New data (INSERT/UPDATE)
-	OldData   json.RawMessage `json:"old_data,omitempty"` // Old data (UPDATE/DELETE)
+	Data      json.RawMessage `json:"data,omitempty"`
+	OldData   json.RawMessage `json:"old_data,omitempty"`
 }
 
-// WebhookResponse represents the response sent to webhook caller
 type WebhookResponse struct {
 	Status  string `json:"status"`
 	Message string `json:"message,omitempty"`
 }
 
-// WebhookDecryptor handles RSA decryption of webhook payloads
 type WebhookDecryptor struct {
 	privateKey *rsa.PrivateKey
 }
 
-// NewWebhookDecryptor creates a new decryptor from a private key file
 func NewWebhookDecryptor(privateKeyPath string) (*WebhookDecryptor, error) {
 	data, err := os.ReadFile(privateKeyPath)
 	if err != nil {
@@ -107,7 +110,6 @@ func NewWebhookDecryptor(privateKeyPath string) (*WebhookDecryptor, error) {
 	return &WebhookDecryptor{privateKey: rsaKey}, nil
 }
 
-// DecryptPayload decrypts a hybrid-encrypted payload (RSA + AES-GCM)
 func (d *WebhookDecryptor) DecryptPayload(encryptedData []byte) ([]byte, error) {
 	if d.privateKey.Size() < requiredRSAKeySize {
 		return nil, fmt.Errorf("weak RSA key: minimum 2048-bit required")
@@ -180,7 +182,6 @@ func decodeBase64URL(s string) ([]byte, error) {
 	return base64.URLEncoding.DecodeString(s)
 }
 
-// HandleWebhook handles incoming webhook requests from StorXMonitor
 func HandleWebhook(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
@@ -218,54 +219,36 @@ func HandleWebhook(c echo.Context) error {
 		return respondWebhookError(c, http.StatusBadRequest, "failed to decrypt payload")
 	}
 
-	var event TableChangeEvent
-	if err := json.Unmarshal(plaintext, &event); err != nil {
+	events, err := parseWebhookPayloadEvents(plaintext)
+	if err != nil {
 		logger.Error(ctx, "failed to decode JSON", logger.ErrorField(err))
 		return respondWebhookError(c, http.StatusBadRequest, "invalid JSON payload")
 	}
 
-	if event.Operation == "" || event.Table == "" {
-		logger.Error(ctx, "invalid event structure",
-			logger.String("operation", event.Operation),
-			logger.String("table", event.Table),
-		)
-		return respondWebhookError(c, http.StatusBadRequest, "invalid event structure")
+	for i := range events {
+		if err := validateWebhookEvent(&events[i]); err != nil {
+			logger.Error(ctx, "invalid event structure in payload",
+				logger.Int("event_index", i),
+				logger.ErrorField(err),
+			)
+			return respondWebhookError(c, http.StatusBadRequest, err.Error())
+		}
+		dataJSON := extractEventData(&events[i])
+		if err := storeWebhookEvent(ctx, database, &events[i], dataJSON); err != nil {
+			logger.Error(ctx, "failed to store webhook event",
+				logger.Int("event_index", i),
+				logger.String("operation", events[i].Operation),
+				logger.String("table", events[i].Table),
+				logger.ErrorField(err),
+			)
+		}
 	}
 
-	if event.Operation != "INSERT" && event.Operation != "UPDATE" && event.Operation != "DELETE" {
-		logger.Error(ctx, "invalid operation type", logger.String("operation", event.Operation))
-		return respondWebhookError(c, http.StatusBadRequest, "invalid operation type: must be INSERT, UPDATE, or DELETE")
-	}
+	logger.Info(ctx, "Webhook events received",
+		logger.Int("count", len(events)),
+	)
 
-	if event.Timestamp.IsZero() {
-		event.Timestamp = time.Now()
-	}
-
-	dataJSON := extractEventData(&event)
-	if err := storeWebhookEvent(ctx, database, &event, dataJSON); err != nil {
-		logger.Error(ctx, "failed to store webhook event",
-			logger.String("operation", event.Operation),
-			logger.String("table", event.Table),
-			logger.ErrorField(err),
-		)
-	}
-
-	if eventJSON, err := json.MarshalIndent(event, "", "  "); err == nil {
-		logger.Info(ctx, "Webhook event received",
-			logger.String("operation", event.Operation),
-			logger.String("table", event.Table),
-			logger.String("timestamp", event.Timestamp.String()),
-			logger.String("event_data", string(eventJSON)),
-		)
-	} else {
-		logger.Warn(ctx, "failed to marshal event for logging",
-			logger.String("operation", event.Operation),
-			logger.String("table", event.Table),
-			logger.ErrorField(err),
-		)
-	}
-
-	return respondWebhookSuccess(c, "event received successfully")
+	return respondWebhookSuccess(c, fmt.Sprintf("%d event(s) received successfully", len(events)))
 }
 
 // ProcessWebhookEvents processes pending webhook events from the database
@@ -276,7 +259,7 @@ func ProcessWebhookEvents(ctx context.Context, database *db.PostgresDb, accessGr
 	}
 
 	if len(events) == 0 {
-		return nil // No events to process
+		return nil
 	}
 
 	if accessGrant != "" {
@@ -287,49 +270,162 @@ func ProcessWebhookEvents(ctx context.Context, database *db.PostgresDb, accessGr
 			logger.String("count", fmt.Sprintf("%d", len(events))))
 	}
 
+	workerCount := webhookFixedWorkers
+	logger.Info(ctx, "Starting webhook worker pool",
+		logger.String("workers", fmt.Sprintf("%d", workerCount)),
+		logger.String("batch_size", fmt.Sprintf("%d", len(events))))
+
+	jobs := make(chan repo.WebhookEvent, len(events))
+	results := make(chan webhookProcessOutcome, len(events))
+	var wg sync.WaitGroup
+	wg.Add(workerCount)
+	for i := 0; i < workerCount; i++ {
+		go func() {
+			defer wg.Done()
+			for event := range jobs {
+				results <- processSingleWebhookEvent(ctx, database, &event, accessGrant)
+			}
+		}()
+	}
 	for _, event := range events {
-		if err := processSingleWebhookEvent(ctx, database, &event, accessGrant); err != nil {
-			logger.Error(ctx, "Failed to process webhook event",
-				logger.String("event_id", fmt.Sprintf("%d", event.ID)),
-				logger.String("operation", event.Operation),
-				logger.ErrorField(err),
-			)
-			sanitizedErr := sanitizeErrorMessage(err.Error())
-			_ = database.WebhookEventRepo.UpdateEventStatus(event.ID, "failed", sanitizedErr)
+		jobs <- event
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+
+	outcomes := make([]webhookProcessOutcome, 0, len(events))
+	deleteBuckets := make(map[string]*webhookDeleteBatch)
+	for outcome := range results {
+		outcomeIdx := len(outcomes)
+		outcomes = append(outcomes, outcome)
+		if outcome.DeleteCandidate {
+			batch, ok := deleteBuckets[outcome.BucketName]
+			if !ok {
+				batch = &webhookDeleteBatch{
+					KeySet:        make(map[string]struct{}),
+					OutcomeIdxSet: make(map[int]struct{}),
+				}
+				deleteBuckets[outcome.BucketName] = batch
+			}
+			batch.KeySet[outcome.DecryptedKey] = struct{}{}
+			batch.OutcomeIdxSet[outcomeIdx] = struct{}{}
 		}
 	}
 
+	for bucketName, batch := range deleteBuckets {
+		keys := make([]string, 0, len(batch.KeySet))
+		for key := range batch.KeySet {
+			keys = append(keys, key)
+		}
+		for start := 0; start < len(keys); start += webhookDeleteChunkSize {
+			end := start + webhookDeleteChunkSize
+			if end > len(keys) {
+				end = len(keys)
+			}
+			if err := database.SyncedObjectRepo.DeleteSyncedObjectsByBucketAndKeys(bucketName, keys[start:end]); err != nil {
+				sanitizedErr := sanitizeErrorMessage(fmt.Sprintf("batch delete failed for bucket=%s: %v", bucketName, err))
+				for idx := range batch.OutcomeIdxSet {
+					newRetry := outcomes[idx].PriorRetryCount + 1
+					rc := newRetry
+					outcomes[idx].RetryCountUpdate = &rc
+					outcomes[idx].ErrorMsg = sanitizedErr
+					if newRetry >= webhookMaxSyncDeleteRetries {
+						outcomes[idx].Status = "failed"
+					} else {
+						outcomes[idx].Status = "received"
+					}
+				}
+				break
+			}
+		}
+	}
+
+	updates := make([]repo.WebhookEventStatusUpdate, 0, len(outcomes))
+	for _, outcome := range outcomes {
+		u := repo.WebhookEventStatusUpdate{
+			EventID:  outcome.EventID,
+			Status:   outcome.Status,
+			ErrorMsg: sanitizeErrorMessage(outcome.ErrorMsg),
+		}
+		if outcome.Status != "processed" && outcome.RetryCountUpdate != nil {
+			u.RetryCount = outcome.RetryCountUpdate
+		}
+		updates = append(updates, u)
+	}
+	if err := database.WebhookEventRepo.UpdateEventStatusesBatch(updates); err != nil {
+		return fmt.Errorf("failed to batch update webhook statuses: %w", err)
+	}
+	processedCount, failedCount, requeuedCount := 0, 0, 0
+	for _, outcome := range outcomes {
+		switch outcome.Status {
+		case "failed":
+			failedCount++
+		case "received":
+			requeuedCount++
+		default:
+			processedCount++
+		}
+	}
+	logger.Info(ctx, "Webhook batch processed",
+		logger.Int("total", len(outcomes)),
+		logger.Int("processed", processedCount),
+		logger.Int("failed", failedCount),
+		logger.Int("requeued", requeuedCount),
+		logger.Int("workers", workerCount))
 	return nil
 }
 
-// processSingleWebhookEvent processes a single webhook event
-func processSingleWebhookEvent(ctx context.Context, database *db.PostgresDb, event *repo.WebhookEvent, accessGrant string) error {
+type webhookProcessOutcome struct {
+	EventID          uint
+	Status           string
+	ErrorMsg         string
+	BucketName       string
+	DecryptedKey     string
+	DeleteCandidate  bool
+	PriorRetryCount  uint
+	RetryCountUpdate *uint
+}
+
+type webhookDeleteBatch struct {
+	KeySet        map[string]struct{}
+	OutcomeIdxSet map[int]struct{}
+}
+
+func processSingleWebhookEvent(ctx context.Context, database *db.PostgresDb, event *repo.WebhookEvent, accessGrant string) webhookProcessOutcome {
+	outcome := webhookProcessOutcome{
+		EventID:         event.ID,
+		Status:          "processed",
+		PriorRetryCount: event.RetryCount,
+	}
 	if event.Operation != "DELETE" || event.Table != "objects" {
 		logger.Info(ctx, "Skipping event (not DELETE operation on objects table)",
 			logger.String("event_id", fmt.Sprintf("%d", event.ID)),
 			logger.String("operation", event.Operation),
 			logger.String("table", event.Table),
 		)
-		return database.WebhookEventRepo.UpdateEventStatus(event.ID, "processed", "")
+		return outcome
 	}
 
 	var eventData map[string]interface{}
 	if err := json.Unmarshal(event.Data, &eventData); err != nil {
-		return fmt.Errorf("failed to parse event data: %w", err)
+		outcome.Status = "failed"
+		outcome.ErrorMsg = fmt.Sprintf("failed to parse event data: %v", err)
+		return outcome
 	}
 
 	bucketRaw := getStringFromMap(eventData, "bucket_name")
 	bucketName := autoDecodeString(bucketRaw)
 	if bucketName == "" {
-		_ = database.WebhookEventRepo.UpdateEventStatus(event.ID, "processed", "bucket_name missing or invalid")
-		return nil
+		outcome.ErrorMsg = "bucket_name missing or invalid"
+		return outcome
 	}
 
 	objectKeyRaw := getStringFromMap(eventData, "object_key")
 	encryptedObjectKey := autoDecodeString(objectKeyRaw)
 	if encryptedObjectKey == "" {
-		_ = database.WebhookEventRepo.UpdateEventStatus(event.ID, "processed", "object_key missing or invalid")
-		return nil
+		outcome.ErrorMsg = "object_key missing or invalid"
+		return outcome
 	}
 
 	var finalAccessGrant string
@@ -338,43 +434,34 @@ func processSingleWebhookEvent(ctx context.Context, database *db.PostgresDb, eve
 	} else {
 		projectID := extractProjectID(eventData)
 		if projectID == "" {
-			_ = database.WebhookEventRepo.UpdateEventStatus(event.ID, "processed", "missing project_id/user_id")
-			return nil
+			outcome.ErrorMsg = "missing project_id/user_id"
+			return outcome
 		}
 
 		method := mapBucketNameToMethod(bucketName)
 		if method == "" {
-			_ = database.WebhookEventRepo.UpdateEventStatus(event.ID, "processed", fmt.Sprintf("unknown bucket name: %s", bucketName))
-			return nil
+			outcome.ErrorMsg = fmt.Sprintf("unknown bucket name: %s", bucketName)
+			return outcome
 		}
 
 		var err error
 		finalAccessGrant, err = database.CronJobRepo.GetAccessGrantByProjectID(projectID, method)
 		if err != nil {
-			errorMsg := sanitizeErrorMessage(fmt.Sprintf("access grant not found for project_id: %s", projectID))
-			_ = database.WebhookEventRepo.UpdateEventStatus(event.ID, "processed", errorMsg)
-			return nil
+			outcome.ErrorMsg = fmt.Sprintf("access grant not found for project_id: %s", projectID)
+			return outcome
 		}
 	}
 
 	decryptedKey, err := decryptObjectKey(finalAccessGrant, bucketName, encryptedObjectKey)
 	if err != nil {
-		errorMsg := sanitizeErrorMessage(fmt.Sprintf("decrypt failed: %v", err))
-		_ = database.WebhookEventRepo.UpdateEventStatus(event.ID, "processed", errorMsg)
-		return nil
+		outcome.ErrorMsg = fmt.Sprintf("decrypt failed: %v", err)
+		return outcome
 	}
 
-	_, err = database.SyncedObjectRepo.GetSyncedObjectByBucketAndKey(bucketName, decryptedKey)
-	if err != nil {
-		_ = database.WebhookEventRepo.UpdateEventStatus(event.ID, "processed", "decrypted object_key not found in synced_objects")
-		return nil
-	}
-
-	if err := database.SyncedObjectRepo.DeleteSyncedObject(bucketName, decryptedKey); err != nil {
-		return fmt.Errorf("failed to delete synced object: %w", err)
-	}
-
-	return database.WebhookEventRepo.UpdateEventStatus(event.ID, "processed", "")
+	outcome.BucketName = bucketName
+	outcome.DecryptedKey = decryptedKey
+	outcome.DeleteCandidate = true
+	return outcome
 }
 
 func extractEventData(event *TableChangeEvent) json.RawMessage {
@@ -395,6 +482,31 @@ func extractEventData(event *TableChangeEvent) json.RawMessage {
 		return nil
 	}
 	return event.Data
+}
+
+func parseWebhookPayloadEvents(plaintext []byte) ([]TableChangeEvent, error) {
+	var events []TableChangeEvent
+	if err := json.Unmarshal(plaintext, &events); err == nil {
+		return events, nil
+	}
+	var event TableChangeEvent
+	if err := json.Unmarshal(plaintext, &event); err == nil {
+		return []TableChangeEvent{event}, nil
+	}
+	return nil, fmt.Errorf("payload must be a webhook event object or array")
+}
+
+func validateWebhookEvent(event *TableChangeEvent) error {
+	if event.Operation == "" || event.Table == "" {
+		return fmt.Errorf("invalid event structure")
+	}
+	if event.Operation != "INSERT" && event.Operation != "UPDATE" && event.Operation != "DELETE" {
+		return fmt.Errorf("invalid operation type: must be INSERT, UPDATE, or DELETE")
+	}
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now()
+	}
+	return nil
 }
 
 func storeWebhookEvent(ctx context.Context, database *db.PostgresDb, event *TableChangeEvent, dataJSON json.RawMessage) error {
@@ -562,4 +674,112 @@ func respondWebhookError(c echo.Context, statusCode int, message string) error {
 		Status:  "error",
 		Message: message,
 	})
+}
+
+func runWebhookRetentionCleanup(database *db.PostgresDb) (int64, error) {
+	cutoff := time.Now().Add(-webhookProcessedRetention)
+	var total int64
+	for {
+		deleted, err := database.WebhookEventRepo.DeleteEventsByStatusOlderThan("processed", cutoff, webhookCleanupDeleteBatchSize)
+		if err != nil {
+			return total, err
+		}
+		if deleted == 0 {
+			break
+		}
+		total += deleted
+		if deleted < int64(webhookCleanupDeleteBatchSize) {
+			break
+		}
+	}
+	return total, nil
+}
+
+func runSyncedObjectHardPurge(database *db.PostgresDb) (int64, error) {
+	cutoff := time.Now().Add(-syncedObjectSoftDeletedPurgeAge)
+	var total int64
+	for {
+		deleted, err := database.SyncedObjectRepo.PermanentDeleteSyncedObjectsSoftDeletedBefore(cutoff, webhookCleanupDeleteBatchSize)
+		if err != nil {
+			return total, err
+		}
+		if deleted == 0 {
+			break
+		}
+		total += deleted
+		if deleted < int64(webhookCleanupDeleteBatchSize) {
+			break
+		}
+	}
+	return total, nil
+}
+
+func sleepUntilNextLocalMidnight(ctx context.Context) error {
+	now := time.Now().In(time.Local)
+	nextMidnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.Local)
+	d := time.Until(nextMidnight)
+	if d <= 0 {
+		nextMidnight = nextMidnight.Add(24 * time.Hour)
+		d = time.Until(nextMidnight)
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+func StartWebhookEventCleanupLoop(ctx context.Context, database *db.PostgresDb) {
+	if database == nil {
+		return
+	}
+	logger.Info(ctx, "Webhook event cleanup loop started",
+		logger.String("schedule", "daily at 00:00 local"),
+		logger.String("webhook_processed_permanent_delete_after", webhookProcessedRetention.String()),
+		logger.String("synced_object_permanent_delete_after_soft_delete", syncedObjectSoftDeletedPurgeAge.String()),
+		logger.Int("delete_batch_size", webhookCleanupDeleteBatchSize),
+	)
+	go func() {
+		cleanup := func(runCtx context.Context) {
+			var wg sync.WaitGroup
+			var totalWebhookDeleted, totalSyncedPurged int64
+			var webhookErr, syncedErr error
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				n, err := runWebhookRetentionCleanup(database)
+				totalWebhookDeleted = n
+				webhookErr = err
+			}()
+			go func() {
+				defer wg.Done()
+				n, err := runSyncedObjectHardPurge(database)
+				totalSyncedPurged = n
+				syncedErr = err
+			}()
+			wg.Wait()
+			if webhookErr != nil {
+				logger.Warn(runCtx, "Webhook cleanup failed", logger.ErrorField(webhookErr))
+			} else if totalWebhookDeleted > 0 {
+				logger.Info(runCtx, "Webhook cleanup completed (processed rows removed permanently)",
+					logger.Int("deleted_processed_events", int(totalWebhookDeleted)))
+			}
+			if syncedErr != nil {
+				logger.Warn(runCtx, "Synced objects permanent purge failed", logger.ErrorField(syncedErr))
+			} else if totalSyncedPurged > 0 {
+				logger.Info(runCtx, "Synced objects permanently removed (soft-deleted before purge window)",
+					logger.Int("count", int(totalSyncedPurged)))
+			}
+		}
+
+		for {
+			if err := sleepUntilNextLocalMidnight(ctx); err != nil {
+				return
+			}
+			cleanup(ctx)
+		}
+	}()
 }

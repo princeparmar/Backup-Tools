@@ -8,6 +8,7 @@ import (
 
 	"github.com/StorX2-0/Backup-Tools/crons"
 	"github.com/StorX2-0/Backup-Tools/db"
+	"github.com/StorX2-0/Backup-Tools/handler"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger/newrelic"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
@@ -35,6 +36,7 @@ func main() {
 
 	// Start background jobs
 	crons.NewAutosyncManager(store).Start()
+	handler.StartWebhookEventCleanupLoop(ctx, store)
 
 	// Start server
 	router.StartServer(store, getAddress())
