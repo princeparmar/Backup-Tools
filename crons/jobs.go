@@ -33,6 +33,8 @@ var processorMap = map[string]Processor{
 	"gmail":         NewGmailProcessor(),
 	"outlook":       NewOutlookProcessor(),
 	"psql_database": NewPsqlDatabaseProcessor(),
+	"google_drive":  NewGoogleDriveProcessor(),
+	"google_photos": NewGooglePhotosProcessor(),
 }
 
 type AutosyncManager struct {
@@ -469,10 +471,10 @@ func (a *AutosyncManager) gmailStorxMissing(job *repo.CronJobListingDB) bool {
 	if job == nil {
 		return true
 	}
-	if job.Method != "gmail" {
-		return strings.TrimSpace(job.StorxToken) == ""
+	if repo.IsGoogleMediaOrGmailMethod(job.Method) {
+		return strings.TrimSpace(a.store.CronJobRepo.ResolvedStorxToken(job)) == ""
 	}
-	return strings.TrimSpace(a.store.CronJobRepo.GmailResolvedStorxToken(job)) == ""
+	return strings.TrimSpace(job.StorxToken) == ""
 }
 
 func (a *AutosyncManager) clearStorxOnUplinkFailure(job *repo.CronJobListingDB) {
@@ -550,13 +552,12 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 
 	switch {
 	case a.gmailStorxMissing(job):
-		if job.Method == "gmail" {
-			if err := a.store.CronJobRepo.DeactivateGmailWorkspaceTreeForStorxFailure(job, cronJobStorxInsufficientShort); err != nil {
-				logger.Warn(context.Background(), "Failed to deactivate Gmail workspace tree after missing StorX",
+		if repo.IsGoogleMediaOrGmailMethod(job.Method) {
+			if err := a.store.CronJobRepo.DeactivateJobsForCredentialOrLegacyStorx(job, cronJobStorxInsufficientShort); err != nil {
+				logger.Warn(context.Background(), "Failed to deactivate jobs after missing StorX",
 					logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
 			}
 			job.StorxToken = ""
-			job.StorjProjectID = ""
 		}
 		job.Active = false
 		job.AutoDeactivated = true
@@ -575,8 +576,8 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 	case job != nil && job.Method == "gmail" &&
 		(strings.Contains(errLower, "access_token_scope_insufficient") ||
 			strings.Contains(errLower, "insufficient authentication scopes")):
-		if err := a.store.CronJobRepo.DeactivateGmailWorkspaceTreeForGoogleAuthFailure(job, cronJobGoogleInsufficientScope); err != nil {
-			logger.Warn(context.Background(), "Failed to deactivate Gmail workspace tree after insufficient Gmail scopes",
+		if err := a.store.CronJobRepo.DeactivateJobsForCredentialOrLegacyGoogleAuth(job, cronJobGoogleInsufficientScope); err != nil {
+			logger.Warn(context.Background(), "Failed to deactivate jobs after insufficient Gmail scopes",
 				logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
 		}
 		repo.StripGmailRefreshTokenFromCronJobInputData(job)
@@ -590,9 +591,9 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		strings.Contains(errMsg, "refresh token not found"):
 		// gmailRefreshOrTokenExchangeFailure(job, errMsg):
 		if task.RetryCount == repo.MaxRetryCount-1 {
-			if job.Method == "gmail" {
-				if err := a.store.CronJobRepo.DeactivateGmailWorkspaceTreeForGoogleAuthFailure(job, cronJobGoogleAuthDeactivate); err != nil {
-					logger.Warn(context.Background(), "Failed to deactivate Gmail workspace tree after Google auth failure",
+			if repo.IsGoogleMediaOrGmailMethod(job.Method) {
+				if err := a.store.CronJobRepo.DeactivateJobsForCredentialOrLegacyGoogleAuth(job, cronJobGoogleAuthDeactivate); err != nil {
+					logger.Warn(context.Background(), "Failed to deactivate jobs after Google auth failure",
 						logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
 				}
 				repo.StripGmailRefreshTokenFromCronJobInputData(job)
@@ -630,13 +631,12 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		}
 
 	case strings.Contains(errMsg, "uplink: permission") || strings.Contains(errMsg, "uplink: invalid access"):
-		if job.Method == "gmail" {
-			if err := a.store.CronJobRepo.DeactivateGmailWorkspaceTreeForStorxFailure(job, cronJobStorxInsufficientShort); err != nil {
-				logger.Warn(context.Background(), "Failed to deactivate Gmail workspace tree after StorX uplink failure",
+		if repo.IsGoogleMediaOrGmailMethod(job.Method) {
+			if err := a.store.CronJobRepo.DeactivateJobsForCredentialOrLegacyStorx(job, cronJobStorxInsufficientShort); err != nil {
+				logger.Warn(context.Background(), "Failed to deactivate jobs after StorX uplink failure",
 					logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
 			}
 			job.StorxToken = ""
-			job.StorjProjectID = ""
 		} else {
 			a.clearStorxOnUplinkFailure(job)
 		}
@@ -656,3 +656,7 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		task.Message = cronTaskGenericRetry(task.RetryCount)
 	}
 }
+
+// Autosync processors: gmail_processror.go, outlook_processor.go, google_drive_processor.go, google_photos_processor.go.
+// processorMap dispatches by job.Method; CreateTaskForAllPendingJobs + ProcessTask are method-agnostic.
+// google_calendar / google_contacts: onboarding jobs exist; add processorMap entries when backup runners exist.

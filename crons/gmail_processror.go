@@ -38,8 +38,9 @@ func gmailMailboxPathAndOAuthHolder(job *repo.CronJobListingDB, hasRefreshToken 
 	if strings.EqualFold(mailboxForSession, "me") && strings.Contains(path, "@") {
 		mailboxForSession = strings.TrimSpace(path)
 	}
-	oauthAccountEmail = repo.GmailConnectedAccountEmail(job)
-	if oauthAccountEmail == "" && hasRefreshToken {
+	// DISABLED(parent_id): repo.GmailConnectedAccountEmail(job) — use ResolvedOAuthHolderEmail in Run().
+	_ = hasRefreshToken
+	if oauthAccountEmail == "" {
 		if mailboxForSession != "" && !strings.EqualFold(mailboxForSession, "me") {
 			oauthAccountEmail = mailboxForSession
 		} else if strings.Contains(path, "@") {
@@ -60,9 +61,9 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 		return err
 	}
 
-	storxToken := input.Database.CronJobRepo.GmailResolvedStorxToken(input.Job)
+	storxToken := input.Database.CronJobRepo.ResolvedStorxToken(input.Job)
 	if strings.TrimSpace(storxToken) == "" {
-		return fmt.Errorf("storx access grant not found for this job (set storx_token on the admin mailbox job for corporate backups)")
+		return fmt.Errorf("storx access grant not found for this job (set storx_token on the shared credential or admin mailbox job)")
 	}
 
 	// Process webhook events using the same resolved access grant (non-blocking).
@@ -75,7 +76,8 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 	}(storxToken)
 
 	refreshToken := input.Database.CronJobRepo.GmailResolvedRefreshToken(input.Job)
-	mailboxForSession, pathPrefix, oauthAccountEmail := gmailMailboxPathAndOAuthHolder(input.Job, refreshToken != "")
+	mailboxForSession, pathPrefix, _ := gmailMailboxPathAndOAuthHolder(input.Job, refreshToken != "")
+	oauthAccountEmail := input.Database.CronJobRepo.ResolvedOAuthHolderEmail(input.Job)
 
 	// JWT and requires DWD; without DWD you get unauthorized_client despite a valid admin refresh token.
 	delegationOnly := refreshToken == "" && google.GmailJobUsesDelegationWithoutOAuth(mailboxForSession, oauthAccountEmail)

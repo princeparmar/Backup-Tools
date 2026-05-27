@@ -8,6 +8,7 @@ import (
 type PostgresDb struct {
 	*gorm.DB
 	CronJobRepo        *repo.CronJobRepository
+	CredentialRepo     *repo.GoogleBackupCredentialRepository
 	TaskRepo           *repo.TaskRepository
 	ScheduledTasksRepo *repo.ScheduledTasksRepository
 	AuthRepo           *repo.AuthRepository
@@ -25,6 +26,7 @@ func NewPostgresStore(dsn string, queryLogging bool) (*PostgresDb, error) {
 	return &PostgresDb{
 		DB:                 db,
 		CronJobRepo:        repo.NewCronJobRepository(db),
+		CredentialRepo:     repo.NewGoogleBackupCredentialRepository(db),
 		TaskRepo:           repo.NewTaskRepository(db),
 		ScheduledTasksRepo: repo.NewScheduledTasksRepository(db),
 		AuthRepo:           repo.NewAuthRepository(db),
@@ -38,6 +40,7 @@ func (s *PostgresDb) Migrate() error {
 		&repo.GoogleAuthStorage{},
 		&repo.ShopifyAuthStorage{},
 		&repo.QuickbooksAuthStorage{},
+		&repo.GoogleBackupCredentialDB{},
 		&repo.CronJobListingDB{},
 		&repo.TaskListingDB{},
 		&repo.ScheduledTasks{},

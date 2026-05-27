@@ -25,12 +25,21 @@ type WorkspaceGmailSession struct {
 	APIUser string
 }
 
+// workspaceDelegationScopes — DWD scope URLs per Google backup product (Admin Console paste).
+var workspaceDelegationScopes = map[string]string{
+	"gmail":    "https://www.googleapis.com/auth/gmail.readonly",
+	"drive":    "https://www.googleapis.com/auth/drive.readonly",
+	"contacts": "https://www.googleapis.com/auth/contacts.readonly",
+	"calendar": "https://www.googleapis.com/auth/calendar.readonly",
+	"photos":   "https://www.googleapis.com/auth/photoslibrary.readonly",
+}
+
 // WorkspaceDelegationSetup contains the details an admin needs to configure DWD.
 type WorkspaceDelegationSetup struct {
-	ClientID         string   `json:"client_id"`
-	RequiredScopes   []string `json:"required_scopes"`
-	AdminConsolePath string   `json:"admin_console_path"`
-	AdminConsoleURL  string   `json:"admin_console_url"`
+	ClientID         string            `json:"client_id"`
+	Scopes           map[string]string `json:"scopes"`
+	AdminConsolePath string            `json:"admin_console_path"`
+	AdminConsoleURL  string            `json:"admin_console_url"`
 }
 
 var (
@@ -52,9 +61,13 @@ func GetWorkspaceDelegationSetup() (*WorkspaceDelegationSetup, error) {
 	if err != nil {
 		return nil, err
 	}
+	scopes := make(map[string]string, len(workspaceDelegationScopes))
+	for k, v := range workspaceDelegationScopes {
+		scopes[k] = v
+	}
 	return &WorkspaceDelegationSetup{
 		ClientID:         clientID,
-		RequiredScopes:   []string{gmail.GmailReadonlyScope},
+		Scopes:           scopes,
 		AdminConsolePath: "Security → Access and Data Controls → API controls → Domain-wide delegation",
 		AdminConsoleURL:  "https://admin.google.com/",
 	}, nil
