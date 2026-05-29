@@ -53,6 +53,26 @@ type PaginatedFilesResponse struct {
 	TotalFiles    int64        `json:"total_files"`
 }
 
+// FlatDriveFile is a non-folder file projection used by scalable autosync baseline listing.
+type FlatDriveFile struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	MimeType     string   `json:"mime_type"`
+	Parents      []string `json:"parents,omitempty"`
+	ModifiedTime string   `json:"modified_time,omitempty"`
+	Size         int64    `json:"size,omitempty"`
+	Md5Checksum  string   `json:"md5_checksum,omitempty"`
+	Version      int64    `json:"version,omitempty"`
+	DriveID      string   `json:"drive_id,omitempty"`
+}
+
+type FlatDriveFilesResponse struct {
+	Files                []FlatDriveFile `json:"files"`
+	NextPageToken        string          `json:"nextPageToken,omitempty"`
+	NextPageTokenLegacy  string          `json:"next_page_token,omitempty"`
+	PageSize             int64           `json:"page_size"`
+}
+
 // createFilesJSON creates a FilesJSON object from a Google Drive file
 func createFilesJSON(file *drive.File, synced bool, path string) *FilesJSON {
 	// Parse created time
@@ -85,6 +105,53 @@ func createFilesJSON(file *drive.File, synced bool, path string) *FilesJSON {
 		CreatedAt:         createdAt,
 		Synced:            synced,
 	}
+}
+
+// ListNonFolderFilesFlat returns a flat, paginated list of non-folder files across My Drive and shared drives.
+func ListNonFolderFilesFlat(c echo.Context, pageToken string) (*FlatDriveFilesResponse, error) {
+	srv, err := getDriveService(c)
+	if err != nil {
+		return nil, err
+	}
+	return ListNonFolderFilesFlatWithService(srv, pageToken)
+}
+
+// ListNonFolderFilesFlatWithService is shared by HTTP route and cron flow.
+func ListNonFolderFilesFlatWithService(srv *drive.Service, pageToken string) (*FlatDriveFilesResponse, error) {
+	query := "trashed=false and mimeType!='application/vnd.google-apps.folder'"
+	call := srv.Files.List().
+		Q(query).
+		SupportsAllDrives(true).
+		IncludeItemsFromAllDrives(true).
+		Fields("nextPageToken, files(id,name,mimeType,parents,modifiedTime,size,md5Checksum,version,driveId)")
+	if strings.TrimSpace(pageToken) != "" {
+		call = call.PageToken(strings.TrimSpace(pageToken))
+	}
+	resp, err := call.Do()
+	if err != nil {
+		return nil, fmt.Errorf("list non-folder drive files: %w", err)
+	}
+
+	out := make([]FlatDriveFile, 0, len(resp.Files))
+	for _, f := range resp.Files {
+		out = append(out, FlatDriveFile{
+			ID:           f.Id,
+			Name:         f.Name,
+			MimeType:     f.MimeType,
+			Parents:      f.Parents,
+			ModifiedTime: f.ModifiedTime,
+			Size:         f.Size,
+			Md5Checksum:  f.Md5Checksum,
+			Version:      f.Version,
+			DriveID:      f.DriveId,
+		})
+	}
+	return &FlatDriveFilesResponse{
+		Files:               out,
+		NextPageToken:       resp.NextPageToken,
+		NextPageTokenLegacy: resp.NextPageToken,
+		PageSize:            int64(len(resp.Files)),
+	}, nil
 }
 
 // GetFileNames retrieves all file names and their IDs from Google Drive

@@ -14,7 +14,7 @@ import (
 // deriveSource derives source (provider) from bucket name
 // Currently only supports Google services: gmail, google-photos, google-drive
 func deriveSource(bucketName string) string {
-	if bucketName == "gmail" || bucketName == "google-photos" || bucketName == "google-drive" {
+	if bucketName == "gmail" || bucketName == "google-photos" || bucketName == "google-drive" || bucketName == "google-contacts" {
 		return "google"
 	}
 	if strings.HasPrefix(bucketName, "google-") {
@@ -33,6 +33,8 @@ func deriveType(bucketName string) string {
 		return "photos"
 	case "google-drive":
 		return "drive"
+	case "google-contacts":
+		return "contacts"
 	default:
 		if strings.HasPrefix(bucketName, "google-") {
 			return strings.TrimPrefix(bucketName, "google-")

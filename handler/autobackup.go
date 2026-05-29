@@ -34,15 +34,15 @@ var (
 
 // onboardingIntervalValues — Satellite onboarding JSON `interval` + GET /auto-sync/job/interval.
 var onboardingIntervalValues = map[string][]string{
-	"1h":    {""},
-	"6h":    {""},
+	"3h":    {""},
+	"12h":   {""},
 	"daily": {"12am"}, // nightly (once per calendar day; on = 12am)
 }
 
 // intervalValues — validation for job PUT and legacy schedules (weekly/monthly kept for existing jobs).
 var intervalValues = map[string][]string{
-	"1h":    {""},
-	"6h":    {""},
+	"3h":    {""},
+	"12h":   {""},
 	"daily": {"12am"},
 	// Legacy UI picker (not used for Satellite onboarding `interval` field):
 	"weekly":  {"Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"},
@@ -61,6 +61,7 @@ var onboardingServiceToMethod = map[string]string{
 type GoogleBackupOnboardingRequest struct {
 	Services        []string `json:"services"`
 	Interval        string   `json:"interval"`
+	On              string   `json:"on"` // required for weekly/monthly; empty for 3h/12h; daily defaults to 12am
 	GoogleEmail     string   `json:"google_email"`
 	AccountType     string   `json:"account_type"`
 	ProjectID       string   `json:"project_id"`
@@ -104,10 +105,11 @@ var onboardingServiceComingSoon = map[string]bool{
 */
 
 type onboardingJobResult struct {
-	Service string `json:"service,omitempty"`
-	Email   string `json:"email,omitempty"`
-	JobID   uint   `json:"job_id,omitempty"`
-	TaskID  uint   `json:"task_id,omitempty"`
+	Service  string `json:"service,omitempty"`
+	Email    string `json:"email,omitempty"`
+	JobID    uint   `json:"job_id,omitempty"`
+	PolicyID uint   `json:"policy_id,omitempty"`
+	TaskID   uint   `json:"task_id,omitempty"`
 }
 
 type onboardingFailedResult struct {
@@ -134,6 +136,7 @@ func (r *GoogleBackupOnboardingRequest) trim() {
 	r.RefreshToken = strings.TrimSpace(r.RefreshToken)
 	r.ProjectID = strings.TrimSpace(r.ProjectID)
 	r.Interval = strings.TrimSpace(r.Interval)
+	r.On = strings.TrimSpace(r.On)
 	r.SatelliteUserID = strings.TrimSpace(r.SatelliteUserID)
 }
 
@@ -187,26 +190,23 @@ type CronJobDetailResponse struct {
 	repo.CronJobListingDB
 }
 
-// GoogleConnectedAccountUpdateRequest is the body for PUT /auto-sync/job/project (connected account; no job_id).
-type GoogleConnectedAccountUpdateRequest struct {
-	ProjectID    string  `json:"project_id"`
-	GoogleEmail  string  `json:"google_email"`
-	StorxToken   *string `json:"storx_token"`
-	RefreshToken *string `json:"refresh_token"`
-	Interval     *string `json:"interval"`
-	On           *string `json:"on"`
-	Active       *bool   `json:"active"`
+// AutomaticBackupUpdateByProjectRequest is PUT /auto-sync/job/project — same fields as AutomaticBackupUpdateRequest plus project scope.
+type AutomaticBackupUpdateByProjectRequest struct {
+	AutomaticBackupUpdateRequest
+	ProjectID   string `json:"project_id"`
+	GoogleEmail string `json:"google_email"`
 }
 
-func (r *GoogleConnectedAccountUpdateRequest) connectedEmail() string {
-	return strings.TrimSpace(r.GoogleEmail)
-}
-
-func (r *GoogleConnectedAccountUpdateRequest) hasUpdateFields() bool {
+func (r *AutomaticBackupUpdateRequest) hasUpdateFields() bool {
 	if r == nil {
 		return false
 	}
-	return r.StorxToken != nil || r.RefreshToken != nil || r.Interval != nil || r.On != nil || r.Active != nil
+	return r.Interval != nil || r.On != nil || r.RefreshToken != nil ||
+		r.DatabaseConnection != nil || r.StorxToken != nil || r.Active != nil || r.ApplyStorxToAll != nil
+}
+
+func (r *AutomaticBackupUpdateByProjectRequest) connectedEmail() string {
+	return strings.TrimSpace(r.GoogleEmail)
 }
 
 // LEGACY(parent_account / is_admin) — removed from API; use credential_id + Satellite connected-account UI instead.
@@ -354,20 +354,17 @@ func propagateCredentialLinkedActive(database *db.PostgresDb, job *repo.CronJobL
 	return nil
 }
 
-// mergeBulkGmailActivatePatch is activeStateUpdateFields(true) plus interval/on from scheduleTemplate when the target row is missing them.
+// mergeBulkGmailActivatePatch is activeStateUpdateFields(true) plus interval cache from scheduleTemplate when missing.
 func mergeBulkGmailActivatePatch(target *repo.CronJobListingDB, scheduleTemplate *repo.CronJobListingDB) map[string]interface{} {
 	patch := activeStateUpdateFields(true)
 	if target == nil || scheduleTemplate == nil || scheduleTemplate.SyncType == "one_time" {
 		return patch
 	}
-	if strings.TrimSpace(scheduleTemplate.Interval) == "" || strings.TrimSpace(scheduleTemplate.On) == "" {
+	if strings.TrimSpace(scheduleTemplate.Interval) == "" {
 		return patch
 	}
 	if strings.TrimSpace(target.Interval) == "" {
 		patch["interval"] = scheduleTemplate.Interval
-	}
-	if strings.TrimSpace(target.On) == "" {
-		patch["on"] = scheduleTemplate.On
 	}
 	return patch
 }
@@ -409,6 +406,7 @@ func HandleAutomaticSyncListForUser(c echo.Context) error {
 
 	for i := range automaticSyncList {
 		database.CronJobRepo.EnrichCronJobFromCredential(&automaticSyncList[i])
+		database.PolicyRepo.EnrichJobFromPolicy(&automaticSyncList[i])
 	}
 	maskedJobs := repo.MaskTokenForCronJobListingDB(automaticSyncList)
 	response := make([]CronJobResponse, len(maskedJobs))
@@ -448,13 +446,17 @@ func calculateNextBackup(job repo.CronJobListingDB) *time.Time {
 	var next time.Time
 
 	switch job.Interval {
-	case "1h":
-		next = now.Truncate(time.Hour).Add(time.Hour)
-	case "6h":
-		block := (now.Hour() / 6) * 6
-		next = time.Date(now.Year(), now.Month(), now.Day(), block, 0, 0, 0, now.Location()).Add(6 * time.Hour)
+	case "3h":
+		block := (now.Hour() / 3) * 3
+		next = time.Date(now.Year(), now.Month(), now.Day(), block, 0, 0, 0, now.Location()).Add(3 * time.Hour)
 		if !next.After(now) {
-			next = next.Add(6 * time.Hour)
+			next = next.Add(3 * time.Hour)
+		}
+	case "12h":
+		block := (now.Hour() / 12) * 12
+		next = time.Date(now.Year(), now.Month(), now.Day(), block, 0, 0, 0, now.Location()).Add(12 * time.Hour)
+		if !next.After(now) {
+			next = next.Add(12 * time.Hour)
 		}
 	case "daily":
 		next = startSearchingFrom
@@ -610,7 +612,7 @@ func HandleIntervalOnConfig(c echo.Context) error {
 
 	c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Interval Values",
-		"data":    onboardingIntervalValues,
+		"data":    intervalValues,
 	})
 	return nil
 }
@@ -653,6 +655,7 @@ func HandleAutomaticSyncDetails(c echo.Context) error {
 
 	jobCopy := *jobDetails
 	database.CronJobRepo.EnrichCronJobFromCredential(&jobCopy)
+	database.PolicyRepo.EnrichJobFromPolicy(&jobCopy)
 	repo.MaskTokenForCronJobDB(&jobCopy)
 	detail := CronJobDetailResponse{CronJobListingDB: jobCopy}
 
@@ -712,7 +715,7 @@ func handleSatelliteOnboardingCreate(c echo.Context, ctx context.Context, userID
 	if err != nil {
 		return err
 	}
-	schedule, err := parseOnboardingInterval(req.Interval)
+	schedule, err := parseOnboardingSchedule(req.Interval, req.On)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
 	}
@@ -777,17 +780,7 @@ func handleLegacySyncCreate(c echo.Context, ctx context.Context, userID, method 
 	case "gmail":
 		return jsonErrorMsg(http.StatusBadRequest, "Invalid Request", "use POST /google/backup/onboarding/jobs or POST /auto-sync/job with services[] in JSON body")
 	case "outlook":
-		var body struct {
-			Code string `json:"code"`
-		}
-		if err := c.Bind(&body); err != nil {
-			return jsonError(http.StatusBadRequest, "Invalid Request", err)
-		}
-		name, config, err := ProcessOutlookMethod(strings.TrimSpace(body.Code))
-		if err != nil {
-			return err
-		}
-		return createSingleSyncJobAndRespond(ctx, c, userID, method, syncType, name, config, database)
+		return jsonErrorMsg(http.StatusBadRequest, "Invalid Request", "use POST /auto-sync/job with services[] and refresh_token in JSON body")
 	case "psql_database", "mysql_database":
 		var conn DatabaseConnection
 		if err := c.Bind(&conn); err != nil {
@@ -895,11 +888,15 @@ func createGoogleJobsForServiceEmails(
 			failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: extractCreateJobError(createErr)})
 			continue
 		}
-		if err := applyOnboardingJobSchedule(database, cronJob.ID, schedule, req.ProjectID); err != nil {
+		if err := applyOnboardingJobSchedule(database, cronJob.ID, schedule, credentialID, req.ProjectID); err != nil {
 			failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: err.Error()})
 			continue
 		}
+		policy, _ := database.PolicyRepo.GetByJobID(cronJob.ID)
 		entry := onboardingJobResult{Service: svc, Email: targetEmail, JobID: cronJob.ID}
+		if policy != nil {
+			entry.PolicyID = policy.ID
+		}
 		if syncType == "one_time" {
 			if task, taskErr := database.TaskRepo.CreateTaskForCronJob(cronJob.ID); taskErr == nil {
 				entry.TaskID = task.ID
@@ -918,36 +915,62 @@ func createSyncJobWithCredential(userID, name, method, syncType string, credenti
 	return database.CronJobRepo.CreateCronJobForUserWithCredential(userID, name, method, syncType, credentialID, nil)
 }
 
-func parseOnboardingInterval(raw string) (onboardingSchedule, error) {
-	raw = strings.TrimSpace(strings.ToLower(raw))
+func parseOnboardingSchedule(rawInterval, rawOn string) (onboardingSchedule, error) {
+	rawInterval = strings.TrimSpace(strings.ToLower(rawInterval))
+	rawOn = strings.TrimSpace(rawOn)
 	var interval, on string
-	switch raw {
-	case "1h", "1hour":
-		interval, on = "1h", ""
-	case "6h", "6hour":
-		interval, on = "6h", ""
+	switch rawInterval {
+	case "3h", "3hour":
+		interval, on = "3h", ""
+	case "12h", "12hour":
+		interval, on = "12h", ""
 	case "nightly", "night", "24h", "1d", "daily", "12am":
 		interval, on = "daily", "12am"
-	default:
-		return onboardingSchedule{}, fmt.Errorf("unsupported interval: %s (use 1h, 6h, or nightly)", raw)
-	}
-	// Legacy onboarding mapping (weekly / monthly / catch-all hours → daily) — not used for Satellite JSON.
-	/*
-		switch raw {
-		case "24h", "1d", "daily", "12h":
-			interval, on = "daily", "12am"
-		case "7d", "168h", "weekly":
-			interval, on = "weekly", "Monday"
-		default:
-			if strings.HasSuffix(raw, "h") {
-				interval, on = "daily", "12am"
+	case "weekly", "7d", "168h":
+		interval = "weekly"
+		if rawOn == "" {
+			on = "Monday"
+		} else {
+			on = normalizeWeekdayOn(rawOn)
+			if on == "" {
+				return onboardingSchedule{}, fmt.Errorf("invalid weekday for weekly interval: %s", rawOn)
 			}
 		}
-	*/
-	if !validateOnboardingInterval(interval, on) {
-		return onboardingSchedule{}, fmt.Errorf("invalid interval schedule: %s", raw)
+	case "monthly":
+		interval = "monthly"
+		if rawOn == "" {
+			return onboardingSchedule{}, fmt.Errorf("on is required for monthly interval (day 1-28)")
+		}
+		day, err := strconv.Atoi(rawOn)
+		if err != nil || day < 1 || day > 28 {
+			return onboardingSchedule{}, fmt.Errorf("monthly on must be a day between 1 and 28")
+		}
+		on = strconv.Itoa(day)
+	default:
+		return onboardingSchedule{}, fmt.Errorf("unsupported interval: %s (use 3h, 12h, nightly, weekly, or monthly)", rawInterval)
+	}
+	if err := validateScheduleIntervalOn(interval, on); err != nil {
+		return onboardingSchedule{}, err
 	}
 	return onboardingSchedule{Interval: interval, On: on}, nil
+}
+
+func normalizeWeekdayOn(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	title := strings.ToUpper(raw[:1]) + strings.ToLower(raw[1:])
+	for _, allowed := range intervalValues["weekly"] {
+		if allowed == title {
+			return allowed
+		}
+	}
+	return ""
+}
+
+func parseOnboardingInterval(raw string) (onboardingSchedule, error) {
+	return parseOnboardingSchedule(raw, "")
 }
 
 func validateOnboardingInterval(interval, on string) bool {
@@ -970,13 +993,11 @@ func onboardingGoogleJobConfig(googleEmail, refreshToken string) map[string]inte
 	}
 }
 
-// applyOnboardingJobSchedule sets interval/on on create. project_id lives on google_backup_credentials only.
-func applyOnboardingJobSchedule(database *db.PostgresDb, jobID uint, schedule onboardingSchedule, projectID string) error {
+// applyOnboardingJobSchedule creates policy row (canonical schedule) and syncs job.interval cache.
+func applyOnboardingJobSchedule(database *db.PostgresDb, jobID uint, schedule onboardingSchedule, credentialID uint, projectID string) error {
 	_ = projectID
-	return database.CronJobRepo.UpdateCronJobByID(jobID, map[string]interface{}{
-		"interval": schedule.Interval,
-		"on":       schedule.On,
-	})
+	_, err := database.PolicyRepo.CreatePolicy(credentialID, jobID, schedule.Interval, schedule.On)
+	return err
 }
 
 // Legacy: set storx_token on create and auto-activate daily jobs when grant was resolved on onboarding.
@@ -1471,35 +1492,6 @@ func createSingleSyncJobAndRespond(ctx context.Context, c echo.Context, userID, 
 	return respondSyncCreate(c, syncType, success, failed, data, task)
 }
 
-// ProcessOutlookMethod exchanges OAuth code for refresh_token (legacy create — future: outlook in services[] + refresh_token in JSON).
-func ProcessOutlookMethod(code string) (string, map[string]interface{}, error) {
-	if code == "" {
-		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Code is required")
-	}
-
-	tok, err := outlook.AuthTokenUsingCode(code)
-	if err != nil {
-		return "", nil, jsonError(http.StatusBadRequest, "Invalid Code. Not able to generate auth token from code", err)
-	}
-
-	client, err := outlook.NewOutlookClientUsingToken(tok.AccessToken)
-	if err != nil {
-		return "", nil, jsonError(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid", err)
-	}
-
-	userDetails, err := client.GetCurrentUser()
-	if err != nil || userDetails.Mail == "" {
-		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Invalid Code. May be it is expired or invalid")
-	}
-
-	config := map[string]interface{}{
-		"refresh_token": tok.RefreshToken,
-		"email":         userDetails.Mail,
-	}
-
-	return userDetails.Mail, config, nil
-}
-
 func ProcessOutlookAccessToken(accessToken string) (string, map[string]interface{}, error) {
 	if accessToken == "" {
 		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Access Token Required")
@@ -1698,7 +1690,6 @@ func mergeJobInputData(job *repo.CronJobListingDB, updates map[string]interface{
 type AutomaticBackupUpdateRequest struct {
 	Interval           *string             `json:"interval"`
 	On                 *string             `json:"on"`
-	Code               *string             `json:"code"`
 	RefreshToken       *string             `json:"refresh_token"`
 	DatabaseConnection *DatabaseConnection `json:"database_connection"`
 	StorxToken         *string             `json:"storx_token"`
@@ -1719,41 +1710,29 @@ func jobGmailMailbox(job *repo.CronJobListingDB) string {
 	return strings.TrimSpace(job.Name)
 }
 
-// gmailOAuthMergeBaseJob — DISABLED(parent_id): refresh_token updates go to google_backup_credentials.
-/*
-func gmailOAuthMergeBaseJob(...) (*repo.CronJobListingDB, error) {
-	...
-}
-*/
-
-// oauthInputDataFromBackupRequest stores refresh_token from Satellite on job update (no OAuth code exchange).
-func oauthInputDataFromBackupRequest(database *db.PostgresDb, job *repo.CronJobListingDB, req *AutomaticBackupUpdateRequest) (map[string]interface{}, error) {
-	// Legacy: OAuth code → new refresh_token
-	// if req.Code != nil {
-	// 	return gmailInputDataAfterCodeReauth(database, job, *req.Code)
-	// }
-	if req.Code != nil {
-		return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "code update is disabled; send refresh_token in JSON from Satellite"})
+func gmailOAuthMergeBaseJob(database *db.PostgresDb, job *repo.CronJobListingDB) (*repo.CronJobListingDB, error) {
+	if job == nil || database == nil {
+		return job, nil
 	}
-	if req.RefreshToken != nil {
-		rt := strings.TrimSpace(*req.RefreshToken)
-		if rt == "" {
-			return nil, httpErr(http.StatusBadRequest, "Invalid Request", "refresh_token cannot be empty")
-		}
-		switch job.Method {
-		case "outlook", "gmail", "google_drive", "google_photos", "google_calendar", "google_contacts":
-			return storeRefreshTokenInputData(database, job, rt)
-		default:
-			return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{
-				"message": fmt.Sprintf("refresh_token update is not supported for method %s", job.Method),
-			})
-		}
-	}
-	return nil, nil
+	return job, nil
 }
 
-// storeRefreshTokenInputData persists Satellite-provided refresh_token without Google/Outlook token exchange.
-func storeRefreshTokenInputData(database *db.PostgresDb, job *repo.CronJobListingDB, refreshToken string) (map[string]interface{}, error) {
+func credentialEmailForJob(database *db.PostgresDb, job *repo.CronJobListingDB) string {
+	if database == nil || job == nil {
+		return ""
+	}
+	cid := repo.JobCredentialID(job)
+	if cid == 0 {
+		return ""
+	}
+	cred, err := database.CredentialRepo.GetByID(cid)
+	if err != nil || cred == nil {
+		return ""
+	}
+	return strings.TrimSpace(cred.Email)
+}
+
+func persistOAuthRefreshTokenOnJob(database *db.PostgresDb, job *repo.CronJobListingDB, refreshToken string) (map[string]interface{}, error) {
 	if cid := repo.JobCredentialID(job); cid > 0 && repo.IsGoogleMediaOrGmailMethod(job.Method) {
 		rt := strings.TrimSpace(refreshToken)
 		if err := database.CredentialRepo.UpdateTokens(cid, &rt, nil); err != nil {
@@ -1770,21 +1749,73 @@ func storeRefreshTokenInputData(database *db.PostgresDb, job *repo.CronJobListin
 		}
 		return out, nil
 	}
-	// DISABLED(parent_id): gmailOAuthMergeBaseJob for admin row merge.
 	out := mergeJobInputData(job, map[string]interface{}{"refresh_token": refreshToken})
 	delete(out, "credential_id")
 	delete(out, "connected_email")
 	return out, nil
 }
 
-// Legacy: ExchangeCodeForTokenWithAdminScope → refresh_token
-//
-//	func gmailInputDataAfterCodeReauth(database *db.PostgresDb, job *repo.CronJobListingDB, code string) (map[string]interface{}, error) { ... }
-//
-// Legacy: AuthTokenUsingRefreshToken validation before store
-//
-//	func gmailInputDataAfterRefreshToken(...) { ... }
-//	func outlookInputDataAfterRefreshToken(...) { ... }
+// oauthInputDataFromBackupRequest validates refresh_token and persists it on the credential or job input_data.
+func oauthInputDataFromBackupRequest(database *db.PostgresDb, job *repo.CronJobListingDB, req *AutomaticBackupUpdateRequest) (map[string]interface{}, error) {
+	if req.RefreshToken == nil {
+		return nil, nil
+	}
+	switch job.Method {
+	case "outlook":
+		return outlookInputDataAfterRefreshToken(job, *req.RefreshToken)
+	case "gmail", "google_drive", "google_photos", "google_calendar", "google_contacts":
+		return gmailInputDataAfterRefreshToken(database, job, *req.RefreshToken)
+	default:
+		return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "refresh_token update is not supported for this method"})
+	}
+}
+
+func gmailInputDataAfterRefreshToken(database *db.PostgresDb, job *repo.CronJobListingDB, refreshToken string) (map[string]interface{}, error) {
+	accessToken, err := google.AuthTokenUsingRefreshToken(refreshToken)
+	if err != nil {
+		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. Not able to generate auth token from refresh token", err.Error())
+	}
+	userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(accessToken)
+	if err != nil {
+		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err.Error())
+	}
+	if userDetails.Email == "" {
+		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", "getting empty email id from google token")
+	}
+	tokenEmail := strings.TrimSpace(userDetails.Email)
+	mailbox := jobGmailMailbox(job)
+	credEmail := credentialEmailForJob(database, job)
+	if !strings.EqualFold(tokenEmail, mailbox) && (credEmail == "" || !strings.EqualFold(tokenEmail, credEmail)) {
+		return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "email id mismatch"})
+	}
+	mergeBase, err := gmailOAuthMergeBaseJob(database, job)
+	if err != nil {
+		return nil, err
+	}
+	return persistOAuthRefreshTokenOnJob(database, mergeBase, refreshToken)
+}
+
+func outlookInputDataAfterRefreshToken(job *repo.CronJobListingDB, refreshToken string) (map[string]interface{}, error) {
+	authToken, err := outlook.AuthTokenUsingRefreshToken(refreshToken)
+	if err != nil {
+		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. Not able to generate auth token from refresh token", err.Error())
+	}
+	client, err := outlook.NewOutlookClientUsingToken(authToken)
+	if err != nil {
+		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err.Error())
+	}
+	userDetails, err := client.GetCurrentUser()
+	if err != nil {
+		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err.Error())
+	}
+	if strings.TrimSpace(userDetails.Mail) == "" {
+		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", "getting empty email id from outlook token")
+	}
+	if !strings.EqualFold(strings.TrimSpace(userDetails.Mail), strings.TrimSpace(job.Name)) {
+		return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "email id mismatch"})
+	}
+	return mergeJobInputData(job, map[string]interface{}{"refresh_token": refreshToken}), nil
+}
 
 func HandleAutomaticSyncCreateTask(c echo.Context) error {
 	ctx := c.Request().Context()
@@ -1907,105 +1938,29 @@ func resolveUserCredentialByProjectAndEmail(database *db.PostgresDb, userID, pro
 	return cred, nil
 }
 
-func parseConnectedAccountSchedule(interval, on *string) (intervalVal, onVal string, err error) {
-	if (interval == nil && on != nil) || (interval != nil && on == nil) {
-		return "", "", httpErr(http.StatusBadRequest, "Invalid Request", "interval and on must be sent together")
-	}
-	if interval == nil {
-		return "", "", nil
-	}
-	intervalVal = strings.TrimSpace(*interval)
-	onVal = ""
-	if on != nil {
-		onVal = strings.TrimSpace(*on)
-	}
-	if onVal == "" && intervalVal != "1h" && intervalVal != "6h" {
-		return "", "", httpErr(http.StatusBadRequest, "Invalid Request", "on is required for this interval (use empty on for 1h or 6h)")
-	}
-	if intervalVal == "monthly" {
-		day, convErr := strconv.Atoi(onVal)
-		if convErr != nil {
-			return "", "", httpErr(http.StatusBadRequest, "Invalid Request", "on must be a valid day number for monthly interval")
-		}
-		onVal = strconv.Itoa(day)
-		if day == 29 || day == 30 || day == 31 {
-			return "", "", httpErr(http.StatusBadRequest, "Invalid Request", "monthly backups cannot be scheduled on the 29th, 30th or 31st; use 1-28")
-		}
-	}
-	if !validateInterval(intervalVal, onVal) {
-		return "", "", httpErr(http.StatusBadRequest, "Invalid Request", "on is not valid for the given interval")
-	}
-	return intervalVal, onVal, nil
-}
-
-func extractAndStoreProjectIDForCredential(ctx context.Context, database *db.PostgresDb, credentialID uint, storxToken string) {
-	if database == nil || credentialID == 0 || strings.TrimSpace(storxToken) == "" {
-		return
-	}
-	projectID, err := satellite.GetProjectIDFromAccessGrant(ctx, storxToken)
-	if err != nil || projectID == "" {
-		return
-	}
-	if err := database.CredentialRepo.UpdateStorjProjectID(credentialID, projectID); err != nil {
-		logger.Warn(ctx, "failed to update storj_project_id on credential",
-			logger.Int("credential_id", int(credentialID)), logger.ErrorField(err))
-	}
-}
-
-func applyConnectedAccountCredentialUpdate(ctx context.Context, database *db.PostgresDb, cred *repo.GoogleBackupCredentialDB, req *GoogleConnectedAccountUpdateRequest) error {
-	if cred == nil || database == nil || req == nil {
+func firstJobForOAuthUpdate(jobs []repo.CronJobListingDB, req AutomaticBackupUpdateRequest) *repo.CronJobListingDB {
+	if req.RefreshToken == nil {
 		return nil
 	}
-	var refreshPtr, storxPtr *string
-	if req.RefreshToken != nil {
-		rt := strings.TrimSpace(*req.RefreshToken)
-		if rt == "" {
-			return httpErr(http.StatusBadRequest, "Invalid Request", "refresh_token cannot be empty")
+	for i := range jobs {
+		if jobs[i].Method == "gmail" {
+			return &jobs[i]
 		}
-		refreshPtr = &rt
 	}
-	if req.StorxToken != nil {
-		st := strings.TrimSpace(*req.StorxToken)
-		if st == "" {
-			return httpErr(http.StatusBadRequest, "Invalid Request", "storx_token cannot be empty")
+	for i := range jobs {
+		if repo.IsGoogleMediaOrGmailMethod(jobs[i].Method) {
+			return &jobs[i]
 		}
-		storxPtr = &st
-		extractAndStoreProjectIDForCredential(ctx, database, cred.ID, st)
 	}
-	if refreshPtr == nil && storxPtr == nil {
-		return nil
+	for i := range jobs {
+		if jobs[i].Method == "outlook" {
+			return &jobs[i]
+		}
 	}
-	return database.CredentialRepo.UpdateTokens(cred.ID, refreshPtr, storxPtr)
+	return nil
 }
 
-func linkedJobPatchFromConnectedAccountUpdate(job *repo.CronJobListingDB, intervalVal, onVal string, active *bool, activateAllOnStorx bool) map[string]interface{} {
-	if job == nil {
-		return nil
-	}
-	patch := map[string]interface{}{}
-	if job.SyncType != "one_time" && intervalVal != "" {
-		patch["interval"] = intervalVal
-		patch["on"] = onVal
-	}
-	applyActive := false
-	if active != nil {
-		applyActive = *active
-	} else if activateAllOnStorx {
-		applyActive = true
-	}
-	if active != nil || activateAllOnStorx {
-		for k, v := range activeStateUpdateFields(applyActive) {
-			patch[k] = v
-		}
-	}
-	if len(patch) == 0 {
-		return nil
-	}
-	return patch
-}
-
-// HandleAutomaticBackupUpdateByProject updates google_backup_credentials and all linked cron jobs (no job_id).
-// PUT /auto-sync/job/project — body: project_id, google_email, storx_token, refresh_token, interval, on, active.
+// HandleAutomaticBackupUpdateByProject updates credential tokens and optional bulk schedule/active for all linked jobs.
 func HandleAutomaticBackupUpdateByProject(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
@@ -2019,7 +1974,7 @@ func HandleAutomaticBackupUpdateByProject(c echo.Context) error {
 		})
 	}
 
-	var reqBody GoogleConnectedAccountUpdateRequest
+	var reqBody AutomaticBackupUpdateByProjectRequest
 	if err := c.Bind(&reqBody); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"message": "Invalid request body",
@@ -2028,7 +1983,7 @@ func HandleAutomaticBackupUpdateByProject(c echo.Context) error {
 	}
 	projectID := strings.TrimSpace(reqBody.ProjectID)
 	if projectID == "" {
-		projectID = strings.TrimSpace(c.Param("project_id")) // optional legacy URL param
+		projectID = strings.TrimSpace(c.Param("project_id"))
 	}
 	if projectID == "" {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -2036,10 +1991,10 @@ func HandleAutomaticBackupUpdateByProject(c echo.Context) error {
 			"error":   "project_id is required in request body",
 		})
 	}
-	if !reqBody.hasUpdateFields() {
+	if !reqBody.AutomaticBackupUpdateRequest.hasUpdateFields() {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"message": "Invalid Request",
-			"error":   "at least one of storx_token, refresh_token, interval, on, or active is required",
+			"error":   "at least one update field is required (refresh_token, storx_token, interval, on, active, etc.)",
 		})
 	}
 
@@ -2059,27 +2014,6 @@ func HandleAutomaticBackupUpdateByProject(c echo.Context) error {
 		})
 	}
 
-	intervalVal, onVal, schedErr := parseConnectedAccountSchedule(reqBody.Interval, reqBody.On)
-	if schedErr != nil {
-		var he *echo.HTTPError
-		if errors.As(schedErr, &he) {
-			return c.JSON(he.Code, he.Message)
-		}
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Request", "error": schedErr.Error()})
-	}
-
-	if err := applyConnectedAccountCredentialUpdate(ctx, database, cred, &reqBody); err != nil {
-		var he *echo.HTTPError
-		if errors.As(err, &he) {
-			return c.JSON(he.Code, he.Message)
-		}
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"message": "Failed to update credential",
-			"error":   err.Error(),
-		})
-	}
-
-	activateOnStorx := reqBody.StorxToken != nil
 	jobs, err := database.CronJobRepo.ListJobsByCredentialID(userID, cred.ID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
@@ -2094,65 +2028,93 @@ func HandleAutomaticBackupUpdateByProject(c echo.Context) error {
 		})
 	}
 
-	success := make([]CronJobResponse, 0, len(jobs))
-	failed := make([]map[string]interface{}, 0)
-	for i := range jobs {
-		job := jobs[i]
-		patch := linkedJobPatchFromConnectedAccountUpdate(&job, intervalVal, onVal, reqBody.Active, activateOnStorx)
-		if patch == nil {
-			continue
-		}
-		if updErr := database.CronJobRepo.UpdateCronJobByID(job.ID, patch); updErr != nil {
-			failed = append(failed, map[string]interface{}{
-				"job_id": job.ID,
-				"email":  job.Name,
-				"error":  updErr.Error(),
+	updateReq := reqBody.AutomaticBackupUpdateRequest
+
+	if updateReq.Interval != nil || updateReq.On != nil {
+		intervalVal, onValue, schedErr := parseScheduleFromRequest(updateReq.Interval, updateReq.On)
+		if schedErr != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Request",
+				"error":   schedErr.Error(),
 			})
-			continue
 		}
-		updated, getErr := database.CronJobRepo.GetCronJobByID(job.ID)
-		if getErr != nil {
-			failed = append(failed, map[string]interface{}{
-				"job_id": job.ID,
-				"email":  job.Name,
-				"error":  getErr.Error(),
+		if err := database.PolicyRepo.UpdateScheduleForCredential(cred.ID, intervalVal, onValue); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+				"message": "Failed to update schedule policies",
+				"error":   err.Error(),
 			})
-			continue
 		}
-		database.CronJobRepo.EnrichCronJobFromCredential(updated)
-		repo.MaskTokenForCronJobDB(updated)
-		j := *updated
-		success = append(success, CronJobResponse{
-			CronJobListingDB: j,
-			NextBackup:       calculateNextBackup(j),
-		})
 	}
 
-	if len(success) == 0 && len(failed) == 0 {
-		for i := range jobs {
-			updated, getErr := database.CronJobRepo.GetCronJobByID(jobs[i].ID)
-			if getErr != nil {
-				continue
+	if updateReq.RefreshToken != nil {
+		oauthJob := firstJobForOAuthUpdate(jobs, updateReq)
+		if oauthJob == nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Request",
+				"error":   "no linked oauth job found for refresh_token update",
+			})
+		}
+		in, oauthErr := oauthInputDataFromBackupRequest(database, oauthJob, &updateReq)
+		if oauthErr != nil {
+			var he *echo.HTTPError
+			if errors.As(oauthErr, &he) {
+				return c.JSON(he.Code, he.Message)
 			}
-			database.CronJobRepo.EnrichCronJobFromCredential(updated)
-			repo.MaskTokenForCronJobDB(updated)
-			j := *updated
-			success = append(success, CronJobResponse{
-				CronJobListingDB: j,
-				NextBackup:       calculateNextBackup(j),
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Request", "error": oauthErr.Error()})
+		}
+		_ = in
+	}
+
+	if updateReq.StorxToken != nil {
+		if strings.TrimSpace(*updateReq.StorxToken) == "" {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Request",
+				"error":   "storx_token cannot be empty",
+			})
+		}
+		storx := strings.TrimSpace(*updateReq.StorxToken)
+		if err := database.CredentialRepo.UpdateTokens(cred.ID, nil, &storx); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+				"message": "Failed to update storx token",
+				"error":   err.Error(),
+			})
+		}
+		if pid := extractProjectIDFromStorxGrant(ctx, storx); pid != "" {
+			_ = database.CredentialRepo.UpdateStorjProjectID(cred.ID, pid)
+		}
+	}
+
+	if updateReq.Active != nil {
+		patch := activeStateUpdateFields(*updateReq.Active)
+		if err := database.CronJobRepo.UpdateActiveForCredential(userID, cred.ID, *updateReq.Active, patch); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+				"message": "Failed to update active state",
+				"error":   err.Error(),
 			})
 		}
 	}
 
-	resp := map[string]interface{}{
-		"message":       "Connected account backup updated successfully",
-		"project_id":    projectID,
-		"google_email":  connectedEmail,
-		"credential_id": cred.ID,
-		"success":       nullSliceJSON(success),
-		"failed":        nullSliceJSON(failed),
+	cred, _ = database.CredentialRepo.GetByID(cred.ID)
+	account := buildConnectedAccountView(cred, projectID, connectedEmail)
+	success := make([]AutosyncJobItemView, 0, len(jobs))
+	failed := make([]interface{}, 0)
+
+	for i := range jobs {
+		updated, getErr := database.CronJobRepo.GetCronJobByID(jobs[i].ID)
+		if getErr != nil {
+			failed = append(failed, bulkGmailUpdateFailure(jobs[i].ID, jobs[i].Name, getErr))
+			continue
+		}
+		database.PolicyRepo.EnrichJobFromPolicy(updated)
+		success = append(success, buildAutosyncJobItemView(*updated))
 	}
-	return c.JSON(http.StatusOK, resp)
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "Automatic backup updated successfully",
+		"account": account,
+		"success": success,
+		"failed":  failed,
+	})
 }
 
 func buildUpdateRequestForJob(ctx context.Context, database *db.PostgresDb, job *repo.CronJobListingDB, reqBody AutomaticBackupUpdateRequest, jobID int) (map[string]interface{}, error) {
@@ -2161,17 +2123,7 @@ func buildUpdateRequestForJob(ctx context.Context, database *db.PostgresDb, job 
 	if job.SyncType == "one_time" {
 		if reqBody.Interval != nil || reqBody.On != nil || reqBody.DatabaseConnection != nil || reqBody.Active != nil ||
 			reqBody.ApplyStorxToAll != nil {
-			return nil, httpErr(http.StatusBadRequest, "Invalid Request", "For one-time sync jobs, only storx_token and refresh_token updates are allowed")
-		}
-		oauthInputCount := 0
-		if reqBody.Code != nil {
-			oauthInputCount++
-		}
-		if reqBody.RefreshToken != nil {
-			oauthInputCount++
-		}
-		if oauthInputCount > 1 {
-			return nil, httpErr(http.StatusBadRequest, "Invalid Request", "Only one of code or refresh_token may be set in a single request")
+			return nil, httpErr(http.StatusBadRequest, "Invalid Request", "For one-time sync jobs, only storx_token and refresh_token for oauth updates are allowed")
 		}
 		if reqBody.StorxToken != nil {
 			if strings.TrimSpace(*reqBody.StorxToken) == "" {
@@ -2188,7 +2140,7 @@ func buildUpdateRequestForJob(ctx context.Context, database *db.PostgresDb, job 
 			updateRequest["input_data"] = in
 		}
 		if len(updateRequest) == 0 {
-			return nil, httpErr(http.StatusBadRequest, "Invalid Request", "No valid update fields provided. Only storx_token and refresh_token are allowed for one-time jobs")
+			return nil, httpErr(http.StatusBadRequest, "Invalid Request", "No valid update fields provided. Only storx_token and refresh_token are allowed")
 		}
 		return updateRequest, nil
 	}
@@ -2197,34 +2149,9 @@ func buildUpdateRequestForJob(ctx context.Context, database *db.PostgresDb, job 
 		return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "Both interval and on are required together"})
 	}
 	if reqBody.Interval != nil {
-		onValue := ""
-		if reqBody.On != nil {
-			onValue = strings.TrimSpace(*reqBody.On)
-		}
-		intervalVal := strings.TrimSpace(*reqBody.Interval)
-		if onValue == "" && intervalVal != "1h" && intervalVal != "6h" {
-			return nil, httpErr(http.StatusBadRequest, "Invalid Request", "on is required for this interval (use empty on for 1h or 6h)")
-		}
-		if intervalVal == "monthly" {
-			day, err := strconv.Atoi(onValue)
-			if err != nil {
-				return nil, httpErr(http.StatusBadRequest, "Invalid Request", "On value must be a valid number for monthly intervals")
-			}
-			onValue = strconv.Itoa(day)
-			if day == 29 || day == 30 || day == 31 {
-				return nil, httpErr(http.StatusBadRequest, "Invalid Request", "Monthly backups cannot be scheduled on the 29th, 30th or 31st day. Please select a date between 1-28.")
-			}
-		}
-		if !validateInterval(intervalVal, onValue) {
-			return nil, httpErr(http.StatusBadRequest, "Invalid Request", "on is not valid for the given interval")
-		}
-		updateRequest["interval"] = intervalVal
-		updateRequest["on"] = onValue
+		return nil, httpErr(http.StatusBadRequest, "Invalid Request", "interval updates use PUT /auto-sync/policy/:policy_id")
 	}
 	inputKinds := 0
-	if reqBody.Code != nil {
-		inputKinds++
-	}
 	if reqBody.RefreshToken != nil {
 		inputKinds++
 	}
@@ -2232,17 +2159,9 @@ func buildUpdateRequestForJob(ctx context.Context, database *db.PostgresDb, job 
 		inputKinds++
 	}
 	if inputKinds > 1 {
-		return nil, httpErr(http.StatusBadRequest, "Invalid Request", "Only one of code, refresh_token, or database_connection may be set in a single request")
+		return nil, httpErr(http.StatusBadRequest, "Invalid Request", "Only one of refresh_token or database_connection may be set in a single request")
 	}
-	if reqBody.Code != nil {
-		in, err := oauthInputDataFromBackupRequest(database, job, &reqBody)
-		if err != nil {
-			return nil, err
-		}
-		if in != nil {
-			updateRequest["input_data"] = in
-		}
-	} else if reqBody.DatabaseConnection != nil {
+	if reqBody.DatabaseConnection != nil {
 		if job.Method != "psql_database" && job.Method != "mysql_database" {
 			return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "database connection is not allowed for this method"})
 		}
@@ -2284,108 +2203,94 @@ func buildUpdateRequestForJob(ctx context.Context, database *db.PostgresDb, job 
 	return updateRequest, nil
 }
 
-// func HandleAutomaticBackupUpdate(c echo.Context) error {
-// 	ctx := c.Request().Context()
-// 	var err error
-// 	defer monitor.Mon.Task()(&ctx)(&err)
+// HandleAutomaticBackupUpdate updates active state for a single job.
+func HandleAutomaticBackupUpdate(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
 
-// 	jobID, parseErr := strconv.Atoi(c.Param("job_id"))
-// 	if parseErr != nil || jobID <= 0 {
-// 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-// 			"message": "Invalid Job ID",
-// 		})
-// 	}
+	jobID, parseErr := strconv.Atoi(c.Param("job_id"))
+	if parseErr != nil || jobID <= 0 {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid Job ID",
+		})
+	}
 
-// 	userID, err := satellite.GetUserdetails(c)
-// 	if err != nil {
-// 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-// 			"message": "Authentication required",
-// 			"error":   err.Error(),
-// 		})
-// 	}
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "Authentication required",
+			"error":   err.Error(),
+		})
+	}
 
-// 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
-// 	job, err := database.CronJobRepo.GetJobByIDForUser(userID, uint(jobID))
-// 	if err != nil {
-// 		return c.JSON(http.StatusNotFound, map[string]interface{}{
-// 			"message": "Job not found",
-// 			"error":   err.Error(),
-// 		})
-// 	}
+	if _, err := database.CronJobRepo.GetJobByIDForUser(userID, uint(jobID)); err != nil {
+		return c.JSON(http.StatusNotFound, map[string]interface{}{
+			"message": "Job not found",
+			"error":   err.Error(),
+		})
+	}
 
-// 	var reqBody AutomaticBackupUpdateRequest
+	var reqBody AutomaticBackupUpdateRequest
+	if err := c.Bind(&reqBody); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid request body",
+			"error":   err.Error(),
+		})
+	}
 
-// 	if err := c.Bind(&reqBody); err != nil {
-// 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-// 			"message": "Invalid request body",
-// 			"error":   err.Error(),
-// 		})
-// 	}
+	if reqBody.RefreshToken != nil || reqBody.StorxToken != nil ||
+		reqBody.DatabaseConnection != nil || reqBody.ApplyStorxToAll != nil {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   "credential updates use PUT /auto-sync/job/project",
+		})
+	}
+	if reqBody.Interval != nil || reqBody.On != nil {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   "interval updates use PUT /auto-sync/policy/:policy_id",
+		})
+	}
+	if reqBody.Active == nil {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   "active is required",
+		})
+	}
 
-// 	updateRequest, err := buildUpdateRequestForJob(ctx, database, job, reqBody, jobID)
-// 	if err != nil {
-// 		var httpErr *echo.HTTPError
-// 		if errors.As(err, &httpErr) {
-// 			return c.JSON(httpErr.Code, httpErr.Message)
-// 		}
-// 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Request", "error": err.Error()})
-// 	}
+	updateRequest := activeStateUpdateFields(*reqBody.Active)
+	if err := database.CronJobRepo.UpdateCronJobByID(uint(jobID), updateRequest); err != nil {
+		logger.Error(ctx, "Failed to update cron job", logger.Int("job_id", jobID), logger.ErrorField(err))
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"message": "Failed to update job",
+			"error":   err.Error(),
+		})
+	}
 
-// 	if err := applyStorxUpdateChoiceForLinkedGmailAccounts(job, reqBody); err != nil {
-// 		var httpErrObj *echo.HTTPError
-// 		if errors.As(err, &httpErrObj) {
-// 			return c.JSON(httpErrObj.Code, httpErrObj.Message)
-// 		}
-// 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Request", "error": err.Error()})
-// 	}
+	data, err := database.CronJobRepo.GetCronJobByID(uint(jobID))
+	if err != nil {
+		logger.Error(ctx, "Failed to load job after update", logger.Int("job_id", jobID), logger.ErrorField(err))
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"message": "internal server error",
+			"error":   err.Error(),
+		})
+	}
 
-// 	err = applyAutomaticBackupUpdates(database, job, uint(jobID), updateRequest)
-// 	if err != nil {
-// 		if strings.Contains(err.Error(), "not found") {
-// 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-// 				"message": "Failed to update job",
-// 				"error":   err.Error(),
-// 			})
-// 		}
-// 		logger.Error(ctx, "Failed to update cron job", logger.Int("job_id", jobID), logger.ErrorField(err))
-// 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-// 			"message": "Failed to update job",
-// 			"error":   err.Error(),
-// 		})
-// 	}
+	jobCopy := *data
+	database.CronJobRepo.EnrichCronJobFromCredential(&jobCopy)
+	database.PolicyRepo.EnrichJobFromPolicy(&jobCopy)
+	repo.MaskTokenForCronJobDB(&jobCopy)
+	detail := CronJobDetailResponse{CronJobListingDB: jobCopy}
 
-// 	if reqBody.StorxToken != nil && reqBody.ApplyStorxToAll != nil && *reqBody.ApplyStorxToAll {
-// 		var propagateErr error
-// 		propagateErr = propagateCredentialLinkedActive(database, job, uint(jobID), reqBody.Active)
-// 		if propagateErr != nil {
-// 			logger.Error(ctx, "Failed to propagate linked active state after StorX update", logger.Int("job_id", jobID), logger.ErrorField(propagateErr))
-// 			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-// 				"message": "Failed to update linked accounts",
-// 				"error":   propagateErr.Error(),
-// 			})
-// 		}
-// 	}
-
-// 	data, err := database.CronJobRepo.GetCronJobByID(uint(jobID))
-// 	if err != nil {
-// 		logger.Error(ctx, "Failed to load job after update", logger.Int("job_id", jobID), logger.ErrorField(err))
-// 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-// 			"message": "internal server error",
-// 			"error":   err.Error(),
-// 		})
-// 	}
-
-// 	jobCopy := *data
-// 	database.CronJobRepo.EnrichCronJobFromCredential(&jobCopy)
-// 	repo.MaskTokenForCronJobDB(&jobCopy)
-// 	detail := CronJobDetailResponse{CronJobListingDB: jobCopy}
-// 	return c.JSON(http.StatusOK, map[string]interface{}{
-// 		"message": "Automatic backup updated successfully",
-// 		"success": []CronJobDetailResponse{detail},
-// 		"failed":  []interface{}{},
-// 	})
-// }
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "Automatic backup updated successfully",
+		"success": []CronJobDetailResponse{detail},
+		"failed":  []interface{}{},
+	})
+}
 
 func bulkGmailUpdateFailure(jobID uint, name string, err error) map[string]interface{} {
 	var he *echo.HTTPError
@@ -2395,8 +2300,8 @@ func bulkGmailUpdateFailure(jobID uint, name string, err error) map[string]inter
 	return map[string]interface{}{"job_id": jobID, "email": name, "error": err.Error()}
 }
 
-// HandleAutomaticBackupBulkUpdateByParent updates all jobs for a credential (project_id or google_email). LEGACY route name; not parent_id.
-// Uses same buildUpdateRequestForJob / refresh_token path as PUT /auto-sync/job/:job_id (Satellite sends refresh_token in JSON).
+// HandleAutomaticBackupBulkUpdateByParent updates all Gmail jobs for a corporate admin parent_id
+// resolved from the same encrypted Google token used in create flow.
 // func HandleAutomaticBackupBulkUpdateByParent(c echo.Context) error {
 // 	ctx := c.Request().Context()
 // 	var err error
@@ -2406,7 +2311,7 @@ func bulkGmailUpdateFailure(jobID uint, name string, err error) map[string]inter
 // 	if method != "gmail" {
 // 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 // 			"message": "Invalid Request",
-// 			"error":   "bulk update by google_email is currently supported only for gmail method",
+// 			"error":   "bulk update by parent_id is currently supported only for gmail method",
 // 		})
 // 	}
 
@@ -2418,11 +2323,15 @@ func bulkGmailUpdateFailure(jobID uint, name string, err error) map[string]inter
 // 		})
 // 	}
 
-// 	var reqBody struct {
-// 		AutomaticBackupUpdateRequest
-// 		GoogleEmail string `json:"google_email"`
-// 		ProjectID   string `json:"project_id"`
+// 	connectedEmail, _, _, credErr := GetGoogleCredentialsFromRequest(c)
+// 	if credErr != nil {
+// 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+// 			"message": "Invalid Request",
+// 			"error":   credErr.Error(),
+// 		})
 // 	}
+
+// 	var reqBody AutomaticBackupUpdateRequest
 // 	if err := c.Bind(&reqBody); err != nil {
 // 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 // 			"message": "Invalid request body",
@@ -2430,40 +2339,8 @@ func bulkGmailUpdateFailure(jobID uint, name string, err error) map[string]inter
 // 		})
 // 	}
 
-// 	connectedEmail := strings.TrimSpace(reqBody.GoogleEmail)
-// 	projectID := strings.TrimSpace(reqBody.ProjectID)
-// 	if projectID == "" && connectedEmail == "" {
-// 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-// 			"message": "Invalid Request",
-// 			"error":   "project_id or google_email is required in body for bulk update",
-// 		})
-// 	}
-// 	// Legacy: getSatelliteGoogleCredentialsFromRequest(c)
-
 // 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
-// 	var jobs []repo.CronJobListingDB
-// 	var credID uint
-// 	var ok bool
-// 	var credErr error
-// 	if projectID != "" {
-// 		credID, ok, credErr = database.CredentialRepo.FindIDForUserAndProjectID(userID, projectID)
-// 	} else {
-// 		credID, ok, credErr = database.CredentialRepo.FindIDForUserAndEmail(userID, connectedEmail)
-// 	}
-// 	if credErr != nil {
-// 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-// 			"message": "Failed to resolve credential",
-// 			"error":   credErr.Error(),
-// 		})
-// 	} else if ok {
-// 		jobs, err = database.CronJobRepo.ListJobsByCredentialID(userID, credID)
-// 	} else {
-// 		// DISABLED(parent_id): GetJobsByUserAndParentIDAndMethod
-// 		return c.JSON(http.StatusNotFound, map[string]interface{}{
-// 			"message": "No credential found",
-// 			"error":   "re-onboard with credential-linked jobs (project_id or google_email)",
-// 		})
-// 	}
+// 	jobs, err := database.CronJobRepo.GetJobsByUserAndParentIDAndMethod(userID, connectedEmail, "gmail")
 // 	if err != nil {
 // 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 // 			"message": "Failed to fetch jobs for parent",
@@ -2472,8 +2349,8 @@ func bulkGmailUpdateFailure(jobID uint, name string, err error) map[string]inter
 // 	}
 // 	if len(jobs) == 0 {
 // 		return c.JSON(http.StatusNotFound, map[string]interface{}{
-// 			"message": "No jobs found for credential",
-// 			"error":   "no gmail jobs found for this google_email",
+// 			"message": "No jobs found for parent_id",
+// 			"error":   "no gmail jobs found for this parent",
 // 		})
 // 	}
 
@@ -2481,7 +2358,7 @@ func bulkGmailUpdateFailure(jobID uint, name string, err error) map[string]inter
 // 	failed := make([]map[string]interface{}, 0)
 // 	for i := range jobs {
 // 		job := &jobs[i]
-// 		jobUpdate, buildErr := buildUpdateRequestForJob(ctx, database, job, reqBody.AutomaticBackupUpdateRequest, int(job.ID))
+// 		jobUpdate, buildErr := buildUpdateRequestForJob(ctx, database, job, reqBody, int(job.ID))
 // 		if buildErr != nil {
 // 			failed = append(failed, bulkGmailUpdateFailure(job.ID, job.Name, buildErr))
 // 			continue
@@ -2495,23 +2372,17 @@ func bulkGmailUpdateFailure(jobID uint, name string, err error) map[string]inter
 // 			failed = append(failed, bulkGmailUpdateFailure(job.ID, job.Name, getErr))
 // 			continue
 // 		}
-// 		database.CronJobRepo.EnrichCronJobFromCredential(updatedJob)
+// 		copyGmailCorporateChildStorxFromParent(database, updatedJob)
 // 		repo.MaskTokenForCronJobDB(updatedJob)
 // 		success = append(success, updatedJob)
 // 	}
 
-// 	resp := map[string]interface{}{
-// 		"message": "Automatic backup bulk update completed successfully",
-// 		"success": success,
-// 		"failed":  failed,
-// 	}
-// 	if projectID != "" {
-// 		resp["project_id"] = projectID
-// 	}
-// 	if connectedEmail != "" {
-// 		resp["google_email"] = connectedEmail
-// 	}
-// 	return c.JSON(http.StatusOK, resp)
+// 	return c.JSON(http.StatusOK, map[string]interface{}{
+// 		"message":   "Automatic backup bulk update completed successfully",
+// 		"parent_id": connectedEmail,
+// 		"success":   success,
+// 		"failed":    failed,
+// 	})
 // }
 
 func HandleAutomaticSyncDelete(c echo.Context) error {
@@ -2611,6 +2482,7 @@ func HandleAutomaticSyncTaskList(c echo.Context) error {
 }
 
 func validateInterval(interval, on string) bool {
+	interval, on = normalizeScheduleIntervalOn(interval, on)
 	// For one_time backups, interval doesn't need validation since scheduling doesn't apply
 	if interval == "one_time" {
 		return true
@@ -2630,6 +2502,14 @@ func validateInterval(interval, on string) bool {
 	}
 
 	return false
+}
+
+func extractProjectIDFromStorxGrant(ctx context.Context, storxToken string) string {
+	projectID, err := satellite.GetProjectIDFromAccessGrant(ctx, storxToken)
+	if err != nil || projectID == "" {
+		return ""
+	}
+	return projectID
 }
 
 func extractAndStoreProjectID(ctx context.Context, database *db.PostgresDb, job *repo.CronJobListingDB, storxToken string, updateRequest map[string]interface{}, jobID int, syncType string) {

@@ -33,6 +33,47 @@ func HandleGetGoogleDriveFileNames(c echo.Context) error {
 	return c.JSON(http.StatusOK, fileNames)
 }
 
+// HandleFlatGoogleDriveFiles lists non-folder files as a flat stream-friendly page.
+func HandleFlatGoogleDriveFiles(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		logger.Error(ctx, "Failed to get userID from Satellite service", logger.ErrorField(err))
+		return HandleGoogleDriveError(c, err, "authentication failed")
+	}
+
+	// Keep behavior consistent with existing listing routes:
+	// process webhook events opportunistically before listing.
+	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accessGrant != "" {
+		go func() {
+			processCtx := context.Background()
+			if processErr := ProcessWebhookEvents(processCtx, database, accessGrant, 100); processErr != nil {
+				logger.Warn(processCtx, "Failed to process webhook events from listing route",
+					logger.ErrorField(processErr))
+			}
+		}()
+	}
+
+	pageToken := strings.TrimSpace(c.QueryParam("nextPageToken"))
+	if pageToken == "" {
+		// Backward compatibility for earlier Drive flat listing clients.
+		pageToken = strings.TrimSpace(c.QueryParam("page_token"))
+	}
+
+	_ = userID // reserved for parity with other listing handlers and future user-scoped checks
+	resp, err := google.ListNonFolderFilesFlat(c, pageToken)
+	if err != nil {
+		return HandleGoogleDriveError(c, err, "retrieve flat non-folder files from Google Drive")
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
 // Get all files names in a google drive root
 func HandleRootGoogleDriveFileNames(c echo.Context) error {
 	ctx := c.Request().Context()

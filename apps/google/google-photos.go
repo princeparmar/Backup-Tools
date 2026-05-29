@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -46,6 +47,26 @@ type PaginatedMediaItemsResponse struct {
 	NextPageToken string                  `json:"next_page_token,omitempty"`
 	Limit         int64                   `json:"limit"`
 	TotalItems    int64                   `json:"total_items"`
+}
+
+// FlatPhotosMediaResponse is the flat library listing page (cron + GET /google/photos-flat-media).
+type FlatPhotosMediaResponse struct {
+	MediaItems    []FlatPhotosMediaItem `json:"mediaItems"`
+	NextPageToken string                `json:"nextPageToken"`
+	NextPageTokenLegacy string          `json:"next_page_token,omitempty"`
+}
+
+// FlatPhotosMediaItem is a slim media item for flat library listing.
+type FlatPhotosMediaItem struct {
+	ID           string `json:"id"`
+	Filename     string `json:"filename"`
+	MimeType     string `json:"mime_type"`
+	CreationTime string `json:"creation_time"`
+	BaseURL      string `json:"base_url"`
+	ProductURL   string `json:"product_url"`
+	Width        string `json:"width"`
+	Height       string `json:"height"`
+	Synced       bool   `json:"synced,omitempty"`
 }
 
 func DecodeURLPhotosFilter(urlEncodedFilter string) (*PhotosFilters, error) {
@@ -364,4 +385,223 @@ func parseCustomDateRange(dateRange string) (time.Time, time.Time, error) {
 		return startDate, endDate.Add(23*time.Hour + 59*time.Minute + 59*time.Second), nil
 	}
 	return time.Time{}, time.Time{}, fmt.Errorf("invalid date range format")
+}
+
+const flatPhotosPageSize = 100
+
+// ListAllMediaItemsFlat returns a paginated flat library listing (no album/filters).
+func ListAllMediaItemsFlat(c echo.Context, pageToken string) (*FlatPhotosMediaResponse, error) {
+	client, err := NewGPhotosClient(c)
+	if err != nil {
+		return nil, err
+	}
+	return ListAllMediaItemsFlatWithService(client.Service, pageToken)
+}
+
+// ListAllMediaItemsFlatWithService is shared by HTTP route and cron flow.
+func ListAllMediaItemsFlatWithService(service *photoslibrary.Service, pageToken string) (*FlatPhotosMediaResponse, error) {
+	if service == nil {
+		return nil, fmt.Errorf("photos service is nil")
+	}
+	searchReq := &photoslibrary.SearchMediaItemsRequest{
+		PageSize:  flatPhotosPageSize,
+		PageToken: strings.TrimSpace(pageToken),
+	}
+	response, err := service.MediaItems.Search(searchReq).Do()
+	if err != nil {
+		return nil, fmt.Errorf("search media items: %w", err)
+	}
+	items := make([]FlatPhotosMediaItem, 0, len(response.MediaItems))
+	for _, item := range response.MediaItems {
+		if item == nil || strings.TrimSpace(item.Id) == "" {
+			continue
+		}
+		items = append(items, flatPhotosMediaItemFromAPI(item))
+	}
+	// Sorting only for deterministic processing order, NOT for correctness or stop logic.
+	SortFlatPhotosMediaItemsDesc(items)
+	next := strings.TrimSpace(response.NextPageToken)
+	return &FlatPhotosMediaResponse{
+		MediaItems:          items,
+		NextPageToken:       next,
+		NextPageTokenLegacy: next,
+	}, nil
+}
+
+func flatPhotosMediaItemFromAPI(item *photoslibrary.MediaItem) FlatPhotosMediaItem {
+	out := FlatPhotosMediaItem{
+		ID:         item.Id,
+		Filename:   item.Filename,
+		MimeType:   item.MimeType,
+		BaseURL:    item.BaseUrl,
+		ProductURL: item.ProductUrl,
+	}
+	if item.MediaMetadata != nil {
+		out.CreationTime = item.MediaMetadata.CreationTime
+		out.Width = strconv.FormatInt(item.MediaMetadata.Width, 10)
+		out.Height = strconv.FormatInt(item.MediaMetadata.Height, 10)
+	}
+	return out
+}
+
+// SortFlatPhotosMediaItemsDesc sorts by creationTime DESC, then id DESC (processing order only).
+func SortFlatPhotosMediaItemsDesc(items []FlatPhotosMediaItem) {
+	sort.Slice(items, func(i, j int) bool {
+		a, b := items[i], items[j]
+		if a.CreationTime != b.CreationTime {
+			return a.CreationTime > b.CreationTime
+		}
+		return a.ID > b.ID
+	})
+}
+
+// PageHasAnyNewPhotosItems returns true if any item ID is not in syncedSet.
+func PageHasAnyNewPhotosItems(items []FlatPhotosMediaItem, syncedSet map[string]struct{}) bool {
+	for i := range items {
+		if _, ok := syncedSet[items[i].ID]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
+// BuildPhotosSyncedIDSet builds a mediaItemId set from synced object keys under email prefix.
+func BuildPhotosSyncedIDSet(objectKeys map[string]bool, emailPrefix string) map[string]struct{} {
+	set := make(map[string]struct{})
+	prefix := strings.TrimSpace(emailPrefix)
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	metaPrefix := prefix + "meta/"
+	dataPrefix := prefix + "data/"
+	for key := range objectKeys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if id := extractPhotosIDFromMetaKey(key, metaPrefix); id != "" {
+			set[id] = struct{}{}
+			continue
+		}
+		if id := extractPhotosIDFromDataKey(key, dataPrefix); id != "" {
+			set[id] = struct{}{}
+			continue
+		}
+		if id := extractPhotosIDFromLegacyObjectKey(key, prefix); id != "" {
+			set[id] = struct{}{}
+		}
+	}
+	return set
+}
+
+func extractPhotosIDFromMetaKey(key, metaPrefix string) string {
+	if !strings.HasPrefix(key, metaPrefix) || !strings.HasSuffix(key, ".json") {
+		return ""
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(key, metaPrefix), ".json")
+	return strings.TrimSpace(id)
+}
+
+func extractPhotosIDFromDataKey(key, dataPrefix string) string {
+	if !strings.HasPrefix(key, dataPrefix) {
+		return ""
+	}
+	segment := strings.TrimSpace(strings.TrimPrefix(key, dataPrefix))
+	if segment == "" || strings.Contains(segment, "/") {
+		return ""
+	}
+	if id := extractMediaItemIDFromFilenameSegment(segment); id != "" {
+		return id
+	}
+	return segment
+}
+
+// MediaItemIDFromPhotosObjectSegment extracts Google media item id from PhotoID_filename segment.
+func MediaItemIDFromPhotosObjectSegment(segment string) string {
+	return extractMediaItemIDFromFilenameSegment(segment)
+}
+
+func extractPhotosIDFromLegacyObjectKey(key, emailPrefix string) string {
+	if emailPrefix != "" && !strings.HasPrefix(key, emailPrefix) {
+		return ""
+	}
+	rest := strings.TrimPrefix(key, emailPrefix)
+	if rest == "" || strings.Contains(rest, "/meta/") || strings.Contains(rest, "/data/") {
+		return ""
+	}
+	// Standalone: PhotoID_Filename or album/PhotoID_Filename — take last segment.
+	if idx := strings.LastIndex(rest, "/"); idx >= 0 {
+		rest = rest[idx+1:]
+	}
+	return extractMediaItemIDFromFilenameSegment(rest)
+}
+
+func extractMediaItemIDFromFilenameSegment(segment string) string {
+	segment = strings.TrimSpace(segment)
+	if segment == "" {
+		return ""
+	}
+	// Google Photos media item IDs are typically 98 chars before underscore separator.
+	if len(segment) > 98 && segment[98] == '_' {
+		return segment[:98]
+	}
+	if idx := strings.Index(segment, "_"); idx > 0 {
+		return segment[:idx]
+	}
+	return ""
+}
+
+// PhotosStandaloneObjectKey is legacy manual standalone storage (email root, no meta/data folders).
+func PhotosStandaloneObjectKey(email, mediaItemID, filename string) string {
+	return fmt.Sprintf("%s/%s_%s", strings.TrimSpace(email), strings.TrimSpace(mediaItemID), strings.TrimSpace(filename))
+}
+
+// PhotosIDBasedMetaKey returns cron metadata object key: {email}/meta/{mediaItemId}.json
+func PhotosIDBasedMetaKey(email, mediaItemID string) string {
+	return fmt.Sprintf("%s/meta/%s.json", strings.TrimSpace(email), strings.TrimSpace(mediaItemID))
+}
+
+// PhotosIDBasedDataKey returns cron photo bytes key: {email}/data/{mediaItemId}_{filename}
+func PhotosIDBasedDataKey(email, mediaItemID, filename string) string {
+	return fmt.Sprintf("%s/data/%s_%s", strings.TrimSpace(email), strings.TrimSpace(mediaItemID), strings.TrimSpace(filename))
+}
+
+// PhotosLegacyBareDataKey is older cron layout {email}/data/{id} (still recognized for dedupe/restore).
+func PhotosLegacyBareDataKey(email, mediaItemID string) string {
+	return fmt.Sprintf("%s/data/%s", strings.TrimSpace(email), strings.TrimSpace(mediaItemID))
+}
+
+// IsPhotosMediaItemSynced checks ID-based and legacy synced object paths.
+func IsPhotosMediaItemSynced(syncedMap map[string]bool, email, mediaItemID, filename, albumID, safeAlbumTitle string) bool {
+	if syncedMap == nil {
+		return false
+	}
+	id := strings.TrimSpace(mediaItemID)
+	em := strings.TrimSpace(email)
+	fn := strings.TrimSpace(filename)
+	if id != "" {
+		if syncedMap[PhotosIDBasedMetaKey(em, id)] {
+			return true
+		}
+		if fn != "" && syncedMap[PhotosIDBasedDataKey(em, id, fn)] {
+			return true
+		}
+		if syncedMap[PhotosLegacyBareDataKey(em, id)] {
+			return true
+		}
+	}
+	if fn != "" {
+		if syncedMap[em+"/"+fn] {
+			return true
+		}
+		if id != "" && syncedMap[fmt.Sprintf("%s/%s_%s", em, id, fn)] {
+			return true
+		}
+		if albumID != "" && safeAlbumTitle != "" && id != "" && fn != "" {
+			if syncedMap[fmt.Sprintf("%s/%s_%s/%s_%s", em, albumID, safeAlbumTitle, id, fn)] {
+				return true
+			}
+		}
+	}
+	return false
 }

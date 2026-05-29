@@ -34,7 +34,8 @@ var processorMap = map[string]Processor{
 	"outlook":       NewOutlookProcessor(),
 	"psql_database": NewPsqlDatabaseProcessor(),
 	"google_drive":  NewGoogleDriveProcessor(),
-	"google_photos": NewGooglePhotosProcessor(),
+	"google_photos":   NewGooglePhotosProcessor(),
+	"google_contacts": NewGoogleContactsProcessor(),
 }
 
 type AutosyncManager struct {
@@ -659,4 +660,4 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 
 // Autosync processors: gmail_processror.go, outlook_processor.go, google_drive_processor.go, google_photos_processor.go.
 // processorMap dispatches by job.Method; CreateTaskForAllPendingJobs + ProcessTask are method-agnostic.
-// google_calendar / google_contacts: onboarding jobs exist; add processorMap entries when backup runners exist.
+// google_calendar: onboarding jobs exist; add processorMap entry when backup runner exists.

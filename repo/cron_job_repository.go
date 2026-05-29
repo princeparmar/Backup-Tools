@@ -51,10 +51,12 @@ type CronJobListingDB struct {
 	StorjProjectID string `json:"storj_project_id,omitempty" gorm:"-"`
 
 	// Name + Method + SyncType + UserID must be unique (one cron job per service per mailbox).
-	Name     string     `json:"name" gorm:"uniqueIndex:idx_name_sync_type_user"`
-	Method   string     `json:"method" gorm:"uniqueIndex:idx_name_sync_type_user"`
-	Interval string     `json:"interval"`
-	On       string     `json:"on"`
+	Name     string `json:"name" gorm:"uniqueIndex:idx_name_sync_type_user"`
+	Method   string `json:"method" gorm:"uniqueIndex:idx_name_sync_type_user"`
+	Interval string `json:"interval"`
+	On       string `json:"on" gorm:"-"` // API-only; canonical value from autosync_backup_policy_dbs
+	// PolicyID is API-only; loaded from autosync_backup_policy_dbs via EnrichJobFromPolicy.
+	PolicyID uint       `json:"policy_id,omitempty" gorm:"-"`
 	LastRun  *time.Time `json:"last_run"`
 
 	// Change the type from map[string]interface{} to *database.DbJson[map[string]interface{}]
@@ -101,6 +103,16 @@ type TaskMemory struct {
 	GmailSyncComplete    bool `json:"gmail_sync_complete"`
 	OutlookSyncComplete  bool `json:"outlook_sync_complete"`
 	DatabaseSyncComplete bool `json:"database_sync_complete"`
+
+	// Drive incremental sync state (ID-based autosync architecture)
+	DrivePageToken    *string `json:"drive_page_token,omitempty"`
+	DriveBaselineDone bool    `json:"drive_baseline_done,omitempty"`
+
+	// Photos incremental sync state (ID-based autosync architecture)
+	PhotosBaselineDone bool `json:"photos_baseline_done,omitempty"`
+
+	// Contacts incremental sync state (ID-based autosync architecture)
+	ContactsBaselineDone bool `json:"contacts_baseline_done,omitempty"`
 }
 
 // Scan implements the sql.Scanner interface
@@ -297,10 +309,11 @@ func PeriodStartForInterval(interval string, now time.Time, loc *time.Location) 
 	}
 	n := now.In(loc)
 	switch strings.ToLower(strings.TrimSpace(interval)) {
-	case "1h":
-		return time.Date(n.Year(), n.Month(), n.Day(), n.Hour(), 0, 0, 0, loc)
-	case "6h":
-		blockHour := (n.Hour() / 6) * 6
+	case "3h":
+		blockHour := (n.Hour() / 3) * 3
+		return time.Date(n.Year(), n.Month(), n.Day(), blockHour, 0, 0, 0, loc)
+	case "12h":
+		blockHour := (n.Hour() / 12) * 12
 		return time.Date(n.Year(), n.Month(), n.Day(), blockHour, 0, 0, 0, loc)
 	case "daily":
 		return time.Date(n.Year(), n.Month(), n.Day(), 0, 0, 0, 0, loc)
@@ -324,7 +337,7 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 	// One task creation per schedule period: last_run must be before the period start for this job's interval,
 	// or null. No pushed/running task for the job. Retries on the same row are not new creations.
 	// Parameter order: message, status_not_in_1, status_not_in_2,
-	// daily, weekly, monthly, 1h, 6h period starts, daily (ELSE),
+	// daily, weekly, monthly, 3h, 12h period starts, daily (ELSE),
 	// weekday, day, task_running, task_pushed
 	sqlQuery := `
 		SELECT c.*
@@ -332,26 +345,27 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 		WHERE c.id IN (
 			SELECT c2.id
 			FROM cron_job_listing_dbs c2
+			LEFT JOIN autosync_backup_policy_dbs p ON p.job_id = c2.id AND p.deleted_at IS NULL
 			WHERE c2.active = true
 			AND (c2.message IS NULL OR c2.message != ?)
 			AND c2.status NOT IN (?, ?)
 			AND (
 				c2.last_run IS NULL
-				OR c2.last_run < CASE c2.interval
+				OR c2.last_run < CASE COALESCE(p.interval, c2.interval)
 					WHEN 'daily' THEN ?::timestamptz
 					WHEN 'weekly' THEN ?::timestamptz
 					WHEN 'monthly' THEN ?::timestamptz
-					WHEN '1h' THEN ?::timestamptz
-					WHEN '6h' THEN ?::timestamptz
+					WHEN '3h' THEN ?::timestamptz
+					WHEN '12h' THEN ?::timestamptz
 					ELSE ?::timestamptz
 				END
 			)
 			AND (
-				c2.interval = 'daily'
-				OR c2.interval = '1h'
-				OR c2.interval = '6h'
-				OR (c2.interval = 'weekly' AND c2."on" = ?)
-				OR (c2.interval = 'monthly' AND c2."on" = ?)
+				COALESCE(p.interval, c2.interval) = 'daily'
+				OR COALESCE(p.interval, c2.interval) = '3h'
+				OR COALESCE(p.interval, c2.interval) = '12h'
+				OR (COALESCE(p.interval, c2.interval) = 'weekly' AND p."on" = ?)
+				OR (COALESCE(p.interval, c2.interval) = 'monthly' AND p."on" = ?)
 			)
 			AND NOT EXISTS (
 				SELECT 1
@@ -371,13 +385,13 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 	dailyStart := PeriodStartForInterval("daily", now, location)
 	weeklyStart := PeriodStartForInterval("weekly", now, location)
 	monthlyStart := PeriodStartForInterval("monthly", now, location)
-	hourlyStart := PeriodStartForInterval("1h", now, location)
-	sixHourStart := PeriodStartForInterval("6h", now, location)
+	threeHourStart := PeriodStartForInterval("3h", now, location)
+	twelveHourStart := PeriodStartForInterval("12h", now, location)
 
 	rawQuery := tx.Raw(sqlQuery,
 		JobMessagePushToQueue,
 		JobStatusInQueue, JobStatusInProgress,
-		dailyStart, weeklyStart, monthlyStart, hourlyStart, sixHourStart, dailyStart,
+		dailyStart, weeklyStart, monthlyStart, threeHourStart, twelveHourStart, dailyStart,
 		now.Weekday().String(), fmt.Sprint(now.Day()),
 		TaskStatusRunning, TaskStatusPushed)
 
@@ -657,6 +671,20 @@ func (r *CronJobRepository) ListJobsByCredentialID(userID string, credentialID u
 	return rows, nil
 }
 
+// UpdateActiveForCredential sets active state on all jobs linked to a credential for a user.
+func (r *CronJobRepository) UpdateActiveForCredential(userID string, credentialID uint, active bool, patch map[string]interface{}) error {
+	if credentialID == 0 {
+		return nil
+	}
+	if patch == nil {
+		patch = map[string]interface{}{"active": active}
+	}
+	return r.db.Model(&CronJobListingDB{}).
+		Where("user_id = ? AND "+whereInputDataCredentialID, userID, credentialID).
+		Where("COALESCE(placeholder, false) = ?", false).
+		Updates(patch).Error
+}
+
 // DeactivateJobsForCredentialOrLegacyStorx deactivates all jobs for credential_id, else this job only.
 func (r *CronJobRepository) DeactivateJobsForCredentialOrLegacyStorx(job *CronJobListingDB, message string) error {
 	if job == nil {
@@ -748,7 +776,6 @@ func (r *CronJobRepository) CreateCronJobForUserWithCredential(userID, name, met
 	}
 	if syncType == "one_time" {
 		data.Interval = "one_time"
-		data.On = ""
 		data.Active = true
 	}
 	res := r.db.Create(&data)
@@ -779,7 +806,6 @@ func (r *CronJobRepository) CreateCronJobForUserWithPlaceholder(userID, name, me
 	// Set interval and activation for one-time backups
 	if syncType == "one_time" {
 		data.Interval = "one_time"
-		data.On = ""
 		if !placeholder {
 			data.Active = true
 		}
@@ -1022,17 +1048,40 @@ func gmailDelegationOnlyMayApply(job *CronJobListingDB) bool {
 }
 
 // ValidateJobForActivation checks if the job has all required fields and authentication tokens for activation
+func (r *CronJobRepository) scheduleForActivation(job *CronJobListingDB) (interval, on string) {
+	if job == nil {
+		return "", ""
+	}
+	interval = strings.TrimSpace(job.Interval)
+	var row struct {
+		Interval string
+		On       string
+	}
+	err := r.db.Table("autosync_backup_policy_dbs").
+		Select(`interval, "on"`).
+		Where("job_id = ? AND deleted_at IS NULL", job.ID).
+		First(&row).Error
+	if err == nil {
+		if strings.TrimSpace(row.Interval) != "" {
+			interval = strings.TrimSpace(row.Interval)
+		}
+		return interval, strings.TrimSpace(row.On)
+	}
+	return interval, ""
+}
+
 func (r *CronJobRepository) validateJobForActivation(job *CronJobListingDB) error {
 	// Validate required fields for activation
 	storx := r.ResolvedStorxToken(job)
 	if strings.TrimSpace(storx) == "" {
 		return fmt.Errorf("storx_token is required when activating backup")
 	}
-	if job.Interval == "" {
+	interval, on := r.scheduleForActivation(job)
+	if interval == "" {
 		return fmt.Errorf("interval is required when activating backup")
 	}
-	// 1h / 6h onboarding schedules use empty on; daily/weekly/monthly require on.
-	if job.On == "" && job.Interval != "1h" && job.Interval != "6h" {
+	// Hourly schedules use empty on; daily/weekly/monthly require on.
+	if on == "" && interval != "3h" && interval != "12h" {
 		return fmt.Errorf("on is required when activating backup")
 	}
 

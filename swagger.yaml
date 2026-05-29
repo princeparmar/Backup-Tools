@@ -242,8 +242,8 @@ paths:
     put:
       tags:
         - Auto Sync
-      summary: Update Job
-      description: Update an existing automatic sync job
+      summary: Update Job Active State
+      description: Update active flag for a single job. Schedule changes use PUT /auto-sync/policy/{policy_id}. Credential updates use PUT /auto-sync/job/project.
       security:
         - bearerAuth: []
       parameters:
@@ -258,7 +258,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/JobUpdateRequest'
+              $ref: '#/components/schemas/JobActiveUpdateRequest'
       responses:
         '200':
           description: Job updated successfully
@@ -342,7 +342,7 @@ paths:
       tags:
         - Auto Sync
       summary: Get Interval Configuration
-      description: Get available interval configuration options
+      description: Returns all schedule options (3h, 12h, daily, weekly, monthly) and valid on values per interval
       security:
         - bearerAuth: []
       responses:
@@ -353,18 +353,133 @@ paths:
               schema:
                 type: object
                 properties:
-                  monthly:
-                    type: array
-                    items:
-                      type: string
-                  weekly:
-                    type: array
-                    items:
-                      type: string
-                  daily:
-                    type: array
-                    items:
-                      type: string
+                  message:
+                    type: string
+                    example: Interval Values
+                  data:
+                    type: object
+                    additionalProperties:
+                      type: array
+                      items:
+                        type: string
+
+  /auto-sync/job/project:
+    put:
+      tags:
+        - Auto Sync
+      summary: Update Connected Account (Project)
+      description: Update credential tokens, bulk schedule for all linked jobs, or bulk active state
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectUpdateRequest'
+      responses:
+        '200':
+          description: Project updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectUpdateResponse'
+
+  /auto-sync/job/{job_id}/policy:
+    get:
+      tags:
+        - Auto Sync Policy
+      summary: Get Policy For Job
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Policy for job
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyEnvelopeResponse'
+
+  /auto-sync/policy:
+    get:
+      tags:
+        - Auto Sync Policy
+      summary: List Policies For Connected Account
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: credential_id
+          in: query
+          schema:
+            type: integer
+        - name: project_id
+          in: query
+          schema:
+            type: string
+        - name: google_email
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Policy list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyListResponse'
+
+  /auto-sync/policy/{policy_id}:
+    get:
+      tags:
+        - Auto Sync Policy
+      summary: Get Policy By ID
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: policy_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Policy details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyEnvelopeResponse'
+    put:
+      tags:
+        - Auto Sync Policy
+      summary: Update Policy Schedule
+      description: Update interval and on for one job/mailbox
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: policy_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyUpdateRequest'
+      responses:
+        '200':
+          description: Policy updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyEnvelopeResponse'
 
   /auto-sync/task/{job_id}:
     post:
@@ -536,6 +651,57 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/DriveFile'
+
+  /google/drive-flat-files:
+    get:
+      tags:
+        - Google Drive
+      summary: List Flat Non-Folder Files
+      description: Flat paginated list of non-folder files across My Drive and Shared Drives. No recursion or path building.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: nextPageToken
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: page_token
+          in: query
+          required: false
+          deprecated: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Flat non-folder file page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  files:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        mime_type: { type: string }
+                        parents:
+                          type: array
+                          items: { type: string }
+                        modified_time: { type: string }
+                        size: { type: integer }
+                        md5_checksum: { type: string }
+                        version: { type: integer }
+                        drive_id: { type: string }
+                  nextPageToken:
+                    type: string
+                  next_page_token:
+                    type: string
+                  page_size:
+                    type: integer
 
   /google/drive-get-file/{ID}:
     get:
@@ -844,6 +1010,104 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/PhotoItem'
+
+  /google/contacts/list:
+    get:
+      tags:
+        - Google Contacts
+      summary: List Contacts
+      description: Paginated list of Google contacts via People API connections.list. Includes synced flag for cron ID-based objects.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: nextPageToken
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: pageToken
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: page_token
+          in: query
+          required: false
+          deprecated: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Contacts page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  contacts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        phones:
+                          type: array
+                          items: { type: string }
+                        emails:
+                          type: array
+                          items: { type: string }
+                        organizations:
+                          type: array
+                          items: { type: string }
+                        synced: { type: boolean }
+                  nextPageToken: { type: string }
+                  next_page_token: { type: string }
+
+  /google/photos-flat-media:
+    get:
+      tags:
+        - Google Photos
+      summary: List Flat Library Media
+      description: Flat paginated list of all library media items (no album). Includes synced flag for cron ID-based objects.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: nextPageToken
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: page_token
+          in: query
+          required: false
+          deprecated: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Flat media item page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mediaItems:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        filename: { type: string }
+                        mime_type: { type: string }
+                        creation_time: { type: string }
+                        base_url: { type: string }
+                        product_url: { type: string }
+                        width: { type: string }
+                        height: { type: string }
+                        synced: { type: boolean }
+                  nextPageToken: { type: string }
+                  next_page_token: { type: string }
 
   /google/photos-list-all:
     get:
@@ -2156,6 +2420,9 @@ components:
         on:
           type: string
           example: "12am"
+        policy_id:
+          type: integer
+          example: 10
         active:
           type: boolean
           example: true
@@ -2180,9 +2447,6 @@ components:
           items:
             type: string
           example: ["email1@example.com", "email2@example.com"]
-        code:
-          type: string
-          example: "oauth_code"
         refresh_token:
           type: string
           example: "refresh_token"
@@ -2200,9 +2464,6 @@ components:
         on:
           type: string
           example: "Monday"
-        code:
-          type: string
-          example: "oauth_code"
         refresh_token:
           type: string
           example: "refresh_token"
@@ -2214,6 +2475,148 @@ components:
         active:
           type: boolean
           example: true
+
+    JobActiveUpdateRequest:
+      type: object
+      properties:
+        active:
+          type: boolean
+          example: true
+      required:
+        - active
+
+    PolicyUpdateRequest:
+      type: object
+      properties:
+        interval:
+          type: string
+          example: "3h"
+        on:
+          type: string
+          example: ""
+      required:
+        - interval
+        - on
+
+    PolicyDetailView:
+      type: object
+      properties:
+        policy_id:
+          type: integer
+        credential_id:
+          type: integer
+        job_id:
+          type: integer
+        interval:
+          type: string
+        on:
+          type: string
+        email:
+          type: string
+        method:
+          type: string
+        active:
+          type: boolean
+        sync_type:
+          type: string
+
+    ConnectedAccountView:
+      type: object
+      properties:
+        project_id:
+          type: string
+        google_email:
+          type: string
+        credential_id:
+          type: integer
+        storj_project_id:
+          type: string
+        refresh_token:
+          type: string
+        storx_token:
+          type: string
+
+    AutosyncJobItemView:
+      type: object
+      properties:
+        ID:
+          type: integer
+        policy_id:
+          type: integer
+        email:
+          type: string
+        method:
+          type: string
+        interval:
+          type: string
+        on:
+          type: string
+        active:
+          type: boolean
+
+    ProjectUpdateRequest:
+      type: object
+      properties:
+        project_id:
+          type: string
+        google_email:
+          type: string
+        refresh_token:
+          type: string
+        storx_token:
+          type: string
+        interval:
+          type: string
+        on:
+          type: string
+        active:
+          type: boolean
+
+    ProjectUpdateResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        account:
+          $ref: '#/components/schemas/ConnectedAccountView'
+        success:
+          type: array
+          items:
+            $ref: '#/components/schemas/AutosyncJobItemView'
+        failed:
+          type: array
+          items:
+            type: object
+
+    PolicyEnvelopeResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        success:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyDetailView'
+        failed:
+          type: array
+          items:
+            type: object
+
+    PolicyListResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        account:
+          $ref: '#/components/schemas/ConnectedAccountView'
+        success:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyDetailView'
+        failed:
+          type: array
+          items:
+            type: object
 
     DatabaseConnection:
       type: object
@@ -2612,9 +3015,6 @@ components:
           items:
             type: string
           example: ["email1@example.com", "email2@example.com"]
-        code:
-          type: string
-          example: "oauth_code"
         refresh_token:
           type: string
           example: "refresh_token"

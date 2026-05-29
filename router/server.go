@@ -54,7 +54,8 @@ func StartServer(db *db.PostgresDb, address string) {
 	e.GET("/google-auth", googlepack.Autentificateg)
 	// e.POST("/auth/google/connect", handler.HandleGoogleConnect)
 	e.GET("/google/gmail/corporate/domain-users", handler.HandleGmailCorporateDomainUsers)
-	e.GET("/auth/microsoft/start", handler.HandleMicrosoftAuthRedirect)
+	// Microsoft OAuth login moved to Satellite.
+	// e.GET("/auth/microsoft/start", handler.HandleMicrosoftAuthRedirect)
 	e.GET("/autobackup/summary", handler.HandleAutomaticBackupSummary)
 	e.GET("/autosync/stats", handler.HandleAutomaticSyncStats)
 
@@ -65,14 +66,18 @@ func StartServer(db *db.PostgresDb, address string) {
 	job := autoSync.Group("/job")
 	job.GET("/", handler.HandleAutomaticSyncListForUser)
 	job.POST("", handler.HandleAutomaticSyncCreate)
+	job.GET("/interval", handler.HandleIntervalOnConfig)
 	job.PUT("/project", handler.HandleAutomaticBackupUpdateByProject)
 	job.GET("/:job_id", handler.HandleAutomaticSyncDetails)
-	// job.POST("/:method", handler.HandleAutomaticSyncCreate)
+	job.PUT("/:job_id", handler.HandleAutomaticBackupUpdate)
+	job.GET("/:job_id/policy", handler.HandleAutosyncPolicyByJobID)
 	// job.PUT("/:method/bulk-update", handler.HandleAutomaticBackupBulkUpdateByParent)
-	// job.PUT("/:job_id", handler.HandleAutomaticBackupUpdate)
 	job.DELETE("/:job_id", handler.HandleAutomaticSyncDelete)
 
-	job.GET("/interval", handler.HandleIntervalOnConfig)
+	policy := autoSync.Group("/policy")
+	policy.GET("", handler.HandleAutosyncPolicyList)
+	policy.GET("/:policy_id", handler.HandleAutosyncPolicyByID)
+	policy.PUT("/:policy_id", handler.HandleAutosyncPolicyUpdate)
 
 	task := autoSync.Group("/task")
 	task.POST("/:job_id", handler.HandleAutomaticSyncCreateTask)
@@ -95,6 +100,8 @@ func StartServer(db *db.PostgresDb, address string) {
 	google.GET("/drive-root-file-names", handler.HandleRootGoogleDriveFileNames)
 	// List all files in root and not in root folder. Only files and folders in Root
 	google.GET("/drive-get-file-names", handler.HandleGetGoogleDriveFileNames)
+	// Flat list of non-folder files across all drives (pagination supported)
+	google.GET("/drive-flat-files", handler.HandleFlatGoogleDriveFiles)
 	google.GET("/drive-get-file/:ID", googlepack.GetFileByID)
 
 	// list drive files in satellite
@@ -119,7 +126,11 @@ func StartServer(db *db.PostgresDb, address string) {
 	// Send a list of items from google drive to satellite
 	// google.POST("/sync-list-from-drive", handler.HandleSendListFromGoogleDriveToSatellite)
 
+	// Google Contacts
+	google.GET("/contacts/list", handler.HandleListContacts)
+
 	// Google Photos
+	google.GET("/photos-flat-media", handler.HandleFlatPhotosMedia)
 	google.GET("/photos-list-albums", handler.HandleListGPhotosAlbums)
 	google.GET("/photos-list-photos-in-album/:ID", handler.HandleListPhotosInAlbum)
 	google.GET("/photos-list-all", handler.HandleListAllPhotos)
