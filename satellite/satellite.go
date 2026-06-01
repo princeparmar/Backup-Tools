@@ -26,6 +26,7 @@ const (
 	ReserveBucket_Cloud      = "google-cloud"
 	ReserveBucket_Photos     = "google-photos"
 	ReserveBucket_Contacts   = "google-contacts"
+	ReserveBucket_Calendar   = "google-calendar"
 	ReserveBucket_Dropbox    = "dropbox"
 	ReserveBucket_S3         = "aws-s3"
 	ReserveBucket_Github     = "github"

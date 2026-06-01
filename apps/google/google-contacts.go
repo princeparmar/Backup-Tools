@@ -2,6 +2,7 @@ package google
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -14,10 +15,22 @@ import (
 )
 
 const (
-	contactsPageSize     = 100
-	contactsPersonFields = "names,emailAddresses,phoneNumbers,organizations,addresses,birthdays,photos,metadata"
+	contactsPageSize      = 100
+	contactsPersonFields  = "names,emailAddresses,phoneNumbers,organizations,addresses,birthdays,photos,metadata"
 	contactsReadonlyScope = "https://www.googleapis.com/auth/contacts.readonly"
+	contactsScope         = "https://www.googleapis.com/auth/contacts"
 )
+
+// ContactsBackupObject is the JSON stored in the vault by cron autosync.
+type ContactsBackupObject struct {
+	ResourceName  string   `json:"resource_name"`
+	Name          string   `json:"name"`
+	Phones        []string `json:"phones"`
+	Emails        []string `json:"emails"`
+	Organizations []string `json:"organizations,omitempty"`
+	ETag          string   `json:"etag"`
+	UpdatedAt     string   `json:"updated_at"`
+}
 
 // FlatContactsResponse is the paginated contacts listing (HTTP route + cron).
 type FlatContactsResponse struct {
@@ -57,11 +70,20 @@ func NewPeopleServiceFromContext(c echo.Context) (*people.Service, error) {
 
 // NewPeopleServiceWithAccessToken builds a People API client for cron autosync.
 func NewPeopleServiceWithAccessToken(ctx context.Context, accessToken string) (*people.Service, error) {
+	return newPeopleServiceWithAccessToken(ctx, accessToken, contactsReadonlyScope)
+}
+
+// NewPeopleServiceForRestore builds a People API client for restore (requires contacts write scope on token).
+func NewPeopleServiceForRestore(ctx context.Context, accessToken string) (*people.Service, error) {
+	return newPeopleServiceWithAccessToken(ctx, accessToken, contactsScope)
+}
+
+func newPeopleServiceWithAccessToken(ctx context.Context, accessToken, scope string) (*people.Service, error) {
 	b, err := os.ReadFile("credentials.json")
 	if err != nil {
 		return nil, fmt.Errorf("unable to read credentials file: %w", err)
 	}
-	config, err := oauth2google.ConfigFromJSON(b, contactsReadonlyScope)
+	config, err := oauth2google.ConfigFromJSON(b, scope)
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse credentials: %w", err)
 	}
@@ -204,4 +226,56 @@ func IsContactSynced(syncedMap map[string]bool, email, resourceName string) bool
 		return false
 	}
 	return syncedMap[ContactsObjectKey(email, resourceName)]
+}
+
+// IsContactsRestoreObjectKey returns true for backed-up contact JSON paths (not placeholders).
+func IsContactsRestoreObjectKey(objectKey string) bool {
+	objectKey = strings.TrimSpace(objectKey)
+	return strings.Contains(objectKey, "/contacts/") && strings.HasSuffix(objectKey, ".json") && !strings.Contains(objectKey, ".file_placeholder")
+}
+
+// RestoreContactFromBackup creates a Google contact from vault JSON.
+func RestoreContactFromBackup(ctx context.Context, service *people.Service, data []byte) error {
+	if service == nil {
+		return fmt.Errorf("people service is nil")
+	}
+	var backup ContactsBackupObject
+	if err := json.Unmarshal(data, &backup); err != nil {
+		return fmt.Errorf("parse contact backup: %w", err)
+	}
+	person := personFromContactsBackup(backup)
+	if person == nil {
+		return fmt.Errorf("contact backup has no restorable fields")
+	}
+	_, err := service.People.CreateContact(person).Do()
+	if err != nil {
+		return fmt.Errorf("create contact: %w", err)
+	}
+	return nil
+}
+
+func personFromContactsBackup(backup ContactsBackupObject) *people.Person {
+	person := &people.Person{}
+	if name := strings.TrimSpace(backup.Name); name != "" {
+		person.Names = []*people.Name{{DisplayName: name}}
+	}
+	for _, e := range backup.Emails {
+		if v := strings.TrimSpace(e); v != "" {
+			person.EmailAddresses = append(person.EmailAddresses, &people.EmailAddress{Value: v})
+		}
+	}
+	for _, p := range backup.Phones {
+		if v := strings.TrimSpace(p); v != "" {
+			person.PhoneNumbers = append(person.PhoneNumbers, &people.PhoneNumber{Value: v})
+		}
+	}
+	for _, o := range backup.Organizations {
+		if v := strings.TrimSpace(o); v != "" {
+			person.Organizations = append(person.Organizations, &people.Organization{Name: v})
+		}
+	}
+	if len(person.Names) == 0 && len(person.EmailAddresses) == 0 && len(person.PhoneNumbers) == 0 && len(person.Organizations) == 0 {
+		return nil
+	}
+	return person
 }

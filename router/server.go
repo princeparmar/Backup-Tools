@@ -28,6 +28,7 @@ func StartServer(db *db.PostgresDb, address string) {
 
 	// Swagger documentation endpoints
 	e.GET("/swagger", handler.SwaggerUIHandler)
+	e.GET("/swagger.yaml", handler.SwaggerYAMLHandler)
 
 	e.GET("/health", func(c echo.Context) error {
 		return c.String(http.StatusOK, "OK")
@@ -128,6 +129,12 @@ func StartServer(db *db.PostgresDb, address string) {
 
 	// Google Contacts
 	google.GET("/contacts/list", handler.HandleListContacts)
+	google.POST("/satellite-to-contacts", handler.HandleGoogleContactsRestore)
+
+	// Google Calendar
+	google.GET("/calendar/list", handler.HandleListCalendars)
+	google.GET("/calendar/events/:calendarId", handler.HandleListCalendarEvents)
+	google.POST("/satellite-to-calendar", handler.HandleGoogleCalendarRestore)
 
 	// Google Photos
 	google.GET("/photos-flat-media", handler.HandleFlatPhotosMedia)

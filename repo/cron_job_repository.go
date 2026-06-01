@@ -113,6 +113,15 @@ type TaskMemory struct {
 
 	// Contacts incremental sync state (ID-based autosync architecture)
 	ContactsBaselineDone bool `json:"contacts_baseline_done,omitempty"`
+
+	// Calendar incremental sync state (per-calendar syncToken; see CalendarCalendarState)
+	CalendarCalendars map[string]CalendarCalendarState `json:"calendar_calendars,omitempty"`
+}
+
+// CalendarCalendarState holds baseline + sync token for one Google calendar.
+type CalendarCalendarState struct {
+	BaselineDone bool   `json:"baseline_done,omitempty"`
+	SyncToken    string `json:"sync_token,omitempty"`
 }
 
 // Scan implements the sql.Scanner interface

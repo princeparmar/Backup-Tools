@@ -19,8 +19,32 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// HandleListContacts lists Google contacts with pagination (same logic as cron).
-func HandleListContacts(c echo.Context) error {
+// HandleListCalendars lists Google calendars (same API as cron).
+func HandleListCalendars(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "access token not found",
+		})
+	}
+
+	resp, err := google.ListCalendarsFlat(c)
+	if err != nil {
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{"error": "token expired"})
+		}
+		return c.JSON(http.StatusForbidden, map[string]interface{}{"error": err.Error()})
+	}
+
+	return c.JSON(http.StatusOK, resp)
+}
+
+// HandleListCalendarEvents lists events for one calendar with pagination (same helper as cron).
+func HandleListCalendarEvents(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
@@ -36,9 +60,16 @@ func HandleListContacts(c echo.Context) error {
 	go func() {
 		processCtx := context.Background()
 		if processErr := ProcessWebhookEvents(processCtx, database, accesGrant, 100); processErr != nil {
-			logger.Warn(processCtx, "Failed to process webhook events from contacts listing route", logger.ErrorField(processErr))
+			logger.Warn(processCtx, "Failed to process webhook events from calendar listing route", logger.ErrorField(processErr))
 		}
 	}()
+
+	calendarID := strings.TrimSpace(c.Param("calendarId"))
+	if calendarID == "" {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"error": "calendarId is required",
+		})
+	}
 
 	pageToken := strings.TrimSpace(c.QueryParam("nextPageToken"))
 	if pageToken == "" {
@@ -47,12 +78,18 @@ func HandleListContacts(c echo.Context) error {
 	if pageToken == "" {
 		pageToken = strings.TrimSpace(c.QueryParam("page_token"))
 	}
+	syncToken := strings.TrimSpace(c.QueryParam("syncToken"))
 
-	resp, err := google.ListAllContactsFlat(c, pageToken)
+	service, err := google.NewCalendarServiceFromContext(c)
 	if err != nil {
 		if err.Error() == "token error" {
 			return c.JSON(http.StatusUnauthorized, map[string]interface{}{"error": "token expired"})
 		}
+		return c.JSON(http.StatusForbidden, map[string]interface{}{"error": err.Error()})
+	}
+
+	page, err := google.ListCalendarEventsWithService(service, calendarID, pageToken, syncToken)
+	if err != nil {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{"error": err.Error()})
 	}
 
@@ -68,9 +105,9 @@ func HandleListContacts(c echo.Context) error {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"error": "authentication failed"})
 	}
 
-	syncedObjects, err := database.SyncedObjectRepo.GetSyncedObjectsByUserAndBucket(userID, satellite.ReserveBucket_Contacts, "google", "contacts")
+	syncedObjects, err := database.SyncedObjectRepo.GetSyncedObjectsByUserAndBucket(userID, satellite.ReserveBucket_Calendar, "google", "calendar")
 	if err != nil {
-		logger.Warn(ctx, "Failed to get synced objects from database", logger.ErrorField(err))
+		logger.Warn(ctx, "Failed to get synced calendar objects from database", logger.ErrorField(err))
 		syncedObjects = []repo.SyncedObject{}
 	}
 	syncedMap := make(map[string]bool, len(syncedObjects))
@@ -78,16 +115,16 @@ func HandleListContacts(c echo.Context) error {
 		syncedMap[obj.ObjectKey] = true
 	}
 
-	for i := range resp.Contacts {
-		item := &resp.Contacts[i]
-		item.Synced = google.IsContactSynced(syncedMap, userDetails.Email, item.ID)
+	for i := range page.Events {
+		item := &page.Events[i]
+		item.Synced = google.IsCalendarEventSynced(syncedMap, userDetails.Email, calendarID, item.ID)
 	}
 
-	return c.JSON(http.StatusOK, resp)
+	return c.JSON(http.StatusOK, page)
 }
 
-// HandleGoogleContactsRestore downloads contacts from Satellite and creates them in Google Contacts.
-func HandleGoogleContactsRestore(c echo.Context) error {
+// HandleGoogleCalendarRestore downloads calendar events from Satellite and inserts them into Google Calendar.
+func HandleGoogleCalendarRestore(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
@@ -106,7 +143,7 @@ func HandleGoogleContactsRestore(c echo.Context) error {
 		})
 	}
 
-	service, err := google.NewPeopleServiceFromContext(c)
+	service, err := google.NewCalendarServiceFromContext(c)
 	if err != nil {
 		if err.Error() == "token error" {
 			return c.JSON(http.StatusUnauthorized, map[string]interface{}{"error": "token expired"})
@@ -128,15 +165,15 @@ func HandleGoogleContactsRestore(c echo.Context) error {
 
 	priority := "normal"
 	startData := map[string]interface{}{
-		"event":      "google_contacts_restore_started",
+		"event":      "google_calendar_restore_started",
 		"level":      2,
 		"login_id":   userDetails.Email,
-		"method":     "google_contacts",
+		"method":     "google_calendar",
 		"type":       "restore",
 		"timestamp":  "now",
 		"item_count": len(allKeys),
 	}
-	satellite.SendNotificationAsync(ctx, userID, "Google Contacts Restore Started", fmt.Sprintf("Restore of %d contacts for %s has started", len(allKeys), userDetails.Email), &priority, startData, nil)
+	satellite.SendNotificationAsync(ctx, userID, "Google Calendar Restore Started", fmt.Sprintf("Restore of %d events for %s has started", len(allKeys), userDetails.Email), &priority, startData, nil)
 
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(10)
@@ -144,19 +181,24 @@ func HandleGoogleContactsRestore(c echo.Context) error {
 
 	for _, key := range allKeys {
 		key := key
-		if !google.IsContactsRestoreObjectKey(key) {
+		if !google.IsCalendarEventRestoreObjectKey(key) {
+			failedKeys.Add(key)
+			continue
+		}
+		calendarID, _, ok := google.ParseCalendarEventObjectKey(key)
+		if !ok {
 			failedKeys.Add(key)
 			continue
 		}
 		g.Go(func() error {
-			data, dlErr := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Contacts, key)
+			data, dlErr := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Calendar, key)
 			if dlErr != nil {
-				logger.Warn(ctx, "Failed to download contact from satellite", logger.String("key", key), logger.ErrorField(dlErr))
+				logger.Warn(ctx, "Failed to download calendar event from satellite", logger.String("key", key), logger.ErrorField(dlErr))
 				failedKeys.Add(key)
 				return nil
 			}
-			if restoreErr := google.RestoreContactFromBackup(ctx, service, data); restoreErr != nil {
-				logger.Warn(ctx, "Failed to restore contact", logger.String("key", key), logger.ErrorField(restoreErr))
+			if restoreErr := google.RestoreCalendarEventFromBackup(ctx, service, calendarID, data); restoreErr != nil {
+				logger.Warn(ctx, "Failed to restore calendar event", logger.String("key", key), logger.ErrorField(restoreErr))
 				failedKeys.Add(key)
 			} else {
 				processedKeys.Add(key)
@@ -168,10 +210,10 @@ func HandleGoogleContactsRestore(c echo.Context) error {
 	if err := g.Wait(); err != nil {
 		failPriority := "high"
 		failData := map[string]interface{}{
-			"event": "google_contacts_restore_failed", "level": 4, "login_id": userDetails.Email,
-			"method": "google_contacts", "type": "restore", "timestamp": "now", "error": err.Error(),
+			"event": "google_calendar_restore_failed", "level": 4, "login_id": userDetails.Email,
+			"method": "google_calendar", "type": "restore", "timestamp": "now", "error": err.Error(),
 		}
-		satellite.SendNotificationAsync(context.Background(), userID, "Google Contacts Restore Failed", err.Error(), &failPriority, failData, nil)
+		satellite.SendNotificationAsync(context.Background(), userID, "Google Calendar Restore Failed", err.Error(), &failPriority, failData, nil)
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"error": err.Error(), "failed_keys": failedKeys.Get(), "processed_keys": processedKeys.Get(),
 		})
@@ -179,16 +221,16 @@ func HandleGoogleContactsRestore(c echo.Context) error {
 
 	compPriority := "normal"
 	compData := map[string]interface{}{
-		"event": "google_contacts_restore_completed", "level": 2, "login_id": userDetails.Email,
-		"method": "google_contacts", "type": "restore", "timestamp": "now",
+		"event": "google_calendar_restore_completed", "level": 2, "login_id": userDetails.Email,
+		"method": "google_calendar", "type": "restore", "timestamp": "now",
 		"processed_count": len(processedKeys.Get()), "failed_count": len(failedKeys.Get()),
 	}
-	satellite.SendNotificationAsync(ctx, userID, "Google Contacts Restore Completed",
+	satellite.SendNotificationAsync(ctx, userID, "Google Calendar Restore Completed",
 		fmt.Sprintf("Restore for %s completed. %d succeeded, %d failed", userDetails.Email, len(processedKeys.Get()), len(failedKeys.Get())),
 		&compPriority, compData, nil)
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":        "Google Contacts restore completed",
+		"message":        "Google Calendar restore completed",
 		"processed_keys": processedKeys.Get(),
 		"failed_keys":    failedKeys.Get(),
 	})

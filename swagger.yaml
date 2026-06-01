@@ -1064,6 +1064,123 @@ paths:
                   nextPageToken: { type: string }
                   next_page_token: { type: string }
 
+  /google/satellite-to-contacts:
+    post:
+      tags:
+        - Google Contacts
+      summary: Restore Contacts from Satellite
+      description: |
+        Restores up to 10 contacts from vault to Google Contacts.
+        Request body is a JSON array of base64-encoded satellite object keys
+        (e.g. user@gmail.com/contacts/{id}.json). Requires Google contacts write scope on the access token.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+              description: Base64-encoded object keys in google-contacts bucket
+      responses:
+        '200':
+          description: Restore completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestoreKeysResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /google/calendar/list:
+    get:
+      tags:
+        - Google Calendar
+      summary: List Calendars
+      description: Lists Google calendars (calendarList). Append-only backup; cancelled events on Google do not remove vault copies.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Calendar list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FlatCalendarsResponse'
+
+  /google/calendar/events/{calendarId}:
+    get:
+      tags:
+        - Google Calendar
+      summary: List Calendar Events
+      description: Paginated events.list for one calendar (baseline pageToken or incremental syncToken). Includes synced flag from synced_objects.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: calendarId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: nextPageToken
+          in: query
+          schema:
+            type: string
+        - name: pageToken
+          in: query
+          schema:
+            type: string
+        - name: page_token
+          in: query
+          deprecated: true
+          schema:
+            type: string
+        - name: syncToken
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Events page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FlatCalendarEventsResponse'
+
+  /google/satellite-to-calendar:
+    post:
+      tags:
+        - Google Calendar
+      summary: Restore Calendar Events from Satellite
+      description: |
+        Restores up to 10 calendar events from vault to Google Calendar.
+        Request body is a JSON array of base64-encoded object keys
+        (e.g. user@gmail.com/calendar/events/{calendarId}/{eventId}.json).
+        Creates new events (new Google IDs). Requires calendar write scope on the access token.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+      responses:
+        '200':
+          description: Restore completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestoreKeysResponse'
+
   /google/photos-flat-media:
     get:
       tags:
@@ -2741,6 +2858,74 @@ components:
         cover_photo_base_url:
           type: string
           example: "https://lh3.googleusercontent.com/..."
+
+    FlatCalendar:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "primary"
+        summary:
+          type: string
+          example: "Personal"
+        timezone:
+          type: string
+          example: "Asia/Kolkata"
+        primary:
+          type: boolean
+
+    FlatCalendarsResponse:
+      type: object
+      properties:
+        calendars:
+          type: array
+          items:
+            $ref: '#/components/schemas/FlatCalendar'
+
+    FlatCalendarEvent:
+      type: object
+      properties:
+        id:
+          type: string
+        summary:
+          type: string
+        status:
+          type: string
+        etag:
+          type: string
+        updated:
+          type: string
+        synced:
+          type: boolean
+          description: True if backed up to vault (append-only; cancellations on Google do not remove backup)
+
+    FlatCalendarEventsResponse:
+      type: object
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/FlatCalendarEvent'
+        nextPageToken:
+          type: string
+        nextSyncToken:
+          type: string
+        next_page_token:
+          type: string
+
+    RestoreKeysResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        processed_keys:
+          type: array
+          items:
+            type: string
+        failed_keys:
+          type: array
+          items:
+            type: string
 
     PhotoItem:
       type: object
