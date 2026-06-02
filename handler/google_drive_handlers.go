@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -14,6 +13,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
+	"github.com/StorX2-0/Backup-Tools/restore"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"golang.org/x/sync/errgroup"
 
@@ -849,20 +849,7 @@ func HandleGoogleDriveDownloadAndRestore(c echo.Context) error {
 		}
 		key := key
 		g.Go(func() error {
-			data, err := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Drive, key)
-			if err != nil {
-				logger.Warn(ctx, "Failed to download object", logger.String("key", key), logger.ErrorField(err))
-				failedKeys.Add(key)
-				return nil
-			}
-
-			var backupItem google.DriveBackupItem
-			if err := json.Unmarshal(data, &backupItem); err != nil {
-				logger.Warn(ctx, "Failed to parse backup metadata", logger.String("key", key), logger.ErrorField(err))
-			}
-
-			metadataJSON, _ := json.Marshal(backupItem.Metadata)
-			if err := google.RestoreFromBackup(ctx, srv, userDetails.Email, metadataJSON, backupItem.Content); err != nil {
+			if err := restore.RestoreDriveKey(ctx, accessGrant, srv, userDetails.Email, key); err != nil {
 				logger.Warn(ctx, "Failed to restore item", logger.String("key", key), logger.ErrorField(err))
 				failedKeys.Add(key)
 			} else {

@@ -68,6 +68,8 @@ tags:
     description: Scheduled task management
   - name: Monitoring
     description: System monitoring and metrics
+  - name: Restore
+    description: Async restore-all jobs (vault → Google)
 
 paths:
   # Authentication Endpoints
@@ -2460,6 +2462,227 @@ paths:
                   # TYPE http_requests_total counter
                   http_requests_total{method="GET",endpoint="/api/health"} 100
 
+  # Restore All Endpoints
+  /restore/live:
+    get:
+      tags:
+        - Restore
+      summary: Get active restore jobs
+      description: |
+        Poll in-progress restore-all jobs for the authenticated user, with progress counters
+        and running/retrying batch tasks. Same usage pattern as GET /auto-sync/live.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of active restore jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Active Restore Jobs List
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LiveRestoreJob'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /restore/jobs:
+    get:
+      tags:
+        - Restore
+      summary: List restore jobs
+      description: Recent restore jobs for the user (all statuses). Optional query limit (default 20). No secrets in response.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 20
+        - in: header
+          name: token_key
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Job list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  data:
+                    type: array
+                    items:
+                      type: object
+
+  /restore/all:
+    post:
+      tags:
+        - Restore
+      summary: Start restore-all job
+      description: |
+        Queue an async restore job for one Google service and account.
+        Objects are read from synced_objects and restored using the same vault download
+        and Google API paths as manual restore endpoints (max 10 keys).
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: header
+          name: ACCESS_TOKEN
+          required: true
+          schema:
+            type: string
+          description: StorX satellite access grant
+        - in: header
+          name: GOOGLE_ACCESS_TOKEN
+          required: false
+          schema:
+            type: string
+          description: Google OAuth access token (optional if stored in JWT session)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                service:
+                  type: string
+                  enum: [gmail, drive, photos, calendar, contacts]
+                  example: gmail
+                login_id:
+                  type: string
+                  example: user@gmail.com
+              required:
+                - service
+                - login_id
+      responses:
+        '202':
+          description: Job queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id:
+                    type: integer
+                  status:
+                    type: string
+                  message:
+                    type: string
+        '409':
+          description: Active restore already in progress for user+service+login_id
+        '400':
+          description: Invalid request
+        '403':
+          description: Missing tokens
+
+  /restore/job/{job_id}:
+    get:
+      tags:
+        - Restore
+      summary: Get restore job progress
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: job_id
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Job status and counters
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id:
+                    type: integer
+                  status:
+                    type: string
+                  service:
+                    type: string
+                  login_id:
+                    type: string
+                  total:
+                    type: integer
+                  processed:
+                    type: integer
+                  failed:
+                    type: integer
+                  cursor_id:
+                    type: integer
+        '404':
+          description: Job not found
+
+  /restore/job/{job_id}/cancel:
+    post:
+      tags:
+        - Restore
+      summary: Cancel restore job
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: job_id
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Job cancelled
+        '400':
+          description: Job already finished
+
+  /restore/job/{job_id}/dead-items:
+    get:
+      tags:
+        - Restore
+      summary: List failed object keys (DLQ)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: job_id
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Dead letter items for the job
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        object_key:
+                          type: string
+                        reason:
+                          type: string
+                        last_error_code:
+                          type: string
+
 components:
   securitySchemes:
     bearerAuth:
@@ -2518,6 +2741,61 @@ components:
         updated_at:
           type: string
           format: date-time
+
+    LiveRestoreJob:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 42
+        service:
+          type: string
+          example: gmail
+        method:
+          type: string
+          example: gmail
+        login_id:
+          type: string
+          example: user@gmail.com
+        status:
+          type: string
+          enum: [running]
+          example: running
+        message:
+          type: string
+        message_status:
+          type: string
+        total:
+          type: integer
+        processed:
+          type: integer
+        failed:
+          type: integer
+        cursor_id:
+          type: integer
+        tasks_total:
+          type: integer
+        tasks_completed:
+          type: integer
+        tasks_failed:
+          type: integer
+        progress_percent:
+          type: number
+          format: float
+          example: 24.5
+        tasks:
+          type: array
+          items:
+            type: object
+            properties:
+              start_time:
+                type: string
+                format: date-time
+              status:
+                type: string
+                enum: [running, retrying]
+              batch_index:
+                type: integer
 
     CronJob:
       type: object

@@ -171,11 +171,18 @@ type DatabaseConnection struct {
 	Password     string `json:"password"`
 }
 
-// AutoSyncStatsResponse represents the response structure for autosync stats
+// AutoSyncStatsResponse — Backup-Tools dashboard slice (connected accounts + last snapshot).
+// Storage quota and plan/trial come from Satellite.
 type AutoSyncStatsResponse struct {
-	ActiveSyncs int    `json:"active_syncs"`
-	FailedSyncs int    `json:"failed_syncs"`
-	Status      string `json:"status"`
+	ConnectedAccounts           int        `json:"connected_accounts"`
+	ConnectedAccountsGrowthWeek int        `json:"connected_accounts_growth_this_week"`
+	LastSyncAt                  *time.Time `json:"last_sync_at,omitempty"`
+	LastSyncItemsSynced         int64      `json:"last_sync_items_synced"`
+
+	// Not needed for Satellite dashboard (commented — re-enable if required).
+	// ActiveSyncs int    `json:"active_syncs"`
+	// FailedSyncs int    `json:"failed_syncs"`
+	// Status      string `json:"status"`
 }
 
 // CronJobResponse represents a cron job with next backup time.
@@ -2700,74 +2707,145 @@ func HandleAutomaticSyncStats(c echo.Context) error {
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	gdb := database.DB.WithContext(ctx)
 
-	var totalAccounts, activeSyncs, failedSyncs int64
-	var errTotal, errActive, errFailed error
+	/*
+		// active_syncs / failed_syncs / status — not used by Satellite dashboard.
+		var totalAccounts, activeSyncs, failedSyncs int64
+		var errTotal, errActive, errFailed error
 
-	var wg sync.WaitGroup
-	wg.Add(3)
+		var wg sync.WaitGroup
+		wg.Add(3)
 
-	go func() {
-		defer wg.Done()
-		errTotal = gdb.Session(&gorm.Session{}).
-			Model(&repo.CronJobListingDB{}).
-			Where("user_id = ? AND COALESCE(placeholder, false) = ?", userID, false).
-			Count(&totalAccounts).Error
-	}()
+		go func() {
+			defer wg.Done()
+			errTotal = gdb.Session(&gorm.Session{}).
+				Model(&repo.CronJobListingDB{}).
+				Where("user_id = ? AND COALESCE(placeholder, false) = ?", userID, false).
+				Count(&totalAccounts).Error
+		}()
 
-	go func() {
-		defer wg.Done()
-		errActive = gdb.Session(&gorm.Session{}).
-			Model(&repo.CronJobListingDB{}).
-			Where("user_id = ? AND active = ? AND COALESCE(placeholder, false) = ?", userID, true, false).
-			Count(&activeSyncs).Error
-	}()
+		go func() {
+			defer wg.Done()
+			errActive = gdb.Session(&gorm.Session{}).
+				Model(&repo.CronJobListingDB{}).
+				Where("user_id = ? AND active = ? AND COALESCE(placeholder, false) = ?", userID, true, false).
+				Count(&activeSyncs).Error
+		}()
 
-	go func() {
-		defer wg.Done()
-		errFailed = gdb.Session(&gorm.Session{}).
-			Model(&repo.CronJobListingDB{}).
-			Where("user_id = ? AND COALESCE(placeholder, false) = ? AND ((active = ? AND message_status = ?) OR auto_deactivated = ?)",
-				userID, false, true, repo.JobMessageStatusError, true).
-			Count(&failedSyncs).Error
-	}()
+		go func() {
+			defer wg.Done()
+			errFailed = gdb.Session(&gorm.Session{}).
+				Model(&repo.CronJobListingDB{}).
+				Where("user_id = ? AND COALESCE(placeholder, false) = ? AND ((active = ? AND message_status = ?) OR auto_deactivated = ?)",
+					userID, false, true, repo.JobMessageStatusError, true).
+				Count(&failedSyncs).Error
+		}()
 
-	wg.Wait()
+		wg.Wait()
 
-	if errTotal != nil || errActive != nil || errFailed != nil {
-		if errTotal != nil {
-			err = errTotal
-		} else if errActive != nil {
-			err = errActive
-		} else {
-			err = errFailed
+		if errTotal != nil || errActive != nil || errFailed != nil {
+			if errTotal != nil {
+				err = errTotal
+			} else if errActive != nil {
+				err = errActive
+			} else {
+				err = errFailed
+			}
+			logger.Error(ctx, "Failed to get autosync stats",
+				logger.ErrorField(errTotal),
+				logger.ErrorField(errActive),
+				logger.ErrorField(errFailed),
+			)
+			return c.JSON(http.StatusInternalServerError, map[string]string{
+				"message": "internal server error",
+			})
 		}
-		logger.Error(ctx, "Failed to get autosync stats",
-			logger.ErrorField(errTotal),
-			logger.ErrorField(errActive),
-			logger.ErrorField(errFailed),
-		)
+
+		var status string
+		switch {
+		case totalAccounts == 0:
+			status = "add accounts"
+		case activeSyncs == 0:
+			status = "inactive"
+		case failedSyncs == 0:
+			status = "success"
+		case failedSyncs == activeSyncs:
+			status = "failed"
+		default:
+			status = "partial_success"
+		}
+	*/
+
+	connectedAccounts, growthWeek, errConnected := countConnectedAccountsForUser(gdb, userID)
+	if errConnected != nil {
+		logger.Error(ctx, "Failed to count connected accounts", logger.ErrorField(errConnected))
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"message": "internal server error",
 		})
 	}
 
-	var status string
-	switch {
-	case totalAccounts == 0:
-		status = "add accounts"
-	case activeSyncs == 0:
-		status = "inactive"
-	case failedSyncs == 0:
-		status = "success"
-	case failedSyncs == activeSyncs:
-		status = "failed"
-	default:
-		status = "partial_success"
+	lastSyncAt, lastSyncItems, errLast := lastSyncSnapshotForUser(gdb, userID)
+	if errLast != nil {
+		logger.Error(ctx, "Failed to load last sync snapshot", logger.ErrorField(errLast))
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"message": "internal server error",
+		})
 	}
 
 	return c.JSON(http.StatusOK, AutoSyncStatsResponse{
-		ActiveSyncs: int(activeSyncs),
-		FailedSyncs: int(failedSyncs),
-		Status:      status,
+		ConnectedAccounts:           connectedAccounts,
+		ConnectedAccountsGrowthWeek: growthWeek,
+		LastSyncAt:                  lastSyncAt,
+		LastSyncItemsSynced:         lastSyncItems,
+		// ActiveSyncs: int(activeSyncs),
+		// FailedSyncs: int(failedSyncs),
+		// Status:      status,
 	})
+}
+
+func countConnectedAccountsForUser(gdb *gorm.DB, userID string) (total int, growthThisWeek int, err error) {
+	type row struct {
+		ID        uint
+		CreatedAt time.Time
+	}
+	var creds []row
+	err = gdb.Table("google_backup_credential_dbs AS c").
+		Select("DISTINCT c.id, c.created_at").
+		Joins(`INNER JOIN cron_job_listing_dbs j ON (j.input_data->>'credential_id')::bigint = c.id AND j.deleted_at IS NULL`).
+		Where("j.user_id = ? AND COALESCE(j.placeholder, false) = ?", userID, false).
+		Where("(j.input_data->>'credential_id') IS NOT NULL AND (j.input_data->>'credential_id')::bigint > 0").
+		Scan(&creds).Error
+	if err != nil {
+		return 0, 0, err
+	}
+	total = len(creds)
+	weekAgo := time.Now().AddDate(0, 0, -7)
+	for _, c := range creds {
+		if !c.CreatedAt.IsZero() && c.CreatedAt.After(weekAgo) {
+			growthThisWeek++
+		}
+	}
+	return total, growthThisWeek, nil
+}
+
+func lastSyncSnapshotForUser(gdb *gorm.DB, userID string) (*time.Time, int64, error) {
+	var lastRun *time.Time
+	err := gdb.Model(&repo.CronJobListingDB{}).
+		Where("user_id = ? AND COALESCE(placeholder, false) = ? AND last_run IS NOT NULL", userID, false).
+		Select("MAX(last_run)").
+		Scan(&lastRun).Error
+	if err != nil {
+		return nil, 0, err
+	}
+	if lastRun == nil || lastRun.IsZero() {
+		return nil, 0, nil
+	}
+
+	var items int64
+	err = gdb.Model(&repo.SyncedObject{}).
+		Where("user_id = ? AND synced_at >= ? AND deleted_at IS NULL", userID, *lastRun).
+		Count(&items).Error
+	if err != nil {
+		return lastRun, 0, err
+	}
+	return lastRun, items, nil
 }

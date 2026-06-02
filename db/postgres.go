@@ -15,6 +15,8 @@ type PostgresDb struct {
 	AuthRepo           *repo.AuthRepository
 	SyncedObjectRepo   *repo.SyncedObjectRepository
 	WebhookEventRepo   *repo.WebhookEventRepository
+	RestoreJobRepo  *repo.RestoreJobRepository
+	RestoreTaskRepo *repo.RestoreTaskRepository
 }
 
 func NewPostgresStore(dsn string, queryLogging bool) (*PostgresDb, error) {
@@ -33,7 +35,9 @@ func NewPostgresStore(dsn string, queryLogging bool) (*PostgresDb, error) {
 		ScheduledTasksRepo: repo.NewScheduledTasksRepository(db),
 		AuthRepo:           repo.NewAuthRepository(db),
 		SyncedObjectRepo:   repo.NewSyncedObjectRepository(db),
-		WebhookEventRepo:   repo.NewWebhookEventRepository(db),
+		WebhookEventRepo:    repo.NewWebhookEventRepository(db),
+		RestoreJobRepo:  repo.NewRestoreJobRepository(db),
+		RestoreTaskRepo: repo.NewRestoreTaskRepository(db),
 	}, nil
 }
 
@@ -49,7 +53,14 @@ func (s *PostgresDb) Migrate() error {
 		&repo.ScheduledTasks{},
 		&repo.SyncedObject{},
 		&repo.WebhookEvent{},
+		&repo.RestoreJobListingDB{},
+		&repo.RestoreTaskListingDB{},
+		&repo.RestoreDeadItemDB{},
 	); err != nil {
+		return err
+	}
+
+	if err := s.ensureRestoreIndexes(); err != nil {
 		return err
 	}
 
@@ -61,5 +72,18 @@ func (s *PostgresDb) Migrate() error {
 		return err
 	}
 
+	return nil
+}
+
+func (s *PostgresDb) ensureRestoreIndexes() error {
+	stmts := []string{
+		`CREATE INDEX IF NOT EXISTS idx_synced_objects_restore ON synced_objects (user_id, bucket_name, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_synced_objects_key_lookup ON synced_objects (user_id, bucket_name, object_key)`,
+	}
+	for _, stmt := range stmts {
+		if err := s.DB.Exec(stmt).Error; err != nil {
+			return err
+		}
+	}
 	return nil
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
+	"github.com/StorX2-0/Backup-Tools/restore"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 
 	"github.com/labstack/echo/v4"
@@ -185,19 +186,8 @@ func HandleGoogleCalendarRestore(c echo.Context) error {
 			failedKeys.Add(key)
 			continue
 		}
-		calendarID, _, ok := google.ParseCalendarEventObjectKey(key)
-		if !ok {
-			failedKeys.Add(key)
-			continue
-		}
 		g.Go(func() error {
-			data, dlErr := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Calendar, key)
-			if dlErr != nil {
-				logger.Warn(ctx, "Failed to download calendar event from satellite", logger.String("key", key), logger.ErrorField(dlErr))
-				failedKeys.Add(key)
-				return nil
-			}
-			if restoreErr := google.RestoreCalendarEventFromBackup(ctx, service, calendarID, data); restoreErr != nil {
+			if restoreErr := restore.RestoreCalendarKey(ctx, accessGrant, service, key); restoreErr != nil {
 				logger.Warn(ctx, "Failed to restore calendar event", logger.String("key", key), logger.ErrorField(restoreErr))
 				failedKeys.Add(key)
 			} else {

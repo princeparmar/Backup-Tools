@@ -347,6 +347,15 @@ func GetDriveService(c echo.Context) (*drive.Service, error) {
 	return getDriveService(c)
 }
 
+// GetDriveServiceUsingToken builds a Drive API client for background restore workers.
+func GetDriveServiceUsingToken(accessToken string) (*drive.Service, error) {
+	client, err := clientUsingToken(accessToken)
+	if err != nil {
+		return nil, err
+	}
+	return drive.NewService(context.Background(), option.WithHTTPClient(client))
+}
+
 func clientUsingToken(token string) (*http.Client, error) {
 	b, err := os.ReadFile("credentials.json")
 	if err != nil {

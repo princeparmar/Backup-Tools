@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/gorm"
+	gormdb "gorm.io/gorm"
 )
 
 // SyncedObject represents a synced object in the database
@@ -108,6 +109,66 @@ func (r *SyncedObjectRepository) GetSyncedObjectsByUserAndBucket(userID, bucketN
 	}
 
 	return syncedObjects, nil
+}
+
+func (r *SyncedObjectRepository) applyRestoreFilters(query *gormdb.DB, source, objectType, loginPrefix string) *gormdb.DB {
+	if source != "" {
+		query = query.Where("source = ?", source)
+	}
+	if objectType != "" {
+		query = query.Where("type = ?", objectType)
+	}
+	if loginPrefix != "" {
+		query = query.Where("object_key LIKE ?", loginPrefix+"%")
+	}
+	return query
+}
+
+// CountSyncedObjectsForRestore counts objects eligible for restore (prefix + filters).
+func (r *SyncedObjectRepository) CountSyncedObjectsForRestore(userID, bucketName, source, objectType, loginPrefix string) (int64, error) {
+	var count int64
+	q := r.applyRestoreFilters(
+		r.db.GetGormDB().Where("user_id = ? AND bucket_name = ? AND deleted_at IS NULL", userID, bucketName),
+		source, objectType, loginPrefix)
+	err := q.Model(&SyncedObject{}).Count(&count).Error
+	if err != nil {
+		return 0, fmt.Errorf("count synced objects: %v", err)
+	}
+	return count, nil
+}
+
+// GetSyncedObjectKeysPage returns the next page of synced objects ordered by id (cursor pagination).
+// GetSyncedObjectsInIDRange returns objects with id in (startID, endID] for batch retry.
+func (r *SyncedObjectRepository) GetSyncedObjectsInIDRange(userID, bucketName, source, objectType string, startID, endID uint) ([]SyncedObject, error) {
+	var rows []SyncedObject
+	err := r.applyRestoreFilters(
+		r.db.GetGormDB().Where("user_id = ? AND bucket_name = ? AND deleted_at IS NULL", userID, bucketName),
+		source, objectType, "").
+		Where("id > ? AND id <= ?", startID, endID).
+		Order("id ASC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("get synced object range: %v", err)
+	}
+	return rows, nil
+}
+
+func (r *SyncedObjectRepository) GetSyncedObjectKeysPage(userID, bucketName, source, objectType, loginPrefix string, afterID uint, limit int) ([]SyncedObject, error) {
+	if limit <= 0 {
+		limit = 25
+	}
+	var rows []SyncedObject
+	err := r.applyRestoreFilters(
+		r.db.GetGormDB().Where("user_id = ? AND bucket_name = ? AND deleted_at IS NULL", userID, bucketName),
+		source, objectType, loginPrefix).
+		Where("id > ?", afterID).
+		Order("id ASC").
+		Limit(limit).
+		Find(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("get synced object page: %v", err)
+	}
+	return rows, nil
 }
 
 func (r *SyncedObjectRepository) PermanentDeleteSyncedObjectsSoftDeletedBefore(before time.Time, limit int) (int64, error) {

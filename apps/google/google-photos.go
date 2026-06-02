@@ -98,6 +98,19 @@ func NewGPhotosClient(c echo.Context) (*GPotosClient, error) {
 		return nil, err
 	}
 
+	return newGPotosClientFromHTTPClient(httpClient)
+}
+
+// NewGPhotosClientUsingToken builds a Photos client for background restore workers.
+func NewGPhotosClientUsingToken(accessToken string) (*GPotosClient, error) {
+	httpClient, err := clientUsingToken(accessToken)
+	if err != nil {
+		return nil, err
+	}
+	return newGPotosClientFromHTTPClient(httpClient)
+}
+
+func newGPotosClientFromHTTPClient(httpClient *http.Client) (*GPotosClient, error) {
 	gpclient, err := gphotos.NewClient(httpClient)
 	if err != nil {
 		return nil, err

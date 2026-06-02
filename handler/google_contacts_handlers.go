@@ -13,6 +13,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
+	"github.com/StorX2-0/Backup-Tools/restore"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 
 	"github.com/labstack/echo/v4"
@@ -149,13 +150,7 @@ func HandleGoogleContactsRestore(c echo.Context) error {
 			continue
 		}
 		g.Go(func() error {
-			data, dlErr := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Contacts, key)
-			if dlErr != nil {
-				logger.Warn(ctx, "Failed to download contact from satellite", logger.String("key", key), logger.ErrorField(dlErr))
-				failedKeys.Add(key)
-				return nil
-			}
-			if restoreErr := google.RestoreContactFromBackup(ctx, service, data); restoreErr != nil {
+			if restoreErr := restore.RestoreContactKey(ctx, accessGrant, service, key); restoreErr != nil {
 				logger.Warn(ctx, "Failed to restore contact", logger.String("key", key), logger.ErrorField(restoreErr))
 				failedKeys.Add(key)
 			} else {

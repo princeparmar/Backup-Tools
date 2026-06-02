@@ -18,6 +18,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
+	"github.com/StorX2-0/Backup-Tools/restore"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"golang.org/x/sync/errgroup"
 
@@ -148,23 +149,8 @@ func (s *GmailService) DownloadMessagesFromSatellite(ctx context.Context, keys [
 			continue
 		}
 		g.Go(func() error {
-			// Download file from Satellite
-			data, err := satellite.DownloadObject(ctx, s.accessGrant, satellite.ReserveBucket_Gmail, key)
-			if err != nil {
-				failedIDs.Add(key)
-				return nil
-			}
-
-			// Parse the email data and insert into Gmail
-			var gmailMsg gmail.Message
-			if err := json.Unmarshal(data, &gmailMsg); err != nil {
-				failedIDs.Add(key)
-				return nil
-			}
-
-			// Insert message into Gmail
-			if err := s.client.InsertMessage(&gmailMsg); err != nil {
-				logger.Info(ctx, "error inserting message into Gmail", logger.ErrorField(err))
+			if err := restore.RestoreGmailKey(ctx, s.accessGrant, s.client, key); err != nil {
+				logger.Info(ctx, "error restoring message into Gmail", logger.ErrorField(err))
 				failedIDs.Add(key)
 			} else {
 				processedIDs.Add(key)

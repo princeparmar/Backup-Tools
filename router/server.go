@@ -87,6 +87,15 @@ func StartServer(db *db.PostgresDb, address string) {
 	// Admin endpoint for deleting jobs by email
 	autoSync.DELETE("/delete-jobs-by-email", handler.HandleDeleteJobsByEmail)
 
+	restoreGroup := e.Group("/restore")
+	restoreGroup.Use(middleware.JWTMiddleware)
+	restoreGroup.GET("/live", handler.HandleRestoreLive)
+	restoreGroup.POST("/all", handler.HandleRestoreAll)
+	restoreGroup.GET("/jobs", handler.HandleListRestoreJobs)
+	restoreGroup.GET("/job/:job_id", handler.HandleGetRestoreJob)
+	restoreGroup.POST("/job/:job_id/cancel", handler.HandleCancelRestoreJob)
+	restoreGroup.GET("/job/:job_id/dead-items", handler.HandleListRestoreDeadItems)
+
 	google := e.Group("/google")
 
 	google.Use(middleware.JWTMiddleware)
