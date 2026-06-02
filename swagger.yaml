@@ -387,35 +387,62 @@ paths:
               schema:
                 $ref: '#/components/schemas/ProjectUpdateResponse'
 
-  /auto-sync/job/{job_id}/policy:
+  /auto-sync/policy/by-job/{job_id}:
     get:
       tags:
         - Auto Sync Policy
       summary: Get Policy For Job
-      security:
-        - bearerAuth: []
+      description: Returns the shared policy linked to a job (replaces GET /auto-sync/job/{job_id}/policy).
       parameters:
         - name: job_id
           in: path
           required: true
           schema:
             type: integer
+        - $ref: '#/components/parameters/tokenKeyHeader'
       responses:
         '200':
           description: Policy for job
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PolicyEnvelopeResponse'
+                $ref: '#/components/schemas/PolicyDetailResponse'
+
+  /auto-sync/policy/merge:
+    post:
+      tags:
+        - Auto Sync Policy
+      summary: Merge Duplicate Policies
+      description: |
+        Consolidates policy rows with the same schedule fingerprint (user + credential + interval + on + retention_type).
+        Rebinds jobs to one canonical policy per group and soft-deletes duplicates. Use dry_run to preview.
+        See docs/satellite-autosync-policy-api.md.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyMergeRequest'
+      responses:
+        '200':
+          description: Merge completed or dry-run preview
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyMergeResponse'
 
   /auto-sync/policy:
     get:
       tags:
         - Auto Sync Policy
-      summary: List Policies For Connected Account
-      security:
-        - bearerAuth: []
+      summary: List Policies For User
+      description: |
+        Returns all distinct shared policies for the authenticated user (token_key).
+        Optional credential_id or project_id+google_email filters to one connected account.
       parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
         - name: credential_id
           in: query
           schema:
@@ -441,9 +468,9 @@ paths:
       tags:
         - Auto Sync Policy
       summary: Get Policy By ID
-      security:
-        - bearerAuth: []
+      description: Policy row plus all linked jobs (mailboxes). Requires token_key header.
       parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
         - name: policy_id
           in: path
           required: true
@@ -455,15 +482,17 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PolicyEnvelopeResponse'
+                $ref: '#/components/schemas/PolicyDetailResponse'
     put:
       tags:
         - Auto Sync Policy
-      summary: Update Policy Schedule
-      description: Update interval and on for one job/mailbox
-      security:
-        - bearerAuth: []
+      summary: Update Policy Schedule And Retention
+      description: |
+        apply_all=true updates the same policy for all linked jobs.
+        apply_all=false creates a new policy row and rebinds only selected_job_ids (selective renew).
+        active must be updated via PUT /auto-sync/job/{job_id}.
       parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
         - name: policy_id
           in: path
           required: true
@@ -481,7 +510,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PolicyEnvelopeResponse'
+                $ref: '#/components/schemas/PolicyUpdateResponse'
 
   /auto-sync/task/{job_id}:
     post:
@@ -2684,6 +2713,15 @@ paths:
                           type: string
 
 components:
+  parameters:
+    tokenKeyHeader:
+      name: token_key
+      in: header
+      required: true
+      schema:
+        type: string
+      description: Satellite session token (_tokenKey). Used by /auto-sync/* policy routes.
+
   securitySchemes:
     bearerAuth:
       type: http
@@ -2885,13 +2923,142 @@ components:
       properties:
         interval:
           type: string
-          example: "3h"
+          example: "daily"
         on:
           type: string
-          example: ""
+          example: "12am"
+        retention_type:
+          type: string
+          enum: [never, 30_days, 1_year, 7_years]
+          example: "1_year"
+        apply_all:
+          type: boolean
+          default: true
+          description: When false, selected_job_ids must be set; a new policy row is created for those jobs only.
+        selected_job_ids:
+          type: array
+          items:
+            type: integer
+          description: Job IDs to rebind when apply_all is false (mailbox selective renew).
       required:
         - interval
         - on
+
+    PolicyMergeRequest:
+      type: object
+      properties:
+        dry_run:
+          type: boolean
+          default: false
+          description: Preview merge without writing to the database when true.
+
+    PolicyListItemView:
+      type: object
+      properties:
+        policy_id:
+          type: integer
+        credential_id:
+          type: integer
+        interval:
+          type: string
+        on:
+          type: string
+        retention_type:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        is_expired:
+          type: boolean
+        linked_job_count:
+          type: integer
+
+    PolicyLinkedJobView:
+      type: object
+      properties:
+        job_id:
+          type: integer
+        email:
+          type: string
+        method:
+          type: string
+        active:
+          type: boolean
+        sync_type:
+          type: string
+
+    PolicyMergeGroupResult:
+      type: object
+      properties:
+        fingerprint:
+          type: string
+        canonical_policy_id:
+          type: integer
+        removed_policy_ids:
+          type: array
+          items:
+            type: integer
+        jobs_rebound:
+          type: integer
+
+    PolicyMergeResult:
+      type: object
+      properties:
+        merged_groups:
+          type: integer
+        jobs_rebound:
+          type: integer
+        policies_removed:
+          type: integer
+        groups:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyMergeGroupResult'
+
+    PolicyMergeResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        dry_run:
+          type: boolean
+        merge:
+          $ref: '#/components/schemas/PolicyMergeResult'
+
+    PolicyDetailResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        policy:
+          $ref: '#/components/schemas/PolicyListItemView'
+        linked_jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyLinkedJobView'
+        failed:
+          type: array
+          items:
+            type: object
+
+    PolicyUpdateResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        apply_all:
+          type: boolean
+        policy:
+          $ref: '#/components/schemas/PolicyListItemView'
+        affected_jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyLinkedJobView'
+        failed:
+          type: array
+          items:
+            type: object
 
     PolicyDetailView:
       type: object
@@ -2906,6 +3073,10 @@ components:
           type: string
         on:
           type: string
+        retention_type:
+          type: string
+        is_expired:
+          type: boolean
         email:
           type: string
         method:
@@ -3004,10 +3175,10 @@ components:
           type: string
         account:
           $ref: '#/components/schemas/ConnectedAccountView'
-        success:
+        policies:
           type: array
           items:
-            $ref: '#/components/schemas/PolicyDetailView'
+            $ref: '#/components/schemas/PolicyListItemView'
         failed:
           type: array
           items:

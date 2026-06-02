@@ -64,6 +64,10 @@ func (s *PostgresDb) Migrate() error {
 		return err
 	}
 
+	if err := s.ensureAutosyncPolicySchema(); err != nil {
+		return err
+	}
+
 	if err := s.PolicyRepo.BackfillFromJobs(); err != nil {
 		return err
 	}
@@ -72,6 +76,31 @@ func (s *PostgresDb) Migrate() error {
 		return err
 	}
 
+	return nil
+}
+
+func (s *PostgresDb) ensureAutosyncPolicySchema() error {
+	stmts := []string{
+		`ALTER TABLE autosync_backup_policy_dbs ADD COLUMN IF NOT EXISTS user_id TEXT`,
+		`ALTER TABLE autosync_backup_policy_dbs ADD COLUMN IF NOT EXISTS retention_type TEXT`,
+		`ALTER TABLE autosync_backup_policy_dbs ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ`,
+		`ALTER TABLE cron_job_listing_dbs ADD COLUMN IF NOT EXISTS policy_id BIGINT`,
+		`CREATE INDEX IF NOT EXISTS idx_cron_job_listing_policy_id ON cron_job_listing_dbs(policy_id)`,
+		`UPDATE autosync_backup_policy_dbs SET retention_type = 'never' WHERE retention_type IS NULL OR retention_type = ''`,
+		`ALTER TABLE autosync_backup_policy_dbs ALTER COLUMN retention_type SET DEFAULT 'never'`,
+		`DROP INDEX IF EXISTS idx_autosync_backup_policy_dbs_job_id`,
+		`ALTER TABLE autosync_backup_policy_dbs DROP COLUMN IF EXISTS job_id`,
+		`ALTER TABLE autosync_backup_policy_dbs DROP COLUMN IF EXISTS retention_days`,
+		`ALTER TABLE autosync_backup_policy_dbs ADD COLUMN IF NOT EXISTS is_expired BOOLEAN NOT NULL DEFAULT false`,
+		`UPDATE autosync_backup_policy_dbs SET is_expired = true WHERE deleted_at IS NULL AND expires_at IS NOT NULL AND expires_at <= NOW()`,
+		`DROP INDEX IF EXISTS idx_autosync_policy_fingerprint`,
+		`DROP INDEX IF EXISTS idx_autosync_policy_fingerprint_active`,
+	}
+	for _, stmt := range stmts {
+		if err := s.DB.Exec(stmt).Error; err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

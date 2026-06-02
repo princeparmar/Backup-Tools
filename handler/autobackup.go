@@ -895,11 +895,15 @@ func createGoogleJobsForServiceEmails(
 			failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: extractCreateJobError(createErr)})
 			continue
 		}
-		if err := applyOnboardingJobSchedule(database, cronJob.ID, schedule, credentialID, req.ProjectID); err != nil {
+		if err := applyOnboardingJobSchedule(database, userID, cronJob.ID, schedule, credentialID, req.ProjectID); err != nil {
 			failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: err.Error()})
 			continue
 		}
-		policy, _ := database.PolicyRepo.GetByJobID(cronJob.ID)
+		latestJob, _ := database.CronJobRepo.GetCronJobByID(cronJob.ID)
+		var policy *repo.AutosyncBackupPolicyDB
+		if latestJob != nil && latestJob.PolicyID > 0 {
+			policy, _ = database.PolicyRepo.GetByID(latestJob.PolicyID)
+		}
 		entry := onboardingJobResult{Service: svc, Email: targetEmail, JobID: cronJob.ID}
 		if policy != nil {
 			entry.PolicyID = policy.ID
@@ -1001,10 +1005,13 @@ func onboardingGoogleJobConfig(googleEmail, refreshToken string) map[string]inte
 }
 
 // applyOnboardingJobSchedule creates policy row (canonical schedule) and syncs job.interval cache.
-func applyOnboardingJobSchedule(database *db.PostgresDb, jobID uint, schedule onboardingSchedule, credentialID uint, projectID string) error {
+func applyOnboardingJobSchedule(database *db.PostgresDb, userID string, jobID uint, schedule onboardingSchedule, credentialID uint, projectID string) error {
 	_ = projectID
-	_, err := database.PolicyRepo.CreatePolicy(credentialID, jobID, schedule.Interval, schedule.On)
-	return err
+	policy, err := database.PolicyRepo.FindOrCreatePolicy(userID, credentialID, schedule.Interval, schedule.On, repo.RetentionNever)
+	if err != nil {
+		return err
+	}
+	return database.PolicyRepo.AssignPolicyToJob(jobID, policy.ID)
 }
 
 // Legacy: set storx_token on create and auto-activate daily jobs when grant was resolved on onboarding.
@@ -2045,7 +2052,18 @@ func HandleAutomaticBackupUpdateByProject(c echo.Context) error {
 				"error":   schedErr.Error(),
 			})
 		}
-		if err := database.PolicyRepo.UpdateScheduleForCredential(cred.ID, intervalVal, onValue); err != nil {
+		targetPolicy, ferr := database.PolicyRepo.FindOrCreatePolicy(userID, cred.ID, intervalVal, onValue, repo.RetentionNever)
+		if ferr != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+				"message": "Failed to resolve schedule policy",
+				"error":   ferr.Error(),
+			})
+		}
+		jobIDs := make([]uint, 0, len(jobs))
+		for i := range jobs {
+			jobIDs = append(jobIDs, jobs[i].ID)
+		}
+		if err := database.PolicyRepo.RebindJobsToPolicy(jobIDs, targetPolicy.ID); err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 				"message": "Failed to update schedule policies",
 				"error":   err.Error(),

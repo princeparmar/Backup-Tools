@@ -55,8 +55,8 @@ type CronJobListingDB struct {
 	Method   string `json:"method" gorm:"uniqueIndex:idx_name_sync_type_user"`
 	Interval string `json:"interval"`
 	On       string `json:"on" gorm:"-"` // API-only; canonical value from autosync_backup_policy_dbs
-	// PolicyID is API-only; loaded from autosync_backup_policy_dbs via EnrichJobFromPolicy.
-	PolicyID uint       `json:"policy_id,omitempty" gorm:"-"`
+	// PolicyID links to autosync_backup_policy_dbs.id.
+	PolicyID uint       `json:"policy_id,omitempty" gorm:"column:policy_id;index"`
 	LastRun  *time.Time `json:"last_run"`
 
 	// Change the type from map[string]interface{} to *database.DbJson[map[string]interface{}]
@@ -341,6 +341,16 @@ func PeriodStartForInterval(interval string, now time.Time, loc *time.Location) 
 // GetJobsToProcess retrieves jobs that are ready to be processed
 func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 	var res []CronJobListingDB
+	if err := r.db.Model(&CronJobListingDB{}).
+		Where("policy_id IN (SELECT id FROM autosync_backup_policy_dbs WHERE expires_at IS NOT NULL AND expires_at <= NOW() AND deleted_at IS NULL)").
+		Updates(map[string]interface{}{
+			"active":           false,
+			"auto_deactivated": true,
+			"message":          "Backup policy is expired. Update retention policy before re-activating.",
+			"message_status":   JobMessageStatusError,
+		}).Error; err != nil {
+		return nil, fmt.Errorf("deactivate expired policy jobs: %w", err)
+	}
 	tx := r.db.Begin()
 
 	// One task creation per schedule period: last_run must be before the period start for this job's interval,
@@ -354,13 +364,15 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 		WHERE c.id IN (
 			SELECT c2.id
 			FROM cron_job_listing_dbs c2
-			LEFT JOIN autosync_backup_policy_dbs p ON p.job_id = c2.id AND p.deleted_at IS NULL
+			LEFT JOIN autosync_backup_policy_dbs p ON p.id = c2.policy_id AND p.deleted_at IS NULL
 			WHERE c2.active = true
 			AND (c2.message IS NULL OR c2.message != ?)
 			AND c2.status NOT IN (?, ?)
+			AND c2.policy_id IS NOT NULL
+			AND (p.expires_at IS NULL OR p.expires_at > NOW())
 			AND (
 				c2.last_run IS NULL
-				OR c2.last_run < CASE COALESCE(p.interval, c2.interval)
+				OR c2.last_run < CASE p.interval
 					WHEN 'daily' THEN ?::timestamptz
 					WHEN 'weekly' THEN ?::timestamptz
 					WHEN 'monthly' THEN ?::timestamptz
@@ -370,11 +382,11 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 				END
 			)
 			AND (
-				COALESCE(p.interval, c2.interval) = 'daily'
-				OR COALESCE(p.interval, c2.interval) = '3h'
-				OR COALESCE(p.interval, c2.interval) = '12h'
-				OR (COALESCE(p.interval, c2.interval) = 'weekly' AND p."on" = ?)
-				OR (COALESCE(p.interval, c2.interval) = 'monthly' AND p."on" = ?)
+				p.interval = 'daily'
+				OR p.interval = '3h'
+				OR p.interval = '12h'
+				OR (p.interval = 'weekly' AND p."on" = ?)
+				OR (p.interval = 'monthly' AND p."on" = ?)
 			)
 			AND NOT EXISTS (
 				SELECT 1
@@ -678,6 +690,32 @@ func (r *CronJobRepository) ListJobsByCredentialID(userID string, credentialID u
 		return nil, fmt.Errorf("list jobs by credential_id: %w", err)
 	}
 	return rows, nil
+}
+
+// ListJobsByPolicyID returns all cron jobs for a user linked to a policy.
+func (r *CronJobRepository) ListJobsByPolicyID(userID string, policyID uint) ([]CronJobListingDB, error) {
+	var rows []CronJobListingDB
+	err := r.db.Where("user_id = ? AND policy_id = ?", userID, policyID).
+		Where("COALESCE(placeholder, false) = ?", false).
+		Order("created_at DESC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("list jobs by policy_id: %w", err)
+	}
+	return rows, nil
+}
+
+// GetJobByUserAndPolicyID returns one cron job for a user linked to a policy.
+func (r *CronJobRepository) GetJobByUserAndPolicyID(userID string, policyID uint) (*CronJobListingDB, error) {
+	var row CronJobListingDB
+	err := r.db.Where("user_id = ? AND policy_id = ?", userID, policyID).
+		Where("COALESCE(placeholder, false) = ?", false).
+		Order("id ASC").
+		First(&row).Error
+	if err != nil {
+		return nil, fmt.Errorf("get job by policy_id: %w", err)
+	}
+	return &row, nil
 }
 
 // UpdateActiveForCredential sets active state on all jobs linked to a credential for a user.
@@ -1068,7 +1106,7 @@ func (r *CronJobRepository) scheduleForActivation(job *CronJobListingDB) (interv
 	}
 	err := r.db.Table("autosync_backup_policy_dbs").
 		Select(`interval, "on"`).
-		Where("job_id = ? AND deleted_at IS NULL", job.ID).
+		Where("id = ? AND deleted_at IS NULL", job.PolicyID).
 		First(&row).Error
 	if err == nil {
 		if strings.TrimSpace(row.Interval) != "" {
@@ -1080,6 +1118,16 @@ func (r *CronJobRepository) scheduleForActivation(job *CronJobListingDB) (interv
 }
 
 func (r *CronJobRepository) validateJobForActivation(job *CronJobListingDB) error {
+	if job == nil || job.PolicyID == 0 {
+		return fmt.Errorf("policy_id is required when activating backup")
+	}
+	var policy AutosyncBackupPolicyDB
+	if err := r.db.Where("id = ? AND deleted_at IS NULL", job.PolicyID).First(&policy).Error; err != nil {
+		return fmt.Errorf("policy not found for activation: %w", err)
+	}
+	if IsPolicyExpired(&policy, time.Now().UTC()) {
+		return fmt.Errorf("policy is expired; update retention policy before activating this job")
+	}
 	// Validate required fields for activation
 	storx := r.ResolvedStorxToken(job)
 	if strings.TrimSpace(storx) == "" {

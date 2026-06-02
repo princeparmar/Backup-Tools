@@ -71,12 +71,13 @@ func StartServer(db *db.PostgresDb, address string) {
 	job.PUT("/project", handler.HandleAutomaticBackupUpdateByProject)
 	job.GET("/:job_id", handler.HandleAutomaticSyncDetails)
 	job.PUT("/:job_id", handler.HandleAutomaticBackupUpdate)
-	job.GET("/:job_id/policy", handler.HandleAutosyncPolicyByJobID)
 	// job.PUT("/:method/bulk-update", handler.HandleAutomaticBackupBulkUpdateByParent)
 	job.DELETE("/:job_id", handler.HandleAutomaticSyncDelete)
 
 	policy := autoSync.Group("/policy")
 	policy.GET("", handler.HandleAutosyncPolicyList)
+	policy.POST("/merge", handler.HandleAutosyncPolicyMerge)
+	policy.GET("/by-job/:job_id", handler.HandleAutosyncPolicyByJobID)
 	policy.GET("/:policy_id", handler.HandleAutosyncPolicyByID)
 	policy.PUT("/:policy_id", handler.HandleAutosyncPolicyUpdate)
 
