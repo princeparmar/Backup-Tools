@@ -81,12 +81,14 @@ func ConfigForMethod(method string) (ServiceConfig, bool) {
 
 // RestoreDeps is per-task runtime state (clients created in Processor.Setup).
 type RestoreDeps struct {
-	Store       *db.PostgresDb
-	Job         *repo.RestoreJobListingDB
-	AccessGrant string
-	GoogleToken string
-	LoginID     string
-	Config      ServiceConfig
+	Store        *db.PostgresDb
+	Job          *repo.RestoreJobListingDB
+	AccessGrant  string
+	GoogleToken  string
+	RefreshToken string
+	AuthMode     string
+	LoginID      string
+	Config       ServiceConfig
 
 	GmailClient     *google.GmailClient
 	DriveService    *drive.Service

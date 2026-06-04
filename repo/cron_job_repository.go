@@ -2,6 +2,7 @@ package repo
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/gorm"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
+	gormio "gorm.io/gorm"
 )
 
 // Job message status constants
@@ -631,6 +633,28 @@ func StripGmailRefreshTokenFromCronJobInputData(job *CronJobListingDB) {
 	if _, ok := (*job.InputData.Json())["refresh_token"]; ok {
 		(*job.InputData.Json())["refresh_token"] = ""
 	}
+}
+
+// FindJobForRestore returns the autosync cron job for a user, method, and mailbox login_id.
+func (r *CronJobRepository) FindJobForRestore(userID, method, loginID string) (*CronJobListingDB, bool, error) {
+	userID = strings.TrimSpace(userID)
+	method = strings.TrimSpace(method)
+	loginID = strings.TrimSpace(loginID)
+	if userID == "" || method == "" || loginID == "" {
+		return nil, false, nil
+	}
+	var job CronJobListingDB
+	err := r.db.Where("user_id = ? AND method = ? AND deleted_at IS NULL", userID, method).
+		Where("(name = ? OR (input_data->>'email') = ?)", loginID, loginID).
+		Order("active DESC, id DESC").
+		First(&job).Error
+	if err != nil {
+		if errors.Is(err, gormio.ErrRecordNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("find job for restore: %w", err)
+	}
+	return &job, true, nil
 }
 
 // GetCronJobByID retrieves a cron job by ID

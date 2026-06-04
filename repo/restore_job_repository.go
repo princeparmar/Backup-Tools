@@ -22,14 +22,32 @@ const (
 
 const RestoreMaxRetryCount = 3
 
+// Restore auth modes.
+const (
+	RestoreAuthModeOAuth = "oauth"
+	RestoreAuthModeDWD   = "dwd"
+)
+
+// RestoreJobContext is the slim frozen snapshot stored in context jsonb.
+type RestoreJobContext struct {
+	V             int      `json:"v"`
+	GrantedScopes []string `json:"granted_scopes,omitempty"`
+	OAuthHolder   string   `json:"oauth_holder,omitempty"`
+	QueuedBy      string   `json:"queued_by,omitempty"`
+}
+
 // RestoreJobListingDB tracks a full restore-all operation for one service + account.
 type RestoreJobListingDB struct {
 	gorm.GormModel
 
-	UserID  string `json:"user_id" gorm:"not null;index:idx_restore_jobs_user_service_login,priority:1"`
-	LoginID string `json:"login_id" gorm:"not null;index:idx_restore_jobs_user_service_login,priority:3"`
-	Method  string `json:"method" gorm:"not null;index:idx_restore_jobs_user_service_login,priority:2"`
-	Service string `json:"service" gorm:"not null"`
+	UserID         string `json:"user_id" gorm:"not null;index:idx_restore_jobs_user_service_login,priority:1"`
+	StorjProjectID string `json:"storj_project_id" gorm:"column:storj_project_id;index:idx_restore_jobs_project"`
+	LoginID        string `json:"login_id" gorm:"not null;index:idx_restore_jobs_user_service_login,priority:3"`
+	Method         string `json:"method" gorm:"not null;index:idx_restore_jobs_user_service_login,priority:2"`
+	AccountType    string `json:"account_type" gorm:"column:account_type;not null;default:personal"`
+	AuthMode       string `json:"auth_mode" gorm:"column:auth_mode;not null;default:oauth"`
+	CredentialID   uint   `json:"credential_id" gorm:"column:credential_id;index"`
+	CronJobID      uint   `json:"cron_job_id" gorm:"column:cron_job_id;index"`
 
 	Status string `json:"status" gorm:"not null;default:queued;index"`
 
@@ -38,19 +56,37 @@ type RestoreJobListingDB struct {
 	ProcessedCount uint `json:"processed_count" gorm:"default:0"`
 	FailedCount    uint `json:"failed_count" gorm:"default:0"`
 
-	TasksTotal     uint `json:"tasks_total" gorm:"default:0"`
-	TasksCompleted uint `json:"tasks_completed" gorm:"default:0"`
-	TasksFailed    uint `json:"tasks_failed" gorm:"default:0"`
+	Context *database.DbJson[RestoreJobContext] `json:"context" gorm:"column:context;type:jsonb"`
 
-	StorxToken string `json:"storx_token" gorm:"type:text"`
-
-	InputData *database.DbJson[map[string]interface{}] `json:"input_data" gorm:"type:jsonb"`
-
-	Message       string `json:"message"`
-	MessageStatus string `json:"message_status"`
+	Message string `json:"message" gorm:"type:varchar(512)"`
 
 	CancelledAt   *time.Time `json:"cancelled_at,omitempty"`
 	LastHeartBeat *time.Time `json:"last_heart_beat,omitempty"`
+
+	// Legacy columns — fallback for in-flight rows; do not write on new jobs.
+	Service        string                                 `json:"service,omitempty" gorm:"column:service"`
+	StorxToken     string                                 `json:"storx_token,omitempty" gorm:"column:storx_token;type:text"`
+	InputData      *database.DbJson[map[string]interface{}] `json:"input_data,omitempty" gorm:"column:input_data;type:jsonb"`
+	MessageStatus  string                                 `json:"message_status,omitempty" gorm:"column:message_status"`
+	TasksTotal     uint `json:"tasks_total,omitempty" gorm:"-"`
+	TasksCompleted uint `json:"tasks_completed,omitempty" gorm:"-"`
+	TasksFailed    uint `json:"tasks_failed,omitempty" gorm:"-"`
+}
+
+// APIServiceFromMethod maps internal method to UI service name.
+func APIServiceFromMethod(method string) string {
+	switch method {
+	case "google_drive":
+		return "drive"
+	case "google_photos":
+		return "photos"
+	case "google_calendar":
+		return "calendar"
+	case "google_contacts":
+		return "contacts"
+	default:
+		return method
+	}
 }
 
 // LiveRestoreJobListingDB is the live-view payload for in-progress restore jobs (UI polling).
@@ -61,14 +97,10 @@ type LiveRestoreJobListingDB struct {
 	LoginID         string                     `json:"login_id"`
 	Status          string                     `json:"status"`
 	Message         string                     `json:"message"`
-	MessageStatus   string                     `json:"message_status"`
 	TotalCount      uint                       `json:"total"`
 	ProcessedCount  uint                       `json:"processed"`
 	FailedCount     uint                       `json:"failed"`
 	CursorID        uint                       `json:"cursor_id"`
-	TasksTotal      uint                       `json:"tasks_total"`
-	TasksCompleted  uint                       `json:"tasks_completed"`
-	TasksFailed     uint                       `json:"tasks_failed"`
 	ProgressPercent float64                    `json:"progress_percent"`
 	Tasks           []LiveRestoreTaskListingDB `json:"tasks"`
 }
@@ -96,13 +128,10 @@ func RestoreProgressPercent(total, processed, failed uint) float64 {
 type RestoreDeadItemDB struct {
 	gorm.GormModel
 
-	RestoreJobID  uint   `json:"restore_job_id" gorm:"index"`
-	RestoreTaskID uint   `json:"restore_task_id" gorm:"index"`
-	ObjectKey     string `json:"object_key" gorm:"not null;type:varchar(1000)"`
-	Service       string `json:"service" gorm:"not null"`
-	Reason        string `json:"reason" gorm:"type:text"`
-	LastErrorCode string `json:"last_error_code"`
-	RetryCount    uint   `json:"retry_count" gorm:"default:0"`
+	RestoreJobID uint   `json:"restore_job_id" gorm:"index"`
+	ObjectKey    string `json:"object_key" gorm:"not null;type:varchar(1000)"`
+	ErrorCode    string `json:"error_code" gorm:"column:error_code;type:varchar(32)"`
+	Reason       string `json:"reason" gorm:"type:varchar(500)"`
 }
 
 // RestoreJobRepository handles restore jobs and dead-letter (failed key) rows.
@@ -153,7 +182,6 @@ func (r *RestoreJobRepository) HasActiveJob(userID, method, loginID string) (boo
 	return count > 0, nil
 }
 
-// ClaimNextQueuedJob claims one queued job (SKIP LOCKED) and sets it to running.
 func (r *RestoreJobRepository) ClaimNextQueuedJob() (*RestoreJobListingDB, error) {
 	var job RestoreJobListingDB
 	tx := r.db.Begin()
@@ -181,7 +209,34 @@ func (r *RestoreJobRepository) ClaimNextQueuedJob() (*RestoreJobListingDB, error
 	return &job, nil
 }
 
-// AdvanceRestoreJobCursor atomically advances cursor and batch counters (CAS).
+const restoreRunningBatchGap = 25 * time.Second
+
+// ClaimNextRunningJob claims a running job ready for the next batch (heartbeat not updated recently).
+func (r *RestoreJobRepository) ClaimNextRunningJob() (*RestoreJobListingDB, error) {
+	readyBefore := time.Now().Add(-restoreRunningBatchGap)
+	var job RestoreJobListingDB
+	tx := r.db.Begin()
+	if tx.Error != nil {
+		return nil, tx.Error
+	}
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+		Where("status = ? AND (last_heart_beat IS NULL OR last_heart_beat < ?)", RestoreJobStatusRunning, readyBefore).
+		Order("last_heart_beat ASC NULLS FIRST").
+		First(&job).Error; err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	now := time.Now()
+	if err := tx.Model(&job).Update("last_heart_beat", now).Error; err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	if err := tx.Commit().Error; err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
 func (r *RestoreJobRepository) AdvanceRestoreJobCursor(jobID, expectedCursor, newCursor uint, batchOK, batchFail uint) (bool, error) {
 	res := r.db.Model(&RestoreJobListingDB{}).
 		Where("id = ? AND cursor_id = ?", jobID, expectedCursor).
@@ -208,21 +263,6 @@ func (r *RestoreJobRepository) UpdateHeartBeat(id uint) error {
 	return r.db.Model(&RestoreJobListingDB{}).Where("id = ?", id).Update("last_heart_beat", now).Error
 }
 
-func (r *RestoreJobRepository) IncrementTasksTotal(jobID uint, delta uint) error {
-	return r.db.Model(&RestoreJobListingDB{}).Where("id = ?", jobID).
-		Update("tasks_total", gormdb.Expr("tasks_total + ?", delta)).Error
-}
-
-func (r *RestoreJobRepository) IncrementTasksCompleted(jobID uint) error {
-	return r.db.Model(&RestoreJobListingDB{}).Where("id = ?", jobID).
-		Update("tasks_completed", gormdb.Expr("tasks_completed + 1")).Error
-}
-
-func (r *RestoreJobRepository) IncrementTasksFailed(jobID uint) error {
-	return r.db.Model(&RestoreJobListingDB{}).Where("id = ?", jobID).
-		Update("tasks_failed", gormdb.Expr("tasks_failed + 1")).Error
-}
-
 func (r *RestoreJobRepository) CountPendingRetryTasks(jobID uint) (int64, error) {
 	var count int64
 	now := time.Now()
@@ -233,15 +273,12 @@ func (r *RestoreJobRepository) CountPendingRetryTasks(jobID uint) (int64, error)
 	return count, err
 }
 
-// GetAllActiveRestoreJobsForUser returns running restore jobs (live UI — same idea as autosync /live).
-// Queued jobs are omitted until the worker claims them as running.
 func (r *RestoreJobRepository) GetAllActiveRestoreJobsForUser(userID string) ([]LiveRestoreJobListingDB, error) {
 	query := `
 		SELECT
-			rj.id, rj.service, rj.method, rj.login_id, rj.status, rj.message, rj.message_status,
+			rj.id, rj.method, rj.login_id, rj.status, rj.message,
 			rj.total_count, rj.processed_count, rj.failed_count, rj.cursor_id,
-			rj.tasks_total, rj.tasks_completed, rj.tasks_failed,
-			rt.start_time, rt.status, rt.batch_index
+			rt.started_at, rt.status, rt.batch_index
 		FROM restore_job_listing_dbs rj
 		LEFT JOIN restore_task_listing_dbs rt ON rj.id = rt.restore_job_id
 			AND rt.deleted_at IS NULL
@@ -249,7 +286,7 @@ func (r *RestoreJobRepository) GetAllActiveRestoreJobsForUser(userID string) ([]
 		WHERE rj.user_id = $1
 		AND rj.deleted_at IS NULL
 		AND rj.status = 'running'
-		ORDER BY rj.id DESC, rt.start_time DESC`
+		ORDER BY rj.id DESC, rt.started_at DESC`
 
 	rows, err := r.db.Raw(query, userID).Rows()
 	if err != nil {
@@ -263,27 +300,21 @@ func (r *RestoreJobRepository) GetAllActiveRestoreJobsForUser(userID string) ([]
 	for rows.Next() {
 		var (
 			jobID          uint
-			service        string
 			method         string
 			loginID        string
 			status         string
 			message        string
-			messageStatus  string
 			totalCount     uint
 			processedCount uint
 			failedCount    uint
 			cursorID       uint
-			tasksTotal     uint
-			tasksCompleted uint
-			tasksFailed    uint
 			startTime      *time.Time
 			taskStatus     *string
 			batchIndex     *uint
 		)
 		if err := rows.Scan(
-			&jobID, &service, &method, &loginID, &status, &message, &messageStatus,
+			&jobID, &method, &loginID, &status, &message,
 			&totalCount, &processedCount, &failedCount, &cursorID,
-			&tasksTotal, &tasksCompleted, &tasksFailed,
 			&startTime, &taskStatus, &batchIndex,
 		); err != nil {
 			return nil, fmt.Errorf("scan active restore job: %w", err)
@@ -292,19 +323,15 @@ func (r *RestoreJobRepository) GetAllActiveRestoreJobsForUser(userID string) ([]
 		if _, exists := jobsMap[jobID]; !exists {
 			jobsMap[jobID] = &LiveRestoreJobListingDB{
 				ID:              jobID,
-				Service:         service,
+				Service:         APIServiceFromMethod(method),
 				Method:          method,
 				LoginID:         loginID,
 				Status:          status,
 				Message:         message,
-				MessageStatus:   messageStatus,
 				TotalCount:      totalCount,
 				ProcessedCount:  processedCount,
 				FailedCount:     failedCount,
 				CursorID:        cursorID,
-				TasksTotal:      tasksTotal,
-				TasksCompleted:  tasksCompleted,
-				TasksFailed:     tasksFailed,
 				ProgressPercent: RestoreProgressPercent(totalCount, processedCount, failedCount),
 				Tasks:           []LiveRestoreTaskListingDB{},
 			}
@@ -366,4 +393,11 @@ func (r *RestoreJobRepository) ListDeadItemsByJobID(jobID uint, limit int) ([]Re
 	var rows []RestoreDeadItemDB
 	err := r.db.Where("restore_job_id = ?", jobID).Order("id DESC").Limit(limit).Find(&rows).Error
 	return rows, err
+}
+
+// CountBatchesForJob returns how many batch rows exist (for batch_index assignment).
+func (r *RestoreJobRepository) CountBatchesForJob(jobID uint) (uint, error) {
+	var count int64
+	err := r.db.Model(&RestoreTaskListingDB{}).Where("restore_job_id = ?", jobID).Count(&count).Error
+	return uint(count), err
 }

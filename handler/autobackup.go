@@ -735,7 +735,7 @@ func handleSatelliteOnboardingCreate(c echo.Context, ctx context.Context, userID
 	if err := validateGmailAdminDomainForOnboarding(emails, req.GoogleEmail, req.AccountType); err != nil {
 		return err
 	}
-	cred, err := database.CredentialRepo.FindOrCreateForUser(userID, req.GoogleEmail, req.ProjectID, req.RefreshToken, "")
+	cred, err := database.CredentialRepo.FindOrCreateForUser(userID, req.GoogleEmail, req.ProjectID, req.AccountType, req.RefreshToken, "")
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
 	}

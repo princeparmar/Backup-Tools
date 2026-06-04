@@ -29,19 +29,15 @@ type RestoreTaskListingDB struct {
 	CursorStartID uint `json:"cursor_start_id" gorm:"default:0"`
 	CursorEndID   uint `json:"cursor_end_id" gorm:"default:0"`
 
-	ItemCount      uint `json:"item_count" gorm:"default:0"`
 	ProcessedCount uint `json:"processed_count" gorm:"default:0"`
 	FailedCount    uint `json:"failed_count" gorm:"default:0"`
 
 	RetryCount    uint       `json:"retry_count" gorm:"default:0"`
-	RetryAfter    *time.Time `json:"retry_after,omitempty"`
 	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty" gorm:"index:idx_restore_tasks_status_retry,priority:2"`
-	LastErrorCode string     `json:"last_error_code,omitempty"`
+	ErrorCode     string     `json:"error_code,omitempty" gorm:"column:error_code;type:varchar(32)"`
 
-	Message       string     `json:"message"`
-	StartTime     *time.Time `json:"start_time,omitempty"`
-	Execution     uint64     `json:"execution" gorm:"default:0"`
-	LastHeartBeat *time.Time `json:"last_heart_beat,omitempty"`
+	StartedAt  *time.Time `json:"started_at,omitempty"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }
 
 // RestoreTaskRepository handles batch audit / retry rows for restore jobs.
@@ -64,7 +60,6 @@ func (r *RestoreTaskRepository) Update(id uint, updates map[string]interface{}) 
 	return r.db.Model(&RestoreTaskListingDB{}).Where("id = ?", id).Updates(updates).Error
 }
 
-// ClaimNextRetryTask claims a retrying task that is due.
 func (r *RestoreTaskRepository) ClaimNextRetryTask() (*RestoreTaskListingDB, error) {
 	var task RestoreTaskListingDB
 	now := time.Now()
@@ -81,9 +76,8 @@ func (r *RestoreTaskRepository) ClaimNextRetryTask() (*RestoreTaskListingDB, err
 	}
 	start := time.Now()
 	if err := tx.Model(&task).Updates(map[string]interface{}{
-		"status":          RestoreTaskStatusRunning,
-		"start_time":      start,
-		"last_heart_beat": start,
+		"status":     RestoreTaskStatusRunning,
+		"started_at": start,
 	}).Error; err != nil {
 		tx.Rollback()
 		return nil, err
@@ -98,22 +92,11 @@ func (r *RestoreTaskRepository) CancelPendingForJob(jobID uint) error {
 	return r.db.Model(&RestoreTaskListingDB{}).
 		Where("restore_job_id = ? AND status IN ?", jobID, []string{RestoreTaskStatusRunning, RestoreTaskStatusRetrying}).
 		Updates(map[string]interface{}{
-			"status":  RestoreTaskStatusCancelled,
-			"message": "cancelled with job",
+			"status": RestoreTaskStatusCancelled,
 		}).Error
 }
 
 func (r *RestoreTaskRepository) MissedHeartbeatForTasks(staleBefore time.Time) error {
-	var tasks []RestoreTaskListingDB
-	if err := r.db.Where("status = ? AND (last_heart_beat IS NULL OR last_heart_beat < ?)",
-		RestoreTaskStatusRunning, staleBefore).Find(&tasks).Error; err != nil {
-		return err
-	}
-	for _, t := range tasks {
-		_ = r.db.Model(&RestoreTaskListingDB{}).Where("id = ?", t.ID).Updates(map[string]interface{}{
-			"status":  RestoreTaskStatusFailed,
-			"message": "restore task missed heartbeat",
-		})
-	}
+	// Tasks no longer use per-task heartbeat; job-level heartbeat covers staleness.
 	return nil
 }

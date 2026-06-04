@@ -1,41 +1,62 @@
 package handler
 
 import (
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 
-	googlepack "github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/restore"
-	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/labstack/echo/v4"
 )
 
 type restoreAllRequest struct {
-	Service string `json:"service"`
-	LoginID string `json:"login_id"`
+	Service   string `json:"service"`
+	ProjectID string `json:"project_id"`
+	LoginID   string `json:"login_id"`
 }
 
-// HandleRestoreAll creates a queued restore job for one service + account.
+// HandleRestorePrepare checks whether restore-all can run for project_id + login_id + service.
+func HandleRestorePrepare(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	userID, err := satelliteUserIDFromRequest(c)
+	if err != nil {
+		return err
+	}
+
+	projectID := strings.TrimSpace(c.QueryParam("project_id"))
+	loginID := strings.TrimSpace(c.QueryParam("login_id"))
+	service := strings.TrimSpace(strings.ToLower(c.QueryParam("service")))
+	if projectID == "" || loginID == "" || service == "" {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"error": "project_id, login_id, and service are required",
+		})
+	}
+
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+	result, err := restore.EvaluateReadiness(ctx, database, userID, projectID, loginID, service)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+	}
+	return c.JSON(http.StatusOK, result)
+}
+
+// HandleRestoreAll creates a queued restore job for one service + account (Satellite-proxied).
 func HandleRestoreAll(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	userID, err := satellite.GetUserdetails(c)
+	userID, err := satelliteUserIDFromRequest(c)
 	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"error": "authentication failed"})
-	}
-
-	storxToken := strings.TrimSpace(c.Request().Header.Get("ACCESS_TOKEN"))
-	if storxToken == "" {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{"error": "access token not found"})
+		return err
 	}
 
 	var req restoreAllRequest
@@ -43,36 +64,23 @@ func HandleRestoreAll(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": "invalid request body"})
 	}
 	req.Service = strings.TrimSpace(strings.ToLower(req.Service))
+	req.ProjectID = strings.TrimSpace(req.ProjectID)
 	req.LoginID = strings.TrimSpace(req.LoginID)
-	if req.Service == "" || req.LoginID == "" {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": "service and login_id are required"})
-	}
-
-	method, ok := restore.APIServiceToMethod[restore.APIService(req.Service)]
-	if !ok {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": "unsupported service"})
+	if req.Service == "" || req.ProjectID == "" || req.LoginID == "" {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": "service, project_id, and login_id are required"})
 	}
 
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
-	googleToken := strings.TrimSpace(c.Request().Header.Get("GOOGLE_ACCESS_TOKEN"))
-	if googleToken == "" {
-		jwtKey, jwtErr := googlepack.GetGoogleTokenFromJWT(c)
-		if jwtErr != nil {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{"error": "google access token not found"})
-		}
-		googleToken, err = database.AuthRepo.ReadGoogleAuthToken(jwtKey)
-		if err != nil || googleToken == "" {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{"error": "google access token not found"})
-		}
-	}
-
-	loginID, err := validateRestoreLoginID(googleToken, req.LoginID)
+	prep, err := restore.EvaluateReadiness(ctx, database, userID, req.ProjectID, req.LoginID, req.Service)
 	if err != nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{"error": err.Error()})
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+	}
+	if !prep.Ready {
+		return c.JSON(http.StatusUnprocessableEntity, prep)
 	}
 
-	job, err := restore.CreateRestoreJob(database, userID, method, req.Service, loginID, storxToken, googleToken)
+	job, err := restore.CreateRestoreJobFromReadiness(database, userID, prep)
 	if err != nil {
 		if restore.IsActiveRestoreConflict(err) {
 			return c.JSON(http.StatusConflict, map[string]interface{}{"error": err.Error()})
@@ -93,9 +101,9 @@ func HandleGetRestoreJob(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	userID, err := satellite.GetUserdetails(c)
+	userID, err := satelliteUserIDFromRequest(c)
 	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"error": "authentication failed"})
+		return err
 	}
 
 	jobID, err := parseUintParam(c, "job_id")
@@ -118,9 +126,9 @@ func HandleListRestoreJobs(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	userID, err := satellite.GetUserdetails(c)
+	userID, err := satelliteUserIDFromRequest(c)
 	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"error": "authentication failed"})
+		return err
 	}
 
 	limit := 20
@@ -153,7 +161,7 @@ func HandleRestoreLive(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	userID, err := satellite.GetUserdetails(c)
+	userID, err := satelliteUserIDFromRequest(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
 			"message": "not able to authenticate user",
@@ -178,18 +186,20 @@ func HandleRestoreLive(c echo.Context) error {
 }
 
 func restoreJobProgressResponse(job *repo.RestoreJobListingDB) map[string]interface{} {
+	service := repo.APIServiceFromMethod(job.Method)
 	return map[string]interface{}{
 		"job_id":           job.ID,
 		"status":           job.Status,
-		"service":          job.Service,
+		"service":          service,
+		"method":           job.Method,
 		"login_id":         job.LoginID,
+		"project_id":       job.StorjProjectID,
+		"account_type":     job.AccountType,
+		"auth_mode":        job.AuthMode,
 		"total":            job.TotalCount,
 		"processed":        job.ProcessedCount,
 		"failed":           job.FailedCount,
 		"cursor_id":        job.CursorID,
-		"tasks_total":      job.TasksTotal,
-		"tasks_completed":  job.TasksCompleted,
-		"tasks_failed":     job.TasksFailed,
 		"progress_percent": repo.RestoreProgressPercent(job.TotalCount, job.ProcessedCount, job.FailedCount),
 		"message":          job.Message,
 	}
@@ -201,9 +211,9 @@ func HandleCancelRestoreJob(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	userID, err := satellite.GetUserdetails(c)
+	userID, err := satelliteUserIDFromRequest(c)
 	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"error": "authentication failed"})
+		return err
 	}
 	jobID, err := parseUintParam(c, "job_id")
 	if err != nil {
@@ -218,9 +228,9 @@ func HandleCancelRestoreJob(c echo.Context) error {
 
 // HandleListRestoreDeadItems lists DLQ entries for a job.
 func HandleListRestoreDeadItems(c echo.Context) error {
-	userID, err := satellite.GetUserdetails(c)
+	userID, err := satelliteUserIDFromRequest(c)
 	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"error": "authentication failed"})
+		return err
 	}
 	jobID, err := parseUintParam(c, "job_id")
 	if err != nil {
@@ -235,26 +245,6 @@ func HandleListRestoreDeadItems(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
 	}
 	return c.JSON(http.StatusOK, map[string]interface{}{"items": items})
-}
-
-// validateRestoreLoginID mirrors manual restore: verify Google token and ensure login_id matches token email.
-func validateRestoreLoginID(googleAccessToken, loginID string) (string, error) {
-	details, err := googlepack.GetGoogleAccountDetailsFromAccessToken(googleAccessToken)
-	if err != nil {
-		return "", fmt.Errorf("google access token invalid or expired")
-	}
-	tokenEmail := strings.TrimSpace(details.Email)
-	if tokenEmail == "" {
-		return "", fmt.Errorf("failed to get user email from google token")
-	}
-	want := strings.TrimSpace(loginID)
-	if want == "" {
-		return tokenEmail, nil
-	}
-	if !strings.EqualFold(want, tokenEmail) {
-		return "", fmt.Errorf("login_id does not match the connected Google account")
-	}
-	return tokenEmail, nil
 }
 
 func parseUintParam(c echo.Context, name string) (uint, error) {

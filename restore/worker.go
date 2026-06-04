@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/db"
-	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
@@ -17,24 +16,40 @@ import (
 
 var ErrJobCancelled = errors.New("restore job cancelled")
 
-// ProcessRestoreJobs runs one batch for each claimed job or retry task.
+// ProcessRestoreJobs runs batches for retry, running, and queued jobs until none are claimable.
 func ProcessRestoreJobs(ctx context.Context, store *db.PostgresDb) error {
 	stale := time.Now().Add(-10 * time.Minute)
-	_ = store.RestoreTaskRepo.MissedHeartbeatForTasks(stale)
 	_ = store.RestoreJobRepo.MissedHeartbeatForJobs(stale)
 
-	if err := processRetryTask(ctx, store); err != nil && !errors.Is(err, gormdb.ErrRecordNotFound) {
-		logger.Warn(ctx, "restore retry task", logger.ErrorField(err))
-	}
-
-	job, err := store.RestoreJobRepo.ClaimNextQueuedJob()
-	if err != nil {
-		if errors.Is(err, gormdb.ErrRecordNotFound) {
-			return nil
+	for {
+		if err := processRetryTask(ctx, store); err != nil && !errors.Is(err, gormdb.ErrRecordNotFound) {
+			logger.Warn(ctx, "restore retry task", logger.ErrorField(err))
+		} else if err == nil {
+			continue
 		}
-		return err
+
+		job, err := store.RestoreJobRepo.ClaimNextRunningJob()
+		if err == nil {
+			if err := processJobBatches(ctx, store, job, nil); err != nil && !errors.Is(err, ErrJobCancelled) {
+				return err
+			}
+			continue
+		}
+		if !errors.Is(err, gormdb.ErrRecordNotFound) {
+			return err
+		}
+
+		job, err = store.RestoreJobRepo.ClaimNextQueuedJob()
+		if err != nil {
+			if errors.Is(err, gormdb.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		if err := processJobBatches(ctx, store, job, nil); err != nil && !errors.Is(err, ErrJobCancelled) {
+			return err
+		}
 	}
-	return processJobBatches(ctx, store, job, nil)
 }
 
 func processRetryTask(ctx context.Context, store *db.PostgresDb) error {
@@ -57,6 +72,12 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 		return nil
 	}
 
+	logger.Info(ctx, "Processing restore job batch",
+		logger.Int("job_id", int(job.ID)),
+		logger.String("method", job.Method),
+		logger.String("login_id", job.LoginID),
+		logger.Int("cursor_id", int(job.CursorID)))
+
 	if retryTask == nil && job.CursorID == 0 && job.ProcessedCount == 0 {
 		notifyRestoreStarted(ctx, job)
 	}
@@ -66,7 +87,7 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 		return failJob(ctx, store, job, err)
 	}
 
-	deps, err := buildRestoreDeps(store, job)
+	deps, err := buildRestoreDeps(ctx, store, job)
 	if err != nil {
 		return failJob(ctx, store, job, err)
 	}
@@ -108,20 +129,18 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 	if retryTask != nil {
 		batchTask = retryTask
 	} else {
+		batchIdx, _ := store.RestoreJobRepo.CountBatchesForJob(job.ID)
+		now := time.Now()
 		batchTask = &repo.RestoreTaskListingDB{
 			RestoreJobID:  job.ID,
 			Status:        repo.RestoreTaskStatusRunning,
-			BatchIndex:    job.TasksTotal,
+			BatchIndex:    batchIdx,
 			CursorStartID: job.CursorID,
-			ItemCount:     uint(len(rows)),
+			StartedAt:     &now,
 		}
-		now := time.Now()
-		batchTask.StartTime = &now
-		batchTask.LastHeartBeat = &now
 		if err := store.RestoreTaskRepo.Create(batchTask); err != nil {
 			return err
 		}
-		_ = store.RestoreJobRepo.IncrementTasksTotal(job.ID, 1)
 	}
 
 	if err := checkJobContinuable(store, job.ID); err != nil {
@@ -130,6 +149,25 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 
 	expectedCursor := job.CursorID
 	batchResult := RunBatch(ctx, deps, proc, rows)
+
+	if shouldOAuth401Retry(deps, batchResult) {
+		logger.Warn(ctx, "Restore batch hit OAuth 401, refreshing Google token",
+			logger.Int("job_id", int(job.ID)),
+			logger.Int("task_id", int(batchTask.ID)))
+		if err := deps.RefreshGoogleAccessToken(ctx); err != nil {
+			logger.Warn(ctx, "Restore OAuth token refresh failed",
+				logger.Int("job_id", int(job.ID)),
+				logger.ErrorField(err))
+			return failJob(ctx, store, job, err)
+		}
+		if err := proc.Setup(ctx, deps); err != nil {
+			logger.Warn(ctx, "Restore processor setup failed after token refresh",
+				logger.Int("job_id", int(job.ID)),
+				logger.ErrorField(err))
+			return failJob(ctx, store, job, err)
+		}
+		batchResult = RunBatch(ctx, deps, proc, rows)
+	}
 
 	newCursor := expectedCursor
 	if batchResult.LastObjectID > 0 {
@@ -149,15 +187,13 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 
 	_ = store.RestoreJobRepo.UpdateHeartBeat(job.ID)
 
-	endID := newCursor
 	if len(rows) > 0 {
-		batchTask.CursorEndID = endID
+		batchTask.CursorEndID = newCursor
 	}
 	batchTask.ProcessedCount = batchResult.Processed
 	batchTask.FailedCount = batchResult.Failed
-	batchTask.ItemCount = uint(len(rows))
 
-	finishBatch(store, job, batchTask, batchResult)
+	finishBatch(ctx, store, job, batchTask, batchResult)
 
 	recordBatchItems(job.Method, batchResult.Processed, batchResult.Failed)
 	maybeNotifyProgress(ctx, job)
@@ -172,6 +208,21 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 	return nil
 }
 
+func shouldOAuth401Retry(deps *RestoreDeps, result BatchResult) bool {
+	if deps.AuthMode == repo.RestoreAuthModeDWD || strings.TrimSpace(deps.RefreshToken) == "" {
+		return false
+	}
+	if result.Processed > 0 || result.Failed == 0 {
+		return false
+	}
+	for _, fk := range result.FailedKeys {
+		if fk.ErrorCode == "401" || strings.Contains(strings.ToLower(fk.Reason), "invalid_token") {
+			return true
+		}
+	}
+	return false
+}
+
 func checkJobContinuable(store *db.PostgresDb, jobID uint) error {
 	job, err := store.RestoreJobRepo.GetByID(jobID)
 	if err != nil {
@@ -183,7 +234,6 @@ func checkJobContinuable(store *db.PostgresDb, jobID uint) error {
 	return nil
 }
 
-// resolveJobTerminalStatus picks completed vs partial_completed from aggregate failures.
 func resolveJobTerminalStatus(failedCount uint) (status, message string) {
 	if failedCount > 0 {
 		return repo.RestoreJobStatusPartialCompleted, "restore completed with failures"
@@ -191,12 +241,10 @@ func resolveJobTerminalStatus(failedCount uint) (status, message string) {
 	return repo.RestoreJobStatusCompleted, "restore completed"
 }
 
-// shouldFetchAnotherBatch reports whether the cursor may have more rows after this page.
 func shouldFetchAnotherBatch(rowCount, batchSize int) bool {
 	return rowCount >= batchSize
 }
 
-// IsActiveRestoreConflict reports duplicate active job errors from CreateRestoreJob.
 func IsActiveRestoreConflict(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "already in progress")
 }
@@ -212,72 +260,102 @@ func tryFinalizeJob(ctx context.Context, store *db.PostgresDb, job *repo.Restore
 
 	status, msg := resolveJobTerminalStatus(job.FailedCount)
 
+	logger.Info(ctx, "Restore job finished",
+		logger.Int("job_id", int(job.ID)),
+		logger.String("method", job.Method),
+		logger.String("login_id", job.LoginID),
+		logger.String("status", status),
+		logger.Int("processed", int(job.ProcessedCount)),
+		logger.Int("failed", int(job.FailedCount)),
+		logger.Int("total", int(job.TotalCount)))
+
 	_ = store.RestoreJobRepo.UpdateJob(job.ID, map[string]interface{}{
 		"status":  status,
 		"message": msg,
 	})
 
 	recordJobTerminal(job.Method, status)
-	notifyJobTerminal(ctx, job, status)
+	notifyJobTerminal(ctx, job, status, msg)
 	return nil
 }
 
 func failJob(ctx context.Context, store *db.PostgresDb, job *repo.RestoreJobListingDB, err error) error {
+	outcome := handleRestoreFailure(ctx, store, job, err)
+
 	_ = store.RestoreJobRepo.UpdateJob(job.ID, map[string]interface{}{
 		"status":  repo.RestoreJobStatusFailed,
-		"message": err.Error(),
+		"message": outcome.JobMessage,
 	})
 	recordJobTerminal(job.Method, repo.RestoreJobStatusFailed)
-	notifyJobTerminal(ctx, job, repo.RestoreJobStatusFailed)
+	notifyJobTerminal(ctx, job, repo.RestoreJobStatusFailed, outcome.JobMessage)
 	return err
 }
 
-func finishBatch(store *db.PostgresDb, job *repo.RestoreJobListingDB, batchTask *repo.RestoreTaskListingDB, batchResult BatchResult) {
+func finishBatch(ctx context.Context, store *db.PostgresDb, job *repo.RestoreJobListingDB, batchTask *repo.RestoreTaskListingDB, batchResult BatchResult) {
 	if batchResult.Failed > 0 && batchResult.Processed == 0 && batchTask.RetryCount < repo.RestoreMaxRetryCount {
-		scheduleTaskRetry(store, batchTask, "batch_failed")
-		_ = store.RestoreJobRepo.IncrementTasksFailed(job.ID)
+		logger.Warn(ctx, "Restore batch failed, scheduling retry",
+			logger.Int("job_id", int(job.ID)),
+			logger.Int("task_id", int(batchTask.ID)),
+			logger.Int("retry_count", int(batchTask.RetryCount)),
+			logger.Int("failed", int(batchResult.Failed)))
+		scheduleTaskRetry(ctx, store, batchTask, "batch_failed")
 		return
 	}
 	markTaskSuccess(store, batchTask)
-	_ = store.RestoreJobRepo.IncrementTasksCompleted(job.ID)
 	if batchResult.Failed > 0 {
-		writeDLQ(store, job, batchTask, batchResult.FailedKeys)
+		logger.Warn(ctx, "Restore batch completed with item failures",
+			logger.Int("job_id", int(job.ID)),
+			logger.Int("task_id", int(batchTask.ID)),
+			logger.Int("processed", int(batchResult.Processed)),
+			logger.Int("failed", int(batchResult.Failed)))
+		writeDLQ(ctx, store, job, batchResult.FailedKeys)
 	}
 }
 
 func markTaskSuccess(store *db.PostgresDb, task *repo.RestoreTaskListingDB) {
 	now := time.Now()
-	exec := uint64(0)
-	if task.StartTime != nil {
-		exec = uint64(now.Sub(*task.StartTime).Seconds())
-	}
 	_ = store.RestoreTaskRepo.Update(task.ID, map[string]interface{}{
-		"status":     repo.RestoreTaskStatusSuccess,
-		"execution":  exec,
-		"message":    "batch completed",
+		"status":      repo.RestoreTaskStatusSuccess,
+		"finished_at": now,
 	})
 }
 
-func scheduleTaskRetry(store *db.PostgresDb, task *repo.RestoreTaskListingDB, msg string) {
+func scheduleTaskRetry(ctx context.Context, store *db.PostgresDb, task *repo.RestoreTaskListingDB, code string) {
 	next := NextRetryTime(task.RetryCount)
+	retryMsg := restoreBatchRetryMessage(task.RetryCount + 1)
+	logger.Info(ctx, "Restore task retry scheduled",
+		logger.Int("task_id", int(task.ID)),
+		logger.Int("job_id", int(task.RestoreJobID)),
+		logger.Int("attempt", int(task.RetryCount+1)),
+		logger.String("error_code", code),
+		logger.String("message", retryMsg))
+
 	_ = store.RestoreTaskRepo.Update(task.ID, map[string]interface{}{
 		"status":          repo.RestoreTaskStatusRetrying,
 		"retry_count":     task.RetryCount + 1,
-		"retry_after":     next,
 		"next_attempt_at": next,
-		"message":         msg,
+		"error_code":      code,
 	})
 }
 
-func writeDLQ(store *db.PostgresDb, job *repo.RestoreJobListingDB, task *repo.RestoreTaskListingDB, keys []FailedKey) {
+func writeDLQ(ctx context.Context, store *db.PostgresDb, job *repo.RestoreJobListingDB, keys []FailedKey) {
+	if len(keys) == 0 {
+		return
+	}
+	logger.Warn(ctx, "Restore dead-letter items recorded",
+		logger.Int("job_id", int(job.ID)),
+		logger.Int("count", len(keys)))
+
 	for _, fk := range keys {
+		reason := fk.Reason
+		if len(reason) > 500 {
+			reason = reason[:500]
+		}
 		_ = store.RestoreJobRepo.CreateDeadItem(&repo.RestoreDeadItemDB{
-			RestoreJobID:  job.ID,
-			RestoreTaskID: task.ID,
-			ObjectKey:     fk.ObjectKey,
-			Service:       job.Service,
-			Reason:        fk.Reason,
-			LastErrorCode: fk.ErrorCode,
+			RestoreJobID: job.ID,
+			ObjectKey:    fk.ObjectKey,
+			Reason:       reason,
+			ErrorCode:    fk.ErrorCode,
 		})
 	}
 }
@@ -318,17 +396,21 @@ func maybeNotifyProgress(ctx context.Context, job *repo.RestoreJobListingDB) {
 		&priority, data, nil)
 }
 
-func notifyJobTerminal(ctx context.Context, job *repo.RestoreJobListingDB, status string) {
+func notifyJobTerminal(ctx context.Context, job *repo.RestoreJobListingDB, status, detail string) {
 	priority := "normal"
 	event := "restore_completed"
 	title := "Restore completed"
+	body := fmt.Sprintf("Restore for %s finished (%s)", job.LoginID, status)
 	if status == repo.RestoreJobStatusPartialCompleted {
 		event = "restore_partial_completed"
 		title = "Restore partially completed"
 	} else if status == repo.RestoreJobStatusFailed {
 		event = "restore_failed"
-		title = "Restore failed"
+		title = restoreNotifyFailedTitle
 		priority = "high"
+		if detail != "" {
+			body = detail
+		}
 	} else if status == repo.RestoreJobStatusCancelled {
 		event = "restore_cancelled"
 		title = "Restore cancelled"
@@ -337,39 +419,7 @@ func notifyJobTerminal(ctx context.Context, job *repo.RestoreJobListingDB, statu
 		"event": event, "job_id": job.ID, "method": job.Method, "login_id": job.LoginID,
 		"processed": job.ProcessedCount, "failed": job.FailedCount, "total": job.TotalCount,
 	}
-	satellite.SendNotificationAsync(ctx, job.UserID, title,
-		fmt.Sprintf("Restore for %s finished (%s)", job.LoginID, status),
-		&priority, data, nil)
-}
-
-// CreateRestoreJob inserts a queued restore job from API input.
-func CreateRestoreJob(store *db.PostgresDb, userID, method, service, loginID, storxToken, googleAccessToken string) (*repo.RestoreJobListingDB, error) {
-	active, err := store.RestoreJobRepo.HasActiveJob(userID, method, loginID)
-	if err != nil {
-		return nil, err
-	}
-	if active {
-		return nil, fmt.Errorf("a restore is already in progress for this account and service")
-	}
-	input := map[string]interface{}{
-		"google_access_token": googleAccessToken,
-		"email":               loginID,
-	}
-	job := &repo.RestoreJobListingDB{
-		UserID:        userID,
-		LoginID:       loginID,
-		Method:        method,
-		Service:       service,
-		Status:        repo.RestoreJobStatusQueued,
-		StorxToken:    storxToken,
-		InputData:     database.NewDbJsonFromValue(input),
-		MessageStatus: repo.JobMessageStatusInfo,
-		Message:       "restore queued",
-	}
-	if err := store.RestoreJobRepo.Create(job); err != nil {
-		return nil, err
-	}
-	return job, nil
+	satellite.SendNotificationAsync(ctx, job.UserID, title, body, &priority, data, nil)
 }
 
 // CancelRestoreJob cancels a running restore job.

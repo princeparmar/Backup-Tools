@@ -6,10 +6,7 @@ import (
 	"strings"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
-	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/repo"
-	"github.com/gphotosuploader/google-photos-api-client-go/v2/albums"
-	"golang.org/x/time/rate"
 )
 
 // Processor restores one object key for a service.
@@ -46,30 +43,6 @@ func requireGoogleToken(deps *RestoreDeps) error {
 	return nil
 }
 
-func buildRestoreDeps(store *db.PostgresDb, job *repo.RestoreJobListingDB) (*RestoreDeps, error) {
-	cfg, ok := ConfigForMethod(job.Method)
-	if !ok {
-		return nil, fmt.Errorf("unknown method %s", job.Method)
-	}
-	token := ""
-	if job.InputData != nil && job.InputData.Json() != nil {
-		if t, ok := (*job.InputData.Json())["google_access_token"].(string); ok {
-			token = strings.TrimSpace(t)
-		}
-	}
-	deps := &RestoreDeps{
-		Store:            store,
-		Job:              job,
-		AccessGrant:      job.StorxToken,
-		GoogleToken:      token,
-		LoginID:          job.LoginID,
-		Config:           cfg,
-		PhotosAlbumCache: make(map[string]*albums.Album),
-		googleLimiter:    rate.NewLimiter(rate.Limit(cfg.RateLimitPerSec), int(cfg.RateLimitPerSec)+1),
-		vaultSem:         make(chan struct{}, cfg.VaultConcurrency),
-	}
-	return deps, nil
-}
 
 // baseProcessor helpers
 type gmailProcessor struct{}
@@ -81,6 +54,14 @@ func (g *gmailProcessor) Config() ServiceConfig {
 }
 func (g *gmailProcessor) ShouldRestoreKey(key string) bool { return !ShouldSkipObjectKey(key) }
 func (g *gmailProcessor) Setup(ctx context.Context, deps *RestoreDeps) error {
+	if deps.AuthMode == repo.RestoreAuthModeDWD {
+		client, err := google.NewGmailClientWithServiceAccountDelegationForRestore(ctx, deps.LoginID)
+		if err != nil {
+			return err
+		}
+		deps.GmailClient = client
+		return nil
+	}
 	if err := requireGoogleToken(deps); err != nil {
 		return err
 	}
@@ -105,6 +86,14 @@ func (d *driveProcessor) Config() ServiceConfig {
 }
 func (d *driveProcessor) ShouldRestoreKey(key string) bool { return !ShouldSkipObjectKey(key) }
 func (d *driveProcessor) Setup(ctx context.Context, deps *RestoreDeps) error {
+	if deps.AuthMode == repo.RestoreAuthModeDWD {
+		srv, err := google.GetDriveServiceForRestoreDWD(ctx, deps.LoginID)
+		if err != nil {
+			return err
+		}
+		deps.DriveService = srv
+		return nil
+	}
 	if err := requireGoogleToken(deps); err != nil {
 		return err
 	}
@@ -129,6 +118,14 @@ func (p *photosProcessor) Config() ServiceConfig {
 }
 func (p *photosProcessor) ShouldRestoreKey(key string) bool { return !ShouldSkipObjectKey(key) }
 func (p *photosProcessor) Setup(ctx context.Context, deps *RestoreDeps) error {
+	if deps.AuthMode == repo.RestoreAuthModeDWD {
+		client, err := google.NewGPhotosClientForRestoreDWD(ctx, deps.LoginID)
+		if err != nil {
+			return err
+		}
+		deps.PhotosClient = client
+		return nil
+	}
 	if err := requireGoogleToken(deps); err != nil {
 		return err
 	}
@@ -155,6 +152,14 @@ func (c *calendarProcessor) ShouldRestoreKey(key string) bool {
 	return google.IsCalendarEventRestoreObjectKey(key)
 }
 func (c *calendarProcessor) Setup(ctx context.Context, deps *RestoreDeps) error {
+	if deps.AuthMode == repo.RestoreAuthModeDWD {
+		svc, err := google.NewCalendarServiceForRestoreDWD(ctx, deps.LoginID)
+		if err != nil {
+			return err
+		}
+		deps.CalendarService = svc
+		return nil
+	}
 	if err := requireGoogleToken(deps); err != nil {
 		return err
 	}
@@ -181,6 +186,14 @@ func (c *contactsProcessor) ShouldRestoreKey(key string) bool {
 	return google.IsContactsRestoreObjectKey(key)
 }
 func (c *contactsProcessor) Setup(ctx context.Context, deps *RestoreDeps) error {
+	if deps.AuthMode == repo.RestoreAuthModeDWD {
+		svc, err := google.NewPeopleServiceForRestoreDWD(ctx, deps.LoginID)
+		if err != nil {
+			return err
+		}
+		deps.PeopleService = svc
+		return nil
+	}
 	if err := requireGoogleToken(deps); err != nil {
 		return err
 	}

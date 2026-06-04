@@ -43,6 +43,7 @@ type GoogleAuthResponse struct {
 	Email         string `json:"email"`
 	EmailVerified string `json:"email_verified"`
 	ExpiresIn     string `json:"expires_in"`
+	Scope         string `json:"scope"`
 	Error         string `json:"error"`
 }
 

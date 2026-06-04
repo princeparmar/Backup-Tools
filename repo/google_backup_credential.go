@@ -15,9 +15,10 @@ type GoogleBackupCredentialDB struct {
 	gorm.GormModel
 
 	Email          string `json:"email" gorm:"column:email;index:idx_google_backup_cred_email"`
-	StorjProjectID   string `json:"storj_project_id,omitempty" gorm:"column:storj_project_id;uniqueIndex:idx_google_backup_cred_project_id"`
-	RefreshToken     string `json:"refresh_token,omitempty" gorm:"column:refresh_token"`
-	StorxToken       string `json:"storx_token,omitempty" gorm:"column:storx_token"`
+	StorjProjectID string `json:"storj_project_id,omitempty" gorm:"column:storj_project_id;uniqueIndex:idx_google_backup_cred_project_id"`
+	AccountType    string `json:"account_type" gorm:"column:account_type;not null;default:personal"`
+	RefreshToken   string `json:"refresh_token,omitempty" gorm:"column:refresh_token"`
+	StorxToken     string `json:"storx_token,omitempty" gorm:"column:storx_token"`
 }
 
 // GoogleBackupCredentialRepository handles google_backup_credential_dbs.
@@ -103,11 +104,29 @@ func (r *GoogleBackupCredentialRepository) FindIDForUserAndEmail(userID, email s
 	return cred.ID, true, nil
 }
 
+func normalizeCredentialAccountType(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "employee_workspace":
+		return "employee_workspace"
+	case "admin_workspace":
+		return "admin_workspace"
+	case "personal":
+		return "personal"
+	default:
+		return ""
+	}
+}
+
 // Create inserts a new credential row.
-func (r *GoogleBackupCredentialRepository) Create(email, projectID, refreshToken, storxToken string) (*GoogleBackupCredentialDB, error) {
+func (r *GoogleBackupCredentialRepository) Create(email, projectID, accountType, refreshToken, storxToken string) (*GoogleBackupCredentialDB, error) {
+	acct := normalizeCredentialAccountType(accountType)
+	if acct == "" {
+		acct = "personal"
+	}
 	row := GoogleBackupCredentialDB{
 		Email:          strings.TrimSpace(email),
 		StorjProjectID: strings.TrimSpace(projectID),
+		AccountType:    acct,
 		RefreshToken:   strings.TrimSpace(refreshToken),
 		StorxToken:     strings.TrimSpace(storxToken),
 	}
@@ -124,42 +143,45 @@ func (r *GoogleBackupCredentialRepository) Create(email, projectID, refreshToken
 }
 
 // FindOrCreateForUser finds or creates a credential scoped by storj_project_id (primary) then legacy email via jobs.
-func (r *GoogleBackupCredentialRepository) FindOrCreateForUser(userID, email, projectID, refreshToken, storxToken string) (*GoogleBackupCredentialDB, error) {
+func (r *GoogleBackupCredentialRepository) FindOrCreateForUser(userID, email, projectID, accountType, refreshToken, storxToken string) (*GoogleBackupCredentialDB, error) {
 	projectID = strings.TrimSpace(projectID)
 	if projectID != "" {
 		if id, ok, err := r.FindIDForUserAndProjectID(userID, projectID); err != nil {
 			return nil, err
 		} else if ok {
-			return r.mergeAndReload(id, email, projectID, refreshToken, storxToken)
+			return r.mergeAndReload(id, email, projectID, accountType, refreshToken, storxToken)
 		}
 		if cred, ok, err := r.GetByStorjProjectID(projectID); err != nil {
 			return nil, err
 		} else if ok {
-			return r.mergeAndReload(cred.ID, email, projectID, refreshToken, storxToken)
+			return r.mergeAndReload(cred.ID, email, projectID, accountType, refreshToken, storxToken)
 		}
 	}
 	if id, ok, err := r.FindIDForUserAndEmail(userID, email); err != nil {
 		return nil, err
 	} else if ok {
-		return r.mergeAndReload(id, email, projectID, refreshToken, storxToken)
+		return r.mergeAndReload(id, email, projectID, accountType, refreshToken, storxToken)
 	}
-	return r.Create(email, projectID, refreshToken, storxToken)
+	return r.Create(email, projectID, accountType, refreshToken, storxToken)
 }
 
-func (r *GoogleBackupCredentialRepository) mergeAndReload(id uint, email, projectID, refreshToken, storxToken string) (*GoogleBackupCredentialDB, error) {
-	if err := r.mergeFieldsIfProvided(id, email, projectID, refreshToken, storxToken); err != nil {
+func (r *GoogleBackupCredentialRepository) mergeAndReload(id uint, email, projectID, accountType, refreshToken, storxToken string) (*GoogleBackupCredentialDB, error) {
+	if err := r.mergeFieldsIfProvided(id, email, projectID, accountType, refreshToken, storxToken); err != nil {
 		return nil, err
 	}
 	return r.GetByID(id)
 }
 
-func (r *GoogleBackupCredentialRepository) mergeFieldsIfProvided(id uint, email, projectID, refreshToken, storxToken string) error {
+func (r *GoogleBackupCredentialRepository) mergeFieldsIfProvided(id uint, email, projectID, accountType, refreshToken, storxToken string) error {
 	patch := map[string]interface{}{}
 	if t := strings.TrimSpace(email); t != "" {
 		patch["email"] = t
 	}
 	if t := strings.TrimSpace(projectID); t != "" {
 		patch["storj_project_id"] = t
+	}
+	if t := normalizeCredentialAccountType(accountType); t != "" {
+		patch["account_type"] = t
 	}
 	if t := strings.TrimSpace(refreshToken); t != "" {
 		patch["refresh_token"] = t
