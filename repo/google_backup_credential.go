@@ -10,12 +10,12 @@ import (
 )
 
 // GoogleBackupCredentialDB stores shared Google OAuth + StorX tokens for autosync jobs.
-// Uniqueness: storj_project_id (primary); email may repeat across projects.
+// Uniqueness: (storj_project_id, email) — multiple Google accounts may share one Storj project.
 type GoogleBackupCredentialDB struct {
 	gorm.GormModel
 
-	Email          string `json:"email" gorm:"column:email;index:idx_google_backup_cred_email"`
-	StorjProjectID string `json:"storj_project_id,omitempty" gorm:"column:storj_project_id;uniqueIndex:idx_google_backup_cred_project_id"`
+	Email          string `json:"email" gorm:"column:email;uniqueIndex:idx_google_backup_cred_project_email"`
+	StorjProjectID string `json:"storj_project_id,omitempty" gorm:"column:storj_project_id;uniqueIndex:idx_google_backup_cred_project_email;index:idx_google_backup_cred_project_id"`
 	AccountType    string `json:"account_type" gorm:"column:account_type;not null;default:personal"`
 	RefreshToken   string `json:"refresh_token,omitempty" gorm:"column:refresh_token"`
 	StorxToken     string `json:"storx_token,omitempty" gorm:"column:storx_token"`
@@ -43,7 +43,7 @@ func (r *GoogleBackupCredentialRepository) GetByID(id uint) (*GoogleBackupCreden
 	return &row, nil
 }
 
-// GetByStorjProjectID loads a credential by Satellite/Storj project id (unique per row).
+// GetByStorjProjectID loads one credential row for a Storj project (first match when several Google accounts share a project).
 func (r *GoogleBackupCredentialRepository) GetByStorjProjectID(projectID string) (*GoogleBackupCredentialDB, bool, error) {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
@@ -104,6 +104,29 @@ func (r *GoogleBackupCredentialRepository) FindIDForUserAndEmail(userID, email s
 	return cred.ID, true, nil
 }
 
+// FindIDForUserProjectAndEmail returns credential id for a user's linked jobs matching project_id and OAuth holder email.
+func (r *GoogleBackupCredentialRepository) FindIDForUserProjectAndEmail(userID, projectID, email string) (uint, bool, error) {
+	projectID = strings.TrimSpace(projectID)
+	email = strings.TrimSpace(email)
+	userID = strings.TrimSpace(userID)
+	if projectID == "" || email == "" || userID == "" {
+		return 0, false, nil
+	}
+	var cred GoogleBackupCredentialDB
+	err := r.db.Table("google_backup_credential_dbs AS c").
+		Select("c.id").
+		Joins(`INNER JOIN cron_job_listing_dbs j ON (j.input_data->>'credential_id')::bigint = c.id AND j.deleted_at IS NULL`).
+		Where("j.user_id = ? AND c.storj_project_id = ? AND LOWER(TRIM(c.email)) = LOWER(?)", userID, projectID, email).
+		First(&cred).Error
+	if err != nil {
+		if errors.Is(err, gormio.ErrRecordNotFound) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("find credential for user, project_id, and email: %w", err)
+	}
+	return cred.ID, true, nil
+}
+
 func normalizeCredentialAccountType(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "employee_workspace":
@@ -142,25 +165,23 @@ func (r *GoogleBackupCredentialRepository) Create(email, projectID, accountType,
 	return &row, nil
 }
 
-// FindOrCreateForUser finds or creates a credential scoped by storj_project_id (primary) then legacy email via jobs.
+// FindOrCreateForUser finds or creates a credential per Google account (email), not per storj_project_id alone.
+// Reconnecting the same google_email updates tokens on the existing row; a different email always creates a new row
+// even when project_id matches another connected account.
 func (r *GoogleBackupCredentialRepository) FindOrCreateForUser(userID, email, projectID, accountType, refreshToken, storxToken string) (*GoogleBackupCredentialDB, error) {
+	email = strings.TrimSpace(email)
 	projectID = strings.TrimSpace(projectID)
-	if projectID != "" {
-		if id, ok, err := r.FindIDForUserAndProjectID(userID, projectID); err != nil {
-			return nil, err
-		} else if ok {
-			return r.mergeAndReload(id, email, projectID, accountType, refreshToken, storxToken)
-		}
-		if cred, ok, err := r.GetByStorjProjectID(projectID); err != nil {
-			return nil, err
-		} else if ok {
-			return r.mergeAndReload(cred.ID, email, projectID, accountType, refreshToken, storxToken)
-		}
-	}
 	if id, ok, err := r.FindIDForUserAndEmail(userID, email); err != nil {
 		return nil, err
 	} else if ok {
 		return r.mergeAndReload(id, email, projectID, accountType, refreshToken, storxToken)
+	}
+	if projectID != "" {
+		if id, ok, err := r.FindIDForUserProjectAndEmail(userID, projectID, email); err != nil {
+			return nil, err
+		} else if ok {
+			return r.mergeAndReload(id, email, projectID, accountType, refreshToken, storxToken)
+		}
 	}
 	return r.Create(email, projectID, accountType, refreshToken, storxToken)
 }

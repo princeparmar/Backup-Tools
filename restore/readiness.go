@@ -69,24 +69,6 @@ func EvaluateReadiness(ctx context.Context, store *db.PostgresDb, userID, projec
 		return nil, fmt.Errorf("unsupported service")
 	}
 
-	credID, credOK, err := store.CredentialRepo.FindIDForUserAndProjectID(userID, projectID)
-	if err != nil {
-		return nil, err
-	}
-	if !credOK {
-		out.Ready = false
-		out.Reason = ReadinessReasonNoCredential
-		out.Message = restoreReadinessNoCredential
-		return out, nil
-	}
-	cred, err := store.CredentialRepo.GetByID(credID)
-	if err != nil {
-		return nil, err
-	}
-	out.CredentialID = cred.ID
-	out.AccountType = google.NormalizeAccountType(cred.AccountType)
-	out.OAuthHolderEmail = strings.TrimSpace(cred.Email)
-
 	cronJob, jobOK, err := store.CronJobRepo.FindJobForRestore(userID, method, loginID)
 	if err != nil {
 		return nil, err
@@ -98,6 +80,32 @@ func EvaluateReadiness(ctx context.Context, store *db.PostgresDb, userID, projec
 		return out, nil
 	}
 	out.CronJobID = cronJob.ID
+
+	var cred *repo.GoogleBackupCredentialDB
+	if credID := repo.JobCredentialID(cronJob); credID > 0 {
+		cred, err = store.CredentialRepo.GetByID(credID)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		credID, credOK, err := store.CredentialRepo.FindIDForUserProjectAndEmail(userID, projectID, loginID)
+		if err != nil {
+			return nil, err
+		}
+		if !credOK {
+			out.Ready = false
+			out.Reason = ReadinessReasonNoCredential
+			out.Message = restoreReadinessNoCredential
+			return out, nil
+		}
+		cred, err = store.CredentialRepo.GetByID(credID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	out.CredentialID = cred.ID
+	out.AccountType = google.NormalizeAccountType(cred.AccountType)
+	out.OAuthHolderEmail = strings.TrimSpace(cred.Email)
 
 	cfg, ok := ConfigForMethod(method)
 	if !ok {

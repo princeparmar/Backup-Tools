@@ -2003,12 +2003,12 @@ func resolveUserCredentialByProjectAndEmail(database *db.PostgresDb, userID, pro
 	if email == "" {
 		return nil, httpErr(http.StatusBadRequest, "Invalid Request", "google_email is required")
 	}
-	credID, ok, err := database.CredentialRepo.FindIDForUserAndProjectID(userID, projectID)
+	credID, ok, err := database.CredentialRepo.FindIDForUserProjectAndEmail(userID, projectID, email)
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
-		return nil, httpErr(http.StatusNotFound, "Invalid Request", "no backup credential found for this project_id; complete onboarding first")
+		return nil, httpErr(http.StatusNotFound, "Invalid Request", "no backup credential found for this project_id and google_email; complete onboarding first")
 	}
 	cred, err := database.CredentialRepo.GetByID(credID)
 	if err != nil {

@@ -64,5 +64,10 @@ func (s *PostgresDb) Migrate() error {
 		return err
 	}
 
+	// Allow multiple Google accounts (emails) per storj_project_id.
+	if err := s.DB.Exec(`DROP INDEX IF EXISTS idx_google_backup_cred_project_id`).Error; err != nil {
+		return err
+	}
+
 	return nil
 }
