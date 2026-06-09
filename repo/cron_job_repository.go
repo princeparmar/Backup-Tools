@@ -221,6 +221,82 @@ func (r *CronJobRepository) GetAllCronJobsForUser(userID string, filter *CronJob
 	return res, nil
 }
 
+// ServiceJobCountRow is per-method job counts for GET /auto-sync/job/services.
+type ServiceJobCountRow struct {
+	Method       string
+	TotalJobs    int
+	ActiveJobs   int
+	DeactiveJobs int
+}
+
+// ListServiceJobCountsForUser returns job counts grouped by method for non-placeholder rows.
+func (r *CronJobRepository) ListServiceJobCountsForUser(userID string) ([]ServiceJobCountRow, error) {
+	type countRow struct {
+		Method       string
+		TotalJobs    int
+		ActiveJobs   int
+		DeactiveJobs int
+	}
+	var rows []countRow
+	err := r.db.Model(&CronJobListingDB{}).
+		Select(`method,
+			COUNT(*) AS total_jobs,
+			COUNT(*) FILTER (WHERE active = true) AS active_jobs,
+			COUNT(*) FILTER (WHERE active = false) AS deactive_jobs`).
+		Where("user_id = ? AND COALESCE(placeholder, false) = ?", userID, false).
+		Group("method").
+		Order("method ASC").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("list service job counts: %w", err)
+	}
+	out := make([]ServiceJobCountRow, 0, len(rows))
+	for i := range rows {
+		out = append(out, ServiceJobCountRow{
+			Method:       rows[i].Method,
+			TotalJobs:    rows[i].TotalJobs,
+			ActiveJobs:   rows[i].ActiveJobs,
+			DeactiveJobs: rows[i].DeactiveJobs,
+		})
+	}
+	return out, nil
+}
+
+// UsersGroupsJobFilter scopes jobs for GET /auto-sync/users-groups.
+type UsersGroupsJobFilter struct {
+	EmailSearch string
+	Method      string
+	Domain      string
+}
+
+// ListJobsForUsersGroups returns non-placeholder cron jobs for users-groups listing.
+func (r *CronJobRepository) ListJobsForUsersGroups(userID string, f *UsersGroupsJobFilter) ([]CronJobListingDB, error) {
+	var res []CronJobListingDB
+	query := r.db.Model(&CronJobListingDB{}).
+		Where("cron_job_listing_dbs.user_id = ?", userID).
+		Where("COALESCE(cron_job_listing_dbs.placeholder, false) = ?", false)
+
+	if f != nil {
+		if domain := strings.ToLower(strings.TrimSpace(f.Domain)); domain != "" {
+			query = query.Joins(`INNER JOIN google_backup_credential_dbs c ON (cron_job_listing_dbs.input_data->>'credential_id')::bigint = c.id AND c.deleted_at IS NULL`).
+				Where("LOWER(SPLIT_PART(TRIM(c.email), '@', 2)) = ?", domain)
+		}
+		if search := strings.TrimSpace(f.EmailSearch); search != "" {
+			like := "%" + search + "%"
+			query = query.Where("(cron_job_listing_dbs.name ILIKE ? OR cron_job_listing_dbs.input_data->>'email' ILIKE ?)", like, like)
+		}
+		if method := strings.TrimSpace(f.Method); method != "" {
+			query = query.Where("cron_job_listing_dbs.method = ?", method)
+		}
+	}
+
+	db := query.Order("cron_job_listing_dbs.name ASC, cron_job_listing_dbs.method ASC").Find(&res)
+	if db != nil && db.Error != nil {
+		return nil, fmt.Errorf("list jobs for users-groups: %w", db.Error)
+	}
+	return res, nil
+}
+
 // GetAllCronJobsForUserUnfiltered returns all cron jobs for a user including placeholder rows (duplicate/conflict checks only).
 func (r *CronJobRepository) GetAllCronJobsForUserUnfiltered(userID string) ([]CronJobListingDB, error) {
 	var res []CronJobListingDB

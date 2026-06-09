@@ -3,6 +3,7 @@ package repo
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -99,21 +100,42 @@ func policyScheduleFingerprint(userID string, credentialID uint, interval, on, r
 		strings.TrimSpace(interval), strings.TrimSpace(on), strings.TrimSpace(retentionType))
 }
 
-// PolicyMergeGroupResult describes one merged duplicate fingerprint group.
-type PolicyMergeGroupResult struct {
-	Fingerprint       string `json:"fingerprint"`
-	CanonicalPolicyID uint   `json:"canonical_policy_id"`
-	RemovedPolicyIDs  []uint `json:"removed_policy_ids"`
-	JobsRebound       int    `json:"jobs_rebound"`
+// MergeablePolicyGroupData is internal repo data for one duplicate schedule group.
+type MergeablePolicyGroupData struct {
+	Policies           []AutosyncBackupPolicyDB
+	PolicyIDs          []uint
+	Canonical          AutosyncBackupPolicyDB
+	CanonicalReason    string
+	JobCounts          map[uint]int
+	JobsOnDuplicates   int
+	TotalJobsAfter     int
+	DuplicatePolicyIDs []uint
 }
 
-// PolicyMergeResult is returned by MergeDuplicatePolicies.
-type PolicyMergeResult struct {
-	MergedGroups    int                      `json:"merged_groups"`
-	JobsRebound     int                      `json:"jobs_rebound"`
-	PoliciesRemoved int                      `json:"policies_removed"`
-	Groups          []PolicyMergeGroupResult `json:"groups"`
+// MergeExecuteResult is returned by MergeSelectedPolicyGroup after a successful merge.
+type MergeExecuteResult struct {
+	CanonicalPolicyID   uint
+	CanonicalReason     string
+	RemovedPolicyIDs    []uint
+	PolicyIDs           []uint
+	JobsRebound         int
+	TotalJobsAfterMerge int
 }
+
+// MergeIncompleteGroupError is returned when submitted policy_ids omit members of the duplicate set.
+type MergeIncompleteGroupError struct {
+	MissingPolicyIDs []uint
+}
+
+func (e *MergeIncompleteGroupError) Error() string {
+	return "incomplete merge group"
+}
+
+var (
+	ErrMergePolicyIDsRequired = errors.New("at least two policy_ids are required")
+	ErrMergePolicyNotFound    = errors.New("policy not found for user")
+	ErrMergeMixedGroups       = errors.New("all policy_ids must belong to the same schedule group")
+)
 
 func pickCanonicalPolicy(policies []AutosyncBackupPolicyDB, jobCounts map[uint]int, now time.Time) AutosyncBackupPolicyDB {
 	best := policies[0]
@@ -132,21 +154,71 @@ func pickCanonicalPolicy(policies []AutosyncBackupPolicyDB, jobCounts map[uint]i
 	return best
 }
 
-// MergeDuplicatePolicies merges rows that share the same schedule fingerprint (includes credential_id in the key).
-// Canonical row prefers a non-expired policy with the most linked jobs.
-func (r *AutosyncBackupPolicyRepository) MergeDuplicatePolicies(userID string, dryRun bool) (*PolicyMergeResult, error) {
-	userID = strings.TrimSpace(userID)
-	if userID == "" {
-		return nil, fmt.Errorf("user_id is required")
+func policyCanonicalScore(p AutosyncBackupPolicyDB, jobCounts map[uint]int, now time.Time) int {
+	score := jobCounts[p.ID] * 100
+	if !IsPolicyExpired(&p, now) {
+		score += 10000
 	}
-	policies, err := r.ListByUserID(userID)
-	if err != nil {
-		return nil, err
-	}
-	if len(policies) < 2 {
-		return &PolicyMergeResult{}, nil
-	}
+	return score
+}
 
+// CanonicalReason explains why a policy was chosen as canonical within a duplicate group.
+func CanonicalReason(canonical AutosyncBackupPolicyDB, all []AutosyncBackupPolicyDB, jobCounts map[uint]int, now time.Time) string {
+	canonScore := policyCanonicalScore(canonical, jobCounts, now)
+	tiedAtBest := 0
+	for i := range all {
+		if policyCanonicalScore(all[i], jobCounts, now) == canonScore {
+			tiedAtBest++
+		}
+	}
+	if tiedAtBest > 1 {
+		return "lowest_policy_id"
+	}
+	if !IsPolicyExpired(&canonical, now) {
+		canonJobs := jobCounts[canonical.ID]
+		maxJobs := 0
+		for i := range all {
+			if !IsPolicyExpired(&all[i], now) && jobCounts[all[i].ID] > maxJobs {
+				maxJobs = jobCounts[all[i].ID]
+			}
+		}
+		if canonJobs == maxJobs && maxJobs > 0 {
+			return "most_linked_jobs_non_expired"
+		}
+		return "non_expired_policy"
+	}
+	return "lowest_policy_id"
+}
+
+func buildMergeableGroupData(rows []AutosyncBackupPolicyDB, jobCounts map[uint]int, now time.Time) MergeablePolicyGroupData {
+	canonical := pickCanonicalPolicy(rows, jobCounts, now)
+	policyIDs := make([]uint, 0, len(rows))
+	duplicateIDs := make([]uint, 0, len(rows)-1)
+	jobsOnDuplicates := 0
+	totalJobs := 0
+	for i := range rows {
+		policyIDs = append(policyIDs, rows[i].ID)
+		totalJobs += jobCounts[rows[i].ID]
+		if rows[i].ID != canonical.ID {
+			duplicateIDs = append(duplicateIDs, rows[i].ID)
+			jobsOnDuplicates += jobCounts[rows[i].ID]
+		}
+	}
+	sort.Slice(policyIDs, func(i, j int) bool { return policyIDs[i] < policyIDs[j] })
+	sort.Slice(duplicateIDs, func(i, j int) bool { return duplicateIDs[i] < duplicateIDs[j] })
+	return MergeablePolicyGroupData{
+		Policies:           rows,
+		PolicyIDs:          policyIDs,
+		Canonical:          canonical,
+		CanonicalReason:    CanonicalReason(canonical, rows, jobCounts, now),
+		JobCounts:          jobCounts,
+		JobsOnDuplicates:   jobsOnDuplicates,
+		TotalJobsAfter:     totalJobs,
+		DuplicatePolicyIDs: duplicateIDs,
+	}
+}
+
+func (r *AutosyncBackupPolicyRepository) loadPolicyJobCounts(userID string) (map[uint]int, error) {
 	type jobCountRow struct {
 		PolicyID uint
 		Count    int
@@ -163,61 +235,172 @@ func (r *AutosyncBackupPolicyRepository) MergeDuplicatePolicies(userID string, d
 	for _, c := range counts {
 		jobCounts[c.PolicyID] = c.Count
 	}
+	return jobCounts, nil
+}
 
-	now := time.Now().UTC()
+func groupPoliciesByFingerprint(policies []AutosyncBackupPolicyDB) map[string][]AutosyncBackupPolicyDB {
 	groups := make(map[string][]AutosyncBackupPolicyDB)
 	for i := range policies {
 		fp := policyScheduleFingerprint(policies[i].UserID, policies[i].CredentialID, policies[i].Interval, policies[i].On, policies[i].RetentionType)
 		groups[fp] = append(groups[fp], policies[i])
 	}
+	return groups
+}
 
-	out := &PolicyMergeResult{Groups: make([]PolicyMergeGroupResult, 0)}
-	for fp, rows := range groups {
+// ListMergeablePolicyGroups returns duplicate schedule groups (2+ policies) for a user.
+func (r *AutosyncBackupPolicyRepository) ListMergeablePolicyGroups(userID string) ([]MergeablePolicyGroupData, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, fmt.Errorf("user_id is required")
+	}
+	policies, err := r.ListByUserID(userID)
+	if err != nil {
+		return nil, err
+	}
+	if len(policies) < 2 {
+		return nil, nil
+	}
+	jobCounts, err := r.loadPolicyJobCounts(userID)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	groups := groupPoliciesByFingerprint(policies)
+	out := make([]MergeablePolicyGroupData, 0)
+	for _, rows := range groups {
 		if len(rows) < 2 {
 			continue
 		}
-		canonical := pickCanonicalPolicy(rows, jobCounts, now)
-		removed := make([]uint, 0, len(rows)-1)
-		groupJobs := 0
-		for i := range rows {
-			if rows[i].ID == canonical.ID {
-				continue
-			}
-			removed = append(removed, rows[i].ID)
-			var rebound int64
-			q := r.db.Model(&CronJobListingDB{}).Where("user_id = ? AND policy_id = ?", userID, rows[i].ID)
-			if dryRun {
-				if err := q.Count(&rebound).Error; err != nil {
-					return nil, fmt.Errorf("count jobs for policy %d: %w", rows[i].ID, err)
-				}
-			} else {
-				res := q.Updates(map[string]interface{}{
-					"policy_id": canonical.ID,
-					"interval":  canonical.Interval,
-				})
-				if res.Error != nil {
-					return nil, fmt.Errorf("rebind jobs from policy %d: %w", rows[i].ID, res.Error)
-				}
-				rebound = res.RowsAffected
-			}
-			groupJobs += int(rebound)
-			if !dryRun {
-				if err := r.db.Delete(&AutosyncBackupPolicyDB{}, rows[i].ID).Error; err != nil {
-					return nil, fmt.Errorf("delete duplicate policy %d: %w", rows[i].ID, err)
-				}
-			}
-		}
-		out.Groups = append(out.Groups, PolicyMergeGroupResult{
-			Fingerprint:       fp,
-			CanonicalPolicyID: canonical.ID,
-			RemovedPolicyIDs:  removed,
-			JobsRebound:       groupJobs,
-		})
-		out.MergedGroups++
-		out.JobsRebound += groupJobs
-		out.PoliciesRemoved += len(removed)
+		out = append(out, buildMergeableGroupData(rows, jobCounts, now))
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if len(out[i].PolicyIDs) == 0 || len(out[j].PolicyIDs) == 0 {
+			return i < j
+		}
+		return out[i].PolicyIDs[0] < out[j].PolicyIDs[0]
+	})
 	return out, nil
+}
+
+func sortedUintSet(ids []uint) []uint {
+	seen := make(map[uint]struct{}, len(ids))
+	out := make([]uint, 0, len(ids))
+	for _, id := range ids {
+		if id == 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+func missingPolicyIDs(submitted, full []uint) []uint {
+	submittedSet := make(map[uint]struct{}, len(submitted))
+	for _, id := range submitted {
+		submittedSet[id] = struct{}{}
+	}
+	missing := make([]uint, 0)
+	for _, id := range full {
+		if _, ok := submittedSet[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	return missing
+}
+
+// MergeSelectedPolicyGroup merges one complete duplicate group identified by policy_ids.
+func (r *AutosyncBackupPolicyRepository) MergeSelectedPolicyGroup(userID string, policyIDs []uint) (*MergeExecuteResult, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, fmt.Errorf("user_id is required")
+	}
+	policyIDs = sortedUintSet(policyIDs)
+	if len(policyIDs) < 2 {
+		return nil, ErrMergePolicyIDsRequired
+	}
+
+	loaded := make([]AutosyncBackupPolicyDB, 0, len(policyIDs))
+	fingerprint := ""
+	for _, id := range policyIDs {
+		policy, err := r.GetByID(id)
+		if err != nil {
+			if errors.Is(err, gormio.ErrRecordNotFound) {
+				return nil, ErrMergePolicyNotFound
+			}
+			return nil, err
+		}
+		if strings.TrimSpace(policy.UserID) != userID {
+			return nil, ErrMergePolicyNotFound
+		}
+		fp := policyScheduleFingerprint(policy.UserID, policy.CredentialID, policy.Interval, policy.On, policy.RetentionType)
+		if fingerprint == "" {
+			fingerprint = fp
+		} else if fingerprint != fp {
+			return nil, ErrMergeMixedGroups
+		}
+		loaded = append(loaded, *policy)
+	}
+
+	allPolicies, err := r.ListByUserID(userID)
+	if err != nil {
+		return nil, err
+	}
+	groups := groupPoliciesByFingerprint(allPolicies)
+	fullGroup, ok := groups[fingerprint]
+	if !ok || len(fullGroup) < 2 {
+		return nil, ErrMergeMixedGroups
+	}
+	fullIDs := make([]uint, 0, len(fullGroup))
+	for i := range fullGroup {
+		fullIDs = append(fullIDs, fullGroup[i].ID)
+	}
+	sort.Slice(fullIDs, func(i, j int) bool { return fullIDs[i] < fullIDs[j] })
+	if missing := missingPolicyIDs(policyIDs, fullIDs); len(missing) > 0 {
+		return nil, &MergeIncompleteGroupError{MissingPolicyIDs: missing}
+	}
+
+	jobCounts, err := r.loadPolicyJobCounts(userID)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	groupData := buildMergeableGroupData(fullGroup, jobCounts, now)
+	canonical := groupData.Canonical
+	removed := make([]uint, 0, len(fullGroup)-1)
+	jobsRebound := 0
+	for i := range fullGroup {
+		if fullGroup[i].ID == canonical.ID {
+			continue
+		}
+		removed = append(removed, fullGroup[i].ID)
+		res := r.db.Model(&CronJobListingDB{}).
+			Where("user_id = ? AND policy_id = ?", userID, fullGroup[i].ID).
+			Updates(map[string]interface{}{
+				"policy_id": canonical.ID,
+				"interval":  canonical.Interval,
+			})
+		if res.Error != nil {
+			return nil, fmt.Errorf("rebind jobs from policy %d: %w", fullGroup[i].ID, res.Error)
+		}
+		jobsRebound += int(res.RowsAffected)
+		if err := r.db.Delete(&AutosyncBackupPolicyDB{}, fullGroup[i].ID).Error; err != nil {
+			return nil, fmt.Errorf("delete duplicate policy %d: %w", fullGroup[i].ID, err)
+		}
+	}
+	sort.Slice(removed, func(i, j int) bool { return removed[i] < removed[j] })
+	return &MergeExecuteResult{
+		CanonicalPolicyID:   canonical.ID,
+		CanonicalReason:     groupData.CanonicalReason,
+		RemovedPolicyIDs:    removed,
+		PolicyIDs:           fullIDs,
+		JobsRebound:         jobsRebound,
+		TotalJobsAfterMerge: groupData.TotalJobsAfter,
+	}, nil
 }
 
 func normalizeRetentionType(retentionType string) (string, error) {

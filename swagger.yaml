@@ -183,28 +183,147 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /auto-sync/users-groups/domains:
+    get:
+      tags:
+        - Auto Sync
+      summary: List Connected Domains
+      description: |
+        Returns unique domain strings from connected credentials for the Users & Groups domain dropdown.
+        Scoped to credentials linked to the user's non-placeholder jobs.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      responses:
+        '200':
+          description: Unique domain strings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsersGroupsDomainsResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auto-sync/users-groups:
+    get:
+      tags:
+        - Auto Sync
+      summary: List Users and Groups (by email)
+      description: |
+        Flat listing of mailbox emails with per-service active status.
+        Includes one global policy_link (GET /auto-sync/policy) for the page policy action.
+        Same response shape for personal Gmail and corporate Workspace; use domain to scope rows.
+        Data aggregated from cron jobs only (mailboxes with at least one job).
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - name: domain
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter to jobs under credentials matching this domain (from domains dropdown)
+        - name: search
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Email search (partial match on job name or input_data.email)
+        - name: method
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [all, all_services, gmail, google_drive, google_photos, google_contacts, google_calendar]
+          description: |
+            Service filter (All Services dropdown). Omit, all, or all_services = no filter.
+            Otherwise only mailbox rows that have a job for that service; each row still lists all services.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 10
+          description: Max entities to return (default 10)
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          description: Number of entities to skip
+      responses:
+        '200':
+          description: Paginated entity list
+        '400':
+          description: Invalid pagination parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsersGroupsListResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auto-sync/job/services:
+    get:
+      tags:
+        - Auto Sync
+      summary: List All Autosync Services
+      description: |
+        Returns all supported autosync services with per-method job counts (Services Update page).
+        Services with no jobs for the user return zero counts. Use filter.method on GET /auto-sync/job for Configure modal job listing.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      responses:
+        '200':
+          description: Connected services with per-method job counts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AutosyncServicesResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /auto-sync/job:
     get:
       tags:
         - Auto Sync
       summary: List All Jobs
-      description: Get all automatic sync jobs for the authenticated user
-      security:
-        - bearerAuth: []
+      description: |
+        Get automatic sync jobs for the authenticated user.
+        Optional filter query param (URL-encoded JSON) supports method for service-specific listing,
+        e.g. filter={"method":"gmail"} for Configure Gmail modal.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - name: filter
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            URL-encoded JSON filter. Fields: name, method, syncType, active, status, messageStatus, interval.
+            Example for Gmail only: {"method":"gmail"}
       responses:
         '200':
-          description: List of all jobs
+          description: List of jobs
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  message:
-                    type: string
-                  data:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/CronJob'
+                $ref: '#/components/schemas/AutosyncJobListResponse'
+        '400':
+          description: Invalid filter parameter
         '401':
           description: Unauthorized
           content:
@@ -408,15 +527,32 @@ paths:
               schema:
                 $ref: '#/components/schemas/PolicyDetailResponse'
 
+  /auto-sync/policy/merge/preview:
+    get:
+      tags:
+        - Auto Sync Policy
+      summary: Preview Mergeable Duplicate Policies
+      description: |
+        Read-only preview of all duplicate policy groups for the authenticated user.
+        Each group shares the same schedule and credential. Use policy_ids from a group in POST /auto-sync/policy/merge.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      responses:
+        '200':
+          description: Merge preview (may be empty when no duplicates exist)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyMergePreviewResponse'
+
   /auto-sync/policy/merge:
     post:
       tags:
         - Auto Sync Policy
-      summary: Merge Duplicate Policies
+      summary: Merge Selected Duplicate Policies
       description: |
-        Consolidates policy rows with the same schedule fingerprint (user + credential + interval + on + retention_type).
-        Rebinds jobs to one canonical policy per group and soft-deletes duplicates. Use dry_run to preview.
-        See docs/satellite-autosync-policy-api.md.
+        Merges one complete duplicate policy group identified by policy_ids (from GET /auto-sync/policy/merge/preview).
+        All policies in the duplicate set must be included. Rebinds jobs to the canonical policy and soft-deletes duplicates.
       parameters:
         - $ref: '#/components/parameters/tokenKeyHeader'
       requestBody:
@@ -424,14 +560,18 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/PolicyMergeRequest'
+              $ref: '#/components/schemas/PolicyMergeExecuteRequest'
       responses:
         '200':
-          description: Merge completed or dry-run preview
+          description: Merge completed
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PolicyMergeResponse'
+                $ref: '#/components/schemas/PolicyMergeExecuteResponse'
+        '400':
+          description: Invalid or incomplete policy_ids set
+        '404':
+          description: Policy not found for user
 
   /auto-sync/policy:
     get:
@@ -2921,6 +3061,102 @@ components:
           type: string
           format: date-time
 
+    UsersGroupsDomainsResponse:
+      type: object
+      properties:
+        domains:
+          type: array
+          items:
+            type: string
+          example: ["acme.com", "gmail.com"]
+
+    UsersGroupsServiceView:
+      type: object
+      properties:
+        method:
+          type: string
+          enum: [gmail, google_drive, google_photos, google_contacts, google_calendar]
+        active:
+          type: boolean
+
+    UsersGroupsEntityView:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Display name derived from email (local part before @)
+        email:
+          type: string
+        services:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsersGroupsServiceView'
+
+    UsersGroupsPaginationView:
+      type: object
+      properties:
+        limit:
+          type: integer
+        offset:
+          type: integer
+        page:
+          type: integer
+          description: Current page derived from offset and limit
+        total_pages:
+          type: integer
+        total_count:
+          type: integer
+
+    UsersGroupsListResponse:
+      type: object
+      properties:
+        policy_link:
+          type: string
+          example: /auto-sync/policy
+          description: Global policy page link; Satellite redirects user here for schedule management
+        entities:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsersGroupsEntityView'
+        pagination:
+          $ref: '#/components/schemas/UsersGroupsPaginationView'
+
+    ServiceJobCountView:
+      type: object
+      properties:
+        method:
+          type: string
+          enum: [gmail, google_drive, google_photos, google_contacts, google_calendar]
+        total_jobs:
+          type: integer
+        active_jobs:
+          type: integer
+        deactive_jobs:
+          type: integer
+
+    AutosyncServicesResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        services:
+          type: array
+          items:
+            $ref: '#/components/schemas/ServiceJobCountView'
+
+    AutosyncJobListResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        success:
+          type: array
+          items:
+            $ref: '#/components/schemas/CronJob'
+        failed:
+          type: array
+          items: {}
+
     JobCreateRequest:
       type: object
       properties:
@@ -2999,21 +3235,21 @@ components:
         - interval
         - on
 
-    PolicyMergeRequest:
+    PolicyMergeExecuteRequest:
       type: object
+      required:
+        - policy_ids
       properties:
-        dry_run:
-          type: boolean
-          default: false
-          description: Preview merge without writing to the database when true.
+        policy_ids:
+          type: array
+          minItems: 2
+          items:
+            type: integer
+          description: All policy IDs in one duplicate group (from merge preview).
 
-    PolicyListItemView:
+    PolicyScheduleView:
       type: object
       properties:
-        policy_id:
-          type: integer
-        credential_id:
-          type: integer
         interval:
           type: string
         on:
@@ -3026,8 +3262,141 @@ components:
           nullable: true
         is_expired:
           type: boolean
-        linked_job_count:
+
+    PolicyMergeImpactView:
+      type: object
+      properties:
+        policy_kept:
           type: integer
+        policies_to_remove:
+          type: integer
+          description: Preview only — count of duplicate policies to remove.
+        policies_removed:
+          type: integer
+          description: Execute only — count of policies removed.
+        jobs_to_rebind:
+          type: integer
+          description: Preview only — jobs on duplicate policies that will move.
+        jobs_rebound:
+          type: integer
+          description: Execute only — jobs rebound to canonical policy.
+        total_jobs_after_merge:
+          type: integer
+
+    MergePreviewPolicy:
+      type: object
+      allOf:
+        - $ref: '#/components/schemas/PolicyListItemView'
+        - type: object
+          properties:
+            role:
+              type: string
+              enum: [canonical, duplicate]
+
+    PolicyMergeJobPreview:
+      type: object
+      properties:
+        job_id:
+          type: integer
+        email:
+          type: string
+        method:
+          type: string
+        policy_id:
+          type: integer
+
+    PolicyMergePreviewGroup:
+      type: object
+      properties:
+        schedule:
+          $ref: '#/components/schemas/PolicyScheduleView'
+        account:
+          $ref: '#/components/schemas/ConnectedAccountView'
+        impact:
+          $ref: '#/components/schemas/PolicyMergeImpactView'
+        recommended_canonical_policy_id:
+          type: integer
+        canonical_reason:
+          type: string
+          enum: [most_linked_jobs_non_expired, non_expired_policy, lowest_policy_id]
+        policies:
+          type: array
+          items:
+            $ref: '#/components/schemas/MergePreviewPolicy'
+        policy_ids:
+          type: array
+          items:
+            type: integer
+        linked_jobs_preview:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyMergeJobPreview'
+        jobs_to_rebind:
+          type: integer
+        has_more_jobs:
+          type: boolean
+
+    PolicyMergePreviewResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        summary:
+          type: object
+          properties:
+            mergeable_group_count:
+              type: integer
+            duplicate_policy_count:
+              type: integer
+            jobs_that_would_move:
+              type: integer
+        groups:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyMergePreviewGroup'
+        failed:
+          type: array
+          items: {}
+
+    PolicyMergeExecuteResult:
+      type: object
+      properties:
+        schedule:
+          $ref: '#/components/schemas/PolicyScheduleView'
+        canonical_policy_id:
+          type: integer
+        canonical_reason:
+          type: string
+        removed_policy_ids:
+          type: array
+          items:
+            type: integer
+        policy_ids:
+          type: array
+          items:
+            type: integer
+        jobs_rebound:
+          type: integer
+        impact:
+          $ref: '#/components/schemas/PolicyMergeImpactView'
+        policy:
+          $ref: '#/components/schemas/PolicyListItemView'
+
+    PolicyMergeExecuteResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        merge:
+          $ref: '#/components/schemas/PolicyMergeExecuteResult'
+        failed:
+          type: array
+          items: {}
+
+    PolicyListItemView:
+      allOf:
+        - $ref: '#/components/schemas/PolicyListRowPolicyView'
+      description: Shared policy row (detail/update/merge). Reconnect flags are on account only.
 
     PolicyLinkedJobView:
       type: object
@@ -3043,51 +3412,17 @@ components:
         sync_type:
           type: string
 
-    PolicyMergeGroupResult:
-      type: object
-      properties:
-        fingerprint:
-          type: string
-        canonical_policy_id:
-          type: integer
-        removed_policy_ids:
-          type: array
-          items:
-            type: integer
-        jobs_rebound:
-          type: integer
-
-    PolicyMergeResult:
-      type: object
-      properties:
-        merged_groups:
-          type: integer
-        jobs_rebound:
-          type: integer
-        policies_removed:
-          type: integer
-        groups:
-          type: array
-          items:
-            $ref: '#/components/schemas/PolicyMergeGroupResult'
-
-    PolicyMergeResponse:
-      type: object
-      properties:
-        message:
-          type: string
-        dry_run:
-          type: boolean
-        merge:
-          $ref: '#/components/schemas/PolicyMergeResult'
-
     PolicyDetailResponse:
       type: object
       properties:
         message:
           type: string
         policy:
-          $ref: '#/components/schemas/PolicyListItemView'
+          $ref: '#/components/schemas/PolicyListRowPolicyView'
+          description: Schedule fields only; reconnect flags are on account.
+        account:
+          $ref: '#/components/schemas/ConnectedAccountView'
+          description: Reconnect flags consider credential tokens and resolved tokens on linked jobs.
         linked_jobs:
           type: array
           items:
@@ -3146,16 +3481,29 @@ components:
       properties:
         project_id:
           type: string
+          description: Storj project id for PUT /auto-sync/job/project reconnect save.
         google_email:
           type: string
+          description: OAuth holder email (admin for admin_workspace).
+        oauth_holder_email:
+          type: string
+          description: Same as google_email; use as google_email in project PUT body.
         credential_id:
           type: integer
         storj_project_id:
           type: string
-        refresh_token:
+        account_type:
           type: string
-        storx_token:
+          enum: [personal, employee_workspace, admin_workspace]
+        needs_google_reconnect:
+          type: boolean
+          description: True when no refresh_token on credential or any linked job (resolved).
+        needs_storx_reconnect:
+          type: boolean
+          description: True when no storx_token on credential or any linked job (resolved).
+        reconnect_scope:
           type: string
+          example: credential
 
     AutosyncJobItemView:
       type: object
@@ -3223,6 +3571,40 @@ components:
           items:
             type: object
 
+    PolicyListRowPolicyView:
+      type: object
+      description: Policy schedule fields on listing rows. Reconnect flags are on account only.
+      properties:
+        policy_id:
+          type: integer
+        credential_id:
+          type: integer
+        interval:
+          type: string
+        on:
+          type: string
+        retention_type:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        is_expired:
+          type: boolean
+        linked_job_count:
+          type: integer
+
+    PolicyListRowView:
+      type: object
+      allOf:
+        - $ref: '#/components/schemas/PolicyListRowPolicyView'
+        - type: object
+          required:
+            - account
+          properties:
+            account:
+              $ref: '#/components/schemas/ConnectedAccountView'
+
     PolicyListResponse:
       type: object
       properties:
@@ -3230,10 +3612,11 @@ components:
           type: string
         account:
           $ref: '#/components/schemas/ConnectedAccountView'
+          description: Present when listing is filtered by credential_id or project_id+google_email.
         policies:
           type: array
           items:
-            $ref: '#/components/schemas/PolicyListItemView'
+            $ref: '#/components/schemas/PolicyListRowView'
         failed:
           type: array
           items:

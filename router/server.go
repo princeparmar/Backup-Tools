@@ -61,10 +61,13 @@ func StartServer(db *db.PostgresDb, address string) {
 	e.GET("/autosync/stats", handler.HandleAutomaticSyncStats)
 
 	autoSync := e.Group("/auto-sync")
+	autoSync.GET("/users-groups/domains", handler.HandleAutosyncUsersGroupsDomains)
+	autoSync.GET("/users-groups", handler.HandleAutosyncUsersGroupsList)
 	autoSync.GET("/live", handler.HandleAutomaticSyncActiveJobsForUser)
 	autoSync.PUT("/task/hide", handler.HandleHideTask)
 
 	job := autoSync.Group("/job")
+	job.GET("/services", handler.HandleAutomaticSyncServicesForUser)
 	job.GET("/", handler.HandleAutomaticSyncListForUser)
 	job.POST("", handler.HandleAutomaticSyncCreate)
 	job.GET("/interval", handler.HandleIntervalOnConfig)
@@ -76,6 +79,7 @@ func StartServer(db *db.PostgresDb, address string) {
 
 	policy := autoSync.Group("/policy")
 	policy.GET("", handler.HandleAutosyncPolicyList)
+	policy.GET("/merge/preview", handler.HandleAutosyncPolicyMergePreview)
 	policy.POST("/merge", handler.HandleAutosyncPolicyMerge)
 	policy.GET("/by-job/:job_id", handler.HandleAutosyncPolicyByJobID)
 	policy.GET("/:policy_id", handler.HandleAutosyncPolicyByID)

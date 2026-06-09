@@ -30,6 +30,10 @@ var (
 	allowedSyncTypes = map[string]bool{
 		"one_time": true, "daily": true,
 	}
+	// autosyncServiceMethodsOrder is the stable listing order for GET /auto-sync/job/services (Google workspace only).
+	autosyncServiceMethodsOrder = []string{
+		"gmail", "google_drive", "google_photos", "google_contacts", "google_calendar",
+	}
 )
 
 // onboardingIntervalValues — Satellite onboarding JSON `interval` + GET /auto-sync/job/interval.
@@ -195,6 +199,42 @@ type CronJobResponse struct {
 // CronJobDetailResponse is a single job for GET detail / update responses.
 type CronJobDetailResponse struct {
 	repo.CronJobListingDB
+}
+
+// ServiceJobCountView is per-method job counts on GET /auto-sync/job/services.
+type ServiceJobCountView struct {
+	Method       string `json:"method"`
+	TotalJobs    int    `json:"total_jobs"`
+	ActiveJobs   int    `json:"active_jobs"`
+	DeactiveJobs int    `json:"deactive_jobs"`
+}
+
+func isAllowedAutosyncMethod(method string) bool {
+	return allowedMethods[strings.TrimSpace(method)]
+}
+
+func buildAllServiceJobCounts(rows []repo.ServiceJobCountRow) []ServiceJobCountView {
+	byMethod := make(map[string]repo.ServiceJobCountRow, len(rows))
+	for i := range rows {
+		if !isAllowedAutosyncMethod(rows[i].Method) {
+			continue
+		}
+		byMethod[rows[i].Method] = rows[i]
+	}
+	out := make([]ServiceJobCountView, 0, len(autosyncServiceMethodsOrder))
+	for _, method := range autosyncServiceMethodsOrder {
+		if row, ok := byMethod[method]; ok {
+			out = append(out, ServiceJobCountView{
+				Method:       row.Method,
+				TotalJobs:    row.TotalJobs,
+				ActiveJobs:   row.ActiveJobs,
+				DeactiveJobs: row.DeactiveJobs,
+			})
+			continue
+		}
+		out = append(out, ServiceJobCountView{Method: method})
+	}
+	return out
 }
 
 // AutomaticBackupUpdateByProjectRequest is PUT /auto-sync/job/project — same fields as AutomaticBackupUpdateRequest plus project scope.
@@ -431,6 +471,37 @@ func HandleAutomaticSyncListForUser(c echo.Context) error {
 		"failed":  []interface{}{},
 	})
 }
+
+// HandleAutomaticSyncServicesForUser lists all autosync services with per-method job counts (zero when no jobs).
+func HandleAutomaticSyncServicesForUser(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+			"message": "not able to authenticate user",
+			"error":   err.Error(),
+		})
+	}
+
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+	rows, err := database.CronJobRepo.ListServiceJobCountsForUser(userID)
+	if err != nil {
+		logger.Error(ctx, "Failed to list service job counts", logger.ErrorField(err))
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"message": "internal server error",
+			"error":   err.Error(),
+		})
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message":  "Connected autosync services",
+		"services": buildAllServiceJobCounts(rows),
+	})
+}
+
 func calculateNextBackup(job repo.CronJobListingDB) *time.Time {
 	if !job.Active || job.Interval == "one_time" {
 		return nil

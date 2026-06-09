@@ -236,6 +236,27 @@ func (r *GoogleBackupCredentialRepository) ClearTokens(id uint) error {
 	}).Error
 }
 
+// ListUniqueDomainsForUser returns distinct domains from credential emails linked to the user's jobs.
+func (r *GoogleBackupCredentialRepository) ListUniqueDomainsForUser(userID string) ([]string, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, nil
+	}
+	var domains []string
+	err := r.db.Table("google_backup_credential_dbs AS c").
+		Select("DISTINCT LOWER(SPLIT_PART(TRIM(c.email), '@', 2)) AS domain").
+		Joins(`INNER JOIN cron_job_listing_dbs j ON (j.input_data->>'credential_id')::bigint = c.id AND j.deleted_at IS NULL`).
+		Where("j.user_id = ? AND COALESCE(j.placeholder, false) = ?", userID, false).
+		Where("(j.input_data->>'credential_id') IS NOT NULL AND (j.input_data->>'credential_id')::bigint > 0").
+		Where("SPLIT_PART(TRIM(c.email), '@', 2) <> ''").
+		Order("domain ASC").
+		Pluck("domain", &domains).Error
+	if err != nil {
+		return nil, fmt.Errorf("list unique domains for user: %w", err)
+	}
+	return domains, nil
+}
+
 // OAuthHolderEmail returns the credential email when it differs from the mailbox (corporate delegation).
 func OAuthHolderEmail(cred *GoogleBackupCredentialDB, mailbox string) string {
 	if cred == nil {
