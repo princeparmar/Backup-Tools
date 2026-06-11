@@ -15,8 +15,9 @@ type PostgresDb struct {
 	AuthRepo           *repo.AuthRepository
 	SyncedObjectRepo   *repo.SyncedObjectRepository
 	WebhookEventRepo   *repo.WebhookEventRepository
-	RestoreJobRepo     *repo.RestoreJobRepository
-	RestoreTaskRepo    *repo.RestoreTaskRepository
+	RestoreJobRepo         *repo.RestoreJobRepository
+	RestoreTaskRepo        *repo.RestoreTaskRepository
+	BackupRestoreLogsRepo  *repo.BackupRestoreLogsRepository
 }
 
 func NewPostgresStore(dsn string, queryLogging bool) (*PostgresDb, error) {
@@ -36,8 +37,9 @@ func NewPostgresStore(dsn string, queryLogging bool) (*PostgresDb, error) {
 		AuthRepo:           repo.NewAuthRepository(db),
 		SyncedObjectRepo:   repo.NewSyncedObjectRepository(db),
 		WebhookEventRepo:   repo.NewWebhookEventRepository(db),
-		RestoreJobRepo:     repo.NewRestoreJobRepository(db),
-		RestoreTaskRepo:    repo.NewRestoreTaskRepository(db),
+		RestoreJobRepo:        repo.NewRestoreJobRepository(db),
+		RestoreTaskRepo:       repo.NewRestoreTaskRepository(db),
+		BackupRestoreLogsRepo: repo.NewBackupRestoreLogsRepository(db),
 	}, nil
 }
 

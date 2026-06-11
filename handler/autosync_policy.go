@@ -914,14 +914,14 @@ func HandleAutosyncPolicyMerge(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Policies merged successfully",
 		"merge": map[string]interface{}{
-			"schedule":              buildPolicyScheduleView(canonicalPolicy),
-			"canonical_policy_id":   result.CanonicalPolicyID,
-			"canonical_reason":      result.CanonicalReason,
-			"removed_policy_ids":    result.RemovedPolicyIDs,
-			"policy_ids":            result.PolicyIDs,
-			"jobs_rebound":          result.JobsRebound,
-			"impact":                buildMergeExecuteImpact(result),
-			"policy":                buildPolicyListItemView(canonicalPolicy, len(linkedJobs)),
+			"schedule":            buildPolicyScheduleView(canonicalPolicy),
+			"canonical_policy_id": result.CanonicalPolicyID,
+			"canonical_reason":    result.CanonicalReason,
+			"removed_policy_ids":  result.RemovedPolicyIDs,
+			"policy_ids":          result.PolicyIDs,
+			"jobs_rebound":        result.JobsRebound,
+			"impact":              buildMergeExecuteImpact(result),
+			"policy":              buildPolicyListItemView(canonicalPolicy, len(linkedJobs)),
 		},
 		"failed": []interface{}{},
 	})

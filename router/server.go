@@ -60,6 +60,9 @@ func StartServer(db *db.PostgresDb, address string) {
 	e.GET("/autobackup/summary", handler.HandleAutomaticBackupSummary)
 	e.GET("/autosync/stats", handler.HandleAutomaticSyncStats)
 
+	backupRestore := e.Group("/backup-restore")
+	backupRestore.GET("/logs", handler.HandleBackupRestoreLogs)
+
 	autoSync := e.Group("/auto-sync")
 	autoSync.GET("/users-groups/domains", handler.HandleAutosyncUsersGroupsDomains)
 	autoSync.GET("/users-groups", handler.HandleAutosyncUsersGroupsList)

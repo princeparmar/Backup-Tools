@@ -2703,6 +2703,71 @@ paths:
         '401':
           description: Missing or invalid token_key
 
+  /backup-restore/logs:
+    get:
+      tags:
+        - Backup & Restore Logs
+      summary: List backup and restore activity logs
+      description: |
+        Unified activity feed for the dashboard widget. Returns latest backup (autosync) job
+        snapshots and restore job entries in one merged timeline sorted by most recent activity.
+        Each log row has exactly five fields — type, subject, method, message, message_status.
+        `limit` applies to the merged list (e.g. limit=10 returns up to 10 total rows, not 10 per type).
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - in: query
+          name: types
+          schema:
+            type: string
+            default: backup,restore
+          description: Comma-separated — backup, restore (default both)
+        - in: query
+          name: search
+          schema:
+            type: string
+          description: Partial match on subject or message
+        - in: query
+          name: method
+          schema:
+            type: string
+          description: Exact service method (gmail, google_drive, …)
+        - in: query
+          name: message_status
+          schema:
+            type: string
+            enum: [info, warning, error]
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 10
+            maximum: 100
+          description: Rows per page (default 10, max 100)
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Backup and restore logs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BackupRestoreLogsResponse'
+        '400':
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /restore/live:
     get:
       tags:
@@ -2951,6 +3016,52 @@ components:
         message:
           type: string
           example: "Error description"
+
+    BackupRestoreLogEntry:
+      type: object
+      required:
+        - type
+        - subject
+        - method
+        - message
+        - message_status
+      properties:
+        type:
+          type: string
+          enum: [backup, restore]
+          description: backup = autosync job; restore = restore job
+        subject:
+          type: string
+          description: Mailbox email or account name (backup) or login_id (restore)
+        method:
+          type: string
+          example: gmail
+        message:
+          type: string
+          example: Automatic backup completed successfully
+        message_status:
+          type: string
+          enum: [info, warning, error]
+
+    BackupRestoreLogsResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: Backup and restore logs
+        logs:
+          type: array
+          items:
+            $ref: '#/components/schemas/BackupRestoreLogEntry'
+        pagination:
+          type: object
+          properties:
+            limit:
+              type: integer
+            offset:
+              type: integer
+            total_count:
+              type: integer
 
     # Auto Sync Schemas
     ActiveJob:
