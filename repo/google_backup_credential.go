@@ -43,6 +43,37 @@ func (r *GoogleBackupCredentialRepository) GetByID(id uint) (*GoogleBackupCreden
 	return &row, nil
 }
 
+// GetByIDs loads credentials by primary keys in one query. Missing ids are omitted.
+func (r *GoogleBackupCredentialRepository) GetByIDs(ids []uint) (map[uint]*GoogleBackupCredentialDB, error) {
+	out := make(map[uint]*GoogleBackupCredentialDB)
+	if len(ids) == 0 {
+		return out, nil
+	}
+	uniq := make([]uint, 0, len(ids))
+	seen := make(map[uint]struct{}, len(ids))
+	for _, id := range ids {
+		if id == 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniq = append(uniq, id)
+	}
+	if len(uniq) == 0 {
+		return out, nil
+	}
+	var rows []GoogleBackupCredentialDB
+	if err := r.db.Where("id IN ?", uniq).Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("get credentials by ids: %w", err)
+	}
+	for i := range rows {
+		out[rows[i].ID] = &rows[i]
+	}
+	return out, nil
+}
+
 // GetByStorjProjectID loads one credential row for a Storj project (first match when several Google accounts share a project).
 func (r *GoogleBackupCredentialRepository) GetByStorjProjectID(projectID string) (*GoogleBackupCredentialDB, bool, error) {
 	projectID = strings.TrimSpace(projectID)

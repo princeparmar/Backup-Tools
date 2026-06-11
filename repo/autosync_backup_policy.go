@@ -53,6 +53,37 @@ func (r *AutosyncBackupPolicyRepository) GetByID(policyID uint) (*AutosyncBackup
 	return &row, nil
 }
 
+// GetByIDs loads policies by primary keys in one query. Missing ids are omitted.
+func (r *AutosyncBackupPolicyRepository) GetByIDs(ids []uint) (map[uint]*AutosyncBackupPolicyDB, error) {
+	out := make(map[uint]*AutosyncBackupPolicyDB)
+	if len(ids) == 0 {
+		return out, nil
+	}
+	uniq := make([]uint, 0, len(ids))
+	seen := make(map[uint]struct{}, len(ids))
+	for _, id := range ids {
+		if id == 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniq = append(uniq, id)
+	}
+	if len(uniq) == 0 {
+		return out, nil
+	}
+	var rows []AutosyncBackupPolicyDB
+	if err := r.db.Where("id IN ?", uniq).Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("get policies by ids: %w", err)
+	}
+	for i := range rows {
+		out[rows[i].ID] = &rows[i]
+	}
+	return out, nil
+}
+
 // ListByCredentialID returns all policies for a credential.
 func (r *AutosyncBackupPolicyRepository) ListByCredentialID(credentialID uint) ([]AutosyncBackupPolicyDB, error) {
 	if credentialID == 0 {

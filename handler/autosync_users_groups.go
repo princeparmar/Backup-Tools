@@ -2,11 +2,13 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
@@ -17,18 +19,60 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
+// ---------------------------------------------------------------------------
+// Constants & errors
+// ---------------------------------------------------------------------------
+
+const (
+	autosyncPolicyListLink              = "/auto-sync/policy"
+	usersGroupsDefaultLimit             = 10
+	usersGroupsCredentialHealthy        = "healthy"
+	usersGroupsCredentialReAuthRequired = "re_auth_required"
+	usersGroupsAccountCorporate         = "corporate"
+	usersGroupsAccountIndividual        = "individual"
+)
+
+var (
+	errUsersGroupsMailboxEmailRequired = fmt.Errorf("email is required")
+	errUsersGroupsMailboxNotFound      = fmt.Errorf("mailbox not found")
+
+	workspaceServiceMethods = func() map[string]struct{} {
+		set := make(map[string]struct{}, len(autosyncServiceMethodsOrder))
+		for _, method := range autosyncServiceMethodsOrder {
+			set[method] = struct{}{}
+		}
+		return set
+	}()
+
+	validUsersGroupsAccountTypes = map[string]struct{}{
+		usersGroupsAccountCorporate:  {},
+		usersGroupsAccountIndividual: {},
+	}
+
+	validUsersGroupsCredentialStatuses = map[string]struct{}{
+		usersGroupsCredentialHealthy:        {},
+		usersGroupsCredentialReAuthRequired: {},
+	}
+)
+
+// ---------------------------------------------------------------------------
+// Response types — list (GET /users-groups)
+// ---------------------------------------------------------------------------
+
 // UsersGroupsServiceView is one service row under an email entity.
 type UsersGroupsServiceView struct {
+	JobID  uint   `json:"job_id"`
 	Method string `json:"method"`
 	Active bool   `json:"active"`
 }
 
-const (
-	autosyncPolicyListLink  = "/auto-sync/policy"
-	usersGroupsDefaultLimit = 10
-)
+// UsersGroupsBulkActiveRequest is PUT /users-groups/jobs/active.
+type UsersGroupsBulkActiveRequest struct {
+	JobIDs []uint `json:"job_ids"`
+	Active *bool  `json:"active"`
+}
 
-// UsersGroupsPaginationView is pagination metadata for GET /auto-sync/users-groups.
+// UsersGroupsPaginationView is pagination metadata for GET /users-groups.
 type UsersGroupsPaginationView struct {
 	Limit      int `json:"limit"`
 	Offset     int `json:"offset"`
@@ -37,20 +81,86 @@ type UsersGroupsPaginationView struct {
 	TotalCount int `json:"total_count"`
 }
 
-// UsersGroupsEntityView is one mailbox row on GET /auto-sync/users-groups.
+// UsersGroupsEntityView is one mailbox row on GET /users-groups.
 type UsersGroupsEntityView struct {
-	Name     string                   `json:"name"`
-	Email    string                   `json:"email"`
-	Services []UsersGroupsServiceView `json:"services"`
+	Name             string                   `json:"name"`
+	Email            string                   `json:"email"`
+	AccountType      string                   `json:"account_type"`
+	CredentialStatus string                   `json:"credential_status"`
+	Services         []UsersGroupsServiceView `json:"services"`
 }
 
-var workspaceServiceMethods = func() map[string]struct{} {
-	set := make(map[string]struct{}, len(autosyncServiceMethodsOrder))
-	for _, method := range autosyncServiceMethodsOrder {
-		set[method] = struct{}{}
-	}
-	return set
-}()
+// ---------------------------------------------------------------------------
+// Response types — mailbox tabs (GET /users-groups/mailbox/*)
+// ---------------------------------------------------------------------------
+
+// UsersGroupsMailboxHeader is shared across mailbox tab responses.
+type UsersGroupsMailboxHeader struct {
+	Name        string `json:"name"`
+	Email       string `json:"email"`
+	AccountType string `json:"account_type"`
+}
+
+// UsersGroupsMailboxOverviewService is one job row on the Overview tab.
+type UsersGroupsMailboxOverviewService struct {
+	JobID        uint       `json:"job_id"`
+	Method       string     `json:"method"`
+	Active       bool       `json:"active"`
+	LastBackupAt *time.Time `json:"last_backup_at,omitempty"`
+	NextBackupAt *time.Time `json:"next_backup_at,omitempty"`
+}
+
+// UsersGroupsMailboxOverviewResponse is GET /users-groups/mailbox/overview.
+type UsersGroupsMailboxOverviewResponse struct {
+	UsersGroupsMailboxHeader
+	Services []UsersGroupsMailboxOverviewService `json:"services"`
+}
+
+// UsersGroupsMailboxServicesItem is one row on the Services tab.
+type UsersGroupsMailboxServicesItem struct {
+	Method    string `json:"method"`
+	Connected bool   `json:"connected"`
+	JobID     uint   `json:"job_id,omitempty"`
+}
+
+// UsersGroupsMailboxServicesResponse is GET /users-groups/mailbox/services.
+type UsersGroupsMailboxServicesResponse struct {
+	UsersGroupsMailboxHeader
+	Services []UsersGroupsMailboxServicesItem `json:"services"`
+}
+
+// UsersGroupsMailboxScheduleItem is one schedule row on the Schedule tab.
+type UsersGroupsMailboxScheduleItem struct {
+	JobID         uint   `json:"job_id"`
+	Method        string `json:"method"`
+	PolicyID      uint   `json:"policy_id"`
+	Interval      string `json:"interval"`
+	On            string `json:"on,omitempty"`
+	RetentionType string `json:"retention_type"`
+}
+
+// UsersGroupsMailboxScheduleResponse is GET /users-groups/mailbox/schedule.
+type UsersGroupsMailboxScheduleResponse struct {
+	UsersGroupsMailboxHeader
+	Schedules []UsersGroupsMailboxScheduleItem `json:"schedules"`
+}
+
+// UsersGroupsMailboxCredentialView is the credential block on the Credentials tab.
+type UsersGroupsMailboxCredentialView struct {
+	CredentialID             uint   `json:"credential_id"`
+	Email                    string `json:"email"`
+	NeedsReconnectGoogleAuth bool   `json:"needs_reconnect_google_auth"`
+}
+
+// UsersGroupsMailboxCredentialsResponse is GET /users-groups/mailbox/credentials.
+type UsersGroupsMailboxCredentialsResponse struct {
+	UsersGroupsMailboxHeader
+	Credential UsersGroupsMailboxCredentialView `json:"credential"`
+}
+
+// ---------------------------------------------------------------------------
+// Shared domain helpers
+// ---------------------------------------------------------------------------
 
 func nameFromMailboxEmail(email string) string {
 	email = strings.TrimSpace(email)
@@ -60,40 +170,196 @@ func nameFromMailboxEmail(email string) string {
 	return email
 }
 
-func buildUsersGroupsServices(jobs []repo.CronJobListingDB) []UsersGroupsServiceView {
-	activeByMethod := make(map[string]bool)
-	for i := range jobs {
-		method := strings.TrimSpace(jobs[i].Method)
-		if jobs[i].Active {
-			activeByMethod[method] = true
-			continue
+func usersGroupsIsCorporateMailbox(mailboxEmail string, cred *repo.GoogleBackupCredentialDB) bool {
+	mailboxEmail = strings.TrimSpace(mailboxEmail)
+	if cred != nil {
+		holder := strings.TrimSpace(cred.Email)
+		if holder != "" && mailboxEmail != "" && !strings.EqualFold(holder, mailboxEmail) {
+			return true
 		}
-		if _, ok := activeByMethod[method]; !ok {
-			activeByMethod[method] = false
+		switch strings.ToLower(strings.TrimSpace(cred.AccountType)) {
+		case "admin_workspace", "employee_workspace":
+			return true
 		}
 	}
-	out := make([]UsersGroupsServiceView, 0, len(activeByMethod))
-	for _, method := range autosyncServiceMethodsOrder {
-		active, ok := activeByMethod[method]
-		if !ok {
+	return false
+}
+
+func usersGroupsAccountType(mailboxEmail string, cred *repo.GoogleBackupCredentialDB) string {
+	if usersGroupsIsCorporateMailbox(mailboxEmail, cred) {
+		return usersGroupsAccountCorporate
+	}
+	return usersGroupsAccountIndividual
+}
+
+func usersGroupsCredentialStatus(needsGoogle, needsStorx bool) string {
+	if needsGoogle || needsStorx {
+		return usersGroupsCredentialReAuthRequired
+	}
+	return usersGroupsCredentialHealthy
+}
+
+func usersGroupsMailboxHeader(email string, cred *repo.GoogleBackupCredentialDB) UsersGroupsMailboxHeader {
+	return UsersGroupsMailboxHeader{
+		Name:        nameFromMailboxEmail(email),
+		Email:       email,
+		AccountType: usersGroupsAccountType(email, cred),
+	}
+}
+
+func credentialForEmailJobs(jobs []repo.CronJobListingDB, credByID map[uint]*repo.GoogleBackupCredentialDB) *repo.GoogleBackupCredentialDB {
+	for i := range jobs {
+		if id := repo.JobCredentialID(&jobs[i]); id > 0 {
+			if cred, ok := credByID[id]; ok {
+				return cred
+			}
+		}
+	}
+	return nil
+}
+
+func uniqueCredentialIDsFromJobs(jobs []repo.CronJobListingDB) []uint {
+	seen := make(map[uint]struct{})
+	ids := make([]uint, 0, len(jobs))
+	for i := range jobs {
+		id := repo.JobCredentialID(&jobs[i])
+		if id == 0 {
 			continue
 		}
-		out = append(out, UsersGroupsServiceView{Method: method, Active: active})
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func loadCredentialsForJobs(database *db.PostgresDb, jobs []repo.CronJobListingDB) map[uint]*repo.GoogleBackupCredentialDB {
+	empty := map[uint]*repo.GoogleBackupCredentialDB{}
+	if database == nil || database.CredentialRepo == nil {
+		return empty
+	}
+	ids := uniqueCredentialIDsFromJobs(jobs)
+	if len(ids) == 0 {
+		return empty
+	}
+	out, err := database.CredentialRepo.GetByIDs(ids)
+	if err != nil {
+		return empty
 	}
 	return out
 }
 
-func buildUsersGroupsEntities(jobs []repo.CronJobListingDB) []UsersGroupsEntityView {
-	byEmail := make(map[string][]repo.CronJobListingDB)
+func uniquePolicyIDsFromJobs(jobs []repo.CronJobListingDB) []uint {
+	seen := make(map[uint]struct{})
+	ids := make([]uint, 0, len(jobs))
+	for i := range jobs {
+		id := jobs[i].PolicyID
+		if id == 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func loadPoliciesForJobs(database *db.PostgresDb, jobs []repo.CronJobListingDB) map[uint]*repo.AutosyncBackupPolicyDB {
+	empty := map[uint]*repo.AutosyncBackupPolicyDB{}
+	if database == nil || database.PolicyRepo == nil {
+		return empty
+	}
+	ids := uniquePolicyIDsFromJobs(jobs)
+	if len(ids) == 0 {
+		return empty
+	}
+	out, err := database.PolicyRepo.GetByIDs(ids)
+	if err != nil {
+		return empty
+	}
+	return out
+}
+
+func enrichJobsFromPolicies(jobs []repo.CronJobListingDB, policies map[uint]*repo.AutosyncBackupPolicyDB) {
+	for i := range jobs {
+		if jobs[i].PolicyID == 0 {
+			continue
+		}
+		policy, ok := policies[jobs[i].PolicyID]
+		if !ok || policy == nil {
+			continue
+		}
+		jobs[i].PolicyID = policy.ID
+		jobs[i].Interval = policy.Interval
+		jobs[i].On = policy.On
+	}
+}
+
+func filterUsersGroupsWorkspaceJobs(jobs []repo.CronJobListingDB) []repo.CronJobListingDB {
+	out := make([]repo.CronJobListingDB, 0, len(jobs))
 	for i := range jobs {
 		if _, ok := workspaceServiceMethods[strings.TrimSpace(jobs[i].Method)]; !ok {
 			continue
 		}
-		email := jobMailboxEmail(&jobs[i])
+		out = append(out, jobs[i])
+	}
+	return out
+}
+
+func indexUsersGroupsJobsByMethod(jobs []repo.CronJobListingDB) map[string]repo.CronJobListingDB {
+	byMethod := make(map[string]repo.CronJobListingDB, len(jobs))
+	for i := range jobs {
+		byMethod[strings.TrimSpace(jobs[i].Method)] = jobs[i]
+	}
+	return byMethod
+}
+
+func enrichUsersGroupsJobs(database *db.PostgresDb, jobs []repo.CronJobListingDB) map[uint]*repo.AutosyncBackupPolicyDB {
+	for i := range jobs {
+		database.CronJobRepo.EnrichCronJobFromCredential(&jobs[i])
+	}
+	policies := loadPoliciesForJobs(database, jobs)
+	enrichJobsFromPolicies(jobs, policies)
+	return policies
+}
+
+// ---------------------------------------------------------------------------
+// List helpers (GET /users-groups, GET /users-groups/domains)
+// ---------------------------------------------------------------------------
+
+func buildUsersGroupsServices(jobs []repo.CronJobListingDB) []UsersGroupsServiceView {
+	byMethod := indexUsersGroupsJobsByMethod(jobs)
+	out := make([]UsersGroupsServiceView, 0, len(byMethod))
+	for _, method := range autosyncServiceMethodsOrder {
+		job, ok := byMethod[method]
+		if !ok {
+			continue
+		}
+		out = append(out, UsersGroupsServiceView{
+			JobID:  job.ID,
+			Method: method,
+			Active: job.Active,
+		})
+	}
+	return out
+}
+
+func buildUsersGroupsEntities(
+	jobs []repo.CronJobListingDB,
+	cronRepo *repo.CronJobRepository,
+	credByID map[uint]*repo.GoogleBackupCredentialDB,
+) []UsersGroupsEntityView {
+	byEmail := make(map[string][]repo.CronJobListingDB)
+	for _, job := range filterUsersGroupsWorkspaceJobs(jobs) {
+		email := jobMailboxEmail(&job)
 		if email == "" {
 			continue
 		}
-		byEmail[email] = append(byEmail[email], jobs[i])
+		byEmail[email] = append(byEmail[email], job)
 	}
 
 	emails := make([]string, 0, len(byEmail))
@@ -105,10 +371,14 @@ func buildUsersGroupsEntities(jobs []repo.CronJobListingDB) []UsersGroupsEntityV
 	out := make([]UsersGroupsEntityView, 0, len(emails))
 	for _, email := range emails {
 		emailJobs := byEmail[email]
+		cred := credentialForEmailJobs(emailJobs, credByID)
+		needsGoogle, needsStorx := credentialReconnectFlagsFromJobs(cronRepo, cred, emailJobs)
 		out = append(out, UsersGroupsEntityView{
-			Name:     nameFromMailboxEmail(email),
-			Email:    email,
-			Services: buildUsersGroupsServices(emailJobs),
+			Name:             nameFromMailboxEmail(email),
+			Email:            email,
+			AccountType:      usersGroupsAccountType(email, cred),
+			CredentialStatus: usersGroupsCredentialStatus(needsGoogle, needsStorx),
+			Services:         buildUsersGroupsServices(emailJobs),
 		})
 	}
 	return out
@@ -130,26 +400,55 @@ func parseUsersGroupsServiceMethod(c echo.Context) (string, error) {
 	return method, nil
 }
 
-func filterUsersGroupsEntitiesByMethod(entities []UsersGroupsEntityView, jobs []repo.CronJobListingDB, method string) []UsersGroupsEntityView {
-	if method == "" {
-		return entities
+func parseUsersGroupsAccountType(c echo.Context) (string, error) {
+	raw := strings.TrimSpace(c.QueryParam("account_type"))
+	if raw == "" {
+		return "", nil
 	}
-	emailsWithMethod := make(map[string]struct{})
-	for i := range jobs {
-		if strings.TrimSpace(jobs[i].Method) != method {
-			continue
-		}
-		if email := jobMailboxEmail(&jobs[i]); email != "" {
-			emailsWithMethod[email] = struct{}{}
-		}
+	accountType := strings.ToLower(raw)
+	switch accountType {
+	case "all", "all_types":
+		return "", nil
 	}
-	out := make([]UsersGroupsEntityView, 0)
-	for i := range entities {
-		if _, ok := emailsWithMethod[entities[i].Email]; ok {
-			out = append(out, entities[i])
-		}
+	if _, ok := validUsersGroupsAccountTypes[accountType]; !ok {
+		return "", fmt.Errorf("account_type must be one of: corporate, individual")
 	}
-	return out
+	return accountType, nil
+}
+
+func parseUsersGroupsActive(c echo.Context) (*bool, error) {
+	raw := strings.TrimSpace(c.QueryParam("active"))
+	if raw == "" {
+		return nil, nil
+	}
+	switch strings.ToLower(raw) {
+	case "all", "all_statuses":
+		return nil, nil
+	case "true", "1":
+		v := true
+		return &v, nil
+	case "false", "0":
+		v := false
+		return &v, nil
+	default:
+		return nil, fmt.Errorf("active must be true or false")
+	}
+}
+
+func parseUsersGroupsCredentialStatus(c echo.Context) (string, error) {
+	raw := strings.TrimSpace(c.QueryParam("credential_status"))
+	if raw == "" {
+		return "", nil
+	}
+	status := strings.ToLower(raw)
+	switch status {
+	case "all", "all_statuses":
+		return "", nil
+	}
+	if _, ok := validUsersGroupsCredentialStatuses[status]; !ok {
+		return "", fmt.Errorf("credential_status must be one of: healthy, re_auth_required")
+	}
+	return status, nil
 }
 
 func parseUsersGroupsLimitOffset(c echo.Context) (limit, offset int, err error) {
@@ -168,6 +467,76 @@ func parseUsersGroupsLimitOffset(c echo.Context) (limit, offset int, err error) 
 		}
 	}
 	return limit, offset, nil
+}
+
+func filterUsersGroupsEntitiesByMethod(entities []UsersGroupsEntityView, jobs []repo.CronJobListingDB, method string) []UsersGroupsEntityView {
+	if method == "" {
+		return entities
+	}
+	emailsWithMethod := make(map[string]struct{})
+	for i := range jobs {
+		if strings.TrimSpace(jobs[i].Method) != method {
+			continue
+		}
+		if email := jobMailboxEmail(&jobs[i]); email != "" {
+			emailsWithMethod[email] = struct{}{}
+		}
+	}
+	out := make([]UsersGroupsEntityView, 0, len(entities))
+	for i := range entities {
+		if _, ok := emailsWithMethod[entities[i].Email]; ok {
+			out = append(out, entities[i])
+		}
+	}
+	return out
+}
+
+func filterUsersGroupsEntitiesByActive(entities []UsersGroupsEntityView, jobs []repo.CronJobListingDB, active *bool) []UsersGroupsEntityView {
+	if active == nil {
+		return entities
+	}
+	emailsMatching := make(map[string]struct{})
+	for _, job := range filterUsersGroupsWorkspaceJobs(jobs) {
+		if job.Active != *active {
+			continue
+		}
+		if email := jobMailboxEmail(&job); email != "" {
+			emailsMatching[email] = struct{}{}
+		}
+	}
+	out := make([]UsersGroupsEntityView, 0, len(entities))
+	for i := range entities {
+		if _, ok := emailsMatching[entities[i].Email]; ok {
+			out = append(out, entities[i])
+		}
+	}
+	return out
+}
+
+func filterUsersGroupsEntitiesByAccountType(entities []UsersGroupsEntityView, accountType string) []UsersGroupsEntityView {
+	if accountType == "" {
+		return entities
+	}
+	out := make([]UsersGroupsEntityView, 0, len(entities))
+	for i := range entities {
+		if entities[i].AccountType == accountType {
+			out = append(out, entities[i])
+		}
+	}
+	return out
+}
+
+func filterUsersGroupsEntitiesByCredentialStatus(entities []UsersGroupsEntityView, credentialStatus string) []UsersGroupsEntityView {
+	if credentialStatus == "" {
+		return entities
+	}
+	out := make([]UsersGroupsEntityView, 0, len(entities))
+	for i := range entities {
+		if entities[i].CredentialStatus == credentialStatus {
+			out = append(out, entities[i])
+		}
+	}
+	return out
 }
 
 func paginateUsersGroupsEntities(all []UsersGroupsEntityView, limit, offset int) ([]UsersGroupsEntityView, UsersGroupsPaginationView) {
@@ -197,9 +566,170 @@ func paginateUsersGroupsEntities(all []UsersGroupsEntityView, limit, offset int)
 	return all[offset:end], meta
 }
 
+// ---------------------------------------------------------------------------
+// Mailbox helpers (GET /users-groups/mailbox/*)
+// ---------------------------------------------------------------------------
+
+func parseUsersGroupsMailboxEmail(c echo.Context) (string, error) {
+	email := strings.TrimSpace(c.QueryParam("email"))
+	if email == "" {
+		return "", errUsersGroupsMailboxEmailRequired
+	}
+	return email, nil
+}
+
+type usersGroupsMailboxData struct {
+	database *db.PostgresDb
+	jobs     []repo.CronJobListingDB
+	cred     *repo.GoogleBackupCredentialDB
+	policies map[uint]*repo.AutosyncBackupPolicyDB
+}
+
+func loadUsersGroupsMailboxJobs(database *db.PostgresDb, userID, email string) ([]repo.CronJobListingDB, map[uint]*repo.AutosyncBackupPolicyDB, error) {
+	jobs, err := database.CronJobRepo.ListJobsForUsersGroups(userID, &repo.UsersGroupsJobFilter{
+		MailboxEmail: email,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	policies := enrichUsersGroupsJobs(database, jobs)
+	return jobs, policies, nil
+}
+
+func loadUsersGroupsMailboxContext(c echo.Context) (context.Context, string, string, usersGroupsMailboxData, error) {
+	empty := usersGroupsMailboxData{}
+	ctx, userID, database, err := usersGroupsAuth(c)
+	if err != nil {
+		return ctx, "", "", empty, err
+	}
+	email, err := parseUsersGroupsMailboxEmail(c)
+	if err != nil {
+		return ctx, userID, email, empty, err
+	}
+	jobs, policies, err := loadUsersGroupsMailboxJobs(database, userID, email)
+	if err != nil {
+		return ctx, userID, email, empty, err
+	}
+	workspaceJobs := filterUsersGroupsWorkspaceJobs(jobs)
+	if len(workspaceJobs) == 0 {
+		return ctx, userID, email, empty, errUsersGroupsMailboxNotFound
+	}
+	return ctx, userID, email, usersGroupsMailboxData{
+		database: database,
+		jobs:     workspaceJobs,
+		cred:     credentialForEmailJobs(jobs, loadCredentialsForJobs(database, jobs)),
+		policies: policies,
+	}, nil
+}
+
+func buildMailboxOverviewServices(jobs []repo.CronJobListingDB) []UsersGroupsMailboxOverviewService {
+	byMethod := indexUsersGroupsJobsByMethod(jobs)
+	out := make([]UsersGroupsMailboxOverviewService, 0, len(byMethod))
+	for _, method := range autosyncServiceMethodsOrder {
+		job, ok := byMethod[method]
+		if !ok {
+			continue
+		}
+		var lastBackup *time.Time
+		if job.LastRun != nil {
+			t := *job.LastRun
+			lastBackup = &t
+		}
+		out = append(out, UsersGroupsMailboxOverviewService{
+			JobID:        job.ID,
+			Method:       method,
+			Active:       job.Active,
+			LastBackupAt: lastBackup,
+			NextBackupAt: calculateNextBackup(job),
+		})
+	}
+	return out
+}
+
+func buildMailboxServicesTab(jobs []repo.CronJobListingDB) []UsersGroupsMailboxServicesItem {
+	byMethod := indexUsersGroupsJobsByMethod(jobs)
+	out := make([]UsersGroupsMailboxServicesItem, 0, len(autosyncServiceMethodsOrder))
+	for _, method := range autosyncServiceMethodsOrder {
+		if job, ok := byMethod[method]; ok {
+			out = append(out, UsersGroupsMailboxServicesItem{
+				Method:    method,
+				Connected: true,
+				JobID:     job.ID,
+			})
+			continue
+		}
+		out = append(out, UsersGroupsMailboxServicesItem{Method: method, Connected: false})
+	}
+	return out
+}
+
+func buildMailboxScheduleRows(jobs []repo.CronJobListingDB, policies map[uint]*repo.AutosyncBackupPolicyDB) []UsersGroupsMailboxScheduleItem {
+	byMethod := indexUsersGroupsJobsByMethod(jobs)
+	out := make([]UsersGroupsMailboxScheduleItem, 0, len(byMethod))
+	for _, method := range autosyncServiceMethodsOrder {
+		job, ok := byMethod[method]
+		if !ok {
+			continue
+		}
+		retentionType := ""
+		if job.PolicyID > 0 {
+			if policy, ok := policies[job.PolicyID]; ok && policy != nil {
+				retentionType = strings.TrimSpace(policy.RetentionType)
+			}
+		}
+		out = append(out, UsersGroupsMailboxScheduleItem{
+			JobID:         job.ID,
+			Method:        method,
+			PolicyID:      job.PolicyID,
+			Interval:      strings.TrimSpace(job.Interval),
+			On:            strings.TrimSpace(job.On),
+			RetentionType: retentionType,
+		})
+	}
+	return out
+}
+
+func buildMailboxCredentialView(
+	cronRepo *repo.CronJobRepository,
+	cred *repo.GoogleBackupCredentialDB,
+	jobs []repo.CronJobListingDB,
+) UsersGroupsMailboxCredentialView {
+	needsGoogle, _ := credentialReconnectFlagsFromJobs(cronRepo, cred, jobs)
+	view := UsersGroupsMailboxCredentialView{NeedsReconnectGoogleAuth: needsGoogle}
+	if cred != nil {
+		view.CredentialID = cred.ID
+		view.Email = strings.TrimSpace(cred.Email)
+	}
+	return view
+}
+
+// ---------------------------------------------------------------------------
+// HTTP helpers
+// ---------------------------------------------------------------------------
+
+func usersGroupsAuth(c echo.Context) (context.Context, string, *db.PostgresDb, error) {
+	ctx := c.Request().Context()
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		return ctx, "", nil, err
+	}
+	database, ok := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+	if !ok || database == nil {
+		return ctx, userID, nil, fmt.Errorf("database connection unavailable")
+	}
+	return ctx, userID, database, nil
+}
+
 func usersGroupsUnauthorized(c echo.Context, err error) error {
 	return c.JSON(http.StatusUnauthorized, map[string]interface{}{
 		"message": "not able to authenticate user",
+		"error":   err.Error(),
+	})
+}
+
+func usersGroupsBadRequest(c echo.Context, message string, err error) error {
+	return c.JSON(http.StatusBadRequest, map[string]interface{}{
+		"message": message,
 		"error":   err.Error(),
 	})
 }
@@ -212,14 +742,41 @@ func usersGroupsInternalError(c echo.Context, ctx context.Context, logMsg string
 	})
 }
 
-func usersGroupsUserAndDB(c echo.Context) (context.Context, string, *db.PostgresDb, error) {
-	ctx := c.Request().Context()
-	userID, err := satellite.GetUserdetails(c)
-	if err != nil {
-		return ctx, "", nil, err
-	}
-	return ctx, userID, c.Get(middleware.DbContextKey).(*db.PostgresDb), nil
+func usersGroupsMailboxNotFound(c echo.Context, email string) error {
+	return c.JSON(http.StatusNotFound, map[string]interface{}{
+		"message": "mailbox not found",
+		"error":   "no backup jobs found for " + email,
+	})
 }
+
+func handleUsersGroupsMailboxTabError(c echo.Context, ctx context.Context, userID, email, logMsg string, err error) error {
+	switch {
+	case errors.Is(err, errUsersGroupsMailboxEmailRequired):
+		return usersGroupsBadRequest(c, "invalid request", err)
+	case errors.Is(err, errUsersGroupsMailboxNotFound):
+		return usersGroupsMailboxNotFound(c, email)
+	case userID == "":
+		return usersGroupsUnauthorized(c, err)
+	default:
+		return usersGroupsInternalError(c, ctx, logMsg, err)
+	}
+}
+
+func handleUsersGroupsMailboxTab(c echo.Context, logMsg string, build func(email string, data usersGroupsMailboxData) interface{}) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	ctx, userID, email, data, err := loadUsersGroupsMailboxContext(c)
+	if err != nil {
+		return handleUsersGroupsMailboxTabError(c, ctx, userID, email, logMsg, err)
+	}
+	return c.JSON(http.StatusOK, build(email, data))
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
 
 // HandleAutosyncUsersGroupsDomains lists unique domains for the domains dropdown.
 func HandleAutosyncUsersGroupsDomains(c echo.Context) error {
@@ -227,7 +784,7 @@ func HandleAutosyncUsersGroupsDomains(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	ctx, userID, database, err := usersGroupsUserAndDB(c)
+	ctx, userID, database, err := usersGroupsAuth(c)
 	if err != nil {
 		return usersGroupsUnauthorized(c, err)
 	}
@@ -242,31 +799,153 @@ func HandleAutosyncUsersGroupsDomains(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]interface{}{"domains": domains})
 }
 
+func uniqueUints(ids []uint) []uint {
+	seen := make(map[uint]struct{}, len(ids))
+	out := make([]uint, 0, len(ids))
+	for _, id := range ids {
+		if id == 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func usersGroupsBulkActiveFailure(jobID uint, email, method string, err error) map[string]interface{} {
+	out := map[string]interface{}{
+		"job_id": jobID,
+		"error":  err.Error(),
+	}
+	if email != "" {
+		out["email"] = email
+	}
+	if method != "" {
+		out["method"] = method
+	}
+	return out
+}
+
+func usersGroupsBulkActiveSuccess(job *repo.CronJobListingDB) map[string]interface{} {
+	return map[string]interface{}{
+		"job_id": job.ID,
+		"method": strings.TrimSpace(job.Method),
+		"email":  jobMailboxEmail(job),
+		"active": job.Active,
+	}
+}
+
+func usersGroupsBulkActiveMessage(successLen, failedLen int) string {
+	switch {
+	case failedLen == 0:
+		return "jobs updated"
+	case successLen == 0:
+		return "all jobs failed to update"
+	default:
+		return "some jobs failed to update"
+	}
+}
+
+func bulkUpdateUsersGroupsJobsActive(
+	cronRepo *repo.CronJobRepository,
+	userID string,
+	jobIDs []uint,
+	active bool,
+) (success []map[string]interface{}, failed []map[string]interface{}) {
+	patch := activeStateUpdateFields(active)
+	success = make([]map[string]interface{}, 0, len(jobIDs))
+	failed = make([]map[string]interface{}, 0)
+
+	for _, jobID := range jobIDs {
+		job, err := cronRepo.GetJobByIDForUser(userID, jobID)
+		if err != nil {
+			failed = append(failed, usersGroupsBulkActiveFailure(jobID, "", "", err))
+			continue
+		}
+		email := jobMailboxEmail(job)
+		method := strings.TrimSpace(job.Method)
+
+		if err := cronRepo.UpdateCronJobByID(jobID, patch); err != nil {
+			failed = append(failed, usersGroupsBulkActiveFailure(jobID, email, method, err))
+			continue
+		}
+
+		updated, err := cronRepo.GetCronJobByID(jobID)
+		if err != nil {
+			failed = append(failed, usersGroupsBulkActiveFailure(jobID, email, method, err))
+			continue
+		}
+		success = append(success, usersGroupsBulkActiveSuccess(updated))
+	}
+	return success, failed
+}
+
+// HandleUsersGroupsJobsActive sets active true/false on multiple jobs (bulk pause/resume).
+func HandleUsersGroupsJobsActive(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	ctx, userID, database, err := usersGroupsAuth(c)
+	if err != nil {
+		return usersGroupsUnauthorized(c, err)
+	}
+
+	var req UsersGroupsBulkActiveRequest
+	if err := c.Bind(&req); err != nil {
+		return usersGroupsBadRequest(c, "invalid request body", err)
+	}
+	if req.Active == nil {
+		return usersGroupsBadRequest(c, "invalid request", fmt.Errorf("active is required"))
+	}
+	jobIDs := uniqueUints(req.JobIDs)
+	if len(jobIDs) == 0 {
+		return usersGroupsBadRequest(c, "invalid request", fmt.Errorf("job_ids is required"))
+	}
+
+	success, failed := bulkUpdateUsersGroupsJobsActive(database.CronJobRepo, userID, jobIDs, *req.Active)
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": usersGroupsBulkActiveMessage(len(success), len(failed)),
+		"active":  *req.Active,
+		"success": success,
+		"failed":  failed,
+	})
+}
+
 // HandleAutosyncUsersGroupsList returns a paginated flat list of mailbox emails with per-service active status.
 func HandleAutosyncUsersGroupsList(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	ctx, userID, database, err := usersGroupsUserAndDB(c)
+	ctx, userID, database, err := usersGroupsAuth(c)
 	if err != nil {
 		return usersGroupsUnauthorized(c, err)
 	}
 
 	method, err := parseUsersGroupsServiceMethod(c)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "invalid service filter",
-			"error":   err.Error(),
-		})
+		return usersGroupsBadRequest(c, "invalid service filter", err)
 	}
-
+	accountType, err := parseUsersGroupsAccountType(c)
+	if err != nil {
+		return usersGroupsBadRequest(c, "invalid account_type filter", err)
+	}
+	credentialStatus, err := parseUsersGroupsCredentialStatus(c)
+	if err != nil {
+		return usersGroupsBadRequest(c, "invalid credential_status filter", err)
+	}
+	activeFilter, err := parseUsersGroupsActive(c)
+	if err != nil {
+		return usersGroupsBadRequest(c, "invalid active filter", err)
+	}
 	limit, offset, err := parseUsersGroupsLimitOffset(c)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "invalid pagination parameters",
-			"error":   err.Error(),
-		})
+		return usersGroupsBadRequest(c, "invalid pagination parameters", err)
 	}
 
 	jobs, err := database.CronJobRepo.ListJobsForUsersGroups(userID, &repo.UsersGroupsJobFilter{
@@ -277,14 +956,56 @@ func HandleAutosyncUsersGroupsList(c echo.Context) error {
 		return usersGroupsInternalError(c, ctx, "Failed to list jobs for users-groups", err)
 	}
 
-	entities, pagination := paginateUsersGroupsEntities(
-		filterUsersGroupsEntitiesByMethod(buildUsersGroupsEntities(jobs), jobs, method),
-		limit,
-		offset,
-	)
+	credByID := loadCredentialsForJobs(database, jobs)
+	allEntities := buildUsersGroupsEntities(jobs, database.CronJobRepo, credByID)
+	allEntities = filterUsersGroupsEntitiesByMethod(allEntities, jobs, method)
+	allEntities = filterUsersGroupsEntitiesByActive(allEntities, jobs, activeFilter)
+	allEntities = filterUsersGroupsEntitiesByAccountType(allEntities, accountType)
+	allEntities = filterUsersGroupsEntitiesByCredentialStatus(allEntities, credentialStatus)
+	entities, pagination := paginateUsersGroupsEntities(allEntities, limit, offset)
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"policy_link": autosyncPolicyListLink,
 		"entities":    entities,
 		"pagination":  pagination,
+	})
+}
+
+// HandleAutosyncUsersGroupsMailboxOverview returns Overview tab data for one mailbox.
+func HandleAutosyncUsersGroupsMailboxOverview(c echo.Context) error {
+	return handleUsersGroupsMailboxTab(c, "Failed to load mailbox overview", func(email string, data usersGroupsMailboxData) interface{} {
+		return UsersGroupsMailboxOverviewResponse{
+			UsersGroupsMailboxHeader: usersGroupsMailboxHeader(email, data.cred),
+			Services:                 buildMailboxOverviewServices(data.jobs),
+		}
+	})
+}
+
+// HandleAutosyncUsersGroupsMailboxServices returns Services tab data for one mailbox.
+func HandleAutosyncUsersGroupsMailboxServices(c echo.Context) error {
+	return handleUsersGroupsMailboxTab(c, "Failed to load mailbox services", func(email string, data usersGroupsMailboxData) interface{} {
+		return UsersGroupsMailboxServicesResponse{
+			UsersGroupsMailboxHeader: usersGroupsMailboxHeader(email, data.cred),
+			Services:                 buildMailboxServicesTab(data.jobs),
+		}
+	})
+}
+
+// HandleAutosyncUsersGroupsMailboxSchedule returns Schedule tab data for one mailbox.
+func HandleAutosyncUsersGroupsMailboxSchedule(c echo.Context) error {
+	return handleUsersGroupsMailboxTab(c, "Failed to load mailbox schedule", func(email string, data usersGroupsMailboxData) interface{} {
+		return UsersGroupsMailboxScheduleResponse{
+			UsersGroupsMailboxHeader: usersGroupsMailboxHeader(email, data.cred),
+			Schedules:                buildMailboxScheduleRows(data.jobs, data.policies),
+		}
+	})
+}
+
+// HandleAutosyncUsersGroupsMailboxCredentials returns Credentials tab data for one mailbox.
+func HandleAutosyncUsersGroupsMailboxCredentials(c echo.Context) error {
+	return handleUsersGroupsMailboxTab(c, "Failed to load mailbox credentials", func(email string, data usersGroupsMailboxData) interface{} {
+		return UsersGroupsMailboxCredentialsResponse{
+			UsersGroupsMailboxHeader: usersGroupsMailboxHeader(email, data.cred),
+			Credential:               buildMailboxCredentialView(data.database.CronJobRepo, data.cred, data.jobs),
+		}
 	})
 }

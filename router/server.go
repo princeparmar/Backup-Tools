@@ -63,9 +63,16 @@ func StartServer(db *db.PostgresDb, address string) {
 	backupRestore := e.Group("/backup-restore")
 	backupRestore.GET("/logs", handler.HandleBackupRestoreLogs)
 
+	usersGroups := e.Group("/users-groups")
+	usersGroups.GET("/domains", handler.HandleAutosyncUsersGroupsDomains)
+	usersGroups.PUT("/jobs/active", handler.HandleUsersGroupsJobsActive)
+	usersGroups.GET("", handler.HandleAutosyncUsersGroupsList)
+	usersGroups.GET("/mailbox/overview", handler.HandleAutosyncUsersGroupsMailboxOverview)
+	usersGroups.GET("/mailbox/services", handler.HandleAutosyncUsersGroupsMailboxServices)
+	usersGroups.GET("/mailbox/schedule", handler.HandleAutosyncUsersGroupsMailboxSchedule)
+	usersGroups.GET("/mailbox/credentials", handler.HandleAutosyncUsersGroupsMailboxCredentials)
+
 	autoSync := e.Group("/auto-sync")
-	autoSync.GET("/users-groups/domains", handler.HandleAutosyncUsersGroupsDomains)
-	autoSync.GET("/users-groups", handler.HandleAutosyncUsersGroupsList)
 	autoSync.GET("/live", handler.HandleAutomaticSyncActiveJobsForUser)
 	autoSync.PUT("/task/hide", handler.HandleHideTask)
 

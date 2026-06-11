@@ -183,7 +183,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /auto-sync/users-groups/domains:
+  /users-groups/domains:
     get:
       tags:
         - Auto Sync
@@ -207,13 +207,46 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /auto-sync/users-groups:
+  /users-groups/jobs/active:
+    put:
+      tags:
+        - Auto Sync
+      summary: Bulk update job active state (pause/resume)
+      description: |
+        Sets active true or false on multiple cron jobs in one request.
+        Each job is updated individually (same validation as PUT /auto-sync/job/{job_id}):
+        activating requires policy, schedule, StorX grant, and Google refresh_token where applicable.
+        Failures do not stop other jobs; see success and failed arrays in the response.
+        Use job_id from GET /users-groups entities[].services[] or mailbox overview.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UsersGroupsBulkActiveRequest'
+      responses:
+        '200':
+          description: Jobs updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsersGroupsBulkActiveResponse'
+        '400':
+          description: Invalid request
+        '401':
+          description: Unauthorized
+
+  /users-groups:
     get:
       tags:
         - Auto Sync
       summary: List Users and Groups (by email)
       description: |
         Flat listing of mailbox emails with per-service active status.
+        Each entity includes account_type and credential_status (healthy vs re_auth_required when
+        Google refresh_token or StorX access grant is missing on the linked credential or jobs).
         Includes one global policy_link (GET /auto-sync/policy) for the page policy action.
         Same response shape for personal Gmail and corporate Workspace; use domain to scope rows.
         Data aggregated from cron jobs only (mailboxes with at least one job).
@@ -240,6 +273,34 @@ paths:
           description: |
             Service filter (All Services dropdown). Omit, all, or all_services = no filter.
             Otherwise only mailbox rows that have a job for that service; each row still lists all services.
+        - name: account_type
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [all, all_types, corporate, individual]
+          description: |
+            Mailbox account type filter. corporate = Workspace admin or delegated domain mailboxes;
+            individual = personal Gmail. Omit, all, or all_types = no filter.
+        - name: credential_status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [all, all_statuses, healthy, re_auth_required]
+          description: |
+            Credential health filter. Omit, all, or all_statuses = no filter.
+            re_auth_required = missing Google refresh_token or StorX access grant.
+        - name: active
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [all, all_statuses, true, false]
+          description: |
+            Backup active state filter. true = mailboxes with at least one active job;
+            false = mailboxes with at least one paused job. Omit or all = no filter.
+            Each entity row still lists all services with per-service active status.
         - name: limit
           in: query
           required: false
@@ -271,6 +332,100 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+
+  /users-groups/mailbox/overview:
+    get:
+      tags:
+        - Auto Sync
+      summary: Mailbox Overview tab (lazy-loaded side panel)
+      description: |
+        Overview tab when user opens a mailbox row. Per-service backup timing and active state.
+        Pause/resume via PUT /auto-sync/job/{job_id}. Restore via GET /restore/prepare + POST /restore/all.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - name: email
+          in: query
+          required: true
+          schema:
+            type: string
+          example: s.jenkins@acme.com
+      responses:
+        '200':
+          description: Mailbox overview
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsersGroupsMailboxOverviewResponse'
+        '400':
+          description: Missing email
+        '404':
+          description: No jobs for mailbox
+
+  /users-groups/mailbox/services:
+    get:
+      tags:
+        - Auto Sync
+      summary: Mailbox Services tab
+      description: |
+        All five Google workspace services with connected flag. Connect via POST /auto-sync/job onboarding.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - name: email
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Mailbox services
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsersGroupsMailboxServicesResponse'
+
+  /users-groups/mailbox/schedule:
+    get:
+      tags:
+        - Auto Sync
+      summary: Mailbox Schedule tab
+      description: |
+        Policy schedule per connected service. Edit via PUT /auto-sync/policy/{policy_id}.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - name: email
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Mailbox schedules
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsersGroupsMailboxScheduleResponse'
+
+  /users-groups/mailbox/credentials:
+    get:
+      tags:
+        - Auto Sync
+      summary: Mailbox Credentials tab
+      description: |
+        Shared OAuth credential for the mailbox. Reconnect via PUT /auto-sync/job/project.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - name: email
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Mailbox credential
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsersGroupsMailboxCredentialsResponse'
 
   /auto-sync/job/services:
     get:
@@ -3184,11 +3339,172 @@ components:
     UsersGroupsServiceView:
       type: object
       properties:
+        job_id:
+          type: integer
         method:
           type: string
           enum: [gmail, google_drive, google_photos, google_contacts, google_calendar]
         active:
           type: boolean
+
+    UsersGroupsBulkActiveRequest:
+      type: object
+      required:
+        - job_ids
+        - active
+      properties:
+        job_ids:
+          type: array
+          items:
+            type: integer
+          example: [12, 13, 14]
+        active:
+          type: boolean
+          example: false
+
+    UsersGroupsBulkActiveSuccessItem:
+      type: object
+      properties:
+        job_id:
+          type: integer
+        method:
+          type: string
+        email:
+          type: string
+        active:
+          type: boolean
+
+    UsersGroupsBulkActiveFailureItem:
+      type: object
+      properties:
+        job_id:
+          type: integer
+        email:
+          type: string
+        method:
+          type: string
+        error:
+          type: string
+
+    UsersGroupsBulkActiveResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: jobs updated
+        active:
+          type: boolean
+        success:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsersGroupsBulkActiveSuccessItem'
+        failed:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsersGroupsBulkActiveFailureItem'
+
+    UsersGroupsMailboxHeader:
+      type: object
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+        account_type:
+          type: string
+          enum: [corporate, individual]
+
+    UsersGroupsMailboxOverviewService:
+      type: object
+      properties:
+        job_id:
+          type: integer
+        method:
+          type: string
+        active:
+          type: boolean
+        last_backup_at:
+          type: string
+          format: date-time
+        next_backup_at:
+          type: string
+          format: date-time
+
+    UsersGroupsMailboxOverviewResponse:
+      allOf:
+        - $ref: '#/components/schemas/UsersGroupsMailboxHeader'
+        - type: object
+          properties:
+            services:
+              type: array
+              items:
+                $ref: '#/components/schemas/UsersGroupsMailboxOverviewService'
+
+    UsersGroupsMailboxServicesItem:
+      type: object
+      properties:
+        method:
+          type: string
+        connected:
+          type: boolean
+        job_id:
+          type: integer
+
+    UsersGroupsMailboxServicesResponse:
+      allOf:
+        - $ref: '#/components/schemas/UsersGroupsMailboxHeader'
+        - type: object
+          properties:
+            services:
+              type: array
+              items:
+                $ref: '#/components/schemas/UsersGroupsMailboxServicesItem'
+
+    UsersGroupsMailboxScheduleItem:
+      type: object
+      properties:
+        job_id:
+          type: integer
+        method:
+          type: string
+        policy_id:
+          type: integer
+        interval:
+          type: string
+        on:
+          type: string
+        retention_type:
+          type: string
+          enum: [never, 30_days, 1_year, 7_years]
+
+    UsersGroupsMailboxScheduleResponse:
+      allOf:
+        - $ref: '#/components/schemas/UsersGroupsMailboxHeader'
+        - type: object
+          properties:
+            schedules:
+              type: array
+              items:
+                $ref: '#/components/schemas/UsersGroupsMailboxScheduleItem'
+
+    UsersGroupsMailboxCredentialView:
+      type: object
+      properties:
+        credential_id:
+          type: integer
+        email:
+          type: string
+          description: OAuth holder email
+        needs_reconnect_google_auth:
+          type: boolean
+
+    UsersGroupsMailboxCredentialsResponse:
+      allOf:
+        - $ref: '#/components/schemas/UsersGroupsMailboxHeader'
+        - type: object
+          properties:
+            credential:
+              $ref: '#/components/schemas/UsersGroupsMailboxCredentialView'
 
     UsersGroupsEntityView:
       type: object
@@ -3198,6 +3514,18 @@ components:
           description: Display name derived from email (local part before @)
         email:
           type: string
+        account_type:
+          type: string
+          enum: [corporate, individual]
+          description: |
+            corporate = Google Workspace (admin OAuth holder or delegated domain mailbox).
+            individual = personal Gmail / legacy standalone OAuth.
+        credential_status:
+          type: string
+          enum: [healthy, re_auth_required]
+          description: |
+            healthy when Google refresh_token and StorX access grant are present (credential or resolved job tokens).
+            re_auth_required when either token is missing — UI should prompt reconnect.
         services:
           type: array
           items:

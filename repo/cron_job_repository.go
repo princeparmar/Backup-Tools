@@ -262,11 +262,12 @@ func (r *CronJobRepository) ListServiceJobCountsForUser(userID string) ([]Servic
 	return out, nil
 }
 
-// UsersGroupsJobFilter scopes jobs for GET /auto-sync/users-groups.
+// UsersGroupsJobFilter scopes jobs for GET /users-groups.
 type UsersGroupsJobFilter struct {
-	EmailSearch string
-	Method      string
-	Domain      string
+	EmailSearch  string
+	MailboxEmail string // exact match on job name or input_data.email
+	Method       string
+	Domain       string
 }
 
 // ListJobsForUsersGroups returns non-placeholder cron jobs for users-groups listing.
@@ -280,6 +281,12 @@ func (r *CronJobRepository) ListJobsForUsersGroups(userID string, f *UsersGroups
 		if domain := strings.ToLower(strings.TrimSpace(f.Domain)); domain != "" {
 			query = query.Joins(`INNER JOIN google_backup_credential_dbs c ON (cron_job_listing_dbs.input_data->>'credential_id')::bigint = c.id AND c.deleted_at IS NULL`).
 				Where("LOWER(SPLIT_PART(TRIM(c.email), '@', 2)) = ?", domain)
+		}
+		if mailbox := strings.TrimSpace(f.MailboxEmail); mailbox != "" {
+			query = query.Where(
+				"(LOWER(TRIM(cron_job_listing_dbs.name)) = LOWER(?) OR LOWER(TRIM(COALESCE(cron_job_listing_dbs.input_data->>'email', ''))) = LOWER(?))",
+				mailbox, mailbox,
+			)
 		}
 		if search := strings.TrimSpace(f.EmailSearch); search != "" {
 			like := "%" + search + "%"
