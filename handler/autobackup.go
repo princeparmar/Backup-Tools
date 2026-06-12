@@ -71,6 +71,7 @@ type GoogleBackupOnboardingRequest struct {
 	ProjectID       string   `json:"project_id"`
 	SatelliteUserID string   `json:"satellite_user_id"`
 	RefreshToken    string   `json:"refresh_token"`
+	StorxToken      string   `json:"storx_token,omitempty"`
 	Emails          []string `json:"emails"`
 	PolicyID        *uint    `json:"policy_id,omitempty"`
 	PolicyName      string   `json:"policy_name,omitempty"`
@@ -140,6 +141,7 @@ type onboardingSchedule struct {
 func (r *GoogleBackupOnboardingRequest) trim() {
 	r.GoogleEmail = strings.TrimSpace(r.GoogleEmail)
 	r.RefreshToken = strings.TrimSpace(r.RefreshToken)
+	r.StorxToken = strings.TrimSpace(r.StorxToken)
 	r.ProjectID = strings.TrimSpace(r.ProjectID)
 	r.Interval = strings.TrimSpace(r.Interval)
 	r.On = strings.TrimSpace(r.On)
@@ -808,9 +810,18 @@ func handleSatelliteOnboardingCreate(c echo.Context, ctx context.Context, userID
 	if err := validateGmailAdminDomainForOnboarding(emails, req.GoogleEmail, req.AccountType); err != nil {
 		return err
 	}
-	cred, err := database.CredentialRepo.FindOrCreateForUser(userID, req.GoogleEmail, req.ProjectID, req.AccountType, req.RefreshToken, "")
+	cred, err := database.CredentialRepo.FindOrCreateForUser(userID, req.GoogleEmail, req.ProjectID, req.AccountType, req.RefreshToken, req.StorxToken)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+	}
+	if storx := strings.TrimSpace(req.StorxToken); storx != "" {
+		if pid := extractProjectIDFromStorxGrant(ctx, storx); pid != "" {
+			if uerr := database.CredentialRepo.UpdateStorjProjectID(cred.ID, pid); uerr == nil {
+				if reloaded, rerr := database.CredentialRepo.GetByID(cred.ID); rerr == nil {
+					cred = reloaded
+				}
+			}
+		}
 	}
 
 	hasJobs, herr := database.CronJobRepo.HasLinkedJobsForCredential(userID, cred.ID)
