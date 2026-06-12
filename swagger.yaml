@@ -244,12 +244,11 @@ paths:
         - Auto Sync
       summary: List Users and Groups (by email)
       description: |
-        Flat listing of mailbox emails with per-service active status.
-        Each entity includes account_type and credential_status (healthy vs re_auth_required when
-        Google refresh_token or StorX access grant is missing on the linked credential or jobs).
-        Includes one global policy_link (GET /auto-sync/policy) for the page policy action.
-        Same response shape for personal Gmail and corporate Workspace; use domain to scope rows.
-        Data aggregated from cron jobs only (mailboxes with at least one job).
+        Paginated mailbox listing with full side-panel data per entity (no separate mailbox tab calls required).
+        Each entity has one services[] array (all five Google services): connected rows include job, backup timing,
+        schedule, and policy fields; disconnected rows only include method and connected false.
+        credential block covers the Credentials tab. account_type and credential_status support list filters.
+        Data from cron jobs only (mailboxes with at least one job).
       parameters:
         - $ref: '#/components/parameters/tokenKeyHeader'
         - name: domain
@@ -3429,16 +3428,36 @@ components:
             type: string
           example: ["acme.com", "gmail.com"]
 
-    UsersGroupsServiceView:
+    UsersGroupsEntityServiceView:
       type: object
       properties:
-        job_id:
-          type: integer
         method:
           type: string
           enum: [gmail, google_drive, google_photos, google_contacts, google_calendar]
+        connected:
+          type: boolean
+        job_id:
+          type: integer
+          description: Present when connected is true.
         active:
           type: boolean
+          description: Present when connected is true.
+        last_backup_at:
+          type: string
+          format: date-time
+          nullable: true
+        next_backup_at:
+          type: string
+          format: date-time
+          nullable: true
+        policy_id:
+          type: integer
+        interval:
+          type: string
+        on:
+          type: string
+        retention_type:
+          type: string
 
     UsersGroupsBulkActiveRequest:
       type: object
@@ -3619,10 +3638,13 @@ components:
           description: |
             healthy when Google refresh_token and StorX access grant are present (credential or resolved job tokens).
             re_auth_required when either token is missing — UI should prompt reconnect.
+        credential:
+          $ref: '#/components/schemas/UsersGroupsMailboxCredentialView'
         services:
           type: array
+          description: Always five rows (gmail, drive, photos, calendar, contacts) in stable order.
           items:
-            $ref: '#/components/schemas/UsersGroupsServiceView'
+            $ref: '#/components/schemas/UsersGroupsEntityServiceView'
 
     UsersGroupsPaginationView:
       type: object
@@ -3642,10 +3664,6 @@ components:
     UsersGroupsListResponse:
       type: object
       properties:
-        policy_link:
-          type: string
-          example: /auto-sync/policy
-          description: Global policy page link; Satellite redirects user here for schedule management
         entities:
           type: array
           items:

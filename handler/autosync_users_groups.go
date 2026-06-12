@@ -24,7 +24,6 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	autosyncPolicyListLink              = "/auto-sync/policy"
 	usersGroupsDefaultLimit             = 10
 	usersGroupsCredentialHealthy        = "healthy"
 	usersGroupsCredentialReAuthRequired = "re_auth_required"
@@ -59,11 +58,18 @@ var (
 // Response types — list (GET /users-groups)
 // ---------------------------------------------------------------------------
 
-// UsersGroupsServiceView is one service row under an email entity.
-type UsersGroupsServiceView struct {
-	JobID  uint   `json:"job_id"`
-	Method string `json:"method"`
-	Active bool   `json:"active"`
+// UsersGroupsEntityServiceView is one workspace service row (connected or not) with all mailbox fields.
+type UsersGroupsEntityServiceView struct {
+	Method        string     `json:"method"`
+	Connected     bool       `json:"connected"`
+	JobID         uint       `json:"job_id,omitempty"`
+	Active        *bool      `json:"active,omitempty"`
+	LastBackupAt  *time.Time `json:"last_backup_at,omitempty"`
+	NextBackupAt  *time.Time `json:"next_backup_at,omitempty"`
+	PolicyID      uint       `json:"policy_id,omitempty"`
+	Interval      string     `json:"interval,omitempty"`
+	On            string     `json:"on,omitempty"`
+	RetentionType string     `json:"retention_type,omitempty"`
 }
 
 // UsersGroupsBulkActiveRequest is PUT /users-groups/jobs/active.
@@ -81,13 +87,14 @@ type UsersGroupsPaginationView struct {
 	TotalCount int `json:"total_count"`
 }
 
-// UsersGroupsEntityView is one mailbox row on GET /users-groups.
+// UsersGroupsEntityView is one mailbox row on GET /users-groups (list + side panel).
 type UsersGroupsEntityView struct {
-	Name             string                   `json:"name"`
-	Email            string                   `json:"email"`
-	AccountType      string                   `json:"account_type"`
-	CredentialStatus string                   `json:"credential_status"`
-	Services         []UsersGroupsServiceView `json:"services"`
+	Name             string                         `json:"name"`
+	Email            string                         `json:"email"`
+	AccountType      string                         `json:"account_type"`
+	CredentialStatus string                         `json:"credential_status"`
+	Credential       UsersGroupsMailboxCredentialView `json:"credential"`
+	Services         []UsersGroupsEntityServiceView `json:"services"`
 }
 
 // ---------------------------------------------------------------------------
@@ -331,18 +338,38 @@ func enrichUsersGroupsJobs(database *db.PostgresDb, jobs []repo.CronJobListingDB
 // List helpers (GET /users-groups, GET /users-groups/domains)
 // ---------------------------------------------------------------------------
 
-func buildUsersGroupsServices(jobs []repo.CronJobListingDB) []UsersGroupsServiceView {
+func buildUsersGroupsEntityServices(jobs []repo.CronJobListingDB, policies map[uint]*repo.AutosyncBackupPolicyDB) []UsersGroupsEntityServiceView {
 	byMethod := indexUsersGroupsJobsByMethod(jobs)
-	out := make([]UsersGroupsServiceView, 0, len(byMethod))
+	out := make([]UsersGroupsEntityServiceView, 0, len(autosyncServiceMethodsOrder))
 	for _, method := range autosyncServiceMethodsOrder {
 		job, ok := byMethod[method]
 		if !ok {
+			out = append(out, UsersGroupsEntityServiceView{Method: method, Connected: false})
 			continue
 		}
-		out = append(out, UsersGroupsServiceView{
-			JobID:  job.ID,
-			Method: method,
-			Active: job.Active,
+		var lastBackup *time.Time
+		if job.LastRun != nil {
+			t := *job.LastRun
+			lastBackup = &t
+		}
+		retentionType := ""
+		if job.PolicyID > 0 {
+			if policy, ok := policies[job.PolicyID]; ok && policy != nil {
+				retentionType = strings.TrimSpace(policy.RetentionType)
+			}
+		}
+		active := job.Active
+		out = append(out, UsersGroupsEntityServiceView{
+			Method:        method,
+			Connected:     true,
+			JobID:         job.ID,
+			Active:        &active,
+			LastBackupAt:  lastBackup,
+			NextBackupAt:  calculateNextBackup(job),
+			PolicyID:      job.PolicyID,
+			Interval:      strings.TrimSpace(job.Interval),
+			On:            strings.TrimSpace(job.On),
+			RetentionType: retentionType,
 		})
 	}
 	return out
@@ -352,6 +379,7 @@ func buildUsersGroupsEntities(
 	jobs []repo.CronJobListingDB,
 	cronRepo *repo.CronJobRepository,
 	credByID map[uint]*repo.GoogleBackupCredentialDB,
+	policies map[uint]*repo.AutosyncBackupPolicyDB,
 ) []UsersGroupsEntityView {
 	byEmail := make(map[string][]repo.CronJobListingDB)
 	for _, job := range filterUsersGroupsWorkspaceJobs(jobs) {
@@ -378,7 +406,8 @@ func buildUsersGroupsEntities(
 			Email:            email,
 			AccountType:      usersGroupsAccountType(email, cred),
 			CredentialStatus: usersGroupsCredentialStatus(needsGoogle, needsStorx),
-			Services:         buildUsersGroupsServices(emailJobs),
+			Credential:       buildMailboxCredentialView(cronRepo, cred, emailJobs),
+			Services:         buildUsersGroupsEntityServices(emailJobs, policies),
 		})
 	}
 	return out
@@ -622,68 +651,55 @@ func loadUsersGroupsMailboxContext(c echo.Context) (context.Context, string, str
 	}, nil
 }
 
-func buildMailboxOverviewServices(jobs []repo.CronJobListingDB) []UsersGroupsMailboxOverviewService {
-	byMethod := indexUsersGroupsJobsByMethod(jobs)
-	out := make([]UsersGroupsMailboxOverviewService, 0, len(byMethod))
-	for _, method := range autosyncServiceMethodsOrder {
-		job, ok := byMethod[method]
-		if !ok {
+func buildMailboxOverviewServices(services []UsersGroupsEntityServiceView) []UsersGroupsMailboxOverviewService {
+	out := make([]UsersGroupsMailboxOverviewService, 0, len(services))
+	for i := range services {
+		if !services[i].Connected {
 			continue
 		}
-		var lastBackup *time.Time
-		if job.LastRun != nil {
-			t := *job.LastRun
-			lastBackup = &t
+		active := false
+		if services[i].Active != nil {
+			active = *services[i].Active
 		}
 		out = append(out, UsersGroupsMailboxOverviewService{
-			JobID:        job.ID,
-			Method:       method,
-			Active:       job.Active,
-			LastBackupAt: lastBackup,
-			NextBackupAt: calculateNextBackup(job),
+			JobID:        services[i].JobID,
+			Method:       services[i].Method,
+			Active:       active,
+			LastBackupAt: services[i].LastBackupAt,
+			NextBackupAt: services[i].NextBackupAt,
 		})
 	}
 	return out
 }
 
-func buildMailboxServicesTab(jobs []repo.CronJobListingDB) []UsersGroupsMailboxServicesItem {
-	byMethod := indexUsersGroupsJobsByMethod(jobs)
-	out := make([]UsersGroupsMailboxServicesItem, 0, len(autosyncServiceMethodsOrder))
-	for _, method := range autosyncServiceMethodsOrder {
-		if job, ok := byMethod[method]; ok {
-			out = append(out, UsersGroupsMailboxServicesItem{
-				Method:    method,
-				Connected: true,
-				JobID:     job.ID,
-			})
-			continue
+func buildMailboxServicesTab(services []UsersGroupsEntityServiceView) []UsersGroupsMailboxServicesItem {
+	out := make([]UsersGroupsMailboxServicesItem, 0, len(services))
+	for i := range services {
+		item := UsersGroupsMailboxServicesItem{
+			Method:    services[i].Method,
+			Connected: services[i].Connected,
 		}
-		out = append(out, UsersGroupsMailboxServicesItem{Method: method, Connected: false})
+		if services[i].Connected {
+			item.JobID = services[i].JobID
+		}
+		out = append(out, item)
 	}
 	return out
 }
 
-func buildMailboxScheduleRows(jobs []repo.CronJobListingDB, policies map[uint]*repo.AutosyncBackupPolicyDB) []UsersGroupsMailboxScheduleItem {
-	byMethod := indexUsersGroupsJobsByMethod(jobs)
-	out := make([]UsersGroupsMailboxScheduleItem, 0, len(byMethod))
-	for _, method := range autosyncServiceMethodsOrder {
-		job, ok := byMethod[method]
-		if !ok {
+func buildMailboxScheduleRows(services []UsersGroupsEntityServiceView) []UsersGroupsMailboxScheduleItem {
+	out := make([]UsersGroupsMailboxScheduleItem, 0, len(services))
+	for i := range services {
+		if !services[i].Connected {
 			continue
 		}
-		retentionType := ""
-		if job.PolicyID > 0 {
-			if policy, ok := policies[job.PolicyID]; ok && policy != nil {
-				retentionType = strings.TrimSpace(policy.RetentionType)
-			}
-		}
 		out = append(out, UsersGroupsMailboxScheduleItem{
-			JobID:         job.ID,
-			Method:        method,
-			PolicyID:      job.PolicyID,
-			Interval:      strings.TrimSpace(job.Interval),
-			On:            strings.TrimSpace(job.On),
-			RetentionType: retentionType,
+			JobID:         services[i].JobID,
+			Method:        services[i].Method,
+			PolicyID:      services[i].PolicyID,
+			Interval:      services[i].Interval,
+			On:            services[i].On,
+			RetentionType: services[i].RetentionType,
 		})
 	}
 	return out
@@ -956,26 +972,27 @@ func HandleAutosyncUsersGroupsList(c echo.Context) error {
 		return usersGroupsInternalError(c, ctx, "Failed to list jobs for users-groups", err)
 	}
 
+	policies := enrichUsersGroupsJobs(database, jobs)
 	credByID := loadCredentialsForJobs(database, jobs)
-	allEntities := buildUsersGroupsEntities(jobs, database.CronJobRepo, credByID)
+	allEntities := buildUsersGroupsEntities(jobs, database.CronJobRepo, credByID, policies)
 	allEntities = filterUsersGroupsEntitiesByMethod(allEntities, jobs, method)
 	allEntities = filterUsersGroupsEntitiesByActive(allEntities, jobs, activeFilter)
 	allEntities = filterUsersGroupsEntitiesByAccountType(allEntities, accountType)
 	allEntities = filterUsersGroupsEntitiesByCredentialStatus(allEntities, credentialStatus)
 	entities, pagination := paginateUsersGroupsEntities(allEntities, limit, offset)
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"policy_link": autosyncPolicyListLink,
-		"entities":    entities,
-		"pagination":  pagination,
+		"entities":   entities,
+		"pagination": pagination,
 	})
 }
 
 // HandleAutosyncUsersGroupsMailboxOverview returns Overview tab data for one mailbox.
 func HandleAutosyncUsersGroupsMailboxOverview(c echo.Context) error {
 	return handleUsersGroupsMailboxTab(c, "Failed to load mailbox overview", func(email string, data usersGroupsMailboxData) interface{} {
+		services := buildUsersGroupsEntityServices(data.jobs, data.policies)
 		return UsersGroupsMailboxOverviewResponse{
 			UsersGroupsMailboxHeader: usersGroupsMailboxHeader(email, data.cred),
-			Services:                 buildMailboxOverviewServices(data.jobs),
+			Services:                 buildMailboxOverviewServices(services),
 		}
 	})
 }
@@ -983,9 +1000,10 @@ func HandleAutosyncUsersGroupsMailboxOverview(c echo.Context) error {
 // HandleAutosyncUsersGroupsMailboxServices returns Services tab data for one mailbox.
 func HandleAutosyncUsersGroupsMailboxServices(c echo.Context) error {
 	return handleUsersGroupsMailboxTab(c, "Failed to load mailbox services", func(email string, data usersGroupsMailboxData) interface{} {
+		services := buildUsersGroupsEntityServices(data.jobs, data.policies)
 		return UsersGroupsMailboxServicesResponse{
 			UsersGroupsMailboxHeader: usersGroupsMailboxHeader(email, data.cred),
-			Services:                 buildMailboxServicesTab(data.jobs),
+			Services:                 buildMailboxServicesTab(services),
 		}
 	})
 }
@@ -993,9 +1011,10 @@ func HandleAutosyncUsersGroupsMailboxServices(c echo.Context) error {
 // HandleAutosyncUsersGroupsMailboxSchedule returns Schedule tab data for one mailbox.
 func HandleAutosyncUsersGroupsMailboxSchedule(c echo.Context) error {
 	return handleUsersGroupsMailboxTab(c, "Failed to load mailbox schedule", func(email string, data usersGroupsMailboxData) interface{} {
+		services := buildUsersGroupsEntityServices(data.jobs, data.policies)
 		return UsersGroupsMailboxScheduleResponse{
 			UsersGroupsMailboxHeader: usersGroupsMailboxHeader(email, data.cred),
-			Schedules:                buildMailboxScheduleRows(data.jobs, data.policies),
+			Schedules:                buildMailboxScheduleRows(services),
 		}
 	})
 }
