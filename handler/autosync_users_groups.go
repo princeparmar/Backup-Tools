@@ -67,6 +67,7 @@ type UsersGroupsEntityServiceView struct {
 	LastBackupAt  *time.Time `json:"last_backup_at,omitempty"`
 	NextBackupAt  *time.Time `json:"next_backup_at,omitempty"`
 	PolicyID      uint       `json:"policy_id,omitempty"`
+	PolicyName    string     `json:"policy_name,omitempty"`
 	Interval      string     `json:"interval,omitempty"`
 	On            string     `json:"on,omitempty"`
 	RetentionType string     `json:"retention_type,omitempty"`
@@ -353,9 +354,11 @@ func buildUsersGroupsEntityServices(jobs []repo.CronJobListingDB, policies map[u
 			lastBackup = &t
 		}
 		retentionType := ""
+		policyName := ""
 		if job.PolicyID > 0 {
 			if policy, ok := policies[job.PolicyID]; ok && policy != nil {
 				retentionType = strings.TrimSpace(policy.RetentionType)
+				policyName = strings.TrimSpace(policy.Name)
 			}
 		}
 		active := job.Active
@@ -367,6 +370,7 @@ func buildUsersGroupsEntityServices(jobs []repo.CronJobListingDB, policies map[u
 			LastBackupAt:  lastBackup,
 			NextBackupAt:  calculateNextBackup(job),
 			PolicyID:      job.PolicyID,
+			PolicyName:    policyName,
 			Interval:      strings.TrimSpace(job.Interval),
 			On:            strings.TrimSpace(job.On),
 			RetentionType: retentionType,

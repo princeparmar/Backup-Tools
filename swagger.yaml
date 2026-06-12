@@ -3452,6 +3452,9 @@ components:
           nullable: true
         policy_id:
           type: integer
+        policy_name:
+          type: string
+          description: Present when connected is true and the job has a linked policy.
         interval:
           type: string
         on:
