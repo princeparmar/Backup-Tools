@@ -89,11 +89,15 @@ func StartServer(db *db.PostgresDb, address string) {
 
 	policy := autoSync.Group("/policy")
 	policy.GET("", handler.HandleAutosyncPolicyList)
+	policy.GET("/options", handler.HandleAutosyncPolicyOptions)
+	policy.GET("/available-assignments", handler.HandleAutosyncPolicyAvailableAssignments)
+	policy.POST("", handler.HandleAutosyncPolicyCreate)
+	policy.POST("/move", handler.HandleAutosyncPolicyMove)
 	policy.GET("/merge/preview", handler.HandleAutosyncPolicyMergePreview)
 	policy.POST("/merge", handler.HandleAutosyncPolicyMerge)
-	policy.GET("/by-job/:job_id", handler.HandleAutosyncPolicyByJobID)
 	policy.GET("/:policy_id", handler.HandleAutosyncPolicyByID)
 	policy.PUT("/:policy_id", handler.HandleAutosyncPolicyUpdate)
+	policy.DELETE("/:policy_id", handler.HandleAutosyncPolicyDelete)
 
 	task := autoSync.Group("/task")
 	task.POST("/:job_id", handler.HandleAutomaticSyncCreateTask)

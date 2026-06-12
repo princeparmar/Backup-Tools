@@ -72,6 +72,8 @@ type GoogleBackupOnboardingRequest struct {
 	SatelliteUserID string   `json:"satellite_user_id"`
 	RefreshToken    string   `json:"refresh_token"`
 	Emails          []string `json:"emails"`
+	PolicyID        *uint    `json:"policy_id,omitempty"`
+	PolicyName      string   `json:"policy_name,omitempty"`
 }
 
 // Legacy unified create body (onboarding + outlook code + DB fields) — not used; onboarding uses GoogleBackupOnboardingRequest only.
@@ -811,6 +813,22 @@ func handleSatelliteOnboardingCreate(c echo.Context, ctx context.Context, userID
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
 	}
 
+	hasJobs, herr := database.CronJobRepo.HasLinkedJobsForCredential(userID, cred.ID)
+	if herr != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": herr.Error()})
+	}
+	userHasPolicies, perr := database.PolicyRepo.HasPoliciesForUser(userID)
+	if perr != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": perr.Error()})
+	}
+	isFirstConnection := isFirstOnboardingConnection(cred, hasJobs, userHasPolicies)
+	if !isFirstConnection && (req.PolicyID == nil || *req.PolicyID == 0) && strings.TrimSpace(req.PolicyName) == "" {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"error": "policy_id or policy_name is required for subsequent connections",
+		})
+	}
+
+	var batchPolicyID uint
 	var jobs []onboardingJobResult
 	var failed []onboardingFailedResult
 	var servicesOut []string
@@ -827,7 +845,7 @@ func handleSatelliteOnboardingCreate(c echo.Context, ctx context.Context, userID
 		seenSvc[svc] = struct{}{}
 		servicesOut = append(servicesOut, svc)
 
-		j, f := onboardingCreateForService(ctx, c, userID, syncType, svc, schedule, req, cred.ID, emails, database)
+		j, f := onboardingCreateForService(ctx, c, userID, syncType, svc, schedule, req, cred, isFirstConnection, &batchPolicyID, emails, database)
 		jobs = append(jobs, j...)
 		failed = append(failed, f...)
 	}
@@ -924,7 +942,8 @@ func resolveStorxTokenForOnboarding(ctx context.Context, c echo.Context, project
 
 func onboardingCreateForService(
 	ctx context.Context, c echo.Context, userID, syncType, svc string, schedule onboardingSchedule,
-	req *GoogleBackupOnboardingRequest, credentialID uint, emails []string, database *db.PostgresDb,
+	req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB, isFirstConnection bool, batchPolicyID *uint,
+	emails []string, database *db.PostgresDb,
 ) ([]onboardingJobResult, []onboardingFailedResult) {
 	method, ok := onboardingServiceToMethod[svc]
 	if !ok {
@@ -933,7 +952,7 @@ func onboardingCreateForService(
 	if !allowedMethods[method] {
 		return nil, []onboardingFailedResult{{Service: svc, Error: "method not enabled"}}
 	}
-	return createGoogleJobsForServiceEmails(ctx, c, userID, method, svc, syncType, schedule, req, credentialID, emails, database)
+	return createGoogleJobsForServiceEmails(ctx, c, userID, method, svc, syncType, schedule, req, cred, isFirstConnection, batchPolicyID, emails, database)
 
 	// LEGACY(credential-migration): per-service create before unified credential_id flow.
 	/*
@@ -955,18 +974,23 @@ func onboardingCreateForService(
 
 func createGoogleJobsForServiceEmails(
 	ctx context.Context, c echo.Context, userID, method, svc, syncType string, schedule onboardingSchedule,
-	req *GoogleBackupOnboardingRequest, credentialID uint, emails []string, database *db.PostgresDb,
+	req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB, isFirstConnection bool, batchPolicyID *uint,
+	emails []string, database *db.PostgresDb,
 ) ([]onboardingJobResult, []onboardingFailedResult) {
 	emails = dedupeEmailsPreservingOrder(emails)
 	var jobs []onboardingJobResult
 	var failed []onboardingFailedResult
 	for _, targetEmail := range emails {
-		cronJob, createErr := createSyncJobWithCredential(userID, targetEmail, method, syncType, credentialID, c)
+		cronJob, createErr := createSyncJobWithCredential(userID, targetEmail, method, syncType, cred.ID, c)
 		if createErr != nil {
 			failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: extractCreateJobError(createErr)})
 			continue
 		}
-		if err := applyOnboardingJobSchedule(database, userID, cronJob.ID, schedule, credentialID, req.ProjectID); err != nil {
+		if err := applyOnboardingJobSchedule(database, userID, cronJob.ID, schedule, cred, req, isFirstConnection, batchPolicyID); err != nil {
+			if errors.Is(err, repo.ErrPolicyNameExists) {
+				failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: "policy name already exists for user"})
+				continue
+			}
 			failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: err.Error()})
 			continue
 		}
@@ -1075,14 +1099,22 @@ func onboardingGoogleJobConfig(googleEmail, refreshToken string) map[string]inte
 	}
 }
 
-// applyOnboardingJobSchedule creates policy row (canonical schedule) and syncs job.interval cache.
-func applyOnboardingJobSchedule(database *db.PostgresDb, userID string, jobID uint, schedule onboardingSchedule, credentialID uint, projectID string) error {
-	_ = projectID
-	policy, err := database.PolicyRepo.FindOrCreatePolicy(userID, credentialID, schedule.Interval, schedule.On, repo.RetentionNever)
+// applyOnboardingJobSchedule assigns a named policy to a new onboarding job.
+func applyOnboardingJobSchedule(
+	database *db.PostgresDb,
+	userID string,
+	jobID uint,
+	schedule onboardingSchedule,
+	cred *repo.GoogleBackupCredentialDB,
+	req *GoogleBackupOnboardingRequest,
+	isFirstConnection bool,
+	batchPolicyID *uint,
+) error {
+	policyID, err := resolveOnboardingPolicyID(database, userID, cred, req, schedule, isFirstConnection, batchPolicyID)
 	if err != nil {
 		return err
 	}
-	return database.PolicyRepo.AssignPolicyToJob(jobID, policy.ID)
+	return database.PolicyRepo.AssignPolicyToJob(jobID, policyID)
 }
 
 // Legacy: set storx_token on create and auto-activate daily jobs when grant was resolved on onboarding.
@@ -2123,22 +2155,19 @@ func HandleAutomaticBackupUpdateByProject(c echo.Context) error {
 				"error":   schedErr.Error(),
 			})
 		}
-		targetPolicy, ferr := database.PolicyRepo.FindOrCreatePolicy(userID, cred.ID, intervalVal, onValue, repo.RetentionNever)
-		if ferr != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-				"message": "Failed to resolve schedule policy",
-				"error":   ferr.Error(),
-			})
-		}
-		jobIDs := make([]uint, 0, len(jobs))
+		policyIDs := make(map[uint]struct{})
 		for i := range jobs {
-			jobIDs = append(jobIDs, jobs[i].ID)
+			if jobs[i].PolicyID > 0 {
+				policyIDs[jobs[i].PolicyID] = struct{}{}
+			}
 		}
-		if err := database.PolicyRepo.RebindJobsToPolicy(jobIDs, targetPolicy.ID); err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-				"message": "Failed to update schedule policies",
-				"error":   err.Error(),
-			})
+		for pid := range policyIDs {
+			if err := database.PolicyRepo.UpdatePolicy(pid, intervalVal, onValue, repo.RetentionNever); err != nil {
+				return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+					"message": "Failed to update schedule policies",
+					"error":   err.Error(),
+				})
+			}
 		}
 	}
 

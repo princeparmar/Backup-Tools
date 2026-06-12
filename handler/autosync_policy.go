@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -13,11 +14,12 @@ import (
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/labstack/echo/v4"
+	gormio "gorm.io/gorm"
 )
 
 const reconnectScopeCredential = "credential"
 
-// ConnectedAccountView is shared credential data returned on policy list/detail and project update responses.
+// ConnectedAccountView is shared credential data returned on project update responses.
 type ConnectedAccountView struct {
 	ProjectID            string `json:"project_id"`
 	GoogleEmail          string `json:"google_email"`
@@ -51,63 +53,57 @@ type AutosyncJobItemView struct {
 	NextBackup      *time.Time      `json:"next_backup,omitempty"`
 }
 
-// PolicyDetailView is schedule + job operational fields (legacy per-job shape).
-type PolicyDetailView struct {
-	PolicyID      uint   `json:"policy_id"`
-	CredentialID  uint   `json:"credential_id,omitempty"`
-	JobID         uint   `json:"job_id"`
-	Interval      string `json:"interval"`
-	Email         string `json:"email"`
-	Method        string `json:"method"`
-	On            string `json:"on"`
-	RetentionType string `json:"retention_type"`
-	IsExpired     bool   `json:"is_expired"`
-	Active        bool   `json:"active"`
-	SyncType      string `json:"sync_type"`
-}
-
-// PolicyListItemView is one shared policy row (distinct by policy_id).
-// Reconnect flags live on account only (not duplicated on the policy object).
-type PolicyListItemView = PolicyListRowPolicyView
-
-// PolicyListRowPolicyView is schedule/job-count fields for GET /auto-sync/policy listing rows.
-// Reconnect flags live on account only (not duplicated on the policy object).
+// PolicyListRowPolicyView is one policy row on GET /auto-sync/policy.
 type PolicyListRowPolicyView struct {
-	PolicyID       uint       `json:"policy_id"`
-	CredentialID   uint       `json:"credential_id"`
-	Interval       string     `json:"interval"`
-	On             string     `json:"on"`
-	RetentionType  string     `json:"retention_type"`
-	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
-	IsExpired      bool       `json:"is_expired"`
-	LinkedJobCount int        `json:"linked_job_count"`
+	PolicyID       uint     `json:"policy_id"`
+	Name           string   `json:"name"`
+	Interval       string   `json:"interval"`
+	On             string   `json:"on"`
+	RetentionType  string   `json:"retention_type"`
+	IsExpired      bool     `json:"is_expired"`
+	LinkedJobCount int      `json:"linked_job_count"`
+	Services       []string `json:"services"`
 }
 
-// PolicyListRowView is one policy row on GET /auto-sync/policy with connected account context.
-type PolicyListRowView struct {
-	PolicyListRowPolicyView
-	Account ConnectedAccountView `json:"account"`
+// PolicyManageSummaryView is the policy block on the manage page.
+type PolicyManageSummaryView struct {
+	PolicyID         uint   `json:"policy_id"`
+	Name             string `json:"name"`
+	Interval         string `json:"interval"`
+	On               string `json:"on"`
+	RetentionType    string `json:"retention_type"`
+	IsExpired        bool   `json:"is_expired"`
+	AssignmentCount  int    `json:"assignment_count"`
+	UniqueEmailCount int    `json:"unique_email_count"`
 }
 
-// PolicyLinkedJobView is a slim job row linked to a policy.
+// PolicyLinkedJobView is a slim assignment row linked to a policy.
 type PolicyLinkedJobView struct {
-	JobID    uint   `json:"job_id"`
-	Email    string `json:"email"`
-	Method   string `json:"method"`
-	Active   bool   `json:"active"`
-	SyncType string `json:"sync_type"`
+	JobID  uint   `json:"job_id"`
+	Name   string `json:"name"`
+	Email  string `json:"email"`
+	Method string `json:"method"`
 }
 
 type autosyncPolicyUpdateRequest struct {
-	Interval       *string `json:"interval"`
-	On             *string `json:"on"`
-	RetentionType  *string `json:"retention_type"`
-	ApplyAll       *bool   `json:"apply_all"`
-	SelectedJobIDs []uint  `json:"selected_job_ids"`
-	Active         *bool   `json:"active"`
+	Interval      *string `json:"interval"`
+	On            *string `json:"on"`
+	RetentionType *string `json:"retention_type"`
 }
 
-const mergeJobPreviewLimit = 20
+type autosyncPolicyCreateRequest struct {
+	Name          string `json:"name"`
+	Interval      string `json:"interval"`
+	On            string `json:"on"`
+	RetentionType string `json:"retention_type"`
+	JobIDs        []uint `json:"job_ids"`
+}
+
+type autosyncPolicyMoveRequest struct {
+	TargetPolicyID uint   `json:"target_policy_id"`
+	JobIDs         []uint `json:"job_ids"`
+}
+
 
 type PolicyScheduleView struct {
 	Interval      string     `json:"interval"`
@@ -117,42 +113,52 @@ type PolicyScheduleView struct {
 	IsExpired     bool       `json:"is_expired"`
 }
 
-type MergePreviewPolicy struct {
-	PolicyListItemView
-	Role string `json:"role"`
-}
-
-type PolicyMergeImpactView struct {
-	PolicyKept          uint `json:"policy_kept"`
-	PoliciesToRemove    int  `json:"policies_to_remove,omitempty"`
-	PoliciesRemoved     int  `json:"policies_removed,omitempty"`
-	JobsToRebind        int  `json:"jobs_to_rebind,omitempty"`
-	JobsRebound         int  `json:"jobs_rebound,omitempty"`
-	TotalJobsAfterMerge int  `json:"total_jobs_after_merge"`
-}
-
-type PolicyMergeJobPreview struct {
-	JobID    uint   `json:"job_id"`
-	Email    string `json:"email"`
-	Method   string `json:"method"`
-	PolicyID uint   `json:"policy_id"`
+type PolicyMergePreviewPolicyView struct {
+	PolicyID       uint     `json:"policy_id"`
+	Name           string   `json:"name"`
+	LinkedJobCount int      `json:"linked_job_count"`
+	Services       []string `json:"services,omitempty"`
 }
 
 type PolicyMergePreviewGroup struct {
-	Schedule                     PolicyScheduleView      `json:"schedule"`
-	Account                      ConnectedAccountView    `json:"account"`
-	Impact                       PolicyMergeImpactView   `json:"impact"`
-	RecommendedCanonicalPolicyID uint                    `json:"recommended_canonical_policy_id"`
-	CanonicalReason              string                  `json:"canonical_reason"`
-	Policies                     []MergePreviewPolicy    `json:"policies"`
-	PolicyIDs                    []uint                  `json:"policy_ids"`
-	LinkedJobsPreview            []PolicyMergeJobPreview `json:"linked_jobs_preview"`
-	JobsToRebind                 int                     `json:"jobs_to_rebind"`
-	HasMoreJobs                  bool                    `json:"has_more_jobs"`
+	Schedule  PolicyScheduleView             `json:"schedule"`
+	Policies  []PolicyMergePreviewPolicyView `json:"policies"`
+	TotalJobs int                            `json:"total_jobs"`
 }
 
 type autosyncPolicyMergeRequest struct {
 	PolicyIDs []uint `json:"policy_ids"`
+	Name      string `json:"name"`
+}
+
+type PolicyAvailableEmailView struct {
+	Name       string `json:"name"`
+	Email      string `json:"email"`
+	HereCount  int    `json:"here_count"`
+	OtherCount int    `json:"other_count"`
+}
+
+type PolicyAvailableServiceView struct {
+	JobID             uint   `json:"job_id"`
+	Method            string `json:"method"`
+	ServiceLabel      string `json:"service_label"`
+	Assignment        string `json:"assignment"`
+	CurrentPolicyID   uint   `json:"current_policy_id,omitempty"`
+	CurrentPolicyName string `json:"current_policy_name,omitempty"`
+	CanAdd            bool   `json:"can_add"`
+}
+
+var policyServiceLabels = map[string]string{
+	"gmail":           "Gmail",
+	"google_drive":    "Drive",
+	"google_calendar": "Calendar",
+	"google_contacts": "Contacts",
+	"google_photos":   "Photos",
+	"outlook":         "Outlook",
+}
+
+func normalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
 }
 
 func jobMailboxEmail(job *repo.CronJobListingDB) string {
@@ -223,6 +229,10 @@ func buildConnectedAccountView(cred *repo.GoogleBackupCredentialDB, projectID, g
 }
 
 func buildPolicyScheduleView(policy *repo.AutosyncBackupPolicyDB) PolicyScheduleView {
+	return buildPolicyScheduleViewAt(policy, time.Now().UTC())
+}
+
+func buildPolicyScheduleViewAt(policy *repo.AutosyncBackupPolicyDB, now time.Time) PolicyScheduleView {
 	if policy == nil {
 		return PolicyScheduleView{}
 	}
@@ -231,124 +241,93 @@ func buildPolicyScheduleView(policy *repo.AutosyncBackupPolicyDB) PolicySchedule
 		On:            policy.On,
 		RetentionType: policy.RetentionType,
 		ExpiresAt:     policy.ExpiresAt,
-		IsExpired:     repo.IsPolicyExpired(policy, time.Now().UTC()),
+		IsExpired:     repo.IsPolicyExpired(policy, now),
 	}
 }
 
-func buildMergePreviewImpact(group repo.MergeablePolicyGroupData) PolicyMergeImpactView {
-	return PolicyMergeImpactView{
-		PolicyKept:          group.Canonical.ID,
-		PoliciesToRemove:    len(group.Policies) - 1,
-		JobsToRebind:        group.JobsOnDuplicates,
-		TotalJobsAfterMerge: group.TotalJobsAfter,
+func buildMergePreviewPolicyView(policy *repo.AutosyncBackupPolicyDB, linked []repo.CronJobListingDB) PolicyMergePreviewPolicyView {
+	if policy == nil {
+		return PolicyMergePreviewPolicyView{}
+	}
+	return PolicyMergePreviewPolicyView{
+		PolicyID:       policy.ID,
+		Name:           policy.Name,
+		LinkedJobCount: len(linked),
+		Services:       sortedUniqueServices(linked),
 	}
 }
 
-func buildMergeExecuteImpact(result *repo.MergeExecuteResult) PolicyMergeImpactView {
-	if result == nil {
-		return PolicyMergeImpactView{}
-	}
-	return PolicyMergeImpactView{
-		PolicyKept:          result.CanonicalPolicyID,
-		PoliciesRemoved:     len(result.RemovedPolicyIDs),
-		JobsRebound:         result.JobsRebound,
-		TotalJobsAfterMerge: result.TotalJobsAfterMerge,
-	}
-}
-
-func validateMergePolicyIDSet(submitted, fullGroup []uint) []uint {
-	submittedSet := make(map[uint]struct{}, len(submitted))
-	for _, id := range submitted {
-		submittedSet[id] = struct{}{}
-	}
-	missing := make([]uint, 0)
-	for _, id := range fullGroup {
-		if _, ok := submittedSet[id]; !ok {
-			missing = append(missing, id)
+func sortedUniqueServices(jobs []repo.CronJobListingDB) []string {
+	seen := make(map[string]struct{})
+	for i := range jobs {
+		m := strings.TrimSpace(jobs[i].Method)
+		if m == "" {
+			continue
 		}
+		seen[m] = struct{}{}
 	}
-	return missing
+	out := make([]string, 0, len(seen))
+	for m := range seen {
+		out = append(out, m)
+	}
+	sort.Strings(out)
+	return out
 }
 
-func capMergeJobPreview(jobs []PolicyMergeJobPreview, limit int) ([]PolicyMergeJobPreview, bool) {
-	if limit <= 0 || len(jobs) <= limit {
-		return jobs, false
-	}
-	return jobs[:limit], true
+func buildPolicyListRowPolicyView(policy *repo.AutosyncBackupPolicyDB, linkedJobs []repo.CronJobListingDB) PolicyListRowPolicyView {
+	return buildPolicyListRowPolicyViewAt(policy, linkedJobs, time.Now().UTC())
 }
 
-func accountViewFromCredential(cred *repo.GoogleBackupCredentialDB) ConnectedAccountView {
-	account := buildConnectedAccountView(cred, "", "")
-	if cred != nil {
-		account.GoogleEmail = strings.TrimSpace(cred.Email)
-		account.OAuthHolderEmail = strings.TrimSpace(cred.Email)
-	}
-	return account
-}
-
-func buildConnectedAccountViewForPolicy(database *db.PostgresDb, cred *repo.GoogleBackupCredentialDB, projectID, googleEmail string, linkedJobs []repo.CronJobListingDB) ConnectedAccountView {
-	account := buildConnectedAccountView(cred, projectID, googleEmail)
-	if database != nil && database.CronJobRepo != nil {
-		needsGoogle, needsStorx := credentialReconnectFlagsFromJobs(database.CronJobRepo, cred, linkedJobs)
-		account.NeedsGoogleReconnect = needsGoogle
-		account.NeedsStorxReconnect = needsStorx
-	}
-	return account
-}
-
-func buildPolicyListRowPolicyView(policy *repo.AutosyncBackupPolicyDB, linkedJobCount int) PolicyListRowPolicyView {
-	now := time.Now().UTC()
+func buildPolicyListRowPolicyViewAt(policy *repo.AutosyncBackupPolicyDB, linkedJobs []repo.CronJobListingDB, now time.Time) PolicyListRowPolicyView {
 	return PolicyListRowPolicyView{
 		PolicyID:       policy.ID,
-		CredentialID:   policy.CredentialID,
+		Name:           policy.Name,
 		Interval:       policy.Interval,
 		On:             policy.On,
 		RetentionType:  policy.RetentionType,
-		ExpiresAt:      policy.ExpiresAt,
 		IsExpired:      repo.IsPolicyExpired(policy, now),
-		LinkedJobCount: linkedJobCount,
+		LinkedJobCount: len(linkedJobs),
+		Services:       sortedUniqueServices(linkedJobs),
 	}
 }
 
-func buildPolicyListItemView(policy *repo.AutosyncBackupPolicyDB, linkedJobCount int) PolicyListItemView {
-	return buildPolicyListRowPolicyView(policy, linkedJobCount)
+func uniqueEmailsFromJobs(jobs []repo.CronJobListingDB) int {
+	seen := make(map[string]struct{})
+	for i := range jobs {
+		email := normalizeEmail(jobMailboxEmail(&jobs[i]))
+		if email == "" {
+			continue
+		}
+		seen[email] = struct{}{}
+	}
+	return len(seen)
 }
 
-func loadCredentialForPolicy(database *db.PostgresDb, policy *repo.AutosyncBackupPolicyDB) (*repo.GoogleBackupCredentialDB, error) {
-	if database == nil || policy == nil || policy.CredentialID == 0 {
-		return nil, fmt.Errorf("credential not found for policy")
+func buildPolicyManageSummaryView(policy *repo.AutosyncBackupPolicyDB, linkedJobs []repo.CronJobListingDB) PolicyManageSummaryView {
+	return buildPolicyManageSummaryViewAt(policy, linkedJobs, time.Now().UTC())
+}
+
+func buildPolicyManageSummaryViewAt(policy *repo.AutosyncBackupPolicyDB, linkedJobs []repo.CronJobListingDB, now time.Time) PolicyManageSummaryView {
+	return PolicyManageSummaryView{
+		PolicyID:         policy.ID,
+		Name:             policy.Name,
+		Interval:         policy.Interval,
+		On:               policy.On,
+		RetentionType:    policy.RetentionType,
+		IsExpired:        repo.IsPolicyExpired(policy, now),
+		AssignmentCount:  len(linkedJobs),
+		UniqueEmailCount: uniqueEmailsFromJobs(linkedJobs),
 	}
-	return database.CredentialRepo.GetByID(policy.CredentialID)
 }
 
 func buildPolicyLinkedJobView(job *repo.CronJobListingDB) PolicyLinkedJobView {
+	email := jobMailboxEmail(job)
 	return PolicyLinkedJobView{
-		JobID:    job.ID,
-		Email:    jobMailboxEmail(job),
-		Method:   job.Method,
-		Active:   job.Active,
-		SyncType: job.SyncType,
+		JobID:  job.ID,
+		Name:   displayNameFromMailboxEmail(email),
+		Email:  email,
+		Method: job.Method,
 	}
-}
-
-func buildPolicyDetailView(database *db.PostgresDb, policy *repo.AutosyncBackupPolicyDB, job *repo.CronJobListingDB, omitCredentialID bool) PolicyDetailView {
-	database.PolicyRepo.EnrichJobFromPolicy(job)
-	v := PolicyDetailView{
-		PolicyID:      policy.ID,
-		JobID:         job.ID,
-		Interval:      policy.Interval,
-		On:            policy.On,
-		RetentionType: policy.RetentionType,
-		IsExpired:     repo.IsPolicyExpired(policy, time.Now().UTC()),
-		Email:         jobMailboxEmail(job),
-		Method:        job.Method,
-		Active:        job.Active,
-		SyncType:      job.SyncType,
-	}
-	if !omitCredentialID {
-		v.CredentialID = policy.CredentialID
-	}
-	return v
 }
 
 func buildAutosyncJobItemView(job repo.CronJobListingDB) AutosyncJobItemView {
@@ -371,6 +350,43 @@ func buildAutosyncJobItemView(job repo.CronJobListingDB) AutosyncJobItemView {
 		FailurePeriods:  job.FailurePeriods,
 		NextBackup:      calculateNextBackup(job),
 	}
+}
+
+func serviceLabelForMethod(method string) string {
+	method = strings.TrimSpace(method)
+	if label, ok := policyServiceLabels[method]; ok {
+		return label
+	}
+	return method
+}
+
+func policyJobMatchesSearch(job *repo.CronJobListingDB, search string) bool {
+	search = strings.TrimSpace(strings.ToLower(search))
+	if search == "" {
+		return true
+	}
+	email := strings.ToLower(jobMailboxEmail(job))
+	display := strings.ToLower(displayNameFromMailboxEmail(email))
+	method := strings.ToLower(job.Method)
+	label := strings.ToLower(serviceLabelForMethod(job.Method))
+	return strings.Contains(email, search) ||
+		strings.Contains(display, search) ||
+		strings.Contains(method, search) ||
+		strings.Contains(label, search)
+}
+
+func filterLinkedJobsBySearch(jobs []repo.CronJobListingDB, search string) []repo.CronJobListingDB {
+	search = strings.TrimSpace(search)
+	if search == "" {
+		return jobs
+	}
+	out := make([]repo.CronJobListingDB, 0, len(jobs))
+	for i := range jobs {
+		if policyJobMatchesSearch(&jobs[i], search) {
+			out = append(out, jobs[i])
+		}
+	}
+	return out
 }
 
 func normalizeScheduleIntervalOn(intervalVal, onValue string) (string, string) {
@@ -436,86 +452,160 @@ func parseScheduleFromRequest(interval, on *string) (string, string, error) {
 	return sched.Interval, sched.On, nil
 }
 
-func validateSelectedJobsForUser(database *db.PostgresDb, userID string, jobIDs []uint) error {
+// policyCtx carries auth + DB + request clock for policy handlers.
+type policyCtx struct {
+	echo     echo.Context
+	userID   string
+	database *db.PostgresDb
+	now      time.Time
+}
+
+func newPolicyCtx(c echo.Context) (policyCtx, error) {
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		return policyCtx{}, err
+	}
+	return policyCtx{
+		echo:     c,
+		userID:   userID,
+		database: c.Get(middleware.DbContextKey).(*db.PostgresDb),
+		now:      time.Now().UTC(),
+	}, nil
+}
+
+func (p *policyCtx) loadPolicy(policyID uint) (*repo.AutosyncBackupPolicyDB, error) {
+	return loadPolicyForUser(p.database, p.userID, policyID)
+}
+
+func policyUnauthorized(c echo.Context, err error) error {
+	return c.JSON(http.StatusUnauthorized, map[string]interface{}{
+		"message": "Authentication required",
+		"error":   err.Error(),
+	})
+}
+
+func (p *policyCtx) badRequest(detail string) error {
+	return p.echo.JSON(http.StatusBadRequest, map[string]interface{}{
+		"message": "Invalid Request",
+		"error":   detail,
+	})
+}
+
+func (p *policyCtx) notFound(detail string) error {
+	return p.echo.JSON(http.StatusNotFound, map[string]interface{}{
+		"message": "Invalid Request",
+		"error":   detail,
+	})
+}
+
+func (p *policyCtx) serverError(message string, err error) error {
+	return p.echo.JSON(http.StatusInternalServerError, map[string]interface{}{
+		"message": message,
+		"error":   err.Error(),
+	})
+}
+
+func parsePolicyIDParam(c echo.Context) (uint, error) {
+	id, err := strconvParseUintParam(c.Param("policy_id"))
+	if err != nil {
+		return 0, fmt.Errorf("invalid policy_id")
+	}
+	return id, nil
+}
+
+func strconvParseUintParam(raw string) (uint, error) {
+	n, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 64)
+	if err != nil || n == 0 {
+		return 0, fmt.Errorf("invalid id")
+	}
+	return uint(n), nil
+}
+
+// jobBatch indexes jobs for O(1) lookups during response building.
+type jobBatch struct {
+	rows       []repo.CronJobListingDB
+	byID       map[uint]repo.CronJobListingDB
+	byPolicyID map[uint][]repo.CronJobListingDB
+}
+
+func newJobBatch(rows []repo.CronJobListingDB) jobBatch {
+	b := jobBatch{
+		rows:       rows,
+		byID:       make(map[uint]repo.CronJobListingDB, len(rows)),
+		byPolicyID: make(map[uint][]repo.CronJobListingDB),
+	}
+	for i := range rows {
+		b.byID[rows[i].ID] = rows[i]
+		if rows[i].PolicyID > 0 {
+			b.byPolicyID[rows[i].PolicyID] = append(b.byPolicyID[rows[i].PolicyID], rows[i])
+		}
+	}
+	return b
+}
+
+func loadJobBatchByPolicyIDs(database *db.PostgresDb, userID string, policyIDs []uint) (jobBatch, error) {
+	grouped, err := database.CronJobRepo.ListJobsGroupedByPolicyIDs(userID, policyIDs)
+	if err != nil {
+		return jobBatch{}, err
+	}
+	total := 0
+	for _, jobs := range grouped {
+		total += len(jobs)
+	}
+	rows := make([]repo.CronJobListingDB, 0, total)
+	for _, jobs := range grouped {
+		rows = append(rows, jobs...)
+	}
+	return newJobBatch(rows), nil
+}
+
+func loadJobBatchByIDs(database *db.PostgresDb, userID string, jobIDs []uint) (jobBatch, error) {
+	rows, err := database.CronJobRepo.GetJobsByIDsForUser(userID, jobIDs)
+	if err != nil {
+		return jobBatch{}, err
+	}
+	return newJobBatch(rows), nil
+}
+
+func validateJobIDsInBatch(batch jobBatch, jobIDs []uint) error {
 	if len(jobIDs) == 0 {
-		return fmt.Errorf("selected_job_ids is required")
+		return nil
 	}
 	seen := make(map[uint]struct{}, len(jobIDs))
 	for _, id := range jobIDs {
 		if id == 0 {
-			return fmt.Errorf("invalid job id in selected_job_ids")
+			return fmt.Errorf("invalid job id in job_ids")
 		}
 		if _, dup := seen[id]; dup {
-			continue
+			return fmt.Errorf("duplicate job id %d in job_ids", id)
 		}
 		seen[id] = struct{}{}
-		if _, err := database.CronJobRepo.GetJobByIDForUser(userID, id); err != nil {
+		if _, ok := batch.byID[id]; !ok {
 			return fmt.Errorf("job %d not found for user", id)
 		}
 	}
 	return nil
 }
 
-func resolvePolicyCredential(database *db.PostgresDb, userID, credentialIDStr, projectID, googleEmail string) (*repo.GoogleBackupCredentialDB, string, string, error) {
-	if credentialIDStr != "" {
-		cid, parseErr := strconv.ParseUint(credentialIDStr, 10, 64)
-		if parseErr != nil || cid == 0 {
-			return nil, "", "", fmt.Errorf("credential_id must be a positive integer")
+func linkedViewsFromBatch(batch jobBatch, jobIDs []uint) []PolicyLinkedJobView {
+	if len(jobIDs) == 0 {
+		return nil
+	}
+	jobs := make([]repo.CronJobListingDB, 0, len(jobIDs))
+	for _, id := range jobIDs {
+		if job, ok := batch.byID[id]; ok {
+			jobs = append(jobs, job)
 		}
-		cred, err := database.CredentialRepo.GetByID(uint(cid))
-		if err != nil {
-			return nil, "", "", fmt.Errorf("credential not found")
-		}
-		return cred, cred.StorjProjectID, cred.Email, nil
 	}
-	if projectID == "" || googleEmail == "" {
-		return nil, "", "", fmt.Errorf("credential_id or project_id + google_email is required")
-	}
-	cred, err := resolveUserCredentialByProjectAndEmail(database, userID, projectID, googleEmail)
-	if err != nil {
-		return nil, "", "", err
-	}
-	return cred, cred.StorjProjectID, cred.Email, nil
+	return linkedViewsFromJobs(jobs)
 }
 
-func policyAccountFilterProvided(credentialIDStr, projectID, googleEmail string) bool {
-	return strings.TrimSpace(credentialIDStr) != "" ||
-		strings.TrimSpace(projectID) != "" ||
-		strings.TrimSpace(googleEmail) != ""
-}
-
-func listPoliciesForUser(database *db.PostgresDb, userID string, policies []repo.AutosyncBackupPolicyDB) ([]PolicyListRowView, error) {
-	policyItems := make([]PolicyListRowView, 0, len(policies))
-	credCache := make(map[uint]*repo.GoogleBackupCredentialDB)
-	for i := range policies {
-		linked, lerr := database.CronJobRepo.ListJobsByPolicyID(userID, policies[i].ID)
-		if lerr != nil {
-			continue
-		}
-		if len(linked) == 0 {
-			continue
-		}
-		var cred *repo.GoogleBackupCredentialDB
-		if policies[i].CredentialID > 0 {
-			if cached, ok := credCache[policies[i].CredentialID]; ok {
-				cred = cached
-			} else {
-				cred, _ = database.CredentialRepo.GetByID(policies[i].CredentialID)
-				credCache[policies[i].CredentialID] = cred
-			}
-		}
-		account := accountViewFromCredential(cred)
-		if database != nil && database.CronJobRepo != nil {
-			needsGoogle, needsStorx := credentialReconnectFlagsFromJobs(database.CronJobRepo, cred, linked)
-			account.NeedsGoogleReconnect = needsGoogle
-			account.NeedsStorxReconnect = needsStorx
-		}
-		policyItems = append(policyItems, PolicyListRowView{
-			PolicyListRowPolicyView: buildPolicyListRowPolicyView(&policies[i], len(linked)),
-			Account:                 account,
-		})
+func linkedViewsFromJobs(jobs []repo.CronJobListingDB) []PolicyLinkedJobView {
+	out := make([]PolicyLinkedJobView, len(jobs))
+	for i := range jobs {
+		out[i] = buildPolicyLinkedJobView(&jobs[i])
 	}
-	return policyItems, nil
+	return out
 }
 
 func loadPolicyForUser(database *db.PostgresDb, userID string, policyID uint) (*repo.AutosyncBackupPolicyDB, error) {
@@ -526,575 +616,642 @@ func loadPolicyForUser(database *db.PostgresDb, userID string, policyID uint) (*
 	if strings.TrimSpace(policy.UserID) != strings.TrimSpace(userID) {
 		return nil, fmt.Errorf("policy not found for user")
 	}
-	linked, err := database.CronJobRepo.ListJobsByPolicyID(userID, policy.ID)
-	if err != nil {
-		return nil, err
-	}
-	if len(linked) == 0 {
-		return nil, fmt.Errorf("no jobs linked to policy")
-	}
 	return policy, nil
 }
 
-func validateSelectedJobsOnPolicy(database *db.PostgresDb, userID string, policyID uint, jobIDs []uint) error {
-	if err := validateSelectedJobsForUser(database, userID, jobIDs); err != nil {
-		return err
+func listPolicyListRows(policies []repo.AutosyncBackupPolicyDB, batch jobBatch, now time.Time) []PolicyListRowPolicyView {
+	out := make([]PolicyListRowPolicyView, 0, len(policies))
+	for i := range policies {
+		linked := batch.byPolicyID[policies[i].ID]
+		out = append(out, buildPolicyListRowPolicyViewAt(&policies[i], linked, now))
 	}
-	for _, id := range jobIDs {
-		job, err := database.CronJobRepo.GetJobByIDForUser(userID, id)
-		if err != nil {
-			return fmt.Errorf("job %d not found for user", id)
-		}
-		if job.PolicyID != policyID {
-			return fmt.Errorf("job %d is not linked to policy %d", id, policyID)
-		}
-	}
-	return nil
+	return out
 }
 
-// HandleAutosyncPolicyList lists all distinct shared policies for the authenticated user.
-// Optional query credential_id or project_id+google_email filters to one connected account.
-func HandleAutosyncPolicyList(c echo.Context) error {
-	userID, err := satellite.GetUserdetails(c)
-	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-			"message": "Authentication required",
-			"error":   err.Error(),
-		})
-	}
-
-	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
-	credentialIDStr := strings.TrimSpace(c.QueryParam("credential_id"))
-	projectID := strings.TrimSpace(c.QueryParam("project_id"))
-	googleEmail := strings.TrimSpace(c.QueryParam("google_email"))
-
-	var policies []repo.AutosyncBackupPolicyDB
-	resp := map[string]interface{}{
-		"message":  "Backup policies list",
-		"policies": []PolicyListRowView{},
-		"failed":   []interface{}{},
-	}
-
-	if policyAccountFilterProvided(credentialIDStr, projectID, googleEmail) {
-		cred, pid, email, cerr := resolvePolicyCredential(database, userID, credentialIDStr, projectID, googleEmail)
-		if cerr != nil {
-			var he *echo.HTTPError
-			if errors.As(cerr, &he) {
-				return c.JSON(he.Code, he.Message)
-			}
-			status := http.StatusBadRequest
-			if strings.Contains(cerr.Error(), "not found") {
-				status = http.StatusNotFound
-			}
-			return c.JSON(status, map[string]interface{}{
-				"message": "Invalid Request",
-				"error":   cerr.Error(),
-			})
-		}
-		policies, err = database.PolicyRepo.ListByUserAndCredentialID(userID, cred.ID)
-		if err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]interface{}{"message": "Failed to list policies", "error": err.Error()})
-		}
-		allLinked := make([]repo.CronJobListingDB, 0)
-		for i := range policies {
-			linked, lerr := database.CronJobRepo.ListJobsByPolicyID(userID, policies[i].ID)
-			if lerr != nil {
+func collectMergeGroupPolicyIDs(groups []repo.MergeablePolicyGroupData) []uint {
+	seen := make(map[uint]struct{})
+	ids := make([]uint, 0)
+	for i := range groups {
+		for j := range groups[i].Policies {
+			id := groups[i].Policies[j].ID
+			if _, ok := seen[id]; ok {
 				continue
 			}
-			allLinked = append(allLinked, linked...)
-		}
-		resp["account"] = buildConnectedAccountViewForPolicy(database, cred, pid, email, allLinked)
-	} else {
-		policies, err = database.PolicyRepo.ListByUserID(userID)
-		if err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]interface{}{"message": "Failed to list policies", "error": err.Error()})
+			seen[id] = struct{}{}
+			ids = append(ids, id)
 		}
 	}
-
-	policyItems, err := listPoliciesForUser(database, userID, policies)
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"message": "Failed to list policies", "error": err.Error()})
-	}
-	resp["policies"] = policyItems
-
-	return c.JSON(http.StatusOK, resp)
+	return ids
 }
 
-// HandleAutosyncPolicyByID returns one policy by id.
-func HandleAutosyncPolicyByID(c echo.Context) error {
-	userID, err := satellite.GetUserdetails(c)
-	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-			"message": "Authentication required",
-			"error":   err.Error(),
-		})
-	}
-	policyID, err := strconv.Atoi(c.Param("policy_id"))
-	if err != nil || policyID <= 0 {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "Invalid Request",
-			"error":   "invalid policy_id",
-		})
-	}
-
-	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
-	policy, err := loadPolicyForUser(database, userID, uint(policyID))
-	if err != nil {
-		return c.JSON(http.StatusNotFound, map[string]interface{}{
-			"message": "Invalid Request",
-			"error":   err.Error(),
-		})
-	}
-	linkedJobs, err := database.CronJobRepo.ListJobsByPolicyID(userID, policy.ID)
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"message": "Failed to load linked jobs",
-			"error":   err.Error(),
-		})
-	}
-	linkedViews := make([]PolicyLinkedJobView, 0, len(linkedJobs))
-	for i := range linkedJobs {
-		linkedViews = append(linkedViews, buildPolicyLinkedJobView(&linkedJobs[i]))
-	}
-
-	cred, _ := loadCredentialForPolicy(database, policy)
-	resp := map[string]interface{}{
-		"message":     "Backup policy details",
-		"policy":      buildPolicyListItemView(policy, len(linkedJobs)),
-		"linked_jobs": linkedViews,
-		"failed":      []interface{}{},
-	}
-	if cred != nil {
-		resp["account"] = buildConnectedAccountViewForPolicy(database, cred, cred.StorjProjectID, cred.Email, linkedJobs)
-	}
-
-	return c.JSON(http.StatusOK, resp)
-}
-
-// HandleAutosyncPolicyByJobID returns the policy for a job.
-func HandleAutosyncPolicyByJobID(c echo.Context) error {
-	userID, err := satellite.GetUserdetails(c)
-	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-			"message": "Authentication required",
-			"error":   err.Error(),
-		})
-	}
-	jobID, err := strconv.Atoi(c.Param("job_id"))
-	if err != nil || jobID <= 0 {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "Invalid Request",
-			"error":   "invalid job_id",
-		})
-	}
-
-	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
-	job, err := database.CronJobRepo.GetJobByIDForUser(userID, uint(jobID))
-	if err != nil {
-		return c.JSON(http.StatusNotFound, map[string]interface{}{
-			"message": "Invalid Request",
-			"error":   err.Error(),
-		})
-	}
-	if job.PolicyID == 0 {
-		return c.JSON(http.StatusNotFound, map[string]interface{}{
-			"message": "Invalid Request",
-			"error":   "no policy found for job",
-		})
-	}
-	policy, err := database.PolicyRepo.GetByID(job.PolicyID)
-	if err != nil {
-		return c.JSON(http.StatusNotFound, map[string]interface{}{
-			"message": "Invalid Request",
-			"error":   "no policy found for job",
-		})
-	}
-	if strings.TrimSpace(policy.UserID) != strings.TrimSpace(userID) {
-		return c.JSON(http.StatusNotFound, map[string]interface{}{
-			"message": "Invalid Request",
-			"error":   "policy not found for user",
-		})
-	}
-
-	linkedJobs, lerr := database.CronJobRepo.ListJobsByPolicyID(userID, policy.ID)
-	if lerr != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"message": "Failed to load linked jobs",
-			"error":   lerr.Error(),
-		})
-	}
-
-	cred, _ := loadCredentialForPolicy(database, policy)
-	resp := map[string]interface{}{
-		"message":     "Backup policy for job",
-		"policy":      buildPolicyListItemView(policy, len(linkedJobs)),
-		"linked_jobs": []PolicyLinkedJobView{buildPolicyLinkedJobView(job)},
-		"failed":      []interface{}{},
-	}
-	if cred != nil {
-		resp["account"] = buildConnectedAccountViewForPolicy(database, cred, cred.StorjProjectID, cred.Email, linkedJobs)
-	}
-
-	return c.JSON(http.StatusOK, resp)
-}
-
-func buildPolicyMergePreviewGroup(database *db.PostgresDb, group repo.MergeablePolicyGroupData) (PolicyMergePreviewGroup, error) {
-	cred, _ := loadCredentialForPolicy(database, &group.Canonical)
-	linkedJobs, _ := database.CronJobRepo.ListJobsByPolicyID(group.Canonical.UserID, group.Canonical.ID)
-	var projectID, googleEmail string
-	if cred != nil {
-		projectID = cred.StorjProjectID
-		googleEmail = cred.Email
-	}
-	account := buildConnectedAccountViewForPolicy(database, cred, projectID, googleEmail, linkedJobs)
-
-	policies := make([]MergePreviewPolicy, 0, len(group.Policies))
-	for i := range group.Policies {
-		role := "duplicate"
-		if group.Policies[i].ID == group.Canonical.ID {
-			role = "canonical"
-		}
-		policies = append(policies, MergePreviewPolicy{
-			PolicyListItemView: buildPolicyListItemView(&group.Policies[i], group.JobCounts[group.Policies[i].ID]),
-			Role:               role,
-		})
-	}
-
-	jobPreviews := make([]PolicyMergeJobPreview, 0, group.JobsOnDuplicates)
-	for _, duplicateID := range group.DuplicatePolicyIDs {
-		jobs, err := database.CronJobRepo.ListJobsByPolicyID(group.Canonical.UserID, duplicateID)
-		if err != nil {
-			return PolicyMergePreviewGroup{}, err
-		}
-		for j := range jobs {
-			jobPreviews = append(jobPreviews, PolicyMergeJobPreview{
-				JobID:    jobs[j].ID,
-				Email:    jobMailboxEmail(&jobs[j]),
-				Method:   jobs[j].Method,
-				PolicyID: duplicateID,
-			})
-		}
-	}
-	previewJobs, hasMore := capMergeJobPreview(jobPreviews, mergeJobPreviewLimit)
-
-	return PolicyMergePreviewGroup{
-		Schedule:                     buildPolicyScheduleView(&group.Canonical),
-		Account:                      account,
-		Impact:                       buildMergePreviewImpact(group),
-		RecommendedCanonicalPolicyID: group.Canonical.ID,
-		CanonicalReason:              group.CanonicalReason,
-		Policies:                     policies,
-		PolicyIDs:                    group.PolicyIDs,
-		LinkedJobsPreview:            previewJobs,
-		JobsToRebind:                 group.JobsOnDuplicates,
-		HasMoreJobs:                  hasMore,
-	}, nil
-}
-
-// HandleAutosyncPolicyMergePreview lists all mergeable duplicate policy groups for the authenticated user.
-func HandleAutosyncPolicyMergePreview(c echo.Context) error {
-	userID, err := satellite.GetUserdetails(c)
-	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-			"message": "Authentication required",
-			"error":   err.Error(),
-		})
-	}
-
-	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
-	groups, gerr := database.PolicyRepo.ListMergeablePolicyGroups(userID)
-	if gerr != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"message": "Failed to load mergeable policies",
-			"error":   gerr.Error(),
-		})
-	}
-
-	previewGroups := make([]PolicyMergePreviewGroup, 0, len(groups))
-	summary := map[string]int{
-		"mergeable_group_count":  0,
-		"duplicate_policy_count": 0,
-		"jobs_that_would_move":   0,
-	}
-	msg := "No duplicate policies to merge"
-	if len(groups) > 0 {
-		msg = "Mergeable duplicate policies"
-	}
+func buildMergePreviewGroups(groups []repo.MergeablePolicyGroupData, batch jobBatch, now time.Time) []PolicyMergePreviewGroup {
+	out := make([]PolicyMergePreviewGroup, 0, len(groups))
 	for i := range groups {
-		previewGroup, perr := buildPolicyMergePreviewGroup(database, groups[i])
-		if perr != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-				"message": "Failed to build merge preview",
-				"error":   perr.Error(),
-			})
+		out = append(out, buildMergePreviewGroupAt(groups[i], batch, now))
+	}
+	return out
+}
+
+func buildMergePreviewGroupAt(group repo.MergeablePolicyGroupData, batch jobBatch, now time.Time) PolicyMergePreviewGroup {
+	policies := make([]PolicyMergePreviewPolicyView, 0, len(group.Policies))
+	for i := range group.Policies {
+		p := &group.Policies[i]
+		policies = append(policies, buildMergePreviewPolicyView(p, batch.byPolicyID[p.ID]))
+	}
+	scheduleSource := &group.Policies[0]
+	return PolicyMergePreviewGroup{
+		Schedule:  buildPolicyScheduleViewAt(scheduleSource, now),
+		Policies:  policies,
+		TotalJobs: group.TotalJobs,
+	}
+}
+
+func loadPolicyNameMap(database *db.PostgresDb, policyIDs []uint) (map[uint]string, error) {
+	policies, err := database.PolicyRepo.GetByIDs(policyIDs)
+	if err != nil {
+		return nil, err
+	}
+	names := make(map[uint]string, len(policies))
+	for id, p := range policies {
+		if p != nil {
+			names[id] = p.Name
 		}
-		previewGroups = append(previewGroups, previewGroup)
-		summary["mergeable_group_count"]++
-		summary["duplicate_policy_count"] += len(groups[i].Policies) - 1
-		summary["jobs_that_would_move"] += groups[i].JobsOnDuplicates
+	}
+	return names, nil
+}
+
+func collectDistinctPolicyIDs(jobs []repo.CronJobListingDB) []uint {
+	seen := make(map[uint]struct{})
+	ids := make([]uint, 0)
+	for i := range jobs {
+		if jobs[i].PolicyID == 0 {
+			continue
+		}
+		if _, ok := seen[jobs[i].PolicyID]; ok {
+			continue
+		}
+		seen[jobs[i].PolicyID] = struct{}{}
+		ids = append(ids, jobs[i].PolicyID)
+	}
+	return ids
+}
+
+type mailboxCounts struct {
+	email      string
+	hereCount  int
+	otherCount int
+}
+
+func buildAvailableEmailsView(jobs []repo.CronJobListingDB, targetPolicyID uint, search string) []PolicyAvailableEmailView {
+	counts := make(map[string]*mailboxCounts)
+	order := make([]string, 0)
+	search = normalizeEmail(search)
+
+	for i := range jobs {
+		email := jobMailboxEmail(&jobs[i])
+		if email == "" {
+			continue
+		}
+		key := normalizeEmail(email)
+		entry, ok := counts[key]
+		if !ok {
+			entry = &mailboxCounts{email: email}
+			counts[key] = entry
+			order = append(order, key)
+		}
+		switch {
+		case jobs[i].PolicyID == targetPolicyID:
+			entry.hereCount++
+		case jobs[i].PolicyID > 0:
+			entry.otherCount++
+		}
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message": msg,
-		"summary": summary,
-		"groups":  previewGroups,
-		"failed":  []interface{}{},
+	out := make([]PolicyAvailableEmailView, 0, len(order))
+	for _, key := range order {
+		entry := counts[key]
+		display := displayNameFromMailboxEmail(entry.email)
+		if search != "" && !strings.Contains(normalizeEmail(entry.email), search) && !strings.Contains(normalizeEmail(display), search) {
+			continue
+		}
+		out = append(out, PolicyAvailableEmailView{
+			Name:       display,
+			Email:      entry.email,
+			HereCount:  entry.hereCount,
+			OtherCount: entry.otherCount,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name == out[j].Name {
+			return out[i].Email < out[j].Email
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+func buildAvailableServicesResponse(jobs []repo.CronJobListingDB, targetPolicyID uint, selectedEmail string, policyNames map[uint]string) map[string]interface{} {
+	services := make([]PolicyAvailableServiceView, 0)
+	displayEmail := strings.TrimSpace(selectedEmail)
+
+	for i := range jobs {
+		email := jobMailboxEmail(&jobs[i])
+		if !strings.EqualFold(email, selectedEmail) {
+			continue
+		}
+		displayEmail = email
+		view := PolicyAvailableServiceView{
+			JobID:        jobs[i].ID,
+			Method:       jobs[i].Method,
+			ServiceLabel: serviceLabelForMethod(jobs[i].Method),
+		}
+		if jobs[i].PolicyID == targetPolicyID {
+			view.Assignment = "here"
+			view.CanAdd = false
+		} else {
+			view.Assignment = "other"
+			view.CanAdd = true
+			if jobs[i].PolicyID > 0 {
+				view.CurrentPolicyID = jobs[i].PolicyID
+				view.CurrentPolicyName = policyNames[jobs[i].PolicyID]
+			}
+		}
+		services = append(services, view)
+	}
+
+	return map[string]interface{}{
+		"message":  "Available services",
+		"name":     displayNameFromMailboxEmail(displayEmail),
+		"email":    displayEmail,
+		"services": services,
+	}
+}
+
+// HandleAutosyncPolicyList lists all policies for the authenticated user, including those with no linked jobs.
+func HandleAutosyncPolicyList(c echo.Context) error {
+	p, err := newPolicyCtx(c)
+	if err != nil {
+		return policyUnauthorized(c, err)
+	}
+
+	policies, err := p.database.PolicyRepo.ListByUserID(p.userID)
+	if err != nil {
+		return p.serverError("Failed to list policies", err)
+	}
+	if len(policies) == 0 {
+		return p.echo.JSON(http.StatusOK, map[string]interface{}{
+			"message":  "Backup policies list",
+			"policies": []PolicyListRowPolicyView{},
+		})
+	}
+
+	policyIDs := make([]uint, len(policies))
+	for i := range policies {
+		policyIDs[i] = policies[i].ID
+	}
+	batch, err := loadJobBatchByPolicyIDs(p.database, p.userID, policyIDs)
+	if err != nil {
+		return p.serverError("Failed to list policies", err)
+	}
+
+	return p.echo.JSON(http.StatusOK, map[string]interface{}{
+		"message":  "Backup policies list",
+		"policies": listPolicyListRows(policies, batch, p.now),
 	})
 }
 
-// HandleAutosyncPolicyMerge merges one complete duplicate policy group selected by policy_ids.
-func HandleAutosyncPolicyMerge(c echo.Context) error {
-	userID, err := satellite.GetUserdetails(c)
+// HandleAutosyncPolicyByID returns one policy and its linked jobs for the manage page.
+func HandleAutosyncPolicyByID(c echo.Context) error {
+	p, err := newPolicyCtx(c)
 	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-			"message": "Authentication required",
-			"error":   err.Error(),
-		})
+		return policyUnauthorized(c, err)
+	}
+	policyID, err := parsePolicyIDParam(c)
+	if err != nil {
+		return p.badRequest(err.Error())
+	}
+
+	policy, err := p.loadPolicy(policyID)
+	if err != nil {
+		return p.notFound(err.Error())
+	}
+	linkedJobs, err := p.database.CronJobRepo.ListJobsByPolicyID(p.userID, policy.ID)
+	if err != nil {
+		return p.serverError("Failed to load linked jobs", err)
+	}
+
+	filtered := filterLinkedJobsBySearch(linkedJobs, p.echo.QueryParam("search"))
+	return p.echo.JSON(http.StatusOK, map[string]interface{}{
+		"message":     "Backup policy details",
+		"policy":      buildPolicyManageSummaryViewAt(policy, linkedJobs, p.now),
+		"linked_jobs": linkedViewsFromJobs(filtered),
+	})
+}
+
+// HandleAutosyncPolicyMergePreview lists mergeable duplicate policy groups.
+func HandleAutosyncPolicyMergePreview(c echo.Context) error {
+	p, err := newPolicyCtx(c)
+	if err != nil {
+		return policyUnauthorized(c, err)
+	}
+
+	groups, err := p.database.PolicyRepo.ListMergeablePolicyGroups(p.userID)
+	if err != nil {
+		return p.serverError("Failed to load mergeable policies", err)
+	}
+
+	msg := "No duplicate policies to merge"
+	summary := map[string]int{
+		"mergeable_group_count": 0,
+		"policy_count":          0,
+		"total_jobs":            0,
+	}
+	var previewGroups []PolicyMergePreviewGroup
+	if len(groups) > 0 {
+		msg = "Mergeable duplicate policies"
+		batch, berr := loadJobBatchByPolicyIDs(p.database, p.userID, collectMergeGroupPolicyIDs(groups))
+		if berr != nil {
+			return p.serverError("Failed to build merge preview", berr)
+		}
+		previewGroups = buildMergePreviewGroups(groups, batch, p.now)
+		for i := range groups {
+			summary["mergeable_group_count"]++
+			summary["policy_count"] += len(groups[i].Policies)
+			summary["total_jobs"] += groups[i].TotalJobs
+		}
+	}
+
+	return p.echo.JSON(http.StatusOK, map[string]interface{}{
+		"message": msg,
+		"summary": summary,
+		"groups":  previewGroups,
+	})
+}
+
+// HandleAutosyncPolicyMerge merges one complete duplicate policy group.
+func HandleAutosyncPolicyMerge(c echo.Context) error {
+	p, err := newPolicyCtx(c)
+	if err != nil {
+		return policyUnauthorized(c, err)
 	}
 
 	var req autosyncPolicyMergeRequest
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "Invalid Request",
-			"error":   err.Error(),
-		})
+	if err := p.echo.Bind(&req); err != nil {
+		return p.badRequest(err.Error())
 	}
 	if len(req.PolicyIDs) < 2 {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+		return p.echo.JSON(http.StatusBadRequest, map[string]interface{}{
 			"message": "At least two policy_ids are required",
 		})
 	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		return p.badRequest("name is required")
+	}
 
-	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
-	result, merr := database.PolicyRepo.MergeSelectedPolicyGroup(userID, req.PolicyIDs)
+	result, merr := p.database.PolicyRepo.MergeSelectedPolicyGroup(p.userID, req.PolicyIDs, name)
 	if merr != nil {
 		var incomplete *repo.MergeIncompleteGroupError
 		switch {
 		case errors.Is(merr, repo.ErrMergePolicyIDsRequired):
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			return p.echo.JSON(http.StatusBadRequest, map[string]interface{}{
 				"message": "At least two policy_ids are required",
 			})
+		case errors.Is(merr, repo.ErrPolicyNameExists):
+			return p.echo.JSON(http.StatusConflict, policyNameConflictResponse(name))
+		case strings.Contains(merr.Error(), "policy name is required"):
+			return p.badRequest("name is required")
 		case errors.Is(merr, repo.ErrMergePolicyNotFound):
-			return c.JSON(http.StatusNotFound, map[string]interface{}{
+			return p.echo.JSON(http.StatusNotFound, map[string]interface{}{
 				"message": "Policy not found for user",
 				"error":   merr.Error(),
 			})
 		case errors.Is(merr, repo.ErrMergeMixedGroups):
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "All policy_ids must belong to the same schedule group",
-				"error":   merr.Error(),
-			})
+			return p.badRequest(merr.Error())
 		case errors.As(merr, &incomplete):
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			return p.echo.JSON(http.StatusBadRequest, map[string]interface{}{
 				"message":            "Incomplete merge group; include all policies in this duplicate set",
 				"missing_policy_ids": incomplete.MissingPolicyIDs,
 			})
 		default:
-			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-				"message": "Failed to merge duplicate policies",
-				"error":   merr.Error(),
-			})
+			return p.serverError("Failed to merge duplicate policies", merr)
 		}
 	}
 
-	canonicalPolicy, perr := database.PolicyRepo.GetByID(result.CanonicalPolicyID)
+	newPolicy, perr := p.database.PolicyRepo.GetByID(result.NewPolicyID)
 	if perr != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"message": "Failed to load merged policy",
-			"error":   perr.Error(),
-		})
+		return p.serverError("Failed to load merged policy", perr)
 	}
-	linkedJobs, lerr := database.CronJobRepo.ListJobsByPolicyID(userID, canonicalPolicy.ID)
+	linkedJobs, lerr := p.database.CronJobRepo.ListJobsByPolicyID(p.userID, newPolicy.ID)
 	if lerr != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"message": "Failed to load linked jobs",
-			"error":   lerr.Error(),
-		})
+		return p.serverError("Failed to load linked jobs", lerr)
 	}
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message": "Policies merged successfully",
-		"merge": map[string]interface{}{
-			"schedule":            buildPolicyScheduleView(canonicalPolicy),
-			"canonical_policy_id": result.CanonicalPolicyID,
-			"canonical_reason":    result.CanonicalReason,
-			"removed_policy_ids":  result.RemovedPolicyIDs,
-			"policy_ids":          result.PolicyIDs,
-			"jobs_rebound":        result.JobsRebound,
-			"impact":              buildMergeExecuteImpact(result),
-			"policy":              buildPolicyListItemView(canonicalPolicy, len(linkedJobs)),
-		},
-		"failed": []interface{}{},
+	return p.echo.JSON(http.StatusOK, map[string]interface{}{
+		"message":            "Policies merged successfully",
+		"policy":             buildPolicyListRowPolicyViewAt(newPolicy, linkedJobs, p.now),
+		"removed_policy_ids": result.RemovedPolicyIDs,
+		"source_policy_ids":  result.SourcePolicyIDs,
+		"jobs_moved":         result.JobsMoved,
 	})
 }
 
-// HandleAutosyncPolicyUpdate updates shared policy schedule/retention (apply_all or selective rebind).
-func HandleAutosyncPolicyUpdate(c echo.Context) error {
-	userID, err := satellite.GetUserdetails(c)
+// HandleAutosyncPolicyDelete removes a policy when it has no linked jobs.
+func HandleAutosyncPolicyDelete(c echo.Context) error {
+	p, err := newPolicyCtx(c)
 	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
-			"message": "Authentication required",
-			"error":   err.Error(),
-		})
+		return policyUnauthorized(c, err)
 	}
-	policyID, err := strconv.Atoi(c.Param("policy_id"))
-	if err != nil || policyID <= 0 {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "Invalid Request",
-			"error":   "invalid policy_id",
-		})
+	policyID, err := parsePolicyIDParam(c)
+	if err != nil {
+		return p.badRequest(err.Error())
+	}
+
+	linkedCount, derr := p.database.PolicyRepo.DeletePolicyForUser(p.userID, policyID)
+	if derr != nil {
+		switch {
+		case errors.Is(derr, repo.ErrPolicyHasLinkedJobs):
+			return p.echo.JSON(http.StatusConflict, map[string]interface{}{
+				"message":          "Cannot delete policy with linked jobs",
+				"error":            "Move all jobs to another policy before deleting",
+				"linked_job_count": linkedCount,
+			})
+		case errors.Is(derr, gormio.ErrRecordNotFound):
+			return p.notFound("policy not found for user")
+		default:
+			return p.serverError("Failed to delete policy", derr)
+		}
+	}
+
+	return p.echo.JSON(http.StatusOK, map[string]interface{}{
+		"message":   "Policy deleted successfully",
+		"policy_id": policyID,
+	})
+}
+
+// HandleAutosyncPolicyUpdate updates interval and retention for all jobs on a policy.
+func HandleAutosyncPolicyUpdate(c echo.Context) error {
+	p, err := newPolicyCtx(c)
+	if err != nil {
+		return policyUnauthorized(c, err)
+	}
+	policyID, err := parsePolicyIDParam(c)
+	if err != nil {
+		return p.badRequest(err.Error())
 	}
 
 	var req autosyncPolicyUpdateRequest
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+	if err := p.echo.Bind(&req); err != nil {
+		return p.echo.JSON(http.StatusBadRequest, map[string]interface{}{
 			"message": "Invalid request body",
 			"error":   err.Error(),
 		})
 	}
-	if req.Active != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "Invalid Request",
-			"error":   "active updates use PUT /auto-sync/job/:job_id",
-		})
-	}
 	intervalVal, onValue, schedErr := parseScheduleFromRequest(req.Interval, req.On)
 	if schedErr != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "Invalid Request",
-			"error":   schedErr.Error(),
-		})
+		return p.badRequest(schedErr.Error())
 	}
 	if req.Interval == nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"message": "Invalid Request",
-			"error":   "interval and on are required",
-		})
+		return p.badRequest("interval and on are required")
 	}
 	retentionType := repo.RetentionNever
 	if req.RetentionType != nil {
 		retentionType = strings.TrimSpace(*req.RetentionType)
 	}
-	applyAll := true
-	if req.ApplyAll != nil {
-		applyAll = *req.ApplyAll
-	}
 
-	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
-	policy, err := loadPolicyForUser(database, userID, uint(policyID))
+	policy, err := p.loadPolicy(policyID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, map[string]interface{}{
-			"message": "Invalid Request",
-			"error":   err.Error(),
-		})
+		return p.notFound(err.Error())
+	}
+	if err := p.database.PolicyRepo.EnforceExpiredPolicies(); err != nil {
+		return p.serverError("Failed to enforce expired policy state", err)
+	}
+	if err := p.database.PolicyRepo.UpdatePolicy(policy.ID, intervalVal, onValue, retentionType); err != nil {
+		return p.serverError("Failed to update policy", err)
 	}
 
-	affectedJobIDs := make([]uint, 0)
-
-	if err := database.PolicyRepo.EnforceExpiredPolicies(); err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"message": "Failed to enforce expired policy state",
-			"error":   err.Error(),
-		})
-	}
-
-	if applyAll {
-		// apply_all=true: always update the policy row from the URL; never create or rebind to another policy.
-		linkedJobs, lerr := database.CronJobRepo.ListJobsByPolicyID(userID, policy.ID)
-		if lerr != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-				"message": "Failed to load linked jobs",
-				"error":   lerr.Error(),
-			})
-		}
-		for i := range linkedJobs {
-			affectedJobIDs = append(affectedJobIDs, linkedJobs[i].ID)
-		}
-		if err := database.PolicyRepo.UpdatePolicy(policy.ID, intervalVal, onValue, retentionType); err != nil {
-			status := http.StatusInternalServerError
-			msg := "Failed to update policy"
-			if strings.Contains(strings.ToLower(err.Error()), "duplicate key") {
-				status = http.StatusConflict
-				msg = "Another active policy already has this schedule; change retention or schedule, or use GET /auto-sync/policy/merge/preview then POST /auto-sync/policy/merge"
-			}
-			return c.JSON(status, map[string]interface{}{
-				"message": msg,
-				"error":   err.Error(),
-			})
-		}
-	} else {
-		// apply_all=false: always a new policy row + fresh expires_at for selected jobs only (do not join another active batch).
-		linkedJobs, jerr := database.CronJobRepo.ListJobsByPolicyID(userID, policy.ID)
-		if jerr != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-				"message": "Failed to load linked jobs",
-				"error":   jerr.Error(),
-			})
-		}
-		if len(req.SelectedJobIDs) == 0 {
-			choices := make([]map[string]interface{}, 0, len(linkedJobs))
-			for i := range linkedJobs {
-				choices = append(choices, map[string]interface{}{
-					"job_id": linkedJobs[i].ID,
-					"email":  jobMailboxEmail(&linkedJobs[i]),
-					"method": linkedJobs[i].Method,
-				})
-			}
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message":     "selected_job_ids required when apply_all is false",
-				"linked_jobs": choices,
-			})
-		}
-		if err := validateSelectedJobsOnPolicy(database, userID, policy.ID, req.SelectedJobIDs); err != nil {
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{
-				"message": "Invalid Request",
-				"error":   err.Error(),
-			})
-		}
-		affectedJobIDs = append(affectedJobIDs, req.SelectedJobIDs...)
-		newPolicy, ferr := database.PolicyRepo.CreateNewPolicy(userID, policy.CredentialID, intervalVal, onValue, retentionType)
-		if ferr != nil {
-			status := http.StatusInternalServerError
-			msg := "Failed to create policy for selected jobs"
-			if strings.Contains(strings.ToLower(ferr.Error()), "duplicate key") {
-				status = http.StatusConflict
-				msg = "An active policy with this schedule already exists; use apply_all true to update it for all mailboxes, or change retention/schedule, or use GET /auto-sync/policy/merge/preview then POST /auto-sync/policy/merge"
-			}
-			return c.JSON(status, map[string]interface{}{
-				"message": msg,
-				"error":   ferr.Error(),
-			})
-		}
-		if err := database.PolicyRepo.RebindJobsToPolicy(req.SelectedJobIDs, newPolicy.ID); err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-				"message": "Failed to rebind selected jobs",
-				"error":   err.Error(),
-			})
-		}
-		policy = newPolicy
-	}
-
-	updatedPolicy, err := database.PolicyRepo.GetByID(policy.ID)
+	updatedPolicy, err := p.database.PolicyRepo.GetByID(policy.ID)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"message": "Failed to load policy after update",
-			"error":   err.Error(),
-		})
+		return p.serverError("Failed to load policy after update", err)
 	}
-
-	affectedViews := make([]PolicyLinkedJobView, 0, len(affectedJobIDs))
-	for _, jobID := range affectedJobIDs {
-		job, jerr := database.CronJobRepo.GetJobByIDForUser(userID, jobID)
-		if jerr != nil {
-			continue
-		}
-		affectedViews = append(affectedViews, buildPolicyLinkedJobView(job))
+	linkedJobs, err := p.database.CronJobRepo.ListJobsByPolicyID(p.userID, policy.ID)
+	if err != nil {
+		return p.serverError("Failed to load linked jobs", err)
 	}
-
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":       "Backup policy updated successfully",
-		"apply_all":     applyAll,
-		"policy":        buildPolicyListItemView(updatedPolicy, len(affectedViews)),
-		"affected_jobs": affectedViews,
-		"failed":        []interface{}{},
+	return p.echo.JSON(http.StatusOK, map[string]interface{}{
+		"message": "Backup policy updated successfully",
+		"policy":  buildPolicyManageSummaryViewAt(updatedPolicy, linkedJobs, p.now),
 	})
+}
+
+// HandleAutosyncPolicyCreate creates a named policy and optionally rebinds jobs.
+func HandleAutosyncPolicyCreate(c echo.Context) error {
+	p, err := newPolicyCtx(c)
+	if err != nil {
+		return policyUnauthorized(c, err)
+	}
+
+	var req autosyncPolicyCreateRequest
+	if err := p.echo.Bind(&req); err != nil {
+		return p.badRequest(err.Error())
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		return p.badRequest("name is required")
+	}
+	intervalVal, onValue := normalizeScheduleIntervalOn(req.Interval, req.On)
+	if err := validateScheduleIntervalOn(intervalVal, onValue); err != nil {
+		return p.badRequest(err.Error())
+	}
+	retentionType := strings.TrimSpace(req.RetentionType)
+	if retentionType == "" {
+		retentionType = repo.RetentionNever
+	}
+
+	jobBatch, err := loadJobBatchByIDs(p.database, p.userID, req.JobIDs)
+	if err != nil {
+		return p.serverError("Failed to validate jobs", err)
+	}
+	if err := validateJobIDsInBatch(jobBatch, req.JobIDs); err != nil {
+		return p.badRequest(err.Error())
+	}
+
+	policy, cerr := p.database.PolicyRepo.CreatePolicy(p.userID, name, intervalVal, onValue, retentionType)
+	if cerr != nil {
+		if errors.Is(cerr, repo.ErrPolicyNameExists) {
+			return p.echo.JSON(http.StatusConflict, policyNameConflictResponse(name))
+		}
+		return p.serverError("Failed to create policy", cerr)
+	}
+
+	var movedJobs []PolicyLinkedJobView
+	if len(req.JobIDs) > 0 {
+		if err := p.database.PolicyRepo.RebindJobsToPolicy(req.JobIDs, policy.ID); err != nil {
+			return p.serverError("Failed to assign jobs to policy", err)
+		}
+		movedJobs = linkedViewsFromBatch(jobBatch, req.JobIDs)
+	}
+
+	linkedJobs := jobBatch.byPolicyID[policy.ID]
+	if len(req.JobIDs) > 0 {
+		linkedJobs = make([]repo.CronJobListingDB, 0, len(req.JobIDs))
+		for _, id := range req.JobIDs {
+			if job, ok := jobBatch.byID[id]; ok {
+				job.PolicyID = policy.ID
+				linkedJobs = append(linkedJobs, job)
+			}
+		}
+	}
+	return p.echo.JSON(http.StatusOK, map[string]interface{}{
+		"message":    "Policy created successfully",
+		"policy":     buildPolicyManageSummaryViewAt(policy, linkedJobs, p.now),
+		"moved_jobs": movedJobs,
+	})
+}
+
+// HandleAutosyncPolicyMove rebinds jobs to an existing policy.
+func HandleAutosyncPolicyMove(c echo.Context) error {
+	p, err := newPolicyCtx(c)
+	if err != nil {
+		return policyUnauthorized(c, err)
+	}
+
+	var req autosyncPolicyMoveRequest
+	if err := p.echo.Bind(&req); err != nil {
+		return p.badRequest(err.Error())
+	}
+	if req.TargetPolicyID == 0 {
+		return p.badRequest("target_policy_id is required")
+	}
+	if len(req.JobIDs) == 0 {
+		return p.badRequest("job_ids is required")
+	}
+	if _, err := p.loadPolicy(req.TargetPolicyID); err != nil {
+		return p.notFound("target policy not found for user")
+	}
+
+	jobBatch, err := loadJobBatchByIDs(p.database, p.userID, req.JobIDs)
+	if err != nil {
+		return p.serverError("Failed to validate jobs", err)
+	}
+	if err := validateJobIDsInBatch(jobBatch, req.JobIDs); err != nil {
+		return p.badRequest(err.Error())
+	}
+	if err := p.database.PolicyRepo.RebindJobsToPolicy(req.JobIDs, req.TargetPolicyID); err != nil {
+		return p.serverError("Failed to move assignments", err)
+	}
+
+	return p.echo.JSON(http.StatusOK, map[string]interface{}{
+		"message":          "Assignments moved successfully",
+		"target_policy_id": req.TargetPolicyID,
+		"moved_jobs":       linkedViewsFromBatch(jobBatch, req.JobIDs),
+	})
+}
+
+// HandleAutosyncPolicyOptions returns policy_id and name for move pickers.
+func HandleAutosyncPolicyOptions(c echo.Context) error {
+	p, err := newPolicyCtx(c)
+	if err != nil {
+		return policyUnauthorized(c, err)
+	}
+	options, err := p.database.PolicyRepo.ListPolicyOptions(p.userID)
+	if err != nil {
+		return p.serverError("Failed to list policy options", err)
+	}
+	return p.echo.JSON(http.StatusOK, map[string]interface{}{
+		"message":  "Policy options",
+		"policies": options,
+	})
+}
+
+// HandleAutosyncPolicyAvailableAssignments supports the Add Email & Services modal.
+func HandleAutosyncPolicyAvailableAssignments(c echo.Context) error {
+	p, err := newPolicyCtx(c)
+	if err != nil {
+		return policyUnauthorized(c, err)
+	}
+
+	targetPolicyID, err := strconvParseUintParam(strings.TrimSpace(p.echo.QueryParam("policy_id")))
+	if err != nil {
+		return p.badRequest("policy_id is required and must be a positive integer")
+	}
+	if _, err := loadPolicyForUser(p.database, p.userID, targetPolicyID); err != nil {
+		return p.notFound("policy not found for user")
+	}
+
+	allJobs, err := p.database.CronJobRepo.ListAllAutosyncJobsForUser(p.userID)
+	if err != nil {
+		return p.serverError("Failed to load jobs", err)
+	}
+
+	selectedEmail := strings.TrimSpace(p.echo.QueryParam("email"))
+	if selectedEmail != "" {
+		policyNames, nerr := loadPolicyNameMap(p.database, collectDistinctPolicyIDs(allJobs))
+		if nerr != nil {
+			return p.serverError("Failed to load policy names", nerr)
+		}
+		return p.echo.JSON(http.StatusOK, buildAvailableServicesResponse(allJobs, targetPolicyID, selectedEmail, policyNames))
+	}
+
+	return p.echo.JSON(http.StatusOK, map[string]interface{}{
+		"message": "Available assignments",
+		"emails":  buildAvailableEmailsView(allJobs, targetPolicyID, p.echo.QueryParam("search")),
+	})
+}
+
+// resolveOnboardingPolicyID resolves or creates the policy for onboarding job assignment.
+func resolveOnboardingPolicyID(
+	database *db.PostgresDb,
+	userID string,
+	cred *repo.GoogleBackupCredentialDB,
+	req *GoogleBackupOnboardingRequest,
+	schedule onboardingSchedule,
+	isFirstConnection bool,
+	batchPolicyID *uint,
+) (uint, error) {
+	if batchPolicyID != nil && *batchPolicyID > 0 {
+		return *batchPolicyID, nil
+	}
+
+	if isFirstConnection {
+		baseName := defaultPolicyName(cred)
+		name, err := database.PolicyRepo.EnsureUniquePolicyName(userID, baseName)
+		if err != nil {
+			return 0, err
+		}
+		policy, err := database.PolicyRepo.CreatePolicy(userID, name, schedule.Interval, schedule.On, repo.RetentionNever)
+		if err != nil {
+			return 0, err
+		}
+		if batchPolicyID != nil {
+			*batchPolicyID = policy.ID
+		}
+		return policy.ID, nil
+	}
+
+	if req.PolicyID != nil && *req.PolicyID > 0 {
+		policy, err := loadPolicyForUser(database, userID, *req.PolicyID)
+		if err != nil {
+			return 0, fmt.Errorf("policy not found for user")
+		}
+		if batchPolicyID != nil {
+			*batchPolicyID = policy.ID
+		}
+		return policy.ID, nil
+	}
+
+	policyName := strings.TrimSpace(req.PolicyName)
+	if policyName == "" {
+		return 0, fmt.Errorf("policy_id or policy_name is required for subsequent connections")
+	}
+	created, err := database.PolicyRepo.CreatePolicy(userID, policyName, schedule.Interval, schedule.On, repo.RetentionNever)
+	if err != nil {
+		if errors.Is(err, repo.ErrPolicyNameExists) {
+			return 0, repo.ErrPolicyNameExists
+		}
+		return 0, err
+	}
+	if batchPolicyID != nil {
+		*batchPolicyID = created.ID
+	}
+	return created.ID, nil
 }

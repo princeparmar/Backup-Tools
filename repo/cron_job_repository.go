@@ -526,7 +526,36 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 	return res, nil
 }
 
-// GetJobByIDForUser retrieves a specific cron job by ID for a user (excludes placeholder token-holder rows).
+// GetJobsByIDsForUser loads multiple cron jobs for a user in one query.
+func (r *CronJobRepository) GetJobsByIDsForUser(userID string, jobIDs []uint) ([]CronJobListingDB, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" || len(jobIDs) == 0 {
+		return nil, nil
+	}
+	uniq := make([]uint, 0, len(jobIDs))
+	seen := make(map[uint]struct{}, len(jobIDs))
+	for _, id := range jobIDs {
+		if id == 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniq = append(uniq, id)
+	}
+	if len(uniq) == 0 {
+		return nil, nil
+	}
+	var rows []CronJobListingDB
+	err := r.db.Where("user_id = ? AND id IN ?", userID, uniq).Find(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("get jobs by ids for user: %w", err)
+	}
+	return rows, nil
+}
+
+// GetJobByIDForUser retrieves a specific cron job for a user (excludes placeholder token-holder rows).
 func (r *CronJobRepository) GetJobByIDForUser(userID string, jobID uint) (*CronJobListingDB, error) {
 	var res CronJobListingDB
 	db := r.db.Where("user_id = ? AND id = ?", userID, jobID).Where("COALESCE(placeholder, false) = ?", false).First(&res)
@@ -799,11 +828,65 @@ func (r *CronJobRepository) ListJobsByCredentialID(userID string, credentialID u
 	return rows, nil
 }
 
+// HasLinkedJobsForCredential reports whether a credential has any linked jobs for a user.
+func (r *CronJobRepository) HasLinkedJobsForCredential(userID string, credentialID uint) (bool, error) {
+	if credentialID == 0 {
+		return false, nil
+	}
+	var exists bool
+	err := r.db.Raw(`
+SELECT EXISTS (
+  SELECT 1 FROM cron_job_listing_dbs
+  WHERE user_id = ?
+    AND (input_data->>'credential_id')::bigint = ?
+    AND deleted_at IS NULL
+)`, userID, credentialID).Scan(&exists).Error
+	if err != nil {
+		return false, fmt.Errorf("has linked jobs for credential: %w", err)
+	}
+	return exists, nil
+}
+
+// ListAllAutosyncJobsForUser returns every autosync job for a user.
+func (r *CronJobRepository) ListAllAutosyncJobsForUser(userID string) ([]CronJobListingDB, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, nil
+	}
+	var rows []CronJobListingDB
+	err := r.db.Where("user_id = ?", userID).
+		Order("name ASC, method ASC, id ASC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("list all autosync jobs for user: %w", err)
+	}
+	return rows, nil
+}
+
+// ListJobsGroupedByPolicyIDs bulk-loads jobs for many policies in one query.
+func (r *CronJobRepository) ListJobsGroupedByPolicyIDs(userID string, policyIDs []uint) (map[uint][]CronJobListingDB, error) {
+	out := make(map[uint][]CronJobListingDB)
+	if len(policyIDs) == 0 {
+		return out, nil
+	}
+	var rows []CronJobListingDB
+	err := r.db.Where("user_id = ? AND policy_id IN ?", userID, policyIDs).
+		Order("policy_id ASC, created_at DESC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("list jobs grouped by policy ids: %w", err)
+	}
+	for i := range rows {
+		pid := rows[i].PolicyID
+		out[pid] = append(out[pid], rows[i])
+	}
+	return out, nil
+}
+
 // ListJobsByPolicyID returns all cron jobs for a user linked to a policy.
 func (r *CronJobRepository) ListJobsByPolicyID(userID string, policyID uint) ([]CronJobListingDB, error) {
 	var rows []CronJobListingDB
 	err := r.db.Where("user_id = ? AND policy_id = ?", userID, policyID).
-		Where("COALESCE(placeholder, false) = ?", false).
 		Order("created_at DESC").
 		Find(&rows).Error
 	if err != nil {
@@ -816,7 +899,6 @@ func (r *CronJobRepository) ListJobsByPolicyID(userID string, policyID uint) ([]
 func (r *CronJobRepository) GetJobByUserAndPolicyID(userID string, policyID uint) (*CronJobListingDB, error) {
 	var row CronJobListingDB
 	err := r.db.Where("user_id = ? AND policy_id = ?", userID, policyID).
-		Where("COALESCE(placeholder, false) = ?", false).
 		Order("id ASC").
 		First(&row).Error
 	if err != nil {

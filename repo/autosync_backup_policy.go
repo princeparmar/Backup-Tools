@@ -16,13 +16,24 @@ type AutosyncBackupPolicyDB struct {
 	gorm.GormModel
 
 	UserID        string     `json:"user_id" gorm:"column:user_id;index"`
-	CredentialID  uint       `json:"credential_id" gorm:"column:credential_id;index"`
+	Name          string     `json:"name" gorm:"column:name"`
 	Interval      string     `json:"interval" gorm:"column:interval"`
 	On            string     `json:"on" gorm:"column:on"`
 	RetentionType string     `json:"retention_type" gorm:"column:retention_type;default:never"`
 	ExpiresAt     *time.Time `json:"expires_at,omitempty" gorm:"column:expires_at"`
 	IsExpired     bool       `json:"is_expired" gorm:"column:is_expired;default:false"`
 }
+
+// PolicyOption is a slim row for move/policy pickers.
+type PolicyOption struct {
+	PolicyID uint   `json:"policy_id"`
+	Name     string `json:"name"`
+}
+
+var (
+	ErrPolicyNameExists    = errors.New("policy name already exists for user")
+	ErrPolicyHasLinkedJobs = errors.New("policy has linked jobs")
+)
 
 const (
 	RetentionNever  = "never"
@@ -84,72 +95,141 @@ func (r *AutosyncBackupPolicyRepository) GetByIDs(ids []uint) (map[uint]*Autosyn
 	return out, nil
 }
 
-// ListByCredentialID returns all policies for a credential.
-func (r *AutosyncBackupPolicyRepository) ListByCredentialID(credentialID uint) ([]AutosyncBackupPolicyDB, error) {
-	if credentialID == 0 {
-		return nil, nil
-	}
-	var rows []AutosyncBackupPolicyDB
-	err := r.db.Where("credential_id = ?", credentialID).Order("id ASC").Find(&rows).Error
-	if err != nil {
-		return nil, fmt.Errorf("list policies by credential: %w", err)
-	}
-	return rows, nil
-}
-
-// ListByUserID returns all policies for a user (shared policies across credentials).
+// ListByUserID returns all policies for a user.
 func (r *AutosyncBackupPolicyRepository) ListByUserID(userID string) ([]AutosyncBackupPolicyDB, error) {
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
 		return nil, nil
 	}
 	var rows []AutosyncBackupPolicyDB
-	err := r.db.Where("user_id = ?", userID).Order("credential_id ASC, id ASC").Find(&rows).Error
+	err := r.db.Where("user_id = ?", userID).Order("name ASC, id ASC").Find(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("list policies by user: %w", err)
 	}
 	return rows, nil
 }
 
-// ListByUserAndCredentialID returns policies owned by a user for one credential.
-func (r *AutosyncBackupPolicyRepository) ListByUserAndCredentialID(userID string, credentialID uint) ([]AutosyncBackupPolicyDB, error) {
+// ListByUserIDWithLinkedJobs returns policies that have at least one linked job.
+func (r *AutosyncBackupPolicyRepository) ListByUserIDWithLinkedJobs(userID string) ([]AutosyncBackupPolicyDB, error) {
 	userID = strings.TrimSpace(userID)
-	if userID == "" || credentialID == 0 {
+	if userID == "" {
 		return nil, nil
 	}
 	var rows []AutosyncBackupPolicyDB
-	err := r.db.Where("user_id = ? AND credential_id = ?", userID, credentialID).Order("id ASC").Find(&rows).Error
+	err := r.db.
+		Table("autosync_backup_policy_dbs AS p").
+		Select("p.*").
+		Joins(`INNER JOIN cron_job_listing_dbs j ON j.policy_id = p.id AND j.deleted_at IS NULL`).
+		Where("p.user_id = ? AND p.deleted_at IS NULL", userID).
+		Group("p.id").
+		Order("p.name ASC, p.id ASC").
+		Find(&rows).Error
 	if err != nil {
-		return nil, fmt.Errorf("list policies by user and credential: %w", err)
+		return nil, fmt.Errorf("list policies with linked jobs: %w", err)
 	}
 	return rows, nil
 }
 
-func policyScheduleFingerprint(userID string, credentialID uint, interval, on, retentionType string) string {
-	return fmt.Sprintf("%s|%d|%s|%s|%s",
-		strings.TrimSpace(userID), credentialID,
+// HasPoliciesForUser reports whether the user has any named backup policies.
+func (r *AutosyncBackupPolicyRepository) HasPoliciesForUser(userID string) (bool, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return false, nil
+	}
+	var count int64
+	err := r.db.Model(&AutosyncBackupPolicyDB{}).Where("user_id = ?", userID).Count(&count).Error
+	if err != nil {
+		return false, fmt.Errorf("has policies for user: %w", err)
+	}
+	return count > 0, nil
+}
+
+// ListPolicyOptions returns policy_id and name for all user policies (including empty).
+func (r *AutosyncBackupPolicyRepository) ListPolicyOptions(userID string) ([]PolicyOption, error) {
+	policies, err := r.ListByUserID(userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PolicyOption, 0, len(policies))
+	for i := range policies {
+		out = append(out, PolicyOption{PolicyID: policies[i].ID, Name: policies[i].Name})
+	}
+	return out, nil
+}
+
+// PolicyNameExists reports whether name is taken for user (case-insensitive).
+func (r *AutosyncBackupPolicyRepository) PolicyNameExists(userID, name string, excludePolicyID uint) (bool, error) {
+	userID = strings.TrimSpace(userID)
+	name = strings.TrimSpace(name)
+	if userID == "" || name == "" {
+		return false, nil
+	}
+	q := r.db.Model(&AutosyncBackupPolicyDB{}).
+		Where("user_id = ? AND LOWER(name) = LOWER(?)", userID, name)
+	if excludePolicyID > 0 {
+		q = q.Where("id <> ?", excludePolicyID)
+	}
+	var count int64
+	if err := q.Count(&count).Error; err != nil {
+		return false, fmt.Errorf("check policy name exists: %w", err)
+	}
+	return count > 0, nil
+}
+
+// EnsureUniquePolicyName returns baseName or baseName + " 2", " 3", … when taken.
+func (r *AutosyncBackupPolicyRepository) EnsureUniquePolicyName(userID, baseName string) (string, error) {
+	baseName = strings.TrimSpace(baseName)
+	if baseName == "" {
+		return "", fmt.Errorf("policy name is required")
+	}
+	candidate := baseName
+	for i := 2; i < 1000; i++ {
+		exists, err := r.PolicyNameExists(userID, candidate, 0)
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			return candidate, nil
+		}
+		candidate = fmt.Sprintf("%s %d", baseName, i)
+	}
+	return "", fmt.Errorf("could not allocate unique policy name")
+}
+
+// GetByNameForUser loads a policy by user and exact name (case-insensitive).
+func (r *AutosyncBackupPolicyRepository) GetByNameForUser(userID, name string) (*AutosyncBackupPolicyDB, error) {
+	userID = strings.TrimSpace(userID)
+	name = strings.TrimSpace(name)
+	if userID == "" || name == "" {
+		return nil, gormio.ErrRecordNotFound
+	}
+	var row AutosyncBackupPolicyDB
+	err := r.db.Where("user_id = ? AND LOWER(name) = LOWER(?)", userID, name).First(&row).Error
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+func policyScheduleFingerprint(userID, interval, on, retentionType string) string {
+	return fmt.Sprintf("%s|%s|%s|%s",
+		strings.TrimSpace(userID),
 		strings.TrimSpace(interval), strings.TrimSpace(on), strings.TrimSpace(retentionType))
 }
 
 // MergeablePolicyGroupData is internal repo data for one duplicate schedule group.
 type MergeablePolicyGroupData struct {
-	Policies           []AutosyncBackupPolicyDB
-	PolicyIDs          []uint
-	Canonical          AutosyncBackupPolicyDB
-	CanonicalReason    string
-	JobCounts          map[uint]int
-	JobsOnDuplicates   int
-	TotalJobsAfter     int
-	DuplicatePolicyIDs []uint
+	Policies  []AutosyncBackupPolicyDB
+	PolicyIDs []uint
+	TotalJobs int
 }
 
 // MergeExecuteResult is returned by MergeSelectedPolicyGroup after a successful merge.
 type MergeExecuteResult struct {
-	CanonicalPolicyID   uint
-	CanonicalReason     string
+	NewPolicyID         uint
 	RemovedPolicyIDs    []uint
-	PolicyIDs           []uint
-	JobsRebound         int
+	SourcePolicyIDs     []uint
+	JobsMoved           int
 	TotalJobsAfterMerge int
 }
 
@@ -168,84 +248,18 @@ var (
 	ErrMergeMixedGroups       = errors.New("all policy_ids must belong to the same schedule group")
 )
 
-func pickCanonicalPolicy(policies []AutosyncBackupPolicyDB, jobCounts map[uint]int, now time.Time) AutosyncBackupPolicyDB {
-	best := policies[0]
-	bestScore := -1
-	for i := range policies {
-		p := policies[i]
-		score := jobCounts[p.ID] * 100
-		if !IsPolicyExpired(&p, now) {
-			score += 10000
-		}
-		if score > bestScore || (score == bestScore && p.ID < best.ID) {
-			best = p
-			bestScore = score
-		}
-	}
-	return best
-}
-
-func policyCanonicalScore(p AutosyncBackupPolicyDB, jobCounts map[uint]int, now time.Time) int {
-	score := jobCounts[p.ID] * 100
-	if !IsPolicyExpired(&p, now) {
-		score += 10000
-	}
-	return score
-}
-
-// CanonicalReason explains why a policy was chosen as canonical within a duplicate group.
-func CanonicalReason(canonical AutosyncBackupPolicyDB, all []AutosyncBackupPolicyDB, jobCounts map[uint]int, now time.Time) string {
-	canonScore := policyCanonicalScore(canonical, jobCounts, now)
-	tiedAtBest := 0
-	for i := range all {
-		if policyCanonicalScore(all[i], jobCounts, now) == canonScore {
-			tiedAtBest++
-		}
-	}
-	if tiedAtBest > 1 {
-		return "lowest_policy_id"
-	}
-	if !IsPolicyExpired(&canonical, now) {
-		canonJobs := jobCounts[canonical.ID]
-		maxJobs := 0
-		for i := range all {
-			if !IsPolicyExpired(&all[i], now) && jobCounts[all[i].ID] > maxJobs {
-				maxJobs = jobCounts[all[i].ID]
-			}
-		}
-		if canonJobs == maxJobs && maxJobs > 0 {
-			return "most_linked_jobs_non_expired"
-		}
-		return "non_expired_policy"
-	}
-	return "lowest_policy_id"
-}
-
-func buildMergeableGroupData(rows []AutosyncBackupPolicyDB, jobCounts map[uint]int, now time.Time) MergeablePolicyGroupData {
-	canonical := pickCanonicalPolicy(rows, jobCounts, now)
+func buildMergeableGroupData(rows []AutosyncBackupPolicyDB, jobCounts map[uint]int) MergeablePolicyGroupData {
 	policyIDs := make([]uint, 0, len(rows))
-	duplicateIDs := make([]uint, 0, len(rows)-1)
-	jobsOnDuplicates := 0
 	totalJobs := 0
 	for i := range rows {
 		policyIDs = append(policyIDs, rows[i].ID)
 		totalJobs += jobCounts[rows[i].ID]
-		if rows[i].ID != canonical.ID {
-			duplicateIDs = append(duplicateIDs, rows[i].ID)
-			jobsOnDuplicates += jobCounts[rows[i].ID]
-		}
 	}
 	sort.Slice(policyIDs, func(i, j int) bool { return policyIDs[i] < policyIDs[j] })
-	sort.Slice(duplicateIDs, func(i, j int) bool { return duplicateIDs[i] < duplicateIDs[j] })
 	return MergeablePolicyGroupData{
-		Policies:           rows,
-		PolicyIDs:          policyIDs,
-		Canonical:          canonical,
-		CanonicalReason:    CanonicalReason(canonical, rows, jobCounts, now),
-		JobCounts:          jobCounts,
-		JobsOnDuplicates:   jobsOnDuplicates,
-		TotalJobsAfter:     totalJobs,
-		DuplicatePolicyIDs: duplicateIDs,
+		Policies:  rows,
+		PolicyIDs: policyIDs,
+		TotalJobs: totalJobs,
 	}
 }
 
@@ -272,7 +286,7 @@ func (r *AutosyncBackupPolicyRepository) loadPolicyJobCounts(userID string) (map
 func groupPoliciesByFingerprint(policies []AutosyncBackupPolicyDB) map[string][]AutosyncBackupPolicyDB {
 	groups := make(map[string][]AutosyncBackupPolicyDB)
 	for i := range policies {
-		fp := policyScheduleFingerprint(policies[i].UserID, policies[i].CredentialID, policies[i].Interval, policies[i].On, policies[i].RetentionType)
+		fp := policyScheduleFingerprint(policies[i].UserID, policies[i].Interval, policies[i].On, policies[i].RetentionType)
 		groups[fp] = append(groups[fp], policies[i])
 	}
 	return groups
@@ -295,14 +309,13 @@ func (r *AutosyncBackupPolicyRepository) ListMergeablePolicyGroups(userID string
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now().UTC()
 	groups := groupPoliciesByFingerprint(policies)
 	out := make([]MergeablePolicyGroupData, 0)
 	for _, rows := range groups {
 		if len(rows) < 2 {
 			continue
 		}
-		out = append(out, buildMergeableGroupData(rows, jobCounts, now))
+		out = append(out, buildMergeableGroupData(rows, jobCounts))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if len(out[i].PolicyIDs) == 0 || len(out[j].PolicyIDs) == 0 {
@@ -344,11 +357,15 @@ func missingPolicyIDs(submitted, full []uint) []uint {
 	return missing
 }
 
-// MergeSelectedPolicyGroup merges one complete duplicate group identified by policy_ids.
-func (r *AutosyncBackupPolicyRepository) MergeSelectedPolicyGroup(userID string, policyIDs []uint) (*MergeExecuteResult, error) {
+// MergeSelectedPolicyGroup merges one duplicate group into a newly created named policy.
+func (r *AutosyncBackupPolicyRepository) MergeSelectedPolicyGroup(userID string, policyIDs []uint, name string) (*MergeExecuteResult, error) {
 	userID = strings.TrimSpace(userID)
+	name = strings.TrimSpace(name)
 	if userID == "" {
 		return nil, fmt.Errorf("user_id is required")
+	}
+	if name == "" {
+		return nil, fmt.Errorf("policy name is required")
 	}
 	policyIDs = sortedUintSet(policyIDs)
 	if len(policyIDs) < 2 {
@@ -368,7 +385,7 @@ func (r *AutosyncBackupPolicyRepository) MergeSelectedPolicyGroup(userID string,
 		if strings.TrimSpace(policy.UserID) != userID {
 			return nil, ErrMergePolicyNotFound
 		}
-		fp := policyScheduleFingerprint(policy.UserID, policy.CredentialID, policy.Interval, policy.On, policy.RetentionType)
+		fp := policyScheduleFingerprint(policy.UserID, policy.Interval, policy.On, policy.RetentionType)
 		if fingerprint == "" {
 			fingerprint = fp
 		} else if fingerprint != fp {
@@ -395,42 +412,37 @@ func (r *AutosyncBackupPolicyRepository) MergeSelectedPolicyGroup(userID string,
 		return nil, &MergeIncompleteGroupError{MissingPolicyIDs: missing}
 	}
 
-	jobCounts, err := r.loadPolicyJobCounts(userID)
+	template := fullGroup[0]
+	newPolicy, err := r.CreatePolicy(userID, name, template.Interval, template.On, template.RetentionType)
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now().UTC()
-	groupData := buildMergeableGroupData(fullGroup, jobCounts, now)
-	canonical := groupData.Canonical
-	removed := make([]uint, 0, len(fullGroup)-1)
-	jobsRebound := 0
+
+	removed := make([]uint, 0, len(fullGroup))
+	jobsMoved := 0
 	for i := range fullGroup {
-		if fullGroup[i].ID == canonical.ID {
-			continue
-		}
 		removed = append(removed, fullGroup[i].ID)
 		res := r.db.Model(&CronJobListingDB{}).
 			Where("user_id = ? AND policy_id = ?", userID, fullGroup[i].ID).
 			Updates(map[string]interface{}{
-				"policy_id": canonical.ID,
-				"interval":  canonical.Interval,
+				"policy_id": newPolicy.ID,
+				"interval":  newPolicy.Interval,
 			})
 		if res.Error != nil {
 			return nil, fmt.Errorf("rebind jobs from policy %d: %w", fullGroup[i].ID, res.Error)
 		}
-		jobsRebound += int(res.RowsAffected)
+		jobsMoved += int(res.RowsAffected)
 		if err := r.db.Delete(&AutosyncBackupPolicyDB{}, fullGroup[i].ID).Error; err != nil {
-			return nil, fmt.Errorf("delete duplicate policy %d: %w", fullGroup[i].ID, err)
+			return nil, fmt.Errorf("delete merged policy %d: %w", fullGroup[i].ID, err)
 		}
 	}
 	sort.Slice(removed, func(i, j int) bool { return removed[i] < removed[j] })
 	return &MergeExecuteResult{
-		CanonicalPolicyID:   canonical.ID,
-		CanonicalReason:     groupData.CanonicalReason,
+		NewPolicyID:         newPolicy.ID,
 		RemovedPolicyIDs:    removed,
-		PolicyIDs:           fullIDs,
-		JobsRebound:         jobsRebound,
-		TotalJobsAfterMerge: groupData.TotalJobsAfter,
+		SourcePolicyIDs:     fullIDs,
+		JobsMoved:           jobsMoved,
+		TotalJobsAfterMerge: jobsMoved,
 	}, nil
 }
 
@@ -495,47 +507,63 @@ WHERE deleted_at IS NULL
 `).Error
 }
 
-func (r *AutosyncBackupPolicyRepository) findActivePolicyByFingerprint(userID string, credentialID uint, interval, on, retentionType string, now time.Time) (*AutosyncBackupPolicyDB, error) {
-	var row AutosyncBackupPolicyDB
-	err := r.db.
-		Where("user_id = ? AND credential_id = ? AND interval = ? AND \"on\" = ? AND retention_type = ?",
-			userID, credentialID, interval, on, retentionType).
-		Where("is_expired = ?", false).
-		Where("expires_at IS NULL OR expires_at > ?", now).
-		First(&row).Error
-	if err != nil {
-		return nil, err
+// DeletePolicyForUser soft-deletes a policy when it has no linked jobs.
+// Returns linked job count when ErrPolicyHasLinkedJobs.
+func (r *AutosyncBackupPolicyRepository) DeletePolicyForUser(userID string, policyID uint) (int, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return 0, fmt.Errorf("user_id is required")
 	}
-	return &row, nil
+	if policyID == 0 {
+		return 0, gormio.ErrRecordNotFound
+	}
+	policy, err := r.GetByID(policyID)
+	if err != nil {
+		return 0, err
+	}
+	if strings.TrimSpace(policy.UserID) != userID {
+		return 0, gormio.ErrRecordNotFound
+	}
+	var linkedCount int64
+	if err := r.db.Model(&CronJobListingDB{}).
+		Where("user_id = ? AND policy_id = ?", userID, policyID).
+		Count(&linkedCount).Error; err != nil {
+		return 0, fmt.Errorf("count linked jobs for policy: %w", err)
+	}
+	if linkedCount > 0 {
+		return int(linkedCount), ErrPolicyHasLinkedJobs
+	}
+	if err := r.db.Delete(&AutosyncBackupPolicyDB{}, policyID).Error; err != nil {
+		return 0, fmt.Errorf("delete policy: %w", err)
+	}
+	return 0, nil
 }
 
-// findIndexedActivePolicy matches idx_autosync_policy_fingerprint_active (is_expired only, no time predicate).
-func (r *AutosyncBackupPolicyRepository) findIndexedActivePolicy(userID string, credentialID uint, interval, on, retentionType string) (*AutosyncBackupPolicyDB, error) {
-	var row AutosyncBackupPolicyDB
-	err := r.db.
-		Where("user_id = ? AND credential_id = ? AND interval = ? AND \"on\" = ? AND retention_type = ?",
-			userID, credentialID, interval, on, retentionType).
-		Where("is_expired = ?", false).
-		First(&row).Error
-	if err != nil {
-		return nil, err
-	}
-	return &row, nil
-}
-
-func (r *AutosyncBackupPolicyRepository) insertPolicyRow(userID string, credentialID uint, interval, on, retentionType string) (*AutosyncBackupPolicyDB, error) {
+// CreatePolicy inserts a named policy row for a user.
+func (r *AutosyncBackupPolicyRepository) CreatePolicy(userID, name, interval, on, retentionType string) (*AutosyncBackupPolicyDB, error) {
 	rt, err := normalizeRetentionType(retentionType)
 	if err != nil {
 		return nil, err
 	}
+	userID = strings.TrimSpace(userID)
+	name = strings.TrimSpace(name)
+	interval = strings.TrimSpace(interval)
+	on = strings.TrimSpace(on)
 	if userID == "" {
 		return nil, fmt.Errorf("user_id is required")
 	}
-	if credentialID == 0 {
-		return nil, fmt.Errorf("credential_id is required")
+	if name == "" {
+		return nil, fmt.Errorf("policy name is required")
 	}
 	if interval == "" {
 		return nil, fmt.Errorf("interval is required")
+	}
+	exists, err := r.PolicyNameExists(userID, name, 0)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		return nil, ErrPolicyNameExists
 	}
 	now := time.Now().UTC()
 	expiresAt, err := retentionExpiryFrom(now, rt)
@@ -544,9 +572,9 @@ func (r *AutosyncBackupPolicyRepository) insertPolicyRow(userID string, credenti
 	}
 	row := AutosyncBackupPolicyDB{
 		UserID:        userID,
-		CredentialID:  credentialID,
-		Interval:      strings.TrimSpace(interval),
-		On:            strings.TrimSpace(on),
+		Name:          name,
+		Interval:      interval,
+		On:            on,
 		RetentionType: rt,
 		ExpiresAt:     expiresAt,
 		IsExpired:     policyExpiredAt(expiresAt, now),
@@ -555,48 +583,6 @@ func (r *AutosyncBackupPolicyRepository) insertPolicyRow(userID string, credenti
 		return nil, fmt.Errorf("create policy: %w", err)
 	}
 	return &row, nil
-}
-
-// FindOrCreatePolicy returns an existing non-expired shared policy by fingerprint, or creates one.
-func (r *AutosyncBackupPolicyRepository) FindOrCreatePolicy(userID string, credentialID uint, interval, on, retentionType string) (*AutosyncBackupPolicyDB, error) {
-	userID = strings.TrimSpace(userID)
-	interval = strings.TrimSpace(interval)
-	on = strings.TrimSpace(on)
-	rt, err := normalizeRetentionType(retentionType)
-	if err != nil {
-		return nil, err
-	}
-	if err := r.syncExpiredFlags(); err != nil {
-		return nil, fmt.Errorf("sync policy expiry flags: %w", err)
-	}
-	now := time.Now().UTC()
-	if row, ferr := r.findActivePolicyByFingerprint(userID, credentialID, interval, on, rt, now); ferr == nil {
-		return row, nil
-	} else if !errors.Is(ferr, gormio.ErrRecordNotFound) {
-		return nil, fmt.Errorf("find active policy by fingerprint: %w", ferr)
-	}
-	row, err := r.insertPolicyRow(userID, credentialID, interval, on, rt)
-	if err != nil && strings.Contains(strings.ToLower(err.Error()), "duplicate key") {
-		_ = r.syncExpiredFlags()
-		if existing, ferr := r.findActivePolicyByFingerprint(userID, credentialID, interval, on, rt, now); ferr == nil {
-			return existing, nil
-		}
-		if existing, ferr := r.findIndexedActivePolicy(userID, credentialID, interval, on, rt); ferr == nil {
-			if policyExpiredAt(existing.ExpiresAt, now) {
-				if uerr := r.UpdatePolicy(existing.ID, interval, on, rt); uerr != nil {
-					return nil, uerr
-				}
-				return r.GetByID(existing.ID)
-			}
-			return existing, nil
-		}
-	}
-	return row, err
-}
-
-// CreateNewPolicy always inserts a new policy row (bypasses fingerprint reuse). Prefer FindOrCreatePolicy.
-func (r *AutosyncBackupPolicyRepository) CreateNewPolicy(userID string, credentialID uint, interval, on, retentionType string) (*AutosyncBackupPolicyDB, error) {
-	return r.insertPolicyRow(userID, credentialID, interval, on, retentionType)
 }
 
 // AssignPolicyToJob attaches a policy to one job and syncs the interval cache.
@@ -695,13 +681,13 @@ func (r *AutosyncBackupPolicyRepository) EnrichJobsFromPolicy(jobs []CronJobList
 	}
 }
 
-// BackfillFromJobs inserts policy rows from existing credential-linked cron jobs.
-// It sets cron_job_listing_dbs.policy_id for existing rows, and dedupes same user+credential+schedule fingerprint.
+// BackfillFromJobs inserts named policy rows from existing cron jobs missing policy_id.
 func (r *AutosyncBackupPolicyRepository) BackfillFromJobs() error {
 	type backfillRow struct {
 		JobID         uint
 		UserID        string
 		CredentialID  uint
+		GoogleEmail   string
 		Interval      string
 		On            string
 		RetentionType string
@@ -712,24 +698,33 @@ SELECT
   c.id AS job_id,
   c.user_id,
   (c.input_data->>'credential_id')::bigint AS credential_id,
+  COALESCE(g.email, '') AS google_email,
   COALESCE(p.interval, c.interval) AS interval,
   COALESCE(p."on", '') AS "on",
   COALESCE(p.retention_type, 'never') AS retention_type
 FROM cron_job_listing_dbs c
 LEFT JOIN autosync_backup_policy_dbs p ON p.id = c.policy_id AND p.deleted_at IS NULL
+LEFT JOIN google_backup_credentials g ON g.id = (c.input_data->>'credential_id')::bigint AND g.deleted_at IS NULL
 WHERE c.deleted_at IS NULL
+  AND (c.policy_id IS NULL OR c.policy_id = 0)
   AND c.interval NOT IN ('', 'one_time')
-  AND (c.input_data->>'credential_id') IS NOT NULL
-  AND (c.input_data->>'credential_id')::bigint > 0
 `).Scan(&rows).Error
 	if err != nil {
 		return fmt.Errorf("load policy backfill rows: %w", err)
 	}
 	for i := range rows {
 		row := rows[i]
-		policy, ferr := r.FindOrCreatePolicy(row.UserID, row.CredentialID, row.Interval, row.On, row.RetentionType)
-		if ferr != nil {
-			return ferr
+		defaultName := strings.TrimSpace(row.GoogleEmail)
+		if defaultName == "" {
+			defaultName = fmt.Sprintf("Policy %d", row.JobID)
+		}
+		name, nerr := r.EnsureUniquePolicyName(row.UserID, defaultName)
+		if nerr != nil {
+			return nerr
+		}
+		policy, cerr := r.CreatePolicy(row.UserID, name, row.Interval, row.On, row.RetentionType)
+		if cerr != nil {
+			return cerr
 		}
 		if err := r.AssignPolicyToJob(row.JobID, policy.ID); err != nil {
 			return err

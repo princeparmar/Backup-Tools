@@ -661,35 +661,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/ProjectUpdateResponse'
 
-  /auto-sync/policy/by-job/{job_id}:
-    get:
-      tags:
-        - Auto Sync Policy
-      summary: Get Policy For Job
-      description: Returns the shared policy linked to a job (replaces GET /auto-sync/job/{job_id}/policy).
-      parameters:
-        - name: job_id
-          in: path
-          required: true
-          schema:
-            type: integer
-        - $ref: '#/components/parameters/tokenKeyHeader'
-      responses:
-        '200':
-          description: Policy for job
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PolicyDetailResponse'
-
   /auto-sync/policy/merge/preview:
     get:
       tags:
         - Auto Sync Policy
       summary: Preview Mergeable Duplicate Policies
       description: |
-        Read-only preview of all duplicate policy groups for the authenticated user.
-        Each group shares the same schedule and credential. Use policy_ids from a group in POST /auto-sync/policy/merge.
+        Read-only preview of duplicate policy groups for the authenticated user.
+        Policies are grouped when they share the same schedule (interval + on + retention).
+        Merge via POST /auto-sync/policy/merge with policy_id values from policies[] and a new policy name.
       parameters:
         - $ref: '#/components/parameters/tokenKeyHeader'
       responses:
@@ -706,8 +686,8 @@ paths:
         - Auto Sync Policy
       summary: Merge Selected Duplicate Policies
       description: |
-        Merges one complete duplicate policy group identified by policy_ids (from GET /auto-sync/policy/merge/preview).
-        All policies in the duplicate set must be included. Rebinds jobs to the canonical policy and soft-deletes duplicates.
+        Merges one duplicate policy group into a newly created named policy.
+        All policies in the duplicate set must be included. All jobs move to the new policy; source policies are removed.
       parameters:
         - $ref: '#/components/parameters/tokenKeyHeader'
       requestBody:
@@ -727,6 +707,8 @@ paths:
           description: Invalid or incomplete policy_ids set
         '404':
           description: Policy not found for user
+        '409':
+          description: Policy name already exists for user
 
   /auto-sync/policy:
     get:
@@ -734,22 +716,10 @@ paths:
         - Auto Sync Policy
       summary: List Policies For User
       description: |
-        Returns all distinct shared policies for the authenticated user (token_key).
-        Optional credential_id or project_id+google_email filters to one connected account.
+        Returns all named policies for the authenticated user, including policies with zero linked jobs.
+        Each row includes schedule, linked_job_count, and unique services[].
       parameters:
         - $ref: '#/components/parameters/tokenKeyHeader'
-        - name: credential_id
-          in: query
-          schema:
-            type: integer
-        - name: project_id
-          in: query
-          schema:
-            type: string
-        - name: google_email
-          in: query
-          schema:
-            type: string
       responses:
         '200':
           description: Policy list
@@ -757,13 +727,108 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PolicyListResponse'
+    post:
+      tags:
+        - Auto Sync Policy
+      summary: Create Policy
+      description: |
+        Creates a named policy (unique per user). Optionally rebinds job_ids (split / create-and-assign).
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyCreateRequest'
+      responses:
+        '200':
+          description: Policy created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyCreateResponse'
+        '409':
+          description: Policy name already exists for user
+
+  /auto-sync/policy/options:
+    get:
+      tags:
+        - Auto Sync Policy
+      summary: List Policy Options
+      description: Returns policy_id and name for all user policies (move picker).
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      responses:
+        '200':
+          description: Policy options
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyOptionsResponse'
+
+  /auto-sync/policy/available-assignments:
+    get:
+      tags:
+        - Auto Sync Policy
+      summary: Available Assignments For Add Email Modal
+      description: |
+        Step 1 (no email param): emails[] with here_count / other_count for all user jobs.
+        Step 2 (email param set): services[] for the selected mailbox.
+        policy_id query is badge context only — does not filter loaded jobs.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - name: policy_id
+          in: query
+          required: true
+          schema:
+            type: integer
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: email
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Available assignments
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/PolicyAvailableEmailsResponse'
+                  - $ref: '#/components/schemas/PolicyAvailableServicesResponse'
+
+  /auto-sync/policy/move:
+    post:
+      tags:
+        - Auto Sync Policy
+      summary: Move Assignments To Policy
+      description: Rebinds job_ids to target_policy_id without changing target schedule.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyMoveRequest'
+      responses:
+        '200':
+          description: Assignments moved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyMoveResponse'
 
   /auto-sync/policy/{policy_id}:
     get:
       tags:
         - Auto Sync Policy
       summary: Get Policy By ID
-      description: Policy row plus all linked jobs (mailboxes). Requires token_key header.
+      description: Manage page — policy summary plus linked_jobs (optional search filters assignments only).
       parameters:
         - $ref: '#/components/parameters/tokenKeyHeader'
         - name: policy_id
@@ -771,6 +836,10 @@ paths:
           required: true
           schema:
             type: integer
+        - name: search
+          in: query
+          schema:
+            type: string
       responses:
         '200':
           description: Policy details
@@ -783,9 +852,8 @@ paths:
         - Auto Sync Policy
       summary: Update Policy Schedule And Retention
       description: |
-        apply_all=true updates the same policy for all linked jobs.
-        apply_all=false creates a new policy row and rebinds only selected_job_ids (selective renew).
-        active must be updated via PUT /auto-sync/job/{job_id}.
+        Global save — updates interval, on, and retention for all jobs linked to this policy.
+        Split and move use POST /auto-sync/policy and POST /auto-sync/policy/move.
       parameters:
         - $ref: '#/components/parameters/tokenKeyHeader'
         - name: policy_id
@@ -806,6 +874,31 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PolicyUpdateResponse'
+    delete:
+      tags:
+        - Auto Sync Policy
+      summary: Delete Policy
+      description: |
+        Deletes a policy only when it has zero linked jobs.
+        Move all assignments to another policy first (POST /auto-sync/policy/move).
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - name: policy_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Policy deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyDeleteResponse'
+        '404':
+          description: Policy not found for user
+        '409':
+          description: Policy still has linked jobs
 
   /auto-sync/task/{job_id}:
     post:
@@ -3661,23 +3754,165 @@ components:
           type: string
           enum: [never, 30_days, 1_year, 7_years]
           example: "1_year"
-        apply_all:
-          type: boolean
-          default: true
-          description: When false, selected_job_ids must be set; a new policy row is created for those jobs only.
-        selected_job_ids:
-          type: array
-          items:
-            type: integer
-          description: Job IDs to rebind when apply_all is false (mailbox selective renew).
       required:
         - interval
         - on
+
+    PolicyCreateRequest:
+      type: object
+      required:
+        - name
+        - interval
+        - retention_type
+      properties:
+        name:
+          type: string
+        interval:
+          type: string
+        on:
+          type: string
+        retention_type:
+          type: string
+        job_ids:
+          type: array
+          items:
+            type: integer
+
+    PolicyCreateResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        policy:
+          $ref: '#/components/schemas/PolicyManageSummaryView'
+        moved_jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyLinkedJobView'
+
+    PolicyMoveRequest:
+      type: object
+      required:
+        - target_policy_id
+        - job_ids
+      properties:
+        target_policy_id:
+          type: integer
+        job_ids:
+          type: array
+          items:
+            type: integer
+
+    PolicyMoveResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        target_policy_id:
+          type: integer
+        moved_jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyLinkedJobView'
+
+    PolicyOptionsResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        policies:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyOption'
+
+    PolicyOption:
+      type: object
+      properties:
+        policy_id:
+          type: integer
+        name:
+          type: string
+
+    PolicyAvailableEmailsResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        emails:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyAvailableEmailView'
+
+    PolicyAvailableEmailView:
+      type: object
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+        here_count:
+          type: integer
+        other_count:
+          type: integer
+
+    PolicyAvailableServicesResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        name:
+          type: string
+        email:
+          type: string
+        services:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyAvailableServiceView'
+
+    PolicyAvailableServiceView:
+      type: object
+      properties:
+        job_id:
+          type: integer
+        method:
+          type: string
+        service_label:
+          type: string
+        assignment:
+          type: string
+          enum: [here, other]
+        current_policy_id:
+          type: integer
+        current_policy_name:
+          type: string
+        can_add:
+          type: boolean
+
+    PolicyManageSummaryView:
+      type: object
+      properties:
+        policy_id:
+          type: integer
+        name:
+          type: string
+        interval:
+          type: string
+        on:
+          type: string
+        retention_type:
+          type: string
+        is_expired:
+          type: boolean
+        assignment_count:
+          type: integer
+        unique_email_count:
+          type: integer
 
     PolicyMergeExecuteRequest:
       type: object
       required:
         - policy_ids
+        - name
       properties:
         policy_ids:
           type: array
@@ -3685,6 +3920,9 @@ components:
           items:
             type: integer
           description: All policy IDs in one duplicate group (from merge preview).
+        name:
+          type: string
+          description: Name for the newly created merged policy.
 
     PolicyScheduleView:
       type: object
@@ -3702,78 +3940,33 @@ components:
         is_expired:
           type: boolean
 
-    PolicyMergeImpactView:
+    PolicyMergePreviewPolicyView:
       type: object
       properties:
-        policy_kept:
-          type: integer
-        policies_to_remove:
-          type: integer
-          description: Preview only — count of duplicate policies to remove.
-        policies_removed:
-          type: integer
-          description: Execute only — count of policies removed.
-        jobs_to_rebind:
-          type: integer
-          description: Preview only — jobs on duplicate policies that will move.
-        jobs_rebound:
-          type: integer
-          description: Execute only — jobs rebound to canonical policy.
-        total_jobs_after_merge:
-          type: integer
-
-    MergePreviewPolicy:
-      type: object
-      allOf:
-        - $ref: '#/components/schemas/PolicyListItemView'
-        - type: object
-          properties:
-            role:
-              type: string
-              enum: [canonical, duplicate]
-
-    PolicyMergeJobPreview:
-      type: object
-      properties:
-        job_id:
-          type: integer
-        email:
-          type: string
-        method:
-          type: string
         policy_id:
           type: integer
+        name:
+          type: string
+        linked_job_count:
+          type: integer
+        services:
+          type: array
+          items:
+            type: string
 
     PolicyMergePreviewGroup:
       type: object
       properties:
         schedule:
           $ref: '#/components/schemas/PolicyScheduleView'
-        account:
-          $ref: '#/components/schemas/ConnectedAccountView'
-        impact:
-          $ref: '#/components/schemas/PolicyMergeImpactView'
-        recommended_canonical_policy_id:
-          type: integer
-        canonical_reason:
-          type: string
-          enum: [most_linked_jobs_non_expired, non_expired_policy, lowest_policy_id]
+          description: Shared schedule that groups these policies as duplicates.
         policies:
           type: array
           items:
-            $ref: '#/components/schemas/MergePreviewPolicy'
-        policy_ids:
-          type: array
-          items:
-            type: integer
-        linked_jobs_preview:
-          type: array
-          items:
-            $ref: '#/components/schemas/PolicyMergeJobPreview'
-        jobs_to_rebind:
+            $ref: '#/components/schemas/PolicyMergePreviewPolicyView'
+        total_jobs:
           type: integer
-        has_more_jobs:
-          type: boolean
+          description: Jobs that will move to the new merged policy.
 
     PolicyMergePreviewResponse:
       type: object
@@ -3785,52 +3978,32 @@ components:
           properties:
             mergeable_group_count:
               type: integer
-            duplicate_policy_count:
+            policy_count:
               type: integer
-            jobs_that_would_move:
+            total_jobs:
               type: integer
         groups:
           type: array
           items:
             $ref: '#/components/schemas/PolicyMergePreviewGroup'
-        failed:
-          type: array
-          items: {}
-
-    PolicyMergeExecuteResult:
-      type: object
-      properties:
-        schedule:
-          $ref: '#/components/schemas/PolicyScheduleView'
-        canonical_policy_id:
-          type: integer
-        canonical_reason:
-          type: string
-        removed_policy_ids:
-          type: array
-          items:
-            type: integer
-        policy_ids:
-          type: array
-          items:
-            type: integer
-        jobs_rebound:
-          type: integer
-        impact:
-          $ref: '#/components/schemas/PolicyMergeImpactView'
-        policy:
-          $ref: '#/components/schemas/PolicyListItemView'
 
     PolicyMergeExecuteResponse:
       type: object
       properties:
         message:
           type: string
-        merge:
-          $ref: '#/components/schemas/PolicyMergeExecuteResult'
-        failed:
+        policy:
+          $ref: '#/components/schemas/PolicyListItemView'
+        removed_policy_ids:
           type: array
-          items: {}
+          items:
+            type: integer
+        source_policy_ids:
+          type: array
+          items:
+            type: integer
+        jobs_moved:
+          type: integer
 
     PolicyListItemView:
       allOf:
@@ -3842,13 +4015,11 @@ components:
       properties:
         job_id:
           type: integer
+        name:
+          type: string
         email:
           type: string
         method:
-          type: string
-        active:
-          type: boolean
-        sync_type:
           type: string
 
     PolicyDetailResponse:
@@ -3857,37 +4028,37 @@ components:
         message:
           type: string
         policy:
-          $ref: '#/components/schemas/PolicyListRowPolicyView'
-          description: Schedule fields only; reconnect flags are on account.
-        account:
-          $ref: '#/components/schemas/ConnectedAccountView'
-          description: Reconnect flags consider credential tokens and resolved tokens on linked jobs.
+          $ref: '#/components/schemas/PolicyManageSummaryView'
         linked_jobs:
           type: array
           items:
             $ref: '#/components/schemas/PolicyLinkedJobView'
-        failed:
-          type: array
-          items:
-            type: object
 
     PolicyUpdateResponse:
       type: object
       properties:
         message:
           type: string
-        apply_all:
-          type: boolean
         policy:
-          $ref: '#/components/schemas/PolicyListItemView'
-        affected_jobs:
-          type: array
-          items:
-            $ref: '#/components/schemas/PolicyLinkedJobView'
-        failed:
-          type: array
-          items:
-            type: object
+          $ref: '#/components/schemas/PolicyManageSummaryView'
+
+    PolicyDeleteResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        policy_id:
+          type: integer
+
+    PolicyDeleteConflictResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        error:
+          type: string
+        linked_job_count:
+          type: integer
 
     PolicyDetailView:
       type: object
@@ -4012,54 +4183,36 @@ components:
 
     PolicyListRowPolicyView:
       type: object
-      description: Policy schedule fields on listing rows. Reconnect flags are on account only.
+      description: Named policy row on GET /auto-sync/policy.
       properties:
         policy_id:
           type: integer
-        credential_id:
-          type: integer
+        name:
+          type: string
         interval:
           type: string
         on:
           type: string
         retention_type:
           type: string
-        expires_at:
-          type: string
-          format: date-time
-          nullable: true
         is_expired:
           type: boolean
         linked_job_count:
           type: integer
-
-    PolicyListRowView:
-      type: object
-      allOf:
-        - $ref: '#/components/schemas/PolicyListRowPolicyView'
-        - type: object
-          required:
-            - account
-          properties:
-            account:
-              $ref: '#/components/schemas/ConnectedAccountView'
+        services:
+          type: array
+          items:
+            type: string
 
     PolicyListResponse:
       type: object
       properties:
         message:
           type: string
-        account:
-          $ref: '#/components/schemas/ConnectedAccountView'
-          description: Present when listing is filtered by credential_id or project_id+google_email.
         policies:
           type: array
           items:
-            $ref: '#/components/schemas/PolicyListRowView'
-        failed:
-          type: array
-          items:
-            type: object
+            $ref: '#/components/schemas/PolicyListRowPolicyView'
 
     DatabaseConnection:
       type: object
