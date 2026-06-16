@@ -85,9 +85,9 @@ func NewCalendarServiceWithAccessToken(ctx context.Context, accessToken string) 
 	return newCalendarServiceWithAccessToken(ctx, accessToken, calendarReadonlyScope)
 }
 
-// NewCalendarServiceForRestore builds a Calendar API client for restore (requires calendar write scope on token).
+// NewCalendarServiceForRestore builds a Calendar API client for restore (requires calendar.events on token).
 func NewCalendarServiceForRestore(ctx context.Context, accessToken string) (*calendar.Service, error) {
-	return newCalendarServiceWithAccessToken(ctx, accessToken, calendarScope)
+	return newCalendarServiceWithAccessToken(ctx, accessToken, restoreCalendarScope)
 }
 
 func newCalendarServiceWithAccessToken(ctx context.Context, accessToken, scope string) (*calendar.Service, error) {

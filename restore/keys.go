@@ -17,6 +17,21 @@ import (
 	"google.golang.org/api/people/v1"
 )
 
+// RestoreGmailKeyWithSession downloads using DB storx grant (manual restore, single attempt).
+func RestoreGmailKeyWithSession(ctx context.Context, sess *StorxGrantSession, client *google.GmailClient, objectKey string) error {
+	data, err := sess.DownloadObject(ctx, satellite.ReserveBucket_Gmail, objectKey)
+	if err != nil {
+		return err
+	}
+	var msg gmailapi.Message
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return err
+	}
+	return RetryGoogle(ctx, func() error {
+		return client.InsertMessage(&msg)
+	})
+}
+
 // RestoreGmailKey downloads one message from Satellite and inserts into Gmail.
 func RestoreGmailKey(ctx context.Context, accessGrant string, client *google.GmailClient, objectKey string) error {
 	data, err := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Gmail, objectKey)
@@ -29,6 +44,22 @@ func RestoreGmailKey(ctx context.Context, accessGrant string, client *google.Gma
 	}
 	return RetryGoogle(ctx, func() error {
 		return client.InsertMessage(&msg)
+	})
+}
+
+// RestoreDriveKeyWithSession restores one Drive object using DB storx grant (manual restore).
+func RestoreDriveKeyWithSession(ctx context.Context, sess *StorxGrantSession, srv *drive.Service, userEmail, objectKey string) error {
+	data, err := sess.DownloadObject(ctx, satellite.ReserveBucket_Drive, objectKey)
+	if err != nil {
+		return err
+	}
+	var backupItem google.DriveBackupItem
+	if err := json.Unmarshal(data, &backupItem); err != nil {
+		return fmt.Errorf("parse drive backup: %w", err)
+	}
+	metadataJSON, _ := json.Marshal(backupItem.Metadata)
+	return RetryGoogle(ctx, func() error {
+		return google.RestoreFromBackup(ctx, srv, userEmail, metadataJSON, backupItem.Content)
 	})
 }
 
@@ -48,6 +79,24 @@ func RestoreDriveKey(ctx context.Context, accessGrant string, srv *drive.Service
 	})
 }
 
+// RestoreCalendarKeyWithSession restores one calendar event using DB storx grant (manual restore).
+func RestoreCalendarKeyWithSession(ctx context.Context, sess *StorxGrantSession, service *calendar.Service, objectKey string) error {
+	if !google.IsCalendarEventRestoreObjectKey(objectKey) {
+		return fmt.Errorf("invalid calendar restore key")
+	}
+	calendarID, _, ok := google.ParseCalendarEventObjectKey(objectKey)
+	if !ok {
+		return fmt.Errorf("parse calendar key")
+	}
+	data, err := sess.DownloadObject(ctx, satellite.ReserveBucket_Calendar, objectKey)
+	if err != nil {
+		return err
+	}
+	return RetryGoogle(ctx, func() error {
+		return google.RestoreCalendarEventFromBackup(ctx, service, calendarID, data)
+	})
+}
+
 // RestoreCalendarKey restores one calendar event JSON blob.
 func RestoreCalendarKey(ctx context.Context, accessGrant string, service *calendar.Service, objectKey string) error {
 	if !google.IsCalendarEventRestoreObjectKey(objectKey) {
@@ -63,6 +112,20 @@ func RestoreCalendarKey(ctx context.Context, accessGrant string, service *calend
 	}
 	return RetryGoogle(ctx, func() error {
 		return google.RestoreCalendarEventFromBackup(ctx, service, calendarID, data)
+	})
+}
+
+// RestoreContactKeyWithSession restores one contact using DB storx grant (manual restore).
+func RestoreContactKeyWithSession(ctx context.Context, sess *StorxGrantSession, service *people.Service, objectKey string) error {
+	if !google.IsContactsRestoreObjectKey(objectKey) {
+		return fmt.Errorf("invalid contacts restore key")
+	}
+	data, err := sess.DownloadObject(ctx, satellite.ReserveBucket_Contacts, objectKey)
+	if err != nil {
+		return err
+	}
+	return RetryGoogle(ctx, func() error {
+		return google.RestoreContactFromBackup(ctx, service, data)
 	})
 }
 
@@ -94,7 +157,7 @@ func RestorePhotosKey(ctx context.Context, deps *RestoreDeps, objectKey string) 
 		err        error
 	)
 	if dataKey, metaKey, idBased := parsePhotosIDBasedRestoreKeys(objectKey); idBased {
-		data, filename, err = downloadPhotosIDBasedRestorePayload(ctx, deps.AccessGrant, objectKey, dataKey, metaKey)
+		data, filename, err = downloadPhotosIDBasedRestorePayloadWithGrant(ctx, deps.AccessGrant, objectKey, dataKey, metaKey)
 		if err != nil {
 			return err
 		}
@@ -229,7 +292,12 @@ func parseGooglePhotosKey(key string) (albumID, albumTitle, filename string) {
 	return
 }
 
-func downloadPhotosIDBasedRestorePayload(ctx context.Context, accessGrant, triggerKey, dataKey, metaKey string) ([]byte, string, error) {
+// DownloadPhotosIDBasedPayloadWithSession downloads ID-based photo backup using DB storx grant (manual restore).
+func DownloadPhotosIDBasedPayloadWithSession(ctx context.Context, sess *StorxGrantSession, triggerKey, dataKey, metaKey string) ([]byte, string, error) {
+	return downloadPhotosIDBasedRestorePayload(ctx, sess, triggerKey, dataKey, metaKey)
+}
+
+func downloadPhotosIDBasedRestorePayloadWithGrant(ctx context.Context, accessGrant, triggerKey, dataKey, metaKey string) ([]byte, string, error) {
 	dataKey = strings.TrimSpace(dataKey)
 	metaKey = strings.TrimSpace(metaKey)
 	filename := ""
@@ -249,6 +317,32 @@ func downloadPhotosIDBasedRestorePayload(ctx context.Context, accessGrant, trigg
 		return nil, "", fmt.Errorf("missing data object key for %s", triggerKey)
 	}
 	body, err := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Photos, dataKey)
+	if err != nil {
+		return nil, "", err
+	}
+	return body, filename, nil
+}
+
+func downloadPhotosIDBasedRestorePayload(ctx context.Context, sess *StorxGrantSession, triggerKey, dataKey, metaKey string) ([]byte, string, error) {
+	dataKey = strings.TrimSpace(dataKey)
+	metaKey = strings.TrimSpace(metaKey)
+	filename := ""
+	if metaKey != "" {
+		metaBytes, err := sess.DownloadObject(ctx, satellite.ReserveBucket_Photos, metaKey)
+		if err == nil {
+			var meta photosRestoreMeta
+			if json.Unmarshal(metaBytes, &meta) == nil {
+				filename = strings.TrimSpace(meta.Filename)
+				if dataKey == "" {
+					dataKey = strings.TrimSpace(meta.DataObjectKey)
+				}
+			}
+		}
+	}
+	if dataKey == "" {
+		return nil, "", fmt.Errorf("missing data object key for %s", triggerKey)
+	}
+	body, err := sess.DownloadObject(ctx, satellite.ReserveBucket_Photos, dataKey)
 	if err != nil {
 		return nil, "", err
 	}

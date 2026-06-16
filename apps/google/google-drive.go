@@ -67,10 +67,10 @@ type FlatDriveFile struct {
 }
 
 type FlatDriveFilesResponse struct {
-	Files                []FlatDriveFile `json:"files"`
-	NextPageToken        string          `json:"nextPageToken,omitempty"`
-	NextPageTokenLegacy  string          `json:"next_page_token,omitempty"`
-	PageSize             int64           `json:"page_size"`
+	Files               []FlatDriveFile `json:"files"`
+	NextPageToken       string          `json:"nextPageToken,omitempty"`
+	NextPageTokenLegacy string          `json:"next_page_token,omitempty"`
+	PageSize            int64           `json:"page_size"`
 }
 
 // createFilesJSON creates a FilesJSON object from a Google Drive file
@@ -349,7 +349,7 @@ func GetDriveService(c echo.Context) (*drive.Service, error) {
 
 // GetDriveServiceUsingToken builds a Drive API client for background restore workers.
 func GetDriveServiceUsingToken(accessToken string) (*drive.Service, error) {
-	client, err := clientUsingToken(accessToken)
+	client, err := clientUsingTokenScopes(accessToken, restoreDriveScope)
 	if err != nil {
 		return nil, err
 	}
@@ -357,11 +357,20 @@ func GetDriveServiceUsingToken(accessToken string) (*drive.Service, error) {
 }
 
 func clientUsingToken(token string) (*http.Client, error) {
+	return clientUsingTokenScopes(token,
+		drive.DriveScope,
+		gs.CloudPlatformScope,
+		gs.DevstorageFullControlScope,
+		gs.DevstorageReadWriteScope,
+	)
+}
+
+func clientUsingTokenScopes(token string, scopes ...string) (*http.Client, error) {
 	b, err := os.ReadFile("credentials.json")
 	if err != nil {
 		return nil, fmt.Errorf("unable to read client secret file: %v", err)
 	}
-	config, err := google.ConfigFromJSON(b, drive.DriveScope, gs.CloudPlatformScope, gs.DevstorageFullControlScope, gs.DevstorageReadWriteScope)
+	config, err := google.ConfigFromJSON(b, scopes...)
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse client secret file to config: %v", err)
 	}

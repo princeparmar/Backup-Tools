@@ -799,11 +799,6 @@ func HandleGoogleDriveDownloadAndRestore(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accessGrant == "" {
-		return c.JSON(http.StatusForbidden, map[string]string{"error": "access token not found"})
-	}
-
 	allKeys, err := validateAndProcessRequestIDs(c)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -817,6 +812,11 @@ func HandleGoogleDriveDownloadAndRestore(c echo.Context) error {
 	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
 	if err != nil || userDetails.Email == "" {
 		return c.JSON(http.StatusForbidden, map[string]string{"error": "failed to get user email"})
+	}
+
+	storxSess, err := resolveManualRestoreStorx(c, "google_drive", userDetails.Email)
+	if err != nil {
+		return err
 	}
 
 	userID, err := satellite.GetUserdetails(c)
@@ -849,7 +849,7 @@ func HandleGoogleDriveDownloadAndRestore(c echo.Context) error {
 		}
 		key := key
 		g.Go(func() error {
-			if err := restore.RestoreDriveKey(ctx, accessGrant, srv, userDetails.Email, key); err != nil {
+			if err := restore.RestoreDriveKeyWithSession(ctx, storxSess, srv, userDetails.Email, key); err != nil {
 				logger.Warn(ctx, "Failed to restore item", logger.String("key", key), logger.ErrorField(err))
 				failedKeys.Add(key)
 			} else {

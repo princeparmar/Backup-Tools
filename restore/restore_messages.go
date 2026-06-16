@@ -12,6 +12,10 @@ const (
 
 	restoreJobStorxUplink = "Restore failed: StorX permissions are insufficient. Update StorX permissions via auto-sync and try again."
 
+	restoreJobStorxSatelliteRefresh = "Restore failed: StorX access could not be renewed from Satellite. Please try again later or contact support."
+
+	restoreJobStorxRefreshLimit = "StorX access could not be restored after 3 attempts. Automatic backup has been paused. Please contact support."
+
 	restoreJobGoogleAuth = "Restore failed: Google credentials are invalid or expired. Reconnect your Google account via auto-sync and try again."
 
 	restoreJobGoogleInsufficientScope = "Restore failed: Google account is missing permissions required for this service. Reconnect Google with full app permissions and try again."
@@ -34,6 +38,10 @@ const (
 	restoreTaskDelegation = "Restore batch stopped: domain-wide delegation not configured for this mailbox"
 
 	restoreTaskStorxUplink = "Restore batch stopped: StorX uplink permission denied — update StorX grant"
+
+	restoreTaskStorxSatelliteRefresh = "Restore batch stopped: StorX token could not be renewed from Satellite"
+
+	restoreTaskStorxRefreshLimit = "Restore stopped: StorX access could not be restored after 3 attempts — automatic backup paused, contact support"
 
 	restoreTaskNetwork = "Restore batch stopped: network connectivity issue"
 )

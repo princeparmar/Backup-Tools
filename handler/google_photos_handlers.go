@@ -20,6 +20,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
+	"github.com/StorX2-0/Backup-Tools/restore"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 
 	"github.com/google/uuid"
@@ -927,8 +928,9 @@ func parseGooglePhotosKey(key string) (albumID, albumTitle, filename string) {
 	return
 }
 
-// RestorePhotosFromSatellite restores photos from Satellite to Google Photos
-func (s *PhotosService) RestorePhotosFromSatellite(ctx context.Context, keys []string) (*DownloadResult, error) {
+// RestorePhotosFromSatellite restores photos from Satellite to Google Photos.
+// storx grant is resolved from DB via sess (not ACCESS_TOKEN header).
+func (s *PhotosService) RestorePhotosFromSatellite(ctx context.Context, sess *restore.StorxGrantSession, keys []string) (*DownloadResult, error) {
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(5)
 
@@ -958,7 +960,7 @@ func (s *PhotosService) RestorePhotosFromSatellite(ctx context.Context, keys []s
 			)
 			if dataKey, metaKey, idBased := parsePhotosIDBasedRestoreKeys(key); idBased {
 				var restoreErr error
-				data, filename, restoreErr = downloadPhotosIDBasedRestorePayload(ctx, s.accessGrant, key, dataKey, metaKey)
+				data, filename, restoreErr = restore.DownloadPhotosIDBasedPayloadWithSession(ctx, sess, key, dataKey, metaKey)
 				if restoreErr != nil {
 					logger.Error(ctx, "failed ID-based photos restore", logger.ErrorField(restoreErr), logger.String("key", key))
 					failedIDs.Add(key)
@@ -966,7 +968,7 @@ func (s *PhotosService) RestorePhotosFromSatellite(ctx context.Context, keys []s
 				}
 			} else {
 				var downloadErr error
-				data, downloadErr = satellite.DownloadObject(ctx, s.accessGrant, satellite.ReserveBucket_Photos, key)
+				data, downloadErr = sess.DownloadObject(ctx, satellite.ReserveBucket_Photos, key)
 				if downloadErr != nil {
 					logger.Error(ctx, "failed to download photo from satellite", logger.ErrorField(downloadErr), logger.String("key", key))
 					failedIDs.Add(key)
@@ -1094,15 +1096,7 @@ func HandleGooglePhotosRestore(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	// 1. Get Access Grant
-	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accessGrant == "" {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "access token not found",
-		})
-	}
-
-	// 2. Parse and Decode Keys (Paths)
+	// 1. Parse and Decode Keys (Paths)
 	allKeys, err := validateAndProcessRequestIDs(c)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -1110,14 +1104,19 @@ func HandleGooglePhotosRestore(c echo.Context) error {
 		})
 	}
 
-	// 3. Get user details for email
+	// 2. Get user details for email
 	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
 	if err != nil {
 		logger.Warn(ctx, "failed to get user email for restore", logger.ErrorField(err))
 		userDetails = &google.GoogleAuthResponse{} // Continue with empty email if needed
 	}
 
-	// 4. Create GPhotos Client
+	storxSess, err := resolveManualRestoreStorx(c, "google_photos", userDetails.Email)
+	if err != nil {
+		return err
+	}
+
+	// 3. Create GPhotos Client
 	client, err := google.NewGPhotosClient(c)
 	fmt.Println("client", client)
 	if err != nil {
@@ -1151,9 +1150,9 @@ func HandleGooglePhotosRestore(c echo.Context) error {
 	}
 	satellite.SendNotificationAsync(ctx, userID, "Google Photos Restore Started", fmt.Sprintf("Restore of %d photos for %s has started", len(allKeys), userDetails.Email), &priority, startData, nil)
 
-	// 5. Create Photos Service and Restore
-	photosService := NewPhotosService(client, accessGrant, userDetails.Email)
-	result, err := photosService.RestorePhotosFromSatellite(ctx, allKeys)
+	// 4. Create Photos Service and Restore (storx from DB via storxSess)
+	photosService := NewPhotosService(client, "", userDetails.Email)
+	result, err := photosService.RestorePhotosFromSatellite(ctx, storxSess, allKeys)
 	if err != nil {
 		// Send failure notification
 		failPriority := "high"

@@ -7,8 +7,9 @@ import (
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/db"
-	"github.com/StorX2-0/Backup-Tools/pkg/database"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/repo"
+	storxrefresh "github.com/StorX2-0/Backup-Tools/storx"
 )
 
 // MissingPermission describes a scope or grant the user must fix before restore.
@@ -39,6 +40,11 @@ type ReadinessResult struct {
 	RequiredDWDScopes  []string               `json:"required_dwd_scopes,omitempty"`
 	Message            string                 `json:"message,omitempty"`
 }
+
+const (
+	RestoreAuthModeOAuth = "oauth"
+	RestoreAuthModeDWD   = "dwd"
+)
 
 const (
 	ReadinessReasonNoBackupJob       = "no_backup_job"
@@ -137,6 +143,25 @@ func EvaluateReadiness(ctx context.Context, store *db.PostgresDb, userID, projec
 		storx = strings.TrimSpace(cred.StorxToken)
 	}
 	if storx == "" {
+		recovery := storxrefresh.NewRecovery(store, cronJob)
+		grant, continueOK, refreshErr := recovery.OnStorxError(ctx, fmt.Errorf("storx access grant not found"))
+		if refreshErr != nil || !continueOK {
+			out.Ready = false
+			out.Reason = ReadinessReasonStorxMissing
+			if refreshErr != nil {
+				out.Message = refreshErr.Error()
+			} else {
+				out.Message = restoreReadinessStorxMissing
+			}
+			out.ReconnectHint = "Please contact support if StorX access cannot be restored"
+			return out, nil
+		}
+		storx = strings.TrimSpace(grant)
+		if storx == "" {
+			storx = strings.TrimSpace(store.CronJobRepo.ResolvedStorxToken(cronJob))
+		}
+	}
+	if storx == "" {
 		out.Ready = false
 		out.Reason = ReadinessReasonStorxMissing
 		out.Message = restoreReadinessStorxMissing
@@ -146,7 +171,7 @@ func EvaluateReadiness(ctx context.Context, store *db.PostgresDb, userID, projec
 	}
 
 	switch authMode {
-	case repo.RestoreAuthModeDWD:
+	case RestoreAuthModeDWD:
 		return evaluateDWDReadiness(ctx, out, service, loginID)
 	default:
 		return evaluateOAuthReadiness(ctx, store, out, service, cronJob, cred)
@@ -162,22 +187,22 @@ func ResolveRestoreAuthMode(service, accountType, loginID, holderEmail string, c
 
 	switch accountType {
 	case google.AccountTypePersonal, google.AccountTypeEmployeeWorkspace:
-		return repo.RestoreAuthModeOAuth
+		return RestoreAuthModeOAuth
 	case google.AccountTypeAdminWorkspace:
 		if !strings.EqualFold(strings.TrimSpace(loginID), strings.TrimSpace(holderEmail)) {
-			return repo.RestoreAuthModeDWD
+			return RestoreAuthModeDWD
 		}
-		return repo.RestoreAuthModeOAuth
+		return RestoreAuthModeOAuth
 	}
 
 	// Legacy rows without account_type — child mailbox + SA configured
 	if google.WorkspaceServiceAccountConfigured() &&
 		google.GmailJobUsesDelegationWithoutOAuth(loginID, holderEmail) &&
 		!strings.EqualFold(strings.TrimSpace(loginID), strings.TrimSpace(holderEmail)) {
-		return repo.RestoreAuthModeDWD
+		return RestoreAuthModeDWD
 	}
 	_ = cronJob
-	return repo.RestoreAuthModeOAuth
+	return RestoreAuthModeOAuth
 }
 
 func evaluateDWDReadiness(ctx context.Context, out *ReadinessResult, service, loginID string) (*ReadinessResult, error) {
@@ -295,7 +320,7 @@ func oauthMissingList(service string, scopes []string) []MissingPermission {
 func probeOAuthRestore(ctx context.Context, service, accessToken, loginID string) error {
 	switch strings.ToLower(service) {
 	case "gmail":
-		client, err := google.NewGmailClientUsingToken(accessToken)
+		client, err := google.NewGmailClientForRestore(accessToken)
 		if err != nil {
 			return err
 		}
@@ -323,7 +348,7 @@ func probeOAuthRestore(ctx context.Context, service, accessToken, loginID string
 		_, err = srv.People.Connections.List("people/me").PageSize(1).PersonFields("names").Do()
 		return err
 	case "photos":
-		client, err := google.NewGPhotosClientUsingToken(accessToken)
+		client, err := google.NewGPhotosClientForRestore(accessToken)
 		if err != nil {
 			return err
 		}
@@ -337,8 +362,8 @@ func probeOAuthRestore(ctx context.Context, service, accessToken, loginID string
 	}
 }
 
-// CreateRestoreJobFromReadiness queues a job using columns + slim context snapshot (no tokens).
-func CreateRestoreJobFromReadiness(store *db.PostgresDb, userID string, prep *ReadinessResult) (*repo.RestoreJobListingDB, error) {
+// CreateRestoreJobFromReadiness queues a job using credential/cron links (no tokens on the row).
+func CreateRestoreJobFromReadiness(ctx context.Context, store *db.PostgresDb, userID string, prep *ReadinessResult) (*repo.RestoreJobListingDB, error) {
 	if prep == nil || !prep.Ready {
 		return nil, fmt.Errorf("restore not ready")
 	}
@@ -355,29 +380,26 @@ func CreateRestoreJobFromReadiness(store *db.PostgresDb, userID string, prep *Re
 		return nil, fmt.Errorf("a restore is already in progress for this account and service")
 	}
 
-	ctxSnap := repo.RestoreJobContext{
-		V:             1,
-		GrantedScopes: prep.GrantedScopes,
-		OAuthHolder:   prep.OAuthHolderEmail,
-		QueuedBy:      userID,
-	}
-
 	job := &repo.RestoreJobListingDB{
 		UserID:         userID,
 		StorjProjectID: prep.ProjectID,
 		LoginID:        prep.LoginID,
 		Method:         method,
 		AccountType:    prep.AccountType,
-		AuthMode:       prep.AuthMode,
 		CredentialID:   prep.CredentialID,
 		CronJobID:      prep.CronJobID,
 		Status:         repo.RestoreJobStatusQueued,
-		Context:        database.NewDbJsonFromValue(ctxSnap),
 		Message:        "restore queued",
+		MessageStatus:  repo.JobMessageStatusInfo,
 	}
 
 	if err := store.RestoreJobRepo.Create(job); err != nil {
 		return nil, err
 	}
+	logger.Info(ctx, "Restore job created",
+		logger.Int("job_id", int(job.ID)),
+		logger.String("method", method),
+		logger.String("login_id", prep.LoginID),
+		logger.String("user_id", userID))
 	return job, nil
 }

@@ -61,8 +61,8 @@ func runGooglePhotosAutosync(input ProcessorInput) error {
 		}
 	}()
 
-	task := scheduledTaskShellFromCronJob(input.Job, accessToken)
-	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Photos, task.LoginId+"/.file_placeholder", nil, task.UserID); err != nil {
+	task := scheduledTaskShellFromCronJob(input.Job, accessToken, storx)
+	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Photos, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
 		return fmt.Errorf("setup storage placeholder: %w", err)
 	}
 
@@ -109,7 +109,7 @@ func createPhotosServiceWithAccessToken(ctx context.Context, accessToken string)
 }
 
 func loadPhotosSyncedIDSet(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, storx string) (map[string]struct{}, error) {
-	objectKeys, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Database, storx, satellite.ReserveBucket_Photos, task.LoginId+"/", task.UserID, "google", "photos")
+	objectKeys, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Database, storx, satellite.ReserveBucket_Photos, task.LoginId+"/", task.UserID, "google", "photos", input.StorxRecovery)
 	if err != nil {
 		return nil, fmt.Errorf("load synced objects: %w", err)
 	}
@@ -213,17 +213,17 @@ func syncPhotosMediaByID(ctx context.Context, input ProcessorInput, task *repo.S
 	}
 	if skipContent {
 		b, _ := json.Marshal(meta)
-		return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Photos, metaKey, b, task.UserID)
+		return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Photos, metaKey, b, task.UserID, input.StorxRecovery)
 	}
 	body, err := downloadPhotosMediaContent(ctx, item.BaseURL)
 	if err != nil {
 		return err
 	}
-	if err := handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Photos, dataKey, body, task.UserID); err != nil {
+	if err := handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Photos, dataKey, body, task.UserID, input.StorxRecovery); err != nil {
 		return err
 	}
 	b, _ := json.Marshal(meta)
-	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Photos, metaKey, b, task.UserID)
+	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Photos, metaKey, b, task.UserID, input.StorxRecovery)
 }
 
 func retrySyncPhotosMediaByID(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, item google.FlatPhotosMediaItem) error {

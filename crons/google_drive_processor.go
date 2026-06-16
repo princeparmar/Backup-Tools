@@ -43,12 +43,12 @@ func refreshTokenFromCronJob(job *repo.CronJobListingDB) string {
 	return ""
 }
 
-func scheduledTaskShellFromCronJob(job *repo.CronJobListingDB, accessToken string) *repo.ScheduledTasks {
+func scheduledTaskShellFromCronJob(job *repo.CronJobListingDB, accessToken, storx string) *repo.ScheduledTasks {
 	return &repo.ScheduledTasks{
 		UserID:     job.UserID,
 		LoginId:    job.Name,
 		Method:     job.Method,
-		StorxToken: strings.TrimSpace(job.StorxToken),
+		StorxToken: strings.TrimSpace(storx),
 		Status:     "running",
 		InputData: database.NewDbJsonFromValue(map[string]interface{}{
 			"access_token": accessToken,
@@ -96,8 +96,8 @@ func runGoogleDriveAutosync(input ProcessorInput) error {
 		}
 	}()
 
-	task := scheduledTaskShellFromCronJob(input.Job, accessToken)
-	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Drive, task.LoginId+"/.file_placeholder", nil, task.UserID); err != nil {
+	task := scheduledTaskShellFromCronJob(input.Job, accessToken, storx)
+	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Drive, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
 		return fmt.Errorf("setup storage placeholder: %w", err)
 	}
 
@@ -291,7 +291,7 @@ func syncDriveFileByID(ctx context.Context, input ProcessorInput, task *repo.Sch
 	}
 	if metaChangedOnly {
 		b, _ := json.Marshal(meta)
-		return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, metaKey, b, task.UserID)
+		return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, metaKey, b, task.UserID, input.StorxRecovery)
 	}
 
 	content, exportMime, err := downloadDriveFileContent(service, file)
@@ -301,11 +301,11 @@ func syncDriveFileByID(ctx context.Context, input ProcessorInput, task *repo.Sch
 	if exportMime != "" {
 		meta.ExportMimeType = exportMime
 	}
-	if err := handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, dataKey, content, task.UserID); err != nil {
+	if err := handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, dataKey, content, task.UserID, input.StorxRecovery); err != nil {
 		return err
 	}
 	b, _ := json.Marshal(meta)
-	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, metaKey, b, task.UserID)
+	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, metaKey, b, task.UserID, input.StorxRecovery)
 }
 
 func retrySyncDriveFileByID(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, fileID string, preloaded *drive.File, shortcutTargetCache map[string]*drive.File) error {
@@ -396,5 +396,5 @@ func writeDriveRemovedMetadata(ctx context.Context, input ProcessorInput, task *
 		UpdatedAt:        time.Now().UTC().Format(time.RFC3339),
 	}
 	b, _ := json.Marshal(meta)
-	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, metaKey, b, task.UserID)
+	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, metaKey, b, task.UserID, input.StorxRecovery)
 }

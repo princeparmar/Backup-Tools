@@ -30,6 +30,7 @@ const (
 	JobStatusInProgress = "in_progress"
 	JobStatusSuccess    = "success"
 	JobStatusFailed     = "failed"
+	JobStatusCancelled  = "cancelled"
 
 	TaskStatusPushed  = "pushed"
 	TaskStatusRunning = "running"
@@ -91,6 +92,8 @@ type CronJobListingDB struct {
 	AutoDeactivated bool `json:"autodeactivated" gorm:"column:auto_deactivated;default:false"`
 	// FailurePeriods counts schedule periods that ended with all per-task retries exhausted (retry_count reached MaxRetryCount). Reset on success or user reactivation.
 	FailurePeriods uint `json:"failure_periods" gorm:"column:failure_periods;default:0"`
+	// StorxRefreshFailures counts consecutive Satellite storx refresh failures; reset on successful refresh.
+	StorxRefreshFailures uint `json:"storx_refresh_failures" gorm:"column:storx_refresh_failures;default:0"`
 }
 
 // TaskMemory represents the memory state of a task
@@ -178,7 +181,7 @@ type CronJobFilter struct {
 	Method        string `json:"method,omitempty"`        // Filter by method
 	SyncType      string `json:"syncType,omitempty"`      // Filter by sync type
 	Active        *bool  `json:"active,omitempty"`        // Filter by active status
-	Status        string `json:"status,omitempty"`        // Filter by status (created, in_queue, in_progress, success, failed)
+	Status        string `json:"status,omitempty"`        // Filter by status (created, in_queue, in_progress, success, failed, cancelled)
 	MessageStatus string `json:"messageStatus,omitempty"` // Filter by message status (info, warning, error)
 	Interval      string `json:"interval,omitempty"`      // Filter by interval (daily, weekly, monthly)
 }
@@ -934,13 +937,18 @@ func (r *CronJobRepository) DeactivateJobsForCredentialOrLegacyStorx(job *CronJo
 	job.StorxToken = ""
 	job.Message = message
 	job.MessageStatus = JobMessageStatusError
-	return r.UpdateCronJobByID(job.ID, map[string]interface{}{
+	patch := map[string]interface{}{
 		"active":           false,
 		"auto_deactivated": true,
 		"storx_token":      "",
 		"message":          message,
 		"message_status":   JobMessageStatusError,
-	})
+	}
+	if job.Status != JobStatusSuccess {
+		job.Status = JobStatusCancelled
+		patch["status"] = JobStatusCancelled
+	}
+	return r.UpdateCronJobByID(job.ID, patch)
 }
 
 // DeactivateJobsForCredentialOrLegacyGoogleAuth clears credential tokens and deactivates linked jobs, else this job only.
@@ -955,11 +963,19 @@ func (r *CronJobRepository) DeactivateJobsForCredentialOrLegacyGoogleAuth(job *C
 		return r.DeactivateAllJobsForCredential(cid, message, false)
 	}
 	StripGmailRefreshTokenFromCronJobInputData(job)
+	job.Active = false
+	job.AutoDeactivated = true
+	job.Message = message
+	job.MessageStatus = JobMessageStatusError
 	patch := map[string]interface{}{
 		"active":           false,
 		"auto_deactivated": true,
 		"message":          message,
 		"message_status":   JobMessageStatusError,
+	}
+	if job.Status != JobStatusSuccess {
+		job.Status = JobStatusCancelled
+		patch["status"] = JobStatusCancelled
 	}
 	if job.InputData != nil {
 		patch["input_data"] = job.InputData
@@ -982,6 +998,13 @@ func (r *CronJobRepository) DeactivateAllJobsForCredential(credentialID uint, me
 		"message_status":   JobMessageStatusError,
 	}
 	if err := r.db.Model(&CronJobListingDB{}).Where(whereInputDataCredentialID, credentialID).Updates(updates).Error; err != nil {
+		return err
+	}
+	// StorX/credential deactivation: mark non-success jobs cancelled; successful jobs keep status=success.
+	if err := r.db.Model(&CronJobListingDB{}).
+		Where(whereInputDataCredentialID, credentialID).
+		Where("status <> ?", JobStatusSuccess).
+		Updates(map[string]interface{}{"status": JobStatusCancelled}).Error; err != nil {
 		return err
 	}
 	if clearCredentialTokens && r.credRepo != nil {

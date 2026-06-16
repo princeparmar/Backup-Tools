@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/db"
+	"github.com/StorX2-0/Backup-Tools/handler"
 	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
@@ -23,6 +24,7 @@ type ProcessorInput struct {
 	Job           *repo.CronJobListingDB
 	HeartBeatFunc func() error
 	Database      *db.PostgresDb
+	StorxRecovery *handler.StorxRecovery
 }
 
 type Processor interface {
@@ -282,41 +284,58 @@ func (a *AutosyncManager) processTask(ctx context.Context, task *repo.TaskListin
 		logger.String("method", job.Method),
 	)
 
-	// Record job execution start
-
-	err = processor.Run(ProcessorInput{
-		InputData: job.InputData,
-		Job:       job,
-		Task:      task,
-		Database:  a.store,
-		HeartBeatFunc: func() error {
-			// Check if task is still running
-			currentTask, err := a.store.TaskRepo.GetTaskByID(task.ID)
-			if err != nil {
-				return fmt.Errorf("failed to get task status: %w", err)
+	recovery := handler.NewStorxRecovery(a.store, job)
+	if strings.TrimSpace(a.store.CronJobRepo.ResolvedStorxToken(job)) == "" {
+		if _, continueOK, preErr := recovery.OnStorxError(ctx, handler.ErrStorxGrantMissing); preErr != nil || !continueOK {
+			if preErr != nil {
+				return preErr
 			}
+			return handler.ErrStorxGrantMissing
+		}
+	}
 
+	input := ProcessorInput{
+		InputData:     job.InputData,
+		Job:           job,
+		Task:          task,
+		Database:      a.store,
+		StorxRecovery: recovery,
+		HeartBeatFunc: func() error {
+			currentTask, hbErr := a.store.TaskRepo.GetTaskByID(task.ID)
+			if hbErr != nil {
+				return fmt.Errorf("failed to get task status: %w", hbErr)
+			}
 			if currentTask.Status != repo.TaskStatusRunning {
 				return fmt.Errorf("task status changed to '%s', stopping execution", currentTask.Status)
 			}
-
-			// Update heartbeat
-			if err := a.store.TaskRepo.UpdateHeartBeatForTask(task.ID); err != nil {
-				return fmt.Errorf("failed to update heartbeat: %w", err)
+			if hbErr := a.store.TaskRepo.UpdateHeartBeatForTask(task.ID); hbErr != nil {
+				return fmt.Errorf("failed to update heartbeat: %w", hbErr)
 			}
-
 			return nil
 		},
-	})
-
-	// Record completion status
-	if err != nil {
-		// Error handling
-	} else {
-		// Success handling
 	}
 
-	return err
+	uplinkRecoveries := 0
+	for {
+		err = processor.Run(input)
+		if err == nil {
+			return nil
+		}
+		if !handler.IsStorxUplinkError(err) {
+			return err
+		}
+		uplinkRecoveries++
+		if uplinkRecoveries > handler.MaxStorxUplinkRecoveriesPerRun() {
+			return err
+		}
+		_, continueOK, recErr := recovery.OnStorxError(ctx, err)
+		if recErr != nil {
+			return recErr
+		}
+		if !continueOK {
+			return err
+		}
+	}
 }
 
 func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.CronJobListingDB, processErr error) error {
@@ -422,12 +441,18 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 			updateMap["input_data"] = job.InputData
 		}
 
-		// Update cron job status based on task status
-		switch task.Status {
-		case repo.TaskStatusSuccess:
-			updateMap["status"] = repo.JobStatusSuccess
-		case repo.TaskStatusFailed:
-			updateMap["status"] = repo.JobStatusFailed
+		// Update cron job status based on task status (StorX credential deactivation preserves success).
+		if handler.IsStorxSatelliteRefreshError(processErr) {
+			if job.Status != repo.JobStatusSuccess {
+				updateMap["status"] = repo.JobStatusCancelled
+			}
+		} else {
+			switch task.Status {
+			case repo.TaskStatusSuccess:
+				updateMap["status"] = repo.JobStatusSuccess
+			case repo.TaskStatusFailed:
+				updateMap["status"] = repo.JobStatusFailed
+			}
 		}
 
 		// Use cron-specific update function to safely handle one-time jobs
@@ -503,8 +528,14 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.Cron
 	errLower := strings.ToLower(errMsg)
 
 	switch {
-	case a.gmailStorxMissing(job):
-		return cronEmailStorxInsufficient
+	case handler.IsStorxSatelliteRefreshError(processErr):
+		return cronEmailStorxSatelliteRefreshFinal
+
+	case handler.IsStorxRefreshFailedError(processErr):
+		return cronEmailStorxRefreshRetry
+
+	case handler.IsStorxUplinkError(processErr):
+		return cronEmailStorxRefreshRetry
 
 	case job != nil && job.Method == "gmail" &&
 		(strings.Contains(errLower, "unauthorized_client") ||
@@ -535,9 +566,6 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.Cron
 		}
 		return cronEmailOutlookAuthRetry(task.RetryCount)
 
-	case strings.Contains(errMsg, "uplink: permission") || strings.Contains(errMsg, "uplink: invalid access"):
-		return cronEmailStorxUplinkFinal
-
 	case strings.Contains(errMsg, "could not create bucket") ||
 		strings.Contains(errMsg, "tcp connector failed") ||
 		strings.Contains(errMsg, "connection attempt failed"):
@@ -553,18 +581,17 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 	errLower := strings.ToLower(errMsg)
 
 	switch {
-	case a.gmailStorxMissing(job):
-		if repo.IsGoogleMediaOrGmailMethod(job.Method) {
-			if err := a.store.CronJobRepo.DeactivateJobsForCredentialOrLegacyStorx(job, cronJobStorxInsufficientShort); err != nil {
-				logger.Warn(context.Background(), "Failed to deactivate jobs after missing StorX",
-					logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
-			}
-			job.StorxToken = ""
-		}
-		job.Active = false
-		job.AutoDeactivated = true
-		job.Message = cronJobStorxInsufficientShort
-		task.Message = cronTaskStorxInsufficientDeactivated
+	case handler.IsStorxSatelliteRefreshError(processErr):
+		job.Message = cronJobStorxSatelliteRefreshFinal
+		task.Message = cronTaskStorxSatelliteRefreshFinal
+
+	case handler.IsStorxRefreshFailedError(processErr):
+		job.Message = "StorX refresh failed; automatic backup will retry"
+		task.Message = processErr.Error()
+
+	case handler.IsStorxUplinkError(processErr) || a.gmailStorxMissing(job):
+		job.Message = "StorX access issue; refresh attempted during backup"
+		task.Message = processErr.Error()
 
 	case job != nil && job.Method == "gmail" &&
 		(strings.Contains(errLower, "unauthorized_client") ||
@@ -631,21 +658,6 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 			job.Message = cronJobOutlookAuthRetry(task.RetryCount)
 			task.Message = cronTaskOutlookAuthRetry(task.RetryCount)
 		}
-
-	case strings.Contains(errMsg, "uplink: permission") || strings.Contains(errMsg, "uplink: invalid access"):
-		if repo.IsGoogleMediaOrGmailMethod(job.Method) {
-			if err := a.store.CronJobRepo.DeactivateJobsForCredentialOrLegacyStorx(job, cronJobStorxInsufficientShort); err != nil {
-				logger.Warn(context.Background(), "Failed to deactivate jobs after StorX uplink failure",
-					logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
-			}
-			job.StorxToken = ""
-		} else {
-			a.clearStorxOnUplinkFailure(job)
-		}
-		job.Active = false
-		job.AutoDeactivated = true
-		job.Message = cronJobStorxInsufficientShort
-		task.Message = cronTaskStorxInsufficientDeactivated
 
 	case strings.Contains(errMsg, "could not create bucket") ||
 		strings.Contains(errMsg, "tcp connector failed") ||

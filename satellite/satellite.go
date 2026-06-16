@@ -370,6 +370,82 @@ func GetProjectIDFromAccessGrant(ctx context.Context, accessGrant string) (strin
 	return response.ProjectID, nil
 }
 
+// RefreshStorxToken requests a new uplink access grant from Satellite (Backup-Tools internal route).
+func RefreshStorxToken(ctx context.Context, userID, projectID, email string) (string, error) {
+	userID = strings.TrimSpace(userID)
+	projectID = strings.TrimSpace(projectID)
+	email = strings.TrimSpace(email)
+	if userID == "" || projectID == "" {
+		return "", fmt.Errorf("user_id and project_id are required for storx token refresh")
+	}
+	if StorxSatelliteService == "" {
+		return "", fmt.Errorf("STORX_SATELLITE_SERVICE not set")
+	}
+	apiKey := utils.GetEnvWithKey("BACKUP_TOOLS_API_KEY")
+	if apiKey == "" {
+		return "", fmt.Errorf("BACKUP_TOOLS_API_KEY not set")
+	}
+
+	payload := struct {
+		UserID    string `json:"user_id"`
+		ProjectID string `json:"project_id"`
+		Email     string `json:"email,omitempty"`
+	}{
+		UserID:    userID,
+		ProjectID: projectID,
+		Email:     email,
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal refresh payload: %w", err)
+	}
+
+	url := strings.TrimSuffix(StorxSatelliteService, "/") + "/api/v0/internal/storx-token/refresh"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return "", fmt.Errorf("create refresh request: %w", err)
+	}
+	req.Header.Set("accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("X-User-Id", userID)
+	if email != "" {
+		req.Header.Set("X-User-Email", email)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	res, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("storx refresh request: %w", err)
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return "", fmt.Errorf("read storx refresh response: %w", err)
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return "", fmt.Errorf("storx refresh status %d: %s", res.StatusCode, string(body))
+	}
+
+	var response struct {
+		AccessGrant string `json:"access_grant"`
+		ProjectID   string `json:"project_id"`
+		Error       string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", fmt.Errorf("parse storx refresh response: %w", err)
+	}
+	if response.Error != "" {
+		return "", fmt.Errorf("storx refresh: %s", response.Error)
+	}
+	grant := strings.TrimSpace(response.AccessGrant)
+	if grant == "" {
+		return "", fmt.Errorf("storx refresh returned empty access_grant")
+	}
+	return grant, nil
+}
+
 // createJWTToken creates a JWT token for email notifications
 func createJWTToken(email, errorMsg, method, secretKey string) (string, error) {
 	claims := jwt.MapClaims{

@@ -20,6 +20,17 @@ func RunBatch(ctx context.Context, deps *RestoreDeps, proc Processor, rows []rep
 	g.SetLimit(deps.Config.MaxConcurrency)
 
 	var mu sync.Mutex
+	recordFailure := func(objectKey string, err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		result.Failed++
+		result.FailedKeys = append(result.FailedKeys, FailedKey{
+			ObjectKey: objectKey,
+			Reason:    err.Error(),
+			ErrorCode: ErrorCodeFromErr(err),
+		})
+	}
+
 	for _, row := range rows {
 		row := row
 		if !proc.ShouldRestoreKey(row.ObjectKey) {
@@ -27,28 +38,26 @@ func RunBatch(ctx context.Context, deps *RestoreDeps, proc Processor, rows []rep
 		}
 		g.Go(func() error {
 			if err := deps.waitRate(gctx); err != nil {
-				return err
+				recordFailure(row.ObjectKey, err)
+				return nil
 			}
 			err := deps.withVault(gctx, func() error {
 				return proc.RestoreKey(gctx, deps, row.ObjectKey)
 			})
-			mu.Lock()
-			defer mu.Unlock()
 			if err != nil {
-				result.Failed++
-				result.FailedKeys = append(result.FailedKeys, FailedKey{
-					ObjectKey: row.ObjectKey,
-					Reason:    err.Error(),
-					ErrorCode: ErrorCodeFromErr(err),
-				})
+				recordFailure(row.ObjectKey, err)
 				return nil
 			}
+			mu.Lock()
 			result.Processed++
+			mu.Unlock()
 			return nil
 		})
 	}
 
-	_ = g.Wait()
+	if err := g.Wait(); err != nil {
+		recordFailure("", err)
+	}
 	result.LastObjectID = rows[len(rows)-1].ID
 	return result
 }

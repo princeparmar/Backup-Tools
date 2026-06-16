@@ -43,8 +43,8 @@ func runGoogleCalendarAutosync(input ProcessorInput) error {
 		}
 	}()
 
-	task := scheduledTaskShellFromCronJob(input.Job, accessToken)
-	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Calendar, task.LoginId+"/.file_placeholder", nil, task.UserID); err != nil {
+	task := scheduledTaskShellFromCronJob(input.Job, accessToken, storx)
+	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Calendar, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
 		return fmt.Errorf("setup storage placeholder: %w", err)
 	}
 
@@ -216,7 +216,7 @@ func syncCalendarEvent(ctx context.Context, input ProcessorInput, task *repo.Sch
 	if err != nil {
 		return fmt.Errorf("marshal event: %w", err)
 	}
-	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Calendar, objectKey, b, task.UserID)
+	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Calendar, objectKey, b, task.UserID, input.StorxRecovery)
 }
 
 func retrySyncCalendarEvent(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, calendarID string, ev *calendar.Event) error {
@@ -251,5 +251,5 @@ func saveCalendarMeta(ctx context.Context, input ProcessorInput, task *repo.Sche
 		return fmt.Errorf("marshal calendar metadata: %w", err)
 	}
 	key := google.CalendarMetaObjectKey(task.LoginId, meta.ID)
-	return handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Calendar, key, b, task.UserID)
+	return handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Calendar, key, b, task.UserID, input.StorxRecovery)
 }

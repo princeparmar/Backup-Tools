@@ -48,12 +48,12 @@ const (
 	backupRestoreLogsMaxLimit     = 100
 )
 
-const restoreLogMessageStatusSQL = `CASE rj.status
+const restoreLogMessageStatusSQL = `COALESCE(NULLIF(TRIM(rj.message_status), ''), CASE rj.status
 	WHEN 'partial_completed' THEN 'warning'
 	WHEN 'failed' THEN 'error'
 	WHEN 'cancelled' THEN 'error'
 	ELSE 'info'
-END`
+END)`
 
 // RestoreMessageStatusFromJobStatus maps restore job status to message_status.
 func RestoreMessageStatusFromJobStatus(status string) string {

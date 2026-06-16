@@ -100,6 +100,19 @@ func NewGmailClientUsingToken(token string) (*GmailClient, error) {
 	return &GmailClient{serv}, nil
 }
 
+// NewGmailClientForRestore builds a Gmail client for restore (requires gmail.insert on token).
+func NewGmailClientForRestore(token string) (*GmailClient, error) {
+	client, err := clientUsingTokenScopes(token, restoreGmailScope)
+	if err != nil {
+		return nil, err
+	}
+	serv, err := gmail.NewService(context.Background(), option.WithHTTPClient(client))
+	if err != nil {
+		return nil, err
+	}
+	return &GmailClient{serv}, nil
+}
+
 // Function takes nextPageToken and returns 100 results of User's threads.
 // (Pass `""` if you don't want to specify nextPageToken and get latest threads).
 func (client *GmailClient) GetUserThreads(nextPageToken string) (*ThreadsResponse, error) {

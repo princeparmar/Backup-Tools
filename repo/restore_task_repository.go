@@ -29,12 +29,8 @@ type RestoreTaskListingDB struct {
 	CursorStartID uint `json:"cursor_start_id" gorm:"default:0"`
 	CursorEndID   uint `json:"cursor_end_id" gorm:"default:0"`
 
-	ProcessedCount uint `json:"processed_count" gorm:"default:0"`
-	FailedCount    uint `json:"failed_count" gorm:"default:0"`
-
 	RetryCount    uint       `json:"retry_count" gorm:"default:0"`
 	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty" gorm:"index:idx_restore_tasks_status_retry,priority:2"`
-	ErrorCode     string     `json:"error_code,omitempty" gorm:"column:error_code;type:varchar(32)"`
 
 	StartedAt  *time.Time `json:"started_at,omitempty"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
@@ -58,6 +54,11 @@ func (r *RestoreTaskRepository) Create(task *RestoreTaskListingDB) error {
 
 func (r *RestoreTaskRepository) Update(id uint, updates map[string]interface{}) error {
 	return r.db.Model(&RestoreTaskListingDB{}).Where("id = ?", id).Updates(updates).Error
+}
+
+// UpdateColumns writes all given columns, including zero values (used for cursor_end_id).
+func (r *RestoreTaskRepository) UpdateColumns(id uint, updates map[string]interface{}) error {
+	return r.db.Model(&RestoreTaskListingDB{}).Where("id = ?", id).UpdateColumns(updates).Error
 }
 
 func (r *RestoreTaskRepository) ClaimNextRetryTask() (*RestoreTaskListingDB, error) {

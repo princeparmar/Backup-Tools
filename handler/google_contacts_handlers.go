@@ -93,13 +93,6 @@ func HandleGoogleContactsRestore(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accessGrant == "" {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "access token not found",
-		})
-	}
-
 	allKeys, err := validateAndProcessRequestIDs(c)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -120,6 +113,11 @@ func HandleGoogleContactsRestore(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error": "failed to get user email",
 		})
+	}
+
+	storxSess, err := resolveManualRestoreStorx(c, "google_contacts", userDetails.Email)
+	if err != nil {
+		return err
 	}
 
 	userID, err := satellite.GetUserdetails(c)
@@ -150,7 +148,7 @@ func HandleGoogleContactsRestore(c echo.Context) error {
 			continue
 		}
 		g.Go(func() error {
-			if restoreErr := restore.RestoreContactKey(ctx, accessGrant, service, key); restoreErr != nil {
+			if restoreErr := restore.RestoreContactKeyWithSession(ctx, storxSess, service, key); restoreErr != nil {
 				logger.Warn(ctx, "Failed to restore contact", logger.String("key", key), logger.ErrorField(restoreErr))
 				failedKeys.Add(key)
 			} else {

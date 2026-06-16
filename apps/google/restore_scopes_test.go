@@ -86,7 +86,7 @@ func TestRestoreOAuthScopesForService_gmailOnlyMailScope(t *testing.T) {
 
 func TestRestoreDWDScopesMap(t *testing.T) {
 	tests := []struct {
-		service string
+		service      string
 		wantNonEmpty bool
 	}{
 		{"gmail", true}, {"drive", true}, {"calendar", true}, {"contacts", true}, {"photos", true},

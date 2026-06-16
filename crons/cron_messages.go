@@ -10,6 +10,10 @@ import (
 const (
 	cronEmailStorxInsufficient = "Your automatic backup has been temporarily disabled due to insufficient permissions. Please update your StorX permissions and reactivate the backup from your dashboard."
 
+	cronEmailStorxRefreshRetry = "Your automatic backup encountered a StorX access issue. We are refreshing your StorX token automatically and will retry."
+
+	cronEmailStorxSatelliteRefreshFinal = "Your automatic backup has been paused because StorX access could not be renewed from Satellite. Please contact support."
+
 	cronEmailDelegationFinal = "Google Workspace blocked access to a mailbox (domain-wide delegation). Ask your admin to add this app's OAuth client in Admin Console → Security → API controls → Domain-wide delegation, with the required Gmail scopes, or remove mailboxes that cannot be delegated."
 
 	cronEmailGoogleAuthFinal = "Your automatic backup has been temporarily disabled due to invalid Google credentials. Please update your Google account permissions and reactivate the backup from your dashboard."
@@ -37,6 +41,8 @@ const (
 const (
 	cronJobStorxInsufficientShort = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
 
+	cronJobStorxSatelliteRefreshFinal = "StorX access could not be renewed from Satellite. Automatic backup has been paused—please contact support."
+
 	cronJobDelegationFinal = "Google Workspace denied access to this mailbox (delegation). Ask your admin to enable domain-wide delegation for this app or adjust which accounts are backed up."
 
 	cronJobGoogleAuthDeactivate = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
@@ -59,6 +65,8 @@ const (
 // Task history messages (handleErrorScenarios task.Message).
 const (
 	cronTaskStorxInsufficientDeactivated = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
+
+	cronTaskStorxSatelliteRefreshFinal = "StorX token could not be renewed from Satellite. Automatic backup has been deactivated—please contact support."
 
 	cronTaskDelegationFinal = "Delegation denied by Google Workspace. Your admin must authorize this app for domain-wide delegation (Gmail scopes) for the affected users."
 

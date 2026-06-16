@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -670,7 +671,7 @@ func HandleHideTask(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, map[string]interface{}{"message": "access denied"})
 	}
 
-	if job.Status != repo.JobStatusFailed {
+	if job.Status != repo.JobStatusFailed && job.Status != repo.JobStatusCancelled {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"message": "cron job has no failed tasks to hide",
 		})
@@ -1004,6 +1005,16 @@ func createGoogleJobsForServiceEmails(
 			}
 			failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: err.Error()})
 			continue
+		}
+		// Recurring jobs stay inactive unless storx was supplied at create (stored on credential).
+		if syncType != "one_time" && hasStorxTokenAtJobCreate(req, cred) {
+			if err := database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(true)); err != nil {
+				failed = append(failed, onboardingFailedResult{
+					Service: svc, Email: targetEmail,
+					Error: fmt.Sprintf("job %d created but activation failed: %v", cronJob.ID, err),
+				})
+				continue
+			}
 		}
 		latestJob, _ := database.CronJobRepo.GetCronJobByID(cronJob.ID)
 		var policy *repo.AutosyncBackupPolicyDB
@@ -1712,7 +1723,7 @@ func checkExistingJobs(userID, name, syncType, method string, db *db.PostgresDb)
 
 		if syncType == "daily" && job.SyncType == "one_time" {
 			// One_time sync blocks daily sync unless it's completed (success) or failed
-			if job.Status != repo.JobStatusSuccess && job.Status != repo.JobStatusFailed {
+			if job.Status != repo.JobStatusSuccess && job.Status != repo.JobStatusFailed && job.Status != repo.JobStatusCancelled {
 				return jsonErrorMsg(http.StatusBadRequest, "A one-time sync with this name is still in progress. Wait for it to complete or fail before creating a daily sync.", "A one-time sync with this name is still in progress. Wait for it to complete or fail before creating a daily sync.")
 			}
 		}
@@ -2012,6 +2023,13 @@ func sendJSONError(c echo.Context, status int, message string, err error) error 
 
 func httpErr(status int, message string, errText string) error {
 	return echo.NewHTTPError(status, map[string]interface{}{"message": message, "error": errText})
+}
+
+func hasStorxTokenAtJobCreate(req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB) bool {
+	if req != nil && strings.TrimSpace(req.StorxToken) != "" {
+		return true
+	}
+	return cred != nil && strings.TrimSpace(cred.StorxToken) != ""
 }
 
 func activeStateUpdateFields(active bool) map[string]interface{} {
@@ -2957,7 +2975,7 @@ func countConnectedAccountsForUser(gdb *gorm.DB, userID string) (total int, grow
 }
 
 func lastSyncSnapshotForUser(gdb *gorm.DB, userID string) (*time.Time, int64, error) {
-	var lastRun *time.Time
+	var lastRun sql.NullTime
 	err := gdb.Model(&repo.CronJobListingDB{}).
 		Where("user_id = ? AND COALESCE(placeholder, false) = ? AND last_run IS NOT NULL", userID, false).
 		Select("MAX(last_run)").
@@ -2965,16 +2983,17 @@ func lastSyncSnapshotForUser(gdb *gorm.DB, userID string) (*time.Time, int64, er
 	if err != nil {
 		return nil, 0, err
 	}
-	if lastRun == nil || lastRun.IsZero() {
+	if !lastRun.Valid {
 		return nil, 0, nil
 	}
+	syncAt := lastRun.Time
 
 	var items int64
 	err = gdb.Model(&repo.SyncedObject{}).
-		Where("user_id = ? AND synced_at >= ? AND deleted_at IS NULL", userID, *lastRun).
+		Where("user_id = ? AND synced_at >= ? AND deleted_at IS NULL", userID, syncAt).
 		Count(&items).Error
 	if err != nil {
-		return lastRun, 0, err
+		return &syncAt, 0, err
 	}
-	return lastRun, items, nil
+	return &syncAt, items, nil
 }

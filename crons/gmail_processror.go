@@ -103,7 +103,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 	gmailClient := gmailSession.Client
 	gmailAPIUser := gmailSession.APIUser
 
-	err = handler.UploadObjectAndSync(context.Background(), input.Database, storxToken, satellite.ReserveBucket_Gmail, pathPrefix+"/.file_placeholder", nil, input.Job.UserID)
+	err = handler.UploadObjectAndSync(context.Background(), input.Database, storxToken, satellite.ReserveBucket_Gmail, pathPrefix+"/.file_placeholder", nil, input.Job.UserID, input.StorxRecovery)
 	if err != nil {
 		return err
 	}
@@ -112,7 +112,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 	// This is much faster and avoids unnecessary API calls to Satellite
 	// Uses common function that ensures bucket exists and queries database
 	prefix := pathPrefix + "/"
-	emailListFromBucket, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Database, storxToken, satellite.ReserveBucket_Gmail, prefix, input.Job.UserID, "google", "gmail")
+	emailListFromBucket, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Database, storxToken, satellite.ReserveBucket_Gmail, prefix, input.Job.UserID, "google", "gmail", input.StorxRecovery)
 	if err != nil {
 		return fmt.Errorf("failed to get synced objects: %w", err)
 	}
@@ -158,7 +158,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 			}
 
 			syncedData = true
-			err = handler.UploadObjectAndSync(context.TODO(), input.Database, storxToken, "gmail", messagePath, b, input.Job.UserID)
+			err = handler.UploadObjectAndSync(context.TODO(), input.Database, storxToken, "gmail", messagePath, b, input.Job.UserID, input.StorxRecovery)
 			if err != nil {
 				return err
 			}

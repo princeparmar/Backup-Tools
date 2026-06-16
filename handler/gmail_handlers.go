@@ -136,8 +136,9 @@ func (s *GmailService) UploadMessagesToSatellite(ctx context.Context, database *
 	}, nil
 }
 
-// DownloadMessagesFromSatellite downloads messages from Satellite and inserts them into Gmail
-func (s *GmailService) DownloadMessagesFromSatellite(ctx context.Context, keys []string) (*DownloadResult, error) {
+// DownloadMessagesFromSatellite downloads messages from Satellite and inserts them into Gmail.
+// storx grant is resolved from DB via sess (not ACCESS_TOKEN header).
+func (s *GmailService) DownloadMessagesFromSatellite(ctx context.Context, sess *restore.StorxGrantSession, keys []string) (*DownloadResult, error) {
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(10)
 
@@ -149,7 +150,7 @@ func (s *GmailService) DownloadMessagesFromSatellite(ctx context.Context, keys [
 			continue
 		}
 		g.Go(func() error {
-			if err := restore.RestoreGmailKey(ctx, s.accessGrant, s.client, key); err != nil {
+			if err := restore.RestoreGmailKeyWithSession(ctx, sess, s.client, key); err != nil {
 				logger.Info(ctx, "error restoring message into Gmail", logger.ErrorField(err))
 				failedIDs.Add(key)
 			} else {
@@ -429,14 +430,6 @@ func HandleGmailDownloadAndInsert(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	// Get access token from header
-	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accessGrant == "" {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "access token not found",
-		})
-	}
-
 	// Validate and process request IDs
 	allIDs, err := validateAndProcessRequestIDs(c)
 	if err != nil {
@@ -455,6 +448,11 @@ func HandleGmailDownloadAndInsert(c echo.Context) error {
 	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
 	if err != nil || userDetails.Email == "" {
 		logger.Warn(ctx, "Failed to get user email for notification", logger.ErrorField(err))
+	}
+
+	storxSess, err := resolveManualRestoreStorx(c, "gmail", userDetails.Email)
+	if err != nil {
+		return err
 	}
 
 	userID, err := satellite.GetUserdetails(c)
@@ -476,9 +474,9 @@ func HandleGmailDownloadAndInsert(c echo.Context) error {
 	}
 	satellite.SendNotificationAsync(ctx, userID, "Gmail Restore Started", fmt.Sprintf("Restore of %d messages for %s has started", len(allIDs), userDetails.Email), &priority, startData, nil)
 
-	// Create Gmail service and download messages
-	gmailService := NewGmailService(gmailClient, accessGrant, "")
-	result, err := gmailService.DownloadMessagesFromSatellite(c.Request().Context(), allIDs)
+	// Create Gmail service and download messages (storx from DB via storxSess)
+	gmailService := NewGmailService(gmailClient, "", "")
+	result, err := gmailService.DownloadMessagesFromSatellite(c.Request().Context(), storxSess, allIDs)
 	if err != nil {
 		// Send failure notification
 		failPriority := "high"

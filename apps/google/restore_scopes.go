@@ -16,6 +16,15 @@ const (
 	AccountTypeAdminWorkspace    = "admin_workspace"
 )
 
+// Minimal OAuth / DWD scopes for restore-all (write/insert only — not backup readonly, not full mailbox).
+const (
+	restoreGmailScope    = gmail.GmailInsertScope
+	restoreDriveScope    = drive.DriveFileScope
+	restorePhotosScope   = photoslibrary.PhotoslibraryAppendonlyScope
+	restoreCalendarScope = calendar.CalendarEventsScope
+	restoreContactsScope = contactsScope
+)
+
 // NormalizeAccountType returns a known account type or personal as default.
 func NormalizeAccountType(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
@@ -28,13 +37,13 @@ func NormalizeAccountType(s string) string {
 	}
 }
 
-// restoreDWDScopesByService — Admin Console DWD scope URLs for restore (write) per product.
+// restoreDWDScopesByService — Admin Console DWD scope URLs for restore per product.
 var restoreDWDScopesByService = map[string]string{
-	"gmail":    gmail.MailGoogleComScope,
-	"drive":    drive.DriveScope,
-	"calendar": calendar.CalendarScope,
-	"contacts": contactsScope,
-	"photos":   photoslibrary.PhotoslibraryScope,
+	"gmail":    restoreGmailScope,
+	"drive":    restoreDriveScope,
+	"calendar": restoreCalendarScope,
+	"contacts": restoreContactsScope,
+	"photos":   restorePhotosScope,
 }
 
 // RestoreDWDScopesMap returns all restore DWD scopes keyed by API service name (for Admin Console UI).
@@ -49,11 +58,11 @@ func RestoreDWDScopesMap() map[string]string {
 // AllRestoreDWDScopeURLs returns every restore DWD scope URL (admin pastes all in one delegation row).
 func AllRestoreDWDScopeURLs() []string {
 	return []string{
-		gmail.MailGoogleComScope,
-		drive.DriveScope,
-		calendar.CalendarScope,
-		contactsScope,
-		photoslibrary.PhotoslibraryScope,
+		restoreGmailScope,
+		restoreDriveScope,
+		restoreCalendarScope,
+		restoreContactsScope,
+		restorePhotosScope,
 	}
 }
 
@@ -61,15 +70,15 @@ func AllRestoreDWDScopeURLs() []string {
 func RestoreOAuthScopesForService(service string) []string {
 	switch strings.ToLower(strings.TrimSpace(service)) {
 	case "gmail":
-		return []string{gmail.MailGoogleComScope}
+		return []string{restoreGmailScope}
 	case "drive":
-		return []string{drive.DriveScope}
+		return []string{restoreDriveScope}
 	case "photos":
-		return []string{photoslibrary.PhotoslibraryScope}
+		return []string{restorePhotosScope}
 	case "calendar":
-		return []string{calendar.CalendarScope}
+		return []string{restoreCalendarScope}
 	case "contacts":
-		return []string{contactsScope}
+		return []string{restoreContactsScope}
 	default:
 		return nil
 	}

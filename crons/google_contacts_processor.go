@@ -53,8 +53,8 @@ func runGoogleContactsAutosync(input ProcessorInput) error {
 		}
 	}()
 
-	task := scheduledTaskShellFromCronJob(input.Job, accessToken)
-	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Contacts, task.LoginId+"/.file_placeholder", nil, task.UserID); err != nil {
+	task := scheduledTaskShellFromCronJob(input.Job, accessToken, storx)
+	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Contacts, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
 		return fmt.Errorf("setup storage placeholder: %w", err)
 	}
 
@@ -83,7 +83,7 @@ func runGoogleContactsAutosync(input ProcessorInput) error {
 }
 
 func loadContactsSyncedIDSet(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, storx string) (map[string]struct{}, error) {
-	objectKeys, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Database, storx, satellite.ReserveBucket_Contacts, task.LoginId+"/", task.UserID, "google", "contacts")
+	objectKeys, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Database, storx, satellite.ReserveBucket_Contacts, task.LoginId+"/", task.UserID, "google", "contacts", input.StorxRecovery)
 	if err != nil {
 		return nil, fmt.Errorf("load synced objects: %w", err)
 	}
@@ -181,7 +181,7 @@ func syncContactByID(ctx context.Context, input ProcessorInput, task *repo.Sched
 	if err != nil {
 		return fmt.Errorf("marshal contact: %w", err)
 	}
-	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Contacts, objectKey, b, task.UserID)
+	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Contacts, objectKey, b, task.UserID, input.StorxRecovery)
 }
 
 func retrySyncContactByID(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, item google.FlatContact) error {

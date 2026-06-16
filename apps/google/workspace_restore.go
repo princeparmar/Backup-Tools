@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	photoslibrary "github.com/gphotosuploader/googlemirror/api/photoslibrary/v1"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/calendar/v3"
 	"google.golang.org/api/drive/v3"
@@ -52,9 +51,9 @@ func jwtHTTPClientForRestoreDelegation(ctx context.Context, subjectEmail string,
 	return client, nil
 }
 
-// NewGmailClientWithServiceAccountDelegationForRestore impersonates subject with mail.google.com scope.
+// NewGmailClientWithServiceAccountDelegationForRestore impersonates subject with gmail.insert scope.
 func NewGmailClientWithServiceAccountDelegationForRestore(ctx context.Context, subjectEmail string) (*GmailClient, error) {
-	client, err := jwtHTTPClientForRestoreDelegation(ctx, subjectEmail, gmail.MailGoogleComScope)
+	client, err := jwtHTTPClientForRestoreDelegation(ctx, subjectEmail, RestoreDWDScopeForService("gmail"))
 	if err != nil {
 		return nil, err
 	}
@@ -65,18 +64,18 @@ func NewGmailClientWithServiceAccountDelegationForRestore(ctx context.Context, s
 	return &GmailClient{svc}, nil
 }
 
-// GetDriveServiceForRestoreDWD impersonates subject with drive full scope.
+// GetDriveServiceForRestoreDWD impersonates subject with drive.file scope.
 func GetDriveServiceForRestoreDWD(ctx context.Context, subjectEmail string) (*drive.Service, error) {
-	client, err := jwtHTTPClientForRestoreDelegation(ctx, subjectEmail, drive.DriveScope)
+	client, err := jwtHTTPClientForRestoreDelegation(ctx, subjectEmail, RestoreDWDScopeForService("drive"))
 	if err != nil {
 		return nil, err
 	}
 	return drive.NewService(ctx, option.WithHTTPClient(client))
 }
 
-// NewCalendarServiceForRestoreDWD impersonates subject with calendar write scope.
+// NewCalendarServiceForRestoreDWD impersonates subject with calendar.events scope.
 func NewCalendarServiceForRestoreDWD(ctx context.Context, subjectEmail string) (*calendar.Service, error) {
-	client, err := jwtHTTPClientForRestoreDelegation(ctx, subjectEmail, calendar.CalendarScope)
+	client, err := jwtHTTPClientForRestoreDelegation(ctx, subjectEmail, RestoreDWDScopeForService("calendar"))
 	if err != nil {
 		return nil, err
 	}
@@ -85,16 +84,16 @@ func NewCalendarServiceForRestoreDWD(ctx context.Context, subjectEmail string) (
 
 // NewPeopleServiceForRestoreDWD impersonates subject with contacts write scope.
 func NewPeopleServiceForRestoreDWD(ctx context.Context, subjectEmail string) (*people.Service, error) {
-	client, err := jwtHTTPClientForRestoreDelegation(ctx, subjectEmail, contactsScope)
+	client, err := jwtHTTPClientForRestoreDelegation(ctx, subjectEmail, RestoreDWDScopeForService("contacts"))
 	if err != nil {
 		return nil, err
 	}
 	return people.NewService(ctx, option.WithHTTPClient(client))
 }
 
-// NewGPhotosClientForRestoreDWD impersonates subject with photoslibrary write scope.
+// NewGPhotosClientForRestoreDWD impersonates subject with photoslibrary.appendonly scope.
 func NewGPhotosClientForRestoreDWD(ctx context.Context, subjectEmail string) (*GPotosClient, error) {
-	client, err := jwtHTTPClientForRestoreDelegation(ctx, subjectEmail, photoslibrary.PhotoslibraryScope)
+	client, err := jwtHTTPClientForRestoreDelegation(ctx, subjectEmail, RestoreDWDScopeForService("photos"))
 	if err != nil {
 		return nil, err
 	}

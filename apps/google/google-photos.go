@@ -101,9 +101,18 @@ func NewGPhotosClient(c echo.Context) (*GPotosClient, error) {
 	return newGPotosClientFromHTTPClient(httpClient)
 }
 
-// NewGPhotosClientUsingToken builds a Photos client for background restore workers.
+// NewGPhotosClientUsingToken builds a Photos client using the access token as-is.
 func NewGPhotosClientUsingToken(accessToken string) (*GPotosClient, error) {
 	httpClient, err := clientUsingToken(accessToken)
+	if err != nil {
+		return nil, err
+	}
+	return newGPotosClientFromHTTPClient(httpClient)
+}
+
+// NewGPhotosClientForRestore builds a Photos client for restore (requires photoslibrary.appendonly on token).
+func NewGPhotosClientForRestore(accessToken string) (*GPotosClient, error) {
+	httpClient, err := clientUsingTokenScopes(accessToken, restorePhotosScope)
 	if err != nil {
 		return nil, err
 	}

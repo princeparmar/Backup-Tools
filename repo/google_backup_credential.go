@@ -247,6 +247,14 @@ func (r *GoogleBackupCredentialRepository) mergeFieldsIfProvided(id uint, email,
 	return r.db.Model(&GoogleBackupCredentialDB{}).Where("id = ?", id).Updates(patch).Error
 }
 
+// ClearStorxToken removes storx_token from the credential row (Google refresh_token is kept).
+func (r *GoogleBackupCredentialRepository) ClearStorxToken(id uint) error {
+	if id == 0 {
+		return nil
+	}
+	return r.db.Model(&GoogleBackupCredentialDB{}).Where("id = ?", id).Update("storx_token", "").Error
+}
+
 // UpdateTokens updates refresh_token and/or storx_token on the credential row.
 func (r *GoogleBackupCredentialRepository) UpdateTokens(id uint, refreshToken, storxToken *string) error {
 	if id == 0 {
