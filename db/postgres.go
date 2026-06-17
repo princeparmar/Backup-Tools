@@ -7,17 +7,17 @@ import (
 
 type PostgresDb struct {
 	*gorm.DB
-	CronJobRepo        *repo.CronJobRepository
-	CredentialRepo     *repo.GoogleBackupCredentialRepository
-	PolicyRepo         *repo.AutosyncBackupPolicyRepository
-	TaskRepo           *repo.TaskRepository
-	ScheduledTasksRepo *repo.ScheduledTasksRepository
-	AuthRepo           *repo.AuthRepository
-	SyncedObjectRepo   *repo.SyncedObjectRepository
-	WebhookEventRepo   *repo.WebhookEventRepository
-	RestoreJobRepo         *repo.RestoreJobRepository
-	RestoreTaskRepo        *repo.RestoreTaskRepository
-	BackupRestoreLogsRepo  *repo.BackupRestoreLogsRepository
+	CronJobRepo           *repo.CronJobRepository
+	CredentialRepo        *repo.GoogleBackupCredentialRepository
+	PolicyRepo            *repo.AutosyncBackupPolicyRepository
+	TaskRepo              *repo.TaskRepository
+	ScheduledTasksRepo    *repo.ScheduledTasksRepository
+	AuthRepo              *repo.AuthRepository
+	SyncedObjectRepo      *repo.SyncedObjectRepository
+	WebhookEventRepo      *repo.WebhookEventRepository
+	RestoreJobRepo        *repo.RestoreJobRepository
+	RestoreTaskRepo       *repo.RestoreTaskRepository
+	BackupRestoreLogsRepo *repo.BackupRestoreLogsRepository
 }
 
 func NewPostgresStore(dsn string, queryLogging bool) (*PostgresDb, error) {
@@ -28,15 +28,15 @@ func NewPostgresStore(dsn string, queryLogging bool) (*PostgresDb, error) {
 	}
 
 	return &PostgresDb{
-		DB:                 db,
-		CronJobRepo:        repo.NewCronJobRepository(db),
-		CredentialRepo:     repo.NewGoogleBackupCredentialRepository(db),
-		PolicyRepo:         repo.NewAutosyncBackupPolicyRepository(db),
-		TaskRepo:           repo.NewTaskRepository(db),
-		ScheduledTasksRepo: repo.NewScheduledTasksRepository(db),
-		AuthRepo:           repo.NewAuthRepository(db),
-		SyncedObjectRepo:   repo.NewSyncedObjectRepository(db),
-		WebhookEventRepo:   repo.NewWebhookEventRepository(db),
+		DB:                    db,
+		CronJobRepo:           repo.NewCronJobRepository(db),
+		CredentialRepo:        repo.NewGoogleBackupCredentialRepository(db),
+		PolicyRepo:            repo.NewAutosyncBackupPolicyRepository(db),
+		TaskRepo:              repo.NewTaskRepository(db),
+		ScheduledTasksRepo:    repo.NewScheduledTasksRepository(db),
+		AuthRepo:              repo.NewAuthRepository(db),
+		SyncedObjectRepo:      repo.NewSyncedObjectRepository(db),
+		WebhookEventRepo:      repo.NewWebhookEventRepository(db),
 		RestoreJobRepo:        repo.NewRestoreJobRepository(db),
 		RestoreTaskRepo:       repo.NewRestoreTaskRepository(db),
 		BackupRestoreLogsRepo: repo.NewBackupRestoreLogsRepository(db),

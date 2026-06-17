@@ -180,13 +180,14 @@ type DatabaseConnection struct {
 	Password     string `json:"password"`
 }
 
-// AutoSyncStatsResponse — Backup-Tools dashboard slice (connected accounts + last snapshot).
+// AutoSyncStatsResponse — Backup-Tools dashboard slice (connected accounts + sync summary).
 // Storage quota and plan/trial come from Satellite.
 type AutoSyncStatsResponse struct {
 	ConnectedAccounts           int        `json:"connected_accounts"`
 	ConnectedAccountsGrowthWeek int        `json:"connected_accounts_growth_this_week"`
 	LastSyncAt                  *time.Time `json:"last_sync_at,omitempty"`
-	LastSyncItemsSynced         int64      `json:"last_sync_items_synced"`
+	// LastSyncItemsSynced is total synced_objects for the user (Satellite dashboard "items_synced").
+	LastSyncItemsSynced int64 `json:"last_sync_items_synced"`
 
 	// Not needed for Satellite dashboard (commented — re-enable if required).
 	// ActiveSyncs int    `json:"active_syncs"`
@@ -2974,6 +2975,49 @@ func countConnectedAccountsForUser(gdb *gorm.DB, userID string) (total int, grow
 	return total, growthThisWeek, nil
 }
 
+func syncedObjectUserIDsForUser(gdb *gorm.DB, userID string) ([]string, error) {
+	ids := map[string]struct{}{userID: {}}
+
+	type mailboxRow struct {
+		Name  string
+		Email string
+	}
+	var rows []mailboxRow
+	err := gdb.Model(&repo.CronJobListingDB{}).
+		Select("name, COALESCE(input_data->>'email', '') AS email").
+		Where("user_id = ? AND COALESCE(placeholder, false) = ?", userID, false).
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		if name := strings.TrimSpace(r.Name); strings.Contains(name, "@") {
+			ids[name] = struct{}{}
+		}
+		if email := strings.TrimSpace(r.Email); strings.Contains(email, "@") {
+			ids[email] = struct{}{}
+		}
+	}
+
+	out := make([]string, 0, len(ids))
+	for id := range ids {
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+func countTotalSyncedItemsForUser(gdb *gorm.DB, userID string) (int64, error) {
+	userIDs, err := syncedObjectUserIDsForUser(gdb, userID)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	err = gdb.Model(&repo.SyncedObject{}).
+		Where("user_id IN ? AND deleted_at IS NULL AND object_key NOT LIKE ?", userIDs, "%/.file_placeholder").
+		Count(&total).Error
+	return total, err
+}
+
 func lastSyncSnapshotForUser(gdb *gorm.DB, userID string) (*time.Time, int64, error) {
 	var lastRun sql.NullTime
 	err := gdb.Model(&repo.CronJobListingDB{}).
@@ -2983,17 +3027,19 @@ func lastSyncSnapshotForUser(gdb *gorm.DB, userID string) (*time.Time, int64, er
 	if err != nil {
 		return nil, 0, err
 	}
+
+	var totalSynced int64
+	totalSynced, err = countTotalSyncedItemsForUser(gdb, userID)
+	if err != nil {
+		if lastRun.Valid {
+			return &lastRun.Time, 0, err
+		}
+		return nil, 0, err
+	}
+
 	if !lastRun.Valid {
-		return nil, 0, nil
+		return nil, totalSynced, nil
 	}
 	syncAt := lastRun.Time
-
-	var items int64
-	err = gdb.Model(&repo.SyncedObject{}).
-		Where("user_id = ? AND synced_at >= ? AND deleted_at IS NULL", userID, syncAt).
-		Count(&items).Error
-	if err != nil {
-		return &syncAt, 0, err
-	}
-	return &syncAt, items, nil
+	return &syncAt, totalSynced, nil
 }

@@ -59,6 +59,7 @@ func StartServer(db *db.PostgresDb, address string) {
 	// e.GET("/auth/microsoft/start", handler.HandleMicrosoftAuthRedirect)
 	e.GET("/autobackup/summary", handler.HandleAutomaticBackupSummary)
 	e.GET("/autosync/stats", handler.HandleAutomaticSyncStats)
+	e.GET("/autosync/dashboard-alerts", handler.HandleAutosyncDashboardAlerts)
 
 	backupRestore := e.Group("/backup-restore")
 	backupRestore.GET("/logs", handler.HandleBackupRestoreLogs)

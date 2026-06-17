@@ -426,6 +426,71 @@ paths:
               schema:
                 $ref: '#/components/schemas/UsersGroupsMailboxCredentialsResponse'
 
+  /autosync/stats:
+    get:
+      tags:
+        - Auto Sync
+      summary: Dashboard sync stats
+      description: |
+        Satellite dashboard top-row metrics: connected accounts, growth this week,
+        last sync time, and total synced items count.
+        Storage quota and plan/trial come from Satellite (not this endpoint).
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      responses:
+        '200':
+          description: Dashboard sync stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AutoSyncStatsResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /autosync/dashboard-alerts:
+    get:
+      tags:
+        - Auto Sync
+      summary: Dashboard alert cards
+      description: |
+        Satellite dashboard alert strip: auth errors, paused backups, and new mailboxes (24h).
+        Each section returns count plus mailbox rows grouped by email.
+        Personal accounts include all connected Google services (up to five jobs) under one item.
+        Re-auth detection uses missing Google refresh_token or StorX grant (credential_status only; no tokens returned).
+        Paused = mailbox has jobs and every job has active false.
+        New = mailbox first job created_at within the last 24 hours.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      responses:
+        '200':
+          description: Dashboard alert sections
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AutosyncDashboardAlertsResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /auto-sync/job/services:
     get:
       tags:
@@ -3227,7 +3292,7 @@ components:
       required: true
       schema:
         type: string
-      description: Satellite session token (_tokenKey). Required for /auto-sync/* policy routes and /restore/* (Satellite BFF).
+      description: Satellite session token (_tokenKey). Required for /auto-sync/*, /autosync/*, and /restore/* (Satellite BFF).
 
   securitySchemes:
     bearerAuth:
@@ -3696,6 +3761,93 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ServiceJobCountView'
+
+    AutoSyncStatsResponse:
+      type: object
+      description: Satellite dashboard sync summary (GET /autosync/stats).
+      properties:
+        connected_accounts:
+          type: integer
+          description: Distinct connected Google credentials linked to non-placeholder jobs.
+        connected_accounts_growth_this_week:
+          type: integer
+          description: Credentials created in the last 7 days.
+        last_sync_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Latest last_run across user autosync jobs.
+        last_sync_items_synced:
+          type: integer
+          format: int64
+          description: Total synced_objects for the user (all time).
+
+    AutosyncDashboardServiceView:
+      type: object
+      properties:
+        job_id:
+          type: integer
+        method:
+          type: string
+          enum: [gmail, google_drive, google_photos, google_contacts, google_calendar]
+        connected:
+          type: boolean
+        active:
+          type: boolean
+          nullable: true
+
+    AutosyncDashboardCredentialView:
+      type: object
+      properties:
+        credential_id:
+          type: integer
+        needs_reconnect_google_auth:
+          type: boolean
+
+    AutosyncDashboardMailboxView:
+      type: object
+      description: One mailbox row; services[] lists all Google backup jobs for that email.
+      properties:
+        email:
+          type: string
+        account_type:
+          type: string
+          enum: [corporate, individual]
+        credential_status:
+          type: string
+          enum: [healthy, re_auth_required]
+        connected_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Earliest job created_at for this mailbox.
+        credential:
+          $ref: '#/components/schemas/AutosyncDashboardCredentialView'
+        services:
+          type: array
+          items:
+            $ref: '#/components/schemas/AutosyncDashboardServiceView'
+
+    AutosyncDashboardAlertSection:
+      type: object
+      properties:
+        count:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AutosyncDashboardMailboxView'
+
+    AutosyncDashboardAlertsResponse:
+      type: object
+      description: Satellite dashboard alert cards (GET /autosync/dashboard-alerts).
+      properties:
+        re_auth_required:
+          $ref: '#/components/schemas/AutosyncDashboardAlertSection'
+        paused_backups:
+          $ref: '#/components/schemas/AutosyncDashboardAlertSection'
+        new_connected_accounts_24h:
+          $ref: '#/components/schemas/AutosyncDashboardAlertSection'
 
     AutosyncJobListResponse:
       type: object

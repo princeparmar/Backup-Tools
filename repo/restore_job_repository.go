@@ -51,8 +51,8 @@ type RestoreJobListingDB struct {
 	ProcessedCount uint `json:"processed_count" gorm:"default:0"`
 	FailedCount    uint `json:"failed_count" gorm:"default:0"`
 
-	Message        string `json:"message" gorm:"type:varchar(512)"`
-	MessageStatus  string `json:"message_status" gorm:"column:message_status;not null;default:info"`
+	Message       string `json:"message" gorm:"type:varchar(512)"`
+	MessageStatus string `json:"message_status" gorm:"column:message_status;not null;default:info"`
 
 	CancelledAt   *time.Time `json:"cancelled_at,omitempty"`
 	LastHeartBeat *time.Time `json:"last_heart_beat,omitempty"`

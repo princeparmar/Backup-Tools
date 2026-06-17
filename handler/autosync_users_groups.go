@@ -166,6 +166,43 @@ type UsersGroupsMailboxCredentialsResponse struct {
 	Credential UsersGroupsMailboxCredentialView `json:"credential"`
 }
 
+// AutosyncDashboardAlertsResponse is GET /autosync/dashboard-alerts (Satellite alert cards).
+type AutosyncDashboardAlertsResponse struct {
+	ReAuthRequired          AutosyncDashboardAlertSection `json:"re_auth_required"`
+	PausedBackups           AutosyncDashboardAlertSection `json:"paused_backups"`
+	NewConnectedAccounts24h AutosyncDashboardAlertSection `json:"new_connected_accounts_24h"`
+}
+
+// AutosyncDashboardAlertSection is one alert card: count + mailbox rows (services grouped per email).
+type AutosyncDashboardAlertSection struct {
+	Count int                            `json:"count"`
+	Items []AutosyncDashboardMailboxView `json:"items"`
+}
+
+// AutosyncDashboardMailboxView is one mailbox/account row with all connected services nested.
+type AutosyncDashboardMailboxView struct {
+	Email            string                          `json:"email"`
+	AccountType      string                          `json:"account_type"`
+	CredentialStatus string                          `json:"credential_status"`
+	ConnectedAt      *time.Time                      `json:"connected_at,omitempty"`
+	Credential       AutosyncDashboardCredentialView `json:"credential"`
+	Services         []AutosyncDashboardServiceView  `json:"services"`
+}
+
+// AutosyncDashboardCredentialView is Google OAuth reconnect state for the mailbox.
+type AutosyncDashboardCredentialView struct {
+	CredentialID             uint `json:"credential_id,omitempty"`
+	NeedsReconnectGoogleAuth bool `json:"needs_reconnect_google_auth"`
+}
+
+// AutosyncDashboardServiceView is one backup job under a mailbox.
+type AutosyncDashboardServiceView struct {
+	JobID     uint  `json:"job_id,omitempty"`
+	Method    string `json:"method"`
+	Connected bool  `json:"connected"`
+	Active    *bool `json:"active,omitempty"`
+}
+
 // ---------------------------------------------------------------------------
 // Shared domain helpers
 // ---------------------------------------------------------------------------
@@ -377,6 +414,136 @@ func buildUsersGroupsEntityServices(jobs []repo.CronJobListingDB, policies map[u
 		})
 	}
 	return out
+}
+
+func isMailboxFullyPaused(jobs []repo.CronJobListingDB) bool {
+	if len(jobs) == 0 {
+		return false
+	}
+	for i := range jobs {
+		if jobs[i].Active {
+			return false
+		}
+	}
+	return true
+}
+
+func mailboxFirstJobCreatedAt(jobs []repo.CronJobListingDB) time.Time {
+	var first time.Time
+	for i := range jobs {
+		if jobs[i].CreatedAt.IsZero() {
+			continue
+		}
+		if first.IsZero() || jobs[i].CreatedAt.Before(first) {
+			first = jobs[i].CreatedAt
+		}
+	}
+	return first
+}
+
+func indexUsersGroupsJobsByEmail(jobs []repo.CronJobListingDB) map[string][]repo.CronJobListingDB {
+	byEmail := make(map[string][]repo.CronJobListingDB)
+	for _, job := range filterUsersGroupsWorkspaceJobs(jobs) {
+		email := jobMailboxEmail(&job)
+		if email == "" {
+			continue
+		}
+		byEmail[email] = append(byEmail[email], job)
+	}
+	return byEmail
+}
+
+func buildAutosyncDashboardServiceViews(services []UsersGroupsEntityServiceView) []AutosyncDashboardServiceView {
+	out := make([]AutosyncDashboardServiceView, 0, len(services))
+	for i := range services {
+		out = append(out, AutosyncDashboardServiceView{
+			JobID:     services[i].JobID,
+			Method:    services[i].Method,
+			Connected: services[i].Connected,
+			Active:    services[i].Active,
+		})
+	}
+	return out
+}
+
+func buildAutosyncDashboardMailboxView(
+	email string,
+	emailJobs []repo.CronJobListingDB,
+	cronRepo *repo.CronJobRepository,
+	credByID map[uint]*repo.GoogleBackupCredentialDB,
+	policies map[uint]*repo.AutosyncBackupPolicyDB,
+) AutosyncDashboardMailboxView {
+	cred := credentialForEmailJobs(emailJobs, credByID)
+	needsGoogle, needsStorx := credentialReconnectFlagsFromJobs(cronRepo, cred, emailJobs)
+
+	credView := AutosyncDashboardCredentialView{NeedsReconnectGoogleAuth: needsGoogle}
+	if cred != nil {
+		credView.CredentialID = cred.ID
+	}
+
+	var connectedAt *time.Time
+	if first := mailboxFirstJobCreatedAt(emailJobs); !first.IsZero() {
+		t := first
+		connectedAt = &t
+	}
+
+	return AutosyncDashboardMailboxView{
+		Email:            email,
+		AccountType:      usersGroupsAccountType(email, cred),
+		CredentialStatus: usersGroupsCredentialStatus(needsGoogle, needsStorx),
+		ConnectedAt:      connectedAt,
+		Credential:       credView,
+		Services:         buildAutosyncDashboardServiceViews(buildUsersGroupsEntityServices(emailJobs, policies)),
+	}
+}
+
+func buildDashboardAlerts(
+	jobs []repo.CronJobListingDB,
+	cronRepo *repo.CronJobRepository,
+	credByID map[uint]*repo.GoogleBackupCredentialDB,
+	policies map[uint]*repo.AutosyncBackupPolicyDB,
+) AutosyncDashboardAlertsResponse {
+	byEmail := indexUsersGroupsJobsByEmail(jobs)
+	emails := make([]string, 0, len(byEmail))
+	for email := range byEmail {
+		emails = append(emails, email)
+	}
+	sort.Strings(emails)
+
+	reAuthItems := make([]AutosyncDashboardMailboxView, 0)
+	pausedItems := make([]AutosyncDashboardMailboxView, 0)
+	newItems := make([]AutosyncDashboardMailboxView, 0)
+	since := time.Now().Add(-24 * time.Hour)
+
+	for _, email := range emails {
+		emailJobs := byEmail[email]
+		mailbox := buildAutosyncDashboardMailboxView(email, emailJobs, cronRepo, credByID, policies)
+
+		if mailbox.CredentialStatus == usersGroupsCredentialReAuthRequired {
+			reAuthItems = append(reAuthItems, mailbox)
+		}
+		if isMailboxFullyPaused(emailJobs) {
+			pausedItems = append(pausedItems, mailbox)
+		}
+		if first := mailboxFirstJobCreatedAt(emailJobs); !first.IsZero() && !first.Before(since) {
+			newItems = append(newItems, mailbox)
+		}
+	}
+
+	return AutosyncDashboardAlertsResponse{
+		ReAuthRequired: AutosyncDashboardAlertSection{
+			Count: len(reAuthItems),
+			Items: reAuthItems,
+		},
+		PausedBackups: AutosyncDashboardAlertSection{
+			Count: len(pausedItems),
+			Items: pausedItems,
+		},
+		NewConnectedAccounts24h: AutosyncDashboardAlertSection{
+			Count: len(newItems),
+			Items: newItems,
+		},
+	}
 }
 
 func buildUsersGroupsEntities(
@@ -797,6 +964,28 @@ func handleUsersGroupsMailboxTab(c echo.Context, logMsg string, build func(email
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
+
+// HandleAutosyncDashboardAlerts returns counts for Satellite dashboard alert cards.
+func HandleAutosyncDashboardAlerts(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	ctx, userID, database, err := usersGroupsAuth(c)
+	if err != nil {
+		return usersGroupsUnauthorized(c, err)
+	}
+
+	jobs, err := database.CronJobRepo.ListJobsForUsersGroups(userID, nil)
+	if err != nil {
+		return usersGroupsInternalError(c, ctx, "Failed to list jobs for dashboard alerts", err)
+	}
+
+	policies := enrichUsersGroupsJobs(database, jobs)
+	credByID := loadCredentialsForJobs(database, jobs)
+
+	return c.JSON(http.StatusOK, buildDashboardAlerts(jobs, database.CronJobRepo, credByID, policies))
+}
 
 // HandleAutosyncUsersGroupsDomains lists unique domains for the domains dropdown.
 func HandleAutosyncUsersGroupsDomains(c echo.Context) error {

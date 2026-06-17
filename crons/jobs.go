@@ -32,10 +32,10 @@ type Processor interface {
 }
 
 var processorMap = map[string]Processor{
-	"gmail":         NewGmailProcessor(),
-	"outlook":       NewOutlookProcessor(),
-	"psql_database": NewPsqlDatabaseProcessor(),
-	"google_drive":  NewGoogleDriveProcessor(),
+	"gmail":           NewGmailProcessor(),
+	"outlook":         NewOutlookProcessor(),
+	"psql_database":   NewPsqlDatabaseProcessor(),
+	"google_drive":    NewGoogleDriveProcessor(),
 	"google_photos":   NewGooglePhotosProcessor(),
 	"google_contacts": NewGoogleContactsProcessor(),
 	"google_calendar": NewGoogleCalendarProcessor(),
