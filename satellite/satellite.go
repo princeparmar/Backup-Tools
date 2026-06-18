@@ -446,6 +446,73 @@ func RefreshStorxToken(ctx context.Context, userID, projectID, email string) (st
 	return grant, nil
 }
 
+// ClearGoogleRefreshToken tells Satellite to clear the stored Google OAuth refresh token for a user + mailbox email.
+func ClearGoogleRefreshToken(ctx context.Context, userID, email string) error {
+	userID = strings.TrimSpace(userID)
+	email = strings.TrimSpace(email)
+	if userID == "" || email == "" {
+		return fmt.Errorf("user_id and email are required to clear google refresh token")
+	}
+	if StorxSatelliteService == "" {
+		return fmt.Errorf("STORX_SATELLITE_SERVICE not set")
+	}
+	apiKey := utils.GetEnvWithKey("BACKUP_TOOLS_API_KEY")
+	if apiKey == "" {
+		return fmt.Errorf("BACKUP_TOOLS_API_KEY not set")
+	}
+
+	payload := struct {
+		UserID string `json:"user_id"`
+		Email  string `json:"email"`
+	}{
+		UserID: userID,
+		Email:  email,
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal clear google token payload: %w", err)
+	}
+
+	url := strings.TrimSuffix(StorxSatelliteService, "/") + "/api/v0/internal/google-token/clear"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return fmt.Errorf("create clear google token request: %w", err)
+	}
+	req.Header.Set("accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("X-User-Id", userID)
+	req.Header.Set("X-User-Email", email)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	res, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("clear google token request: %w", err)
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return fmt.Errorf("read clear google token response: %w", err)
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return fmt.Errorf("clear google token status %d: %s", res.StatusCode, string(body))
+	}
+
+	var response struct {
+		Error string `json:"error"`
+	}
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &response); err != nil {
+			return fmt.Errorf("parse clear google token response: %w", err)
+		}
+	}
+	if response.Error != "" {
+		return fmt.Errorf("clear google token: %s", response.Error)
+	}
+	return nil
+}
+
 // createJWTToken creates a JWT token for email notifications
 func createJWTToken(email, errorMsg, method, secretKey string) (string, error) {
 	claims := jwt.MapClaims{

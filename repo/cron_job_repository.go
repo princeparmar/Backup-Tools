@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/gorm"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
+	"github.com/StorX2-0/Backup-Tools/satellite"
 	gormio "gorm.io/gorm"
 )
 
@@ -956,31 +958,52 @@ func (r *CronJobRepository) DeactivateJobsForCredentialOrLegacyGoogleAuth(job *C
 	if job == nil {
 		return nil
 	}
+	var credID uint
 	if cid := JobCredentialID(job); cid > 0 {
+		credID = cid
 		if err := r.credRepo.ClearTokens(cid); err != nil {
 			return err
 		}
-		return r.DeactivateAllJobsForCredential(cid, message, false)
+		if err := r.DeactivateAllJobsForCredential(cid, message, false); err != nil {
+			return err
+		}
+	} else {
+		StripGmailRefreshTokenFromCronJobInputData(job)
+		job.Active = false
+		job.AutoDeactivated = true
+		job.Message = message
+		job.MessageStatus = JobMessageStatusError
+		patch := map[string]interface{}{
+			"active":           false,
+			"auto_deactivated": true,
+			"message":          message,
+			"message_status":   JobMessageStatusError,
+		}
+		if job.Status != JobStatusSuccess {
+			job.Status = JobStatusCancelled
+			patch["status"] = JobStatusCancelled
+		}
+		if job.InputData != nil {
+			patch["input_data"] = job.InputData
+		}
+		if err := r.UpdateCronJobByID(job.ID, patch); err != nil {
+			return err
+		}
 	}
-	StripGmailRefreshTokenFromCronJobInputData(job)
-	job.Active = false
-	job.AutoDeactivated = true
-	job.Message = message
-	job.MessageStatus = JobMessageStatusError
-	patch := map[string]interface{}{
-		"active":           false,
-		"auto_deactivated": true,
-		"message":          message,
-		"message_status":   JobMessageStatusError,
+
+	userID := strings.TrimSpace(job.UserID)
+	email := strings.TrimSpace(job.Name)
+	if credID > 0 && r.credRepo != nil {
+		if cred, err := r.credRepo.GetByID(credID); err == nil && cred != nil {
+			if e := strings.TrimSpace(cred.Email); e != "" {
+				email = e
+			}
+		}
 	}
-	if job.Status != JobStatusSuccess {
-		job.Status = JobStatusCancelled
-		patch["status"] = JobStatusCancelled
+	if userID != "" && email != "" {
+		_ = satellite.ClearGoogleRefreshToken(context.Background(), userID, email)
 	}
-	if job.InputData != nil {
-		patch["input_data"] = job.InputData
-	}
-	return r.UpdateCronJobByID(job.ID, patch)
+	return nil
 }
 
 // DeactivateAllJobsForCredential deactivates every job with credential_id and optionally clears credential tokens.
