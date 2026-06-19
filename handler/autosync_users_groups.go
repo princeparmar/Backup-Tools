@@ -90,12 +90,12 @@ type UsersGroupsPaginationView struct {
 
 // UsersGroupsEntityView is one mailbox row on GET /users-groups (list + side panel).
 type UsersGroupsEntityView struct {
-	Name             string                         `json:"name"`
-	Email            string                         `json:"email"`
-	AccountType      string                         `json:"account_type"`
-	CredentialStatus string                         `json:"credential_status"`
+	Name             string                           `json:"name"`
+	Email            string                           `json:"email"`
+	AccountType      string                           `json:"account_type"`
+	CredentialStatus string                           `json:"credential_status"`
 	Credential       UsersGroupsMailboxCredentialView `json:"credential"`
-	Services         []UsersGroupsEntityServiceView `json:"services"`
+	Services         []UsersGroupsEntityServiceView   `json:"services"`
 }
 
 // ---------------------------------------------------------------------------
@@ -197,10 +197,10 @@ type AutosyncDashboardCredentialView struct {
 
 // AutosyncDashboardServiceView is one backup job under a mailbox.
 type AutosyncDashboardServiceView struct {
-	JobID     uint  `json:"job_id,omitempty"`
+	JobID     uint   `json:"job_id,omitempty"`
 	Method    string `json:"method"`
-	Connected bool  `json:"connected"`
-	Active    *bool `json:"active,omitempty"`
+	Connected bool   `json:"connected"`
+	Active    *bool  `json:"active,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

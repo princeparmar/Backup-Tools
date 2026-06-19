@@ -65,8 +65,8 @@ var onboardingServiceToMethod = map[string]string{
 // sync_type is query only (?sync_type=daily). Future: outlook/psql via services[] in this JSON (legacy POST /auto-sync/job/:method is commented out).
 type GoogleBackupOnboardingRequest struct {
 	Services        []string `json:"services"`
-	Interval        string   `json:"interval"`
-	On              string   `json:"on"` // required for weekly/monthly; empty for 3h/12h; daily defaults to 12am
+	Interval        string   `json:"interval"` // required when creating a new policy; optional when policy_id selects an existing policy
+	On              string   `json:"on"`       // required for weekly/monthly new policies; optional with policy_id
 	GoogleEmail     string   `json:"google_email"`
 	AccountType     string   `json:"account_type"`
 	ProjectID       string   `json:"project_id"`
@@ -149,6 +149,22 @@ func (r *GoogleBackupOnboardingRequest) trim() {
 	r.SatelliteUserID = strings.TrimSpace(r.SatelliteUserID)
 }
 
+func (r *GoogleBackupOnboardingRequest) hasPolicyID() bool {
+	return r.PolicyID != nil && *r.PolicyID > 0
+}
+
+// onboardingNeedsScheduleInBody reports whether interval/on must come from the request
+// (auto-created first policy, or a new policy via policy_name). Existing policy_id skips this.
+func onboardingNeedsScheduleInBody(isFirstConnection bool, req *GoogleBackupOnboardingRequest) bool {
+	if isFirstConnection {
+		return true
+	}
+	if req.hasPolicyID() && strings.TrimSpace(req.PolicyName) == "" {
+		return false
+	}
+	return true
+}
+
 func (r *GoogleBackupOnboardingRequest) validate(userID string) error {
 	if r.RefreshToken == "" {
 		return errors.New("refresh_token is required")
@@ -159,7 +175,8 @@ func (r *GoogleBackupOnboardingRequest) validate(userID string) error {
 	if len(r.Services) == 0 {
 		return errors.New("services is required")
 	}
-	if r.Interval == "" {
+	// When selecting an existing policy (policy_id), interval/on come from that policy.
+	if !r.hasPolicyID() && r.Interval == "" {
 		return errors.New("interval is required")
 	}
 	if r.ProjectID == "" {
@@ -799,10 +816,6 @@ func handleSatelliteOnboardingCreate(c echo.Context, ctx context.Context, userID
 	if err != nil {
 		return err
 	}
-	schedule, err := parseOnboardingSchedule(req.Interval, req.On)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
-	}
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
 	emails, normErr := normalizeGmailEmails(req.Emails, req.GoogleEmail)
@@ -839,6 +852,17 @@ func handleSatelliteOnboardingCreate(c echo.Context, ctx context.Context, userID
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"error": "policy_id or policy_name is required for subsequent connections",
 		})
+	}
+
+	var schedule onboardingSchedule
+	if onboardingNeedsScheduleInBody(isFirstConnection, req) {
+		if strings.TrimSpace(req.Interval) == "" {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": "interval is required"})
+		}
+		schedule, err = parseOnboardingSchedule(req.Interval, req.On)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+		}
 	}
 
 	var batchPolicyID uint
