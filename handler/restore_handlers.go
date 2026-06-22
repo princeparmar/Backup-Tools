@@ -17,7 +17,7 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-// resolveManualRestoreStorx loads storx grant from DB only (no refresh/retry) for manual item restore.
+// resolveManualRestoreStorx loads storx grant from DB for manual item restore (one Satellite refresh on first uplink error).
 func resolveManualRestoreStorx(c echo.Context, method, loginID string) (*restore.StorxGrantSession, error) {
 	loginID = strings.TrimSpace(loginID)
 	if loginID == "" {

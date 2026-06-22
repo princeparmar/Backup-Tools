@@ -14,9 +14,13 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// StorxGrantSession holds the storx grant loaded from DB for manual item restore (no auto-refresh).
+// StorxGrantSession holds the storx grant loaded from DB for manual item restore.
+// On the first uplink/grant error per request it refreshes via Satellite once, then retries the download.
 type StorxGrantSession struct {
-	Grant string
+	Grant     string
+	store     *db.PostgresDb
+	cronJob   *repo.CronJobListingDB
+	refreshed bool
 }
 
 // NewStorxGrantSession loads storx from the linked backup job/credential only.
@@ -40,14 +44,35 @@ func NewStorxGrantSession(ctx context.Context, store *db.PostgresDb, userID, met
 	if grant == "" {
 		return nil, fmt.Errorf("storx access grant not found")
 	}
-	return &StorxGrantSession{Grant: grant}, nil
+	return &StorxGrantSession{
+		Grant:   grant,
+		store:   store,
+		cronJob: cronJob,
+	}, nil
 }
 
-// DownloadObject downloads one object from StorX using the DB grant (single attempt).
+// DownloadObject downloads one object from StorX using the DB grant.
+// On the first storx/uplink error in this session it calls Satellite storx-token/refresh once and retries.
 func (s *StorxGrantSession) DownloadObject(ctx context.Context, bucket, objectKey string) ([]byte, error) {
 	if s == nil {
 		return nil, fmt.Errorf("storx session required")
 	}
+	data, err := satellite.DownloadObject(ctx, s.Grant, bucket, objectKey)
+	if err == nil {
+		return data, nil
+	}
+	if s.refreshed || s.store == nil || s.cronJob == nil {
+		return nil, err
+	}
+	if !storxrefresh.IsUplinkError(err) {
+		return nil, err
+	}
+	s.refreshed = true
+	grant, refreshErr := storxrefresh.RefreshAndSave(ctx, s.store, s.cronJob)
+	if refreshErr != nil {
+		return nil, err
+	}
+	s.Grant = grant
 	return satellite.DownloadObject(ctx, s.Grant, bucket, objectKey)
 }
 
