@@ -164,14 +164,18 @@ func resolveDelegationSubject(mailbox, oauthAccountEmail string) (string, error)
 
 // delegationSubjectAllowed is false for consumer @gmail.com unless GMAIL_DELEGATION_ALLOW_GMAIL_COM=true.
 func delegationSubjectAllowed(email string) bool {
+	if !isConsumerGmailAddress(email) {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(utils.GetEnvWithKey("GMAIL_DELEGATION_ALLOW_GMAIL_COM")), "true")
+}
+
+func isConsumerGmailAddress(email string) bool {
 	e := strings.ToLower(strings.TrimSpace(email))
 	if e == "" || !strings.Contains(e, "@") {
 		return false
 	}
-	if strings.HasSuffix(e, "@gmail.com") || strings.HasSuffix(e, "@googlemail.com") {
-		return strings.EqualFold(strings.TrimSpace(utils.GetEnvWithKey("GMAIL_DELEGATION_ALLOW_GMAIL_COM")), "true")
-	}
-	return true
+	return strings.HasSuffix(e, "@gmail.com") || strings.HasSuffix(e, "@googlemail.com")
 }
 
 // GmailJobUsesDelegationWithoutOAuth is true when backup can skip OAuth refresh and use only domain-wide delegation.
@@ -226,6 +230,9 @@ func NewWorkspaceGmailSession(ctx context.Context, oauthAccessToken, oauthAccoun
 		}
 		return &WorkspaceGmailSession{Client: c, APIUser: apiUser}, nil
 	default:
+		if isConsumerGmailAddress(mailbox) {
+			return nil, fmt.Errorf("gmail backup for %q requires reconnecting the same Google account in your dashboard (personal Gmail does not support Workspace delegation)", mailbox)
+		}
 		c, err := NewGmailClientWithServiceAccountDelegation(ctx, mailbox)
 		if err != nil {
 			return nil, fmt.Errorf("delegated gmail access failed for %q (check domain-wide delegation + scopes): %w", mailbox, err)

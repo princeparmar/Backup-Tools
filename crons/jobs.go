@@ -523,6 +523,41 @@ func gmailRefreshOrTokenExchangeFailure(job *repo.CronJobListingDB, errMsg strin
 		strings.Contains(e, "error parsing response json")
 }
 
+func isPersonalGmailCronJob(job *repo.CronJobListingDB) bool {
+	if job == nil || job.Method != "gmail" {
+		return false
+	}
+	email := strings.TrimSpace(job.Name)
+	if job.InputData != nil && job.InputData.Json() != nil {
+		if s, ok := (*job.InputData.Json())["email"].(string); ok && strings.TrimSpace(s) != "" {
+			email = strings.TrimSpace(s)
+		}
+	}
+	e := strings.ToLower(email)
+	return strings.HasSuffix(e, "@gmail.com") || strings.HasSuffix(e, "@googlemail.com")
+}
+
+func isGmailOAuthOrDelegationFailure(errMsg string) bool {
+	e := strings.ToLower(errMsg)
+	return strings.Contains(e, "unauthorized_client") ||
+		(strings.Contains(e, "oauth2:") && strings.Contains(e, "cannot fetch token")) ||
+		strings.Contains(e, "delegated gmail access failed") ||
+		strings.Contains(e, "domain-wide delegation") ||
+		strings.Contains(e, "reconnecting the same google account")
+}
+
+func (a *AutosyncManager) deactivatePersonalGmailAuth(job *repo.CronJobListingDB, task *repo.TaskListingDB) {
+	if err := a.store.CronJobRepo.DeactivateJobsForCredentialOrLegacyGoogleAuth(job, cronJobPersonalGoogleAuthDeactivate); err != nil {
+		logger.Warn(context.Background(), "Failed to deactivate jobs after personal Gmail auth failure",
+			logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
+	}
+	repo.StripGmailRefreshTokenFromCronJobInputData(job)
+	job.Active = false
+	job.AutoDeactivated = true
+	job.Message = cronJobPersonalGoogleAuthDeactivate
+	task.Message = cronTaskPersonalGoogleAuthDeactivated
+}
+
 func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.CronJobListingDB, task *repo.TaskListingDB) string {
 	errMsg := processErr.Error()
 	errLower := strings.ToLower(errMsg)
@@ -537,10 +572,11 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.Cron
 	case handler.IsStorxUplinkError(processErr):
 		return cronEmailStorxRefreshRetry
 
-	case job != nil && job.Method == "gmail" &&
-		(strings.Contains(errLower, "unauthorized_client") ||
-			strings.Contains(errLower, "oauth2:") && strings.Contains(errLower, "cannot fetch token")):
-		// OAuth2 token endpoint failure: do not retry — one shot then final guidance.
+	case job != nil && job.Method == "gmail" && isPersonalGmailCronJob(job) &&
+		(isGmailOAuthOrDelegationFailure(errMsg) || gmailRefreshOrTokenExchangeFailure(job, errMsg)):
+		return cronEmailGoogleAuthFinal
+
+	case job != nil && job.Method == "gmail" && isGmailOAuthOrDelegationFailure(errMsg):
 		return cronEmailDelegationFinal
 
 	case job != nil && job.Method == "gmail" &&
@@ -593,10 +629,11 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		job.Message = "StorX access issue; refresh attempted during backup"
 		task.Message = processErr.Error()
 
-	case job != nil && job.Method == "gmail" &&
-		(strings.Contains(errLower, "unauthorized_client") ||
-			strings.Contains(errLower, "oauth2:") && strings.Contains(errLower, "cannot fetch token")):
-		// OAuth2 token endpoint failure: deactivate immediately (no per-task retry messaging).
+	case job != nil && job.Method == "gmail" && isPersonalGmailCronJob(job) &&
+		(isGmailOAuthOrDelegationFailure(errMsg) || gmailRefreshOrTokenExchangeFailure(job, errMsg)):
+		a.deactivatePersonalGmailAuth(job, task)
+
+	case job != nil && job.Method == "gmail" && isGmailOAuthOrDelegationFailure(errMsg):
 		job.Active = false
 		job.AutoDeactivated = true
 		job.Message = cronJobDelegationFinal

@@ -467,7 +467,8 @@ paths:
         Each section returns count plus mailbox rows grouped by email.
         Personal accounts include all connected Google services (up to five jobs) under one item.
         Re-auth detection uses missing Google refresh_token or StorX grant (credential_status only; no tokens returned).
-        Paused = mailbox has jobs and every job has active false.
+        Paused count = number of jobs with active false (per job, not per mailbox).
+        Paused items group paused jobs by mailbox email (only inactive services listed).
         New = mailbox first job created_at within the last 24 hours.
       parameters:
         - $ref: '#/components/parameters/tokenKeyHeader'

@@ -47,6 +47,8 @@ const (
 
 	cronJobGoogleAuthDeactivate = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
 
+	cronJobPersonalGoogleAuthDeactivate = "Google sign-in failed for this personal Gmail account. Reconnect your Google account in the dashboard and reactivate the backup."
+
 	cronJobGoogleInsufficientScope = "Gmail access for this backup is incomplete (missing Google permissions). Reconnect your Google account and grant all requested Gmail scopes, then reactivate the automatic backup."
 
 	cronJobOutlookAuthDeactivate = "Invalid Microsoft Outlook credentials. Please update the credentials and reactivate the automatic backup"
@@ -71,6 +73,8 @@ const (
 	cronTaskDelegationFinal = "Delegation denied by Google Workspace. Your admin must authorize this app for domain-wide delegation (Gmail scopes) for the affected users."
 
 	cronTaskGoogleAuthDeactivated = "Google Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
+
+	cronTaskPersonalGoogleAuthDeactivated = "Personal Gmail sign-in failed. Reconnect your Google account in the dashboard, then reactivate this backup."
 
 	cronTaskGoogleInsufficientScope = "Gmail backup stopped: the connected Google account does not include the required Gmail permissions. Reconnect Google with full app permissions and reactivate the job."
 

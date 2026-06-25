@@ -13,10 +13,10 @@ import (
 type restoreErrorKind string
 
 const (
-	restoreKindStorxMissing        restoreErrorKind = "storx_missing"
-	restoreKindStorxUplink         restoreErrorKind = "storx_uplink"
-	restoreKindStorxRefreshFailed  restoreErrorKind = "storx_refresh_failed"
-	restoreKindStorxRefreshLimit   restoreErrorKind = "storx_refresh_limit"
+	restoreKindStorxMissing       restoreErrorKind = "storx_missing"
+	restoreKindStorxUplink        restoreErrorKind = "storx_uplink"
+	restoreKindStorxRefreshFailed restoreErrorKind = "storx_refresh_failed"
+	restoreKindStorxRefreshLimit  restoreErrorKind = "storx_refresh_limit"
 	restoreKindGoogleAuth         restoreErrorKind = "google_auth"
 	restoreKindGoogleInsufficient restoreErrorKind = "google_insufficient_scope"
 	restoreKindGoogleDelegation   restoreErrorKind = "google_delegation"
@@ -31,7 +31,7 @@ type restoreErrorOutcome struct {
 	ClearGoogle bool
 }
 
-func classifyRestoreError(method string, processErr error) restoreErrorOutcome {
+func classifyRestoreError(method, loginID string, processErr error) restoreErrorOutcome {
 	if processErr == nil {
 		return restoreErrorOutcome{
 			Kind:        restoreKindGeneric,
@@ -75,9 +75,16 @@ func classifyRestoreError(method string, processErr error) restoreErrorOutcome {
 			TaskMessage: restoreTaskStorxMissing,
 		}
 
-	case repo.IsGoogleMediaOrGmailMethod(method) &&
-		(strings.Contains(errLower, "unauthorized_client") ||
-			strings.Contains(errLower, "oauth2:") && strings.Contains(errLower, "cannot fetch token")):
+	case repo.IsGoogleMediaOrGmailMethod(method) && method == "gmail" && isConsumerGmailLogin(loginID) &&
+		(isGmailOAuthOrDelegationFailureRestore(errMsg) || googleAuthImmediateFailure(method, errMsg)):
+		return restoreErrorOutcome{
+			Kind:        restoreKindGoogleAuth,
+			JobMessage:  restoreJobGoogleAuth,
+			TaskMessage: restoreTaskGoogleAuth,
+			ClearGoogle: true,
+		}
+
+	case repo.IsGoogleMediaOrGmailMethod(method) && isGmailOAuthOrDelegationFailureRestore(errMsg):
 		return restoreErrorOutcome{
 			Kind:        restoreKindGoogleDelegation,
 			JobMessage:  restoreJobDelegation,
@@ -148,6 +155,23 @@ func googleAuthImmediateFailure(method, errMsg string) bool {
 		strings.Contains(e, "error parsing response json")
 }
 
+func isConsumerGmailLogin(loginID string) bool {
+	e := strings.ToLower(strings.TrimSpace(loginID))
+	if e == "" || !strings.Contains(e, "@") {
+		return false
+	}
+	return strings.HasSuffix(e, "@gmail.com") || strings.HasSuffix(e, "@googlemail.com")
+}
+
+func isGmailOAuthOrDelegationFailureRestore(errMsg string) bool {
+	e := strings.ToLower(errMsg)
+	return strings.Contains(e, "unauthorized_client") ||
+		(strings.Contains(e, "oauth2:") && strings.Contains(e, "cannot fetch token")) ||
+		strings.Contains(e, "delegated gmail access failed") ||
+		strings.Contains(e, "domain-wide delegation") ||
+		strings.Contains(e, "reconnecting the same google account")
+}
+
 func linkedCronJob(store *db.PostgresDb, restoreJob *repo.RestoreJobListingDB) *repo.CronJobListingDB {
 	if store == nil || restoreJob == nil || restoreJob.CronJobID == 0 {
 		return nil
@@ -187,7 +211,7 @@ func applyRestoreGoogleTokenCleanup(ctx context.Context, store *db.PostgresDb, r
 }
 
 func handleRestoreFailure(ctx context.Context, store *db.PostgresDb, restoreJob *repo.RestoreJobListingDB, processErr error) restoreErrorOutcome {
-	outcome := classifyRestoreError(restoreJob.Method, processErr)
+	outcome := classifyRestoreError(restoreJob.Method, restoreJob.LoginID, processErr)
 
 	logger.Warn(ctx, "Restore failure classified",
 		logger.Int("restore_job_id", int(restoreJob.ID)),

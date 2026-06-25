@@ -416,16 +416,27 @@ func buildUsersGroupsEntityServices(jobs []repo.CronJobListingDB, policies map[u
 	return out
 }
 
-func isMailboxFullyPaused(jobs []repo.CronJobListingDB) bool {
-	if len(jobs) == 0 {
-		return false
-	}
+func countPausedJobs(jobs []repo.CronJobListingDB) int {
+	n := 0
 	for i := range jobs {
-		if jobs[i].Active {
-			return false
+		if !jobs[i].Active {
+			n++
 		}
 	}
-	return true
+	return n
+}
+
+func filterPausedDashboardServices(services []AutosyncDashboardServiceView) []AutosyncDashboardServiceView {
+	out := make([]AutosyncDashboardServiceView, 0, len(services))
+	for i := range services {
+		if !services[i].Connected {
+			continue
+		}
+		if services[i].Active != nil && !*services[i].Active {
+			out = append(out, services[i])
+		}
+	}
+	return out
 }
 
 func mailboxFirstJobCreatedAt(jobs []repo.CronJobListingDB) time.Time {
@@ -512,6 +523,7 @@ func buildDashboardAlerts(
 
 	reAuthItems := make([]AutosyncDashboardMailboxView, 0)
 	pausedItems := make([]AutosyncDashboardMailboxView, 0)
+	pausedJobCount := 0
 	newItems := make([]AutosyncDashboardMailboxView, 0)
 	since := time.Now().Add(-24 * time.Hour)
 
@@ -522,7 +534,9 @@ func buildDashboardAlerts(
 		if mailbox.CredentialStatus == usersGroupsCredentialReAuthRequired {
 			reAuthItems = append(reAuthItems, mailbox)
 		}
-		if isMailboxFullyPaused(emailJobs) {
+		if n := countPausedJobs(emailJobs); n > 0 {
+			pausedJobCount += n
+			mailbox.Services = filterPausedDashboardServices(mailbox.Services)
 			pausedItems = append(pausedItems, mailbox)
 		}
 		if first := mailboxFirstJobCreatedAt(emailJobs); !first.IsZero() && !first.Before(since) {
@@ -536,7 +550,7 @@ func buildDashboardAlerts(
 			Items: reAuthItems,
 		},
 		PausedBackups: AutosyncDashboardAlertSection{
-			Count: len(pausedItems),
+			Count: pausedJobCount,
 			Items: pausedItems,
 		},
 		NewConnectedAccounts24h: AutosyncDashboardAlertSection{
