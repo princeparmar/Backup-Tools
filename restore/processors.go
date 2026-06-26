@@ -83,7 +83,16 @@ func (d *driveProcessor) Config() ServiceConfig {
 	cfg, _ := ConfigForMethod("google_drive")
 	return cfg
 }
-func (d *driveProcessor) ShouldRestoreKey(key string) bool { return !ShouldSkipObjectKey(key) }
+func (d *driveProcessor) ShouldRestoreKey(key string) bool {
+	if ShouldSkipObjectKey(key) {
+		return false
+	}
+	// Cron split layout: restore from meta only (data pulled via data_object_key).
+	if google.IsDriveIDBasedDataKey(key) {
+		return false
+	}
+	return true
+}
 func (d *driveProcessor) Setup(ctx context.Context, deps *RestoreDeps) error {
 	if deps.AuthMode == RestoreAuthModeDWD {
 		srv, err := google.GetDriveServiceForRestoreDWD(ctx, deps.LoginID)

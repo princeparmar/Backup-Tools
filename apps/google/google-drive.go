@@ -1896,6 +1896,109 @@ type DriveBackupItem struct {
 	Content  []byte            `json:"content,omitempty"`
 }
 
+// DriveCronBackupMeta is JSON at {email}/meta/{fileId}.json (cron autosync).
+type DriveCronBackupMeta struct {
+	FileID           string            `json:"file_id"`
+	Name             string            `json:"name"`
+	MimeType         string            `json:"mime_type"`
+	Parents          []string          `json:"parents,omitempty"`
+	ModifiedTime     string            `json:"modified_time,omitempty"`
+	Version          int64             `json:"version,omitempty"`
+	Md5Checksum      string            `json:"md5_checksum,omitempty"`
+	DriveID          string            `json:"drive_id,omitempty"`
+	LocationType     string            `json:"location_type,omitempty"`
+	Permissions      []DrivePermission `json:"permissions,omitempty"`
+	Starred          bool              `json:"starred"`
+	Trashed          bool              `json:"trashed"`
+	RemovedFromDrive bool              `json:"removed_from_drive,omitempty"`
+	DeletedAt        string            `json:"deleted_at,omitempty"`
+	LastKnownParents []string          `json:"last_known_parents,omitempty"`
+	IsFolder         bool              `json:"is_folder"`
+	DataObjectKey    string            `json:"data_object_key,omitempty"`
+	ExportMimeType   string            `json:"export_mime_type,omitempty"`
+	UpdatedAt        string            `json:"updated_at,omitempty"`
+}
+
+// SanitizeDrivePathSegment makes file/folder names safe for vault object keys.
+func SanitizeDrivePathSegment(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "/", "_")
+	s = strings.ReplaceAll(s, "\\", "_")
+	return s
+}
+
+// DriveBackupDisplayName returns a vault-safe display name (adds Google Apps extensions).
+func DriveBackupDisplayName(name, mimeType string) string {
+	name = SanitizeDrivePathSegment(name)
+	if name == "" {
+		name = "untitled"
+	}
+	return addGoogleAppsFileExtension(name, mimeType)
+}
+
+// DriveIDBasedMetaKey is cron metadata: {email}/meta/{fileId}_{displayName}.json
+func DriveIDBasedMetaKey(email, fileID, displayName string) string {
+	return fmt.Sprintf("%s/meta/%s_%s.json",
+		strings.TrimSpace(email),
+		strings.TrimSpace(fileID),
+		SanitizeDrivePathSegment(displayName),
+	)
+}
+
+// DriveLegacyBareMetaKey is older cron layout {email}/meta/{fileId}.json (still recognized).
+func DriveLegacyBareMetaKey(email, fileID string) string {
+	return fmt.Sprintf("%s/meta/%s.json", strings.TrimSpace(email), strings.TrimSpace(fileID))
+}
+
+// DriveIDBasedDataKey is cron file bytes: {email}/data/{fileId}_{displayName}
+func DriveIDBasedDataKey(email, fileID, displayName string) string {
+	return fmt.Sprintf("%s/data/%s_%s",
+		strings.TrimSpace(email),
+		strings.TrimSpace(fileID),
+		SanitizeDrivePathSegment(displayName),
+	)
+}
+
+// DriveLegacyBareDataKey is older cron layout {email}/data/{fileId} (still recognized).
+func DriveLegacyBareDataKey(email, fileID string) string {
+	return fmt.Sprintf("%s/data/%s", strings.TrimSpace(email), strings.TrimSpace(fileID))
+}
+
+// IsDriveIDBasedMetaKey reports cron meta paths.
+func IsDriveIDBasedMetaKey(key string) bool {
+	key = strings.TrimSpace(key)
+	return strings.Contains(key, "/meta/") && strings.HasSuffix(key, ".json")
+}
+
+// IsDriveIDBasedDataKey reports cron data paths (meta/data split layout).
+func IsDriveIDBasedDataKey(key string) bool {
+	key = strings.TrimSpace(key)
+	return strings.Contains(key, "/data/") && !strings.HasSuffix(key, ".json")
+}
+
+// CronMetaToDriveFileMetadata maps cron meta JSON to restore metadata.
+func CronMetaToDriveFileMetadata(m *DriveCronBackupMeta, objectKey string) DriveFileMetadata {
+	if m == nil {
+		return DriveFileMetadata{}
+	}
+	fileType := "file"
+	if m.IsFolder {
+		fileType = "folder"
+	}
+	return DriveFileMetadata{
+		Key:          objectKey,
+		Type:         fileType,
+		Name:         m.Name,
+		MimeType:     m.MimeType,
+		Parents:      m.Parents,
+		DriveID:      m.DriveID,
+		LocationType: m.LocationType,
+		Permissions:  m.Permissions,
+		ModifiedTime: m.ModifiedTime,
+		Starred:      m.Starred,
+	}
+}
+
 func RestoreFromBackup(ctx context.Context, srv *drive.Service, userEmail string, metadataJSON, fileBytes []byte) error {
 	metadata, err := ParseBackupMetadata(metadataJSON)
 	if err != nil {

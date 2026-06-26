@@ -49,23 +49,64 @@ func RestoreGmailKey(ctx context.Context, accessGrant string, client *google.Gma
 
 // RestoreDriveKeyWithSession restores one Drive object using DB storx grant (manual restore).
 func RestoreDriveKeyWithSession(ctx context.Context, sess *StorxGrantSession, srv *drive.Service, userEmail, objectKey string) error {
-	data, err := sess.DownloadObject(ctx, satellite.ReserveBucket_Drive, objectKey)
-	if err != nil {
-		return err
-	}
-	var backupItem google.DriveBackupItem
-	if err := json.Unmarshal(data, &backupItem); err != nil {
-		return fmt.Errorf("parse drive backup: %w", err)
-	}
-	metadataJSON, _ := json.Marshal(backupItem.Metadata)
-	return RetryGoogle(ctx, func() error {
-		return google.RestoreFromBackup(ctx, srv, userEmail, metadataJSON, backupItem.Content)
-	})
+	return restoreDriveObjectKey(ctx, func(bucket, key string) ([]byte, error) {
+		return sess.DownloadObject(ctx, bucket, key)
+	}, srv, userEmail, objectKey)
 }
 
 // RestoreDriveKey restores one Drive backup object.
 func RestoreDriveKey(ctx context.Context, accessGrant string, srv *drive.Service, userEmail, objectKey string) error {
-	data, err := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Drive, objectKey)
+	return restoreDriveObjectKey(ctx, func(bucket, key string) ([]byte, error) {
+		return satellite.DownloadObject(ctx, accessGrant, bucket, key)
+	}, srv, userEmail, objectKey)
+}
+
+func restoreDriveObjectKey(
+	ctx context.Context,
+	download func(bucket, key string) ([]byte, error),
+	srv *drive.Service,
+	userEmail, objectKey string,
+) error {
+	if google.IsDriveIDBasedMetaKey(objectKey) {
+		metaBytes, err := download(satellite.ReserveBucket_Drive, objectKey)
+		if err != nil {
+			return err
+		}
+		var meta google.DriveCronBackupMeta
+		if err := json.Unmarshal(metaBytes, &meta); err != nil {
+			return fmt.Errorf("parse drive cron meta: %w", err)
+		}
+		if meta.RemovedFromDrive {
+			return fmt.Errorf("skip removed drive file %s", strings.TrimSpace(meta.FileID))
+		}
+		dataKey := strings.TrimSpace(meta.DataObjectKey)
+		if dataKey == "" && strings.TrimSpace(meta.FileID) != "" {
+			displayName := google.DriveBackupDisplayName(meta.Name, meta.MimeType)
+			if displayName != "" && displayName != "untitled" {
+				dataKey = google.DriveIDBasedDataKey(strings.TrimSpace(userEmail), meta.FileID, displayName)
+			}
+			if dataKey == "" {
+				dataKey = google.DriveLegacyBareDataKey(strings.TrimSpace(userEmail), meta.FileID)
+			}
+		}
+		if dataKey == "" {
+			return fmt.Errorf("missing data_object_key for %s", objectKey)
+		}
+		fileBytes, err := download(satellite.ReserveBucket_Drive, dataKey)
+		if err != nil {
+			return err
+		}
+		driveMeta := google.CronMetaToDriveFileMetadata(&meta, dataKey)
+		metadataJSON, err := json.Marshal(driveMeta)
+		if err != nil {
+			return err
+		}
+		return RetryGoogle(ctx, func() error {
+			return google.RestoreFromBackup(ctx, srv, userEmail, metadataJSON, fileBytes)
+		})
+	}
+
+	data, err := download(satellite.ReserveBucket_Drive, objectKey)
 	if err != nil {
 		return err
 	}

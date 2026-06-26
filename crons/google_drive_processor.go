@@ -126,28 +126,6 @@ func runGoogleDriveAutosync(input ProcessorInput) error {
 	})
 }
 
-type driveMetaObject struct {
-	FileID           string                   `json:"file_id"`
-	Name             string                   `json:"name"`
-	MimeType         string                   `json:"mime_type"`
-	Parents          []string                 `json:"parents,omitempty"`
-	ModifiedTime     string                   `json:"modified_time,omitempty"`
-	Version          int64                    `json:"version,omitempty"`
-	Md5Checksum      string                   `json:"md5_checksum,omitempty"`
-	DriveID          string                   `json:"drive_id,omitempty"`
-	LocationType     string                   `json:"location_type,omitempty"`
-	Permissions      []google.DrivePermission `json:"permissions,omitempty"`
-	Starred          bool                     `json:"starred"`
-	Trashed          bool                     `json:"trashed"`
-	RemovedFromDrive bool                     `json:"removed_from_drive,omitempty"`
-	DeletedAt        string                   `json:"deleted_at,omitempty"`
-	LastKnownParents []string                 `json:"last_known_parents,omitempty"`
-	IsFolder         bool                     `json:"is_folder"`
-	DataObjectKey    string                   `json:"data_object_key,omitempty"`
-	ExportMimeType   string                   `json:"export_mime_type,omitempty"`
-	UpdatedAt        string                   `json:"updated_at,omitempty"`
-}
-
 func createDriveServiceWithAccessToken(ctx context.Context, accessToken string) (*drive.Service, error) {
 	b, err := os.ReadFile("credentials.json")
 	if err != nil {
@@ -259,9 +237,10 @@ func syncDriveFileByID(ctx context.Context, input ProcessorInput, task *repo.Sch
 			shortcutTargetCache[targetID] = file
 		}
 	}
-	metaKey := fmt.Sprintf("%s/meta/%s.json", task.LoginId, file.Id)
-	dataKey := fmt.Sprintf("%s/data/%s", task.LoginId, file.Id)
-	meta := driveMetaObject{
+	displayName := google.DriveBackupDisplayName(file.Name, file.MimeType)
+	metaKey := google.DriveIDBasedMetaKey(task.LoginId, file.Id, displayName)
+	dataKey := google.DriveIDBasedDataKey(task.LoginId, file.Id, displayName)
+	meta := google.DriveCronBackupMeta{
 		FileID:        file.Id,
 		Name:          file.Name,
 		MimeType:      file.MimeType,
@@ -285,7 +264,7 @@ func syncDriveFileByID(ctx context.Context, input ProcessorInput, task *repo.Sch
 		return nil
 	}
 
-	metaChangedOnly, err := shouldSkipDriveContentUpload(ctx, task, metaKey, meta)
+	metaChangedOnly, err := shouldSkipDriveContentUpload(ctx, task, task.LoginId, file.Id, displayName, meta)
 	if err != nil {
 		logger.Warn(ctx, "drive metadata compare failed; continuing with full upload", logger.String("file_id", file.Id), logger.ErrorField(err))
 	}
@@ -322,13 +301,13 @@ func retrySyncDriveFileByID(ctx context.Context, input ProcessorInput, task *rep
 	return lastErr
 }
 
-func shouldSkipDriveContentUpload(ctx context.Context, task *repo.ScheduledTasks, metaKey string, next driveMetaObject) (bool, error) {
-	oldBytes, err := satellite.DownloadObject(ctx, task.StorxToken, satellite.ReserveBucket_Drive, metaKey)
+func shouldSkipDriveContentUpload(ctx context.Context, task *repo.ScheduledTasks, loginID, fileID, displayName string, next google.DriveCronBackupMeta) (bool, error) {
+	oldBytes, err := downloadDriveCronMetaBytes(ctx, task, loginID, fileID, displayName)
 	if err != nil {
 		// Missing previous metadata/object is expected on first sync.
 		return false, nil
 	}
-	var prev driveMetaObject
+	var prev google.DriveCronBackupMeta
 	if err := json.Unmarshal(oldBytes, &prev); err != nil {
 		return false, err
 	}
@@ -343,6 +322,23 @@ func shouldSkipDriveContentUpload(ctx context.Context, task *repo.ScheduledTasks
 		strings.TrimSpace(prev.ModifiedTime) == strings.TrimSpace(next.ModifiedTime) &&
 		strings.TrimSpace(prev.Md5Checksum) == strings.TrimSpace(next.Md5Checksum)
 	return contentSame, nil
+}
+
+func downloadDriveCronMetaBytes(ctx context.Context, task *repo.ScheduledTasks, loginID, fileID, displayName string) ([]byte, error) {
+	candidates := make([]string, 0, 2)
+	if strings.TrimSpace(displayName) != "" {
+		candidates = append(candidates, google.DriveIDBasedMetaKey(loginID, fileID, displayName))
+	}
+	candidates = append(candidates, google.DriveLegacyBareMetaKey(loginID, fileID))
+	var lastErr error
+	for _, key := range candidates {
+		b, err := satellite.DownloadObject(ctx, task.StorxToken, satellite.ReserveBucket_Drive, key)
+		if err == nil {
+			return b, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
 }
 
 func downloadDriveFileContent(service *drive.Service, file *drive.File) ([]byte, string, error) {
@@ -379,15 +375,22 @@ func downloadDriveFileContent(service *drive.Service, file *drive.File) ([]byte,
 }
 
 func writeDriveRemovedMetadata(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, fileID string) error {
-	metaKey := fmt.Sprintf("%s/meta/%s.json", task.LoginId, fileID)
 	var lastKnownParents []string
-	if oldBytes, err := satellite.DownloadObject(ctx, task.StorxToken, satellite.ReserveBucket_Drive, metaKey); err == nil {
-		var prev driveMetaObject
-		if err := json.Unmarshal(oldBytes, &prev); err == nil && len(prev.Parents) > 0 {
-			lastKnownParents = prev.Parents
+	var displayName string
+	if oldBytes, err := downloadDriveCronMetaBytes(ctx, task, task.LoginId, fileID, ""); err == nil {
+		var prev google.DriveCronBackupMeta
+		if err := json.Unmarshal(oldBytes, &prev); err == nil {
+			if len(prev.Parents) > 0 {
+				lastKnownParents = prev.Parents
+			}
+			displayName = google.DriveBackupDisplayName(prev.Name, prev.MimeType)
 		}
 	}
-	meta := driveMetaObject{
+	if strings.TrimSpace(displayName) == "" || displayName == "untitled" {
+		displayName = fileID
+	}
+	metaKey := google.DriveIDBasedMetaKey(task.LoginId, fileID, displayName)
+	meta := google.DriveCronBackupMeta{
 		FileID:           fileID,
 		RemovedFromDrive: true,
 		Trashed:          true,
