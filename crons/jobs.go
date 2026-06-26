@@ -41,6 +41,16 @@ var processorMap = map[string]Processor{
 	"google_calendar": NewGoogleCalendarProcessor(),
 }
 
+// memoryHeavyMethods — only one such backup at a time process-wide (avoids OOM from parallel Drive/Photos/Gmail).
+var memoryHeavyMethods = map[string]struct{}{
+	"google_drive":  {},
+	"google_photos": {},
+	"gmail":         {},
+}
+
+// heavyBackupSlot limits concurrent memory-heavy autosync processors (buffer 1 = strictly serial).
+var heavyBackupSlot = make(chan struct{}, 1)
+
 type AutosyncManager struct {
 	store *db.PostgresDb
 }
@@ -58,7 +68,9 @@ func createCronContext(operation string) context.Context {
 }
 
 func (a *AutosyncManager) Start() {
-	c := cron.New()
+	// DelayIfStillRunning: a Drive/Gmail backup can exceed 1m; without this, overlapping
+	// process_tasks goroutines run multiple syncs in parallel and can OOM the host.
+	c := cron.New(cron.WithChain(cron.DelayIfStillRunning(cron.DefaultLogger)))
 
 	// Create tasks for pending jobs
 	c.AddFunc("@every 1m", func() {
@@ -283,6 +295,11 @@ func (a *AutosyncManager) processTask(ctx context.Context, task *repo.TaskListin
 		logger.Int("task_id", int(task.ID)),
 		logger.String("method", job.Method),
 	)
+
+	if _, heavy := memoryHeavyMethods[job.Method]; heavy {
+		heavyBackupSlot <- struct{}{}
+		defer func() { <-heavyBackupSlot }()
+	}
 
 	recovery := handler.NewStorxRecovery(a.store, job)
 	if strings.TrimSpace(a.store.CronJobRepo.ResolvedStorxToken(job)) == "" {

@@ -19,7 +19,7 @@ func NewRestoreManager(store *db.PostgresDb) *RestoreManager {
 }
 
 func (m *RestoreManager) Start() {
-	c := cron.New()
+	c := cron.New(cron.WithChain(cron.DelayIfStillRunning(cron.DefaultLogger)))
 	c.AddFunc("@every 30s", func() {
 		ctx := createRestoreCronContext()
 		if err := restore.ProcessRestoreJobs(ctx, m.store); err != nil {
