@@ -118,7 +118,7 @@ func HandleListCalendarEvents(c echo.Context) error {
 
 	for i := range page.Events {
 		item := &page.Events[i]
-		item.Synced = google.IsCalendarEventSynced(syncedMap, userDetails.Email, calendarID, item.ID)
+		item.Synced = google.IsCalendarEventSynced(syncedMap, userDetails.Email, calendarID, item.ID, "", item.Summary)
 	}
 
 	return c.JSON(http.StatusOK, page)

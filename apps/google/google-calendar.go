@@ -206,13 +206,45 @@ func SanitizeCalendarPathSegment(s string) string {
 	return s
 }
 
-// CalendarMetaObjectKey returns {email}/calendar/calendars/{calendarId}.json
-func CalendarMetaObjectKey(email, calendarID string) string {
-	return fmt.Sprintf("%s/calendar/calendars/%s.json", strings.TrimSpace(email), SanitizeCalendarPathSegment(calendarID))
+// CalendarBackupDisplayName returns a vault-safe calendar or event summary for object keys.
+func CalendarBackupDisplayName(summary string) string {
+	summary = SanitizeCalendarPathSegment(summary)
+	if summary == "" {
+		return "untitled"
+	}
+	return summary
 }
 
-// CalendarObjectKey returns {email}/calendar/events/{calendarId}/{eventId}.json
-func CalendarObjectKey(email, calendarID, eventID string) string {
+// CalendarMetaObjectKey returns {email}/calendar/calendars/{calendarId}_{summary}.json
+func CalendarMetaObjectKey(email, calendarID, summary string) string {
+	return fmt.Sprintf("%s/calendar/calendars/%s_%s.json",
+		strings.TrimSpace(email),
+		SanitizeCalendarPathSegment(calendarID),
+		CalendarBackupDisplayName(summary),
+	)
+}
+
+// CalendarLegacyBareMetaKey is older layout {email}/calendar/calendars/{calendarId}.json (still recognized).
+func CalendarLegacyBareMetaKey(email, calendarID string) string {
+	return fmt.Sprintf("%s/calendar/calendars/%s.json",
+		strings.TrimSpace(email),
+		SanitizeCalendarPathSegment(calendarID),
+	)
+}
+
+// CalendarObjectKey returns {email}/calendar/events/{calendarId}_{calSummary}/{eventId}_{eventSummary}.json
+func CalendarObjectKey(email, calendarID, calendarSummary, eventID, eventSummary string) string {
+	return fmt.Sprintf("%s/calendar/events/%s_%s/%s_%s.json",
+		strings.TrimSpace(email),
+		SanitizeCalendarPathSegment(calendarID),
+		CalendarBackupDisplayName(calendarSummary),
+		SanitizeCalendarPathSegment(eventID),
+		CalendarBackupDisplayName(eventSummary),
+	)
+}
+
+// CalendarLegacyBareEventKey is older layout {email}/calendar/events/{calendarId}/{eventId}.json (still recognized).
+func CalendarLegacyBareEventKey(email, calendarID, eventID string) string {
 	return fmt.Sprintf("%s/calendar/events/%s/%s.json",
 		strings.TrimSpace(email),
 		SanitizeCalendarPathSegment(calendarID),
@@ -220,27 +252,82 @@ func CalendarObjectKey(email, calendarID, eventID string) string {
 	)
 }
 
+// ParseCalendarIDFromPathSegment extracts calendarId from a path segment ({id} or {id}_{summary}).
+func ParseCalendarIDFromPathSegment(segment string) string {
+	segment = SanitizeCalendarPathSegment(segment)
+	if idx := strings.Index(segment, "_"); idx > 0 {
+		return segment[:idx]
+	}
+	return segment
+}
+
+// ParseEventIDFromPathSegment extracts eventId from a path segment ({id} or {id}_{summary}).
+func ParseEventIDFromPathSegment(segment string) string {
+	segment = strings.TrimSpace(segment)
+	if idx := strings.Index(segment, "_"); idx > 0 {
+		return segment[:idx]
+	}
+	return segment
+}
+
 // IsCalendarEventSynced checks whether an event object exists in synced_objects paths.
-func IsCalendarEventSynced(syncedMap map[string]bool, email, calendarID, eventID string) bool {
+func IsCalendarEventSynced(syncedMap map[string]bool, email, calendarID, eventID, calendarSummary, eventSummary string) bool {
 	if syncedMap == nil {
 		return false
 	}
-	return syncedMap[CalendarObjectKey(email, calendarID, eventID)]
+	if syncedMap[CalendarLegacyBareEventKey(email, calendarID, eventID)] {
+		return true
+	}
+	if strings.TrimSpace(calendarSummary) != "" || strings.TrimSpace(eventSummary) != "" {
+		if syncedMap[CalendarObjectKey(email, calendarID, calendarSummary, eventID, eventSummary)] {
+			return true
+		}
+	}
+	return calendarEventSyncedByScan(syncedMap, email, calendarID, eventID)
 }
 
-// BuildCalendarSyncedEventIDSet builds eventId set from synced keys under email/calendar/events/{calendarId}/.
-func BuildCalendarSyncedEventIDSet(objectKeys map[string]bool, email, calendarID string) map[string]struct{} {
-	set := make(map[string]struct{})
-	email = strings.TrimSpace(email)
-	calendarID = SanitizeCalendarPathSegment(calendarID)
-	prefix := fmt.Sprintf("%s/calendar/events/%s/", email, calendarID)
-	for key := range objectKeys {
-		key = strings.TrimSpace(key)
+func calendarEventSyncedByScan(syncedMap map[string]bool, email, calendarID, eventID string) bool {
+	wantCalID := SanitizeCalendarPathSegment(calendarID)
+	wantEventID := SanitizeCalendarPathSegment(eventID)
+	prefix := fmt.Sprintf("%s/calendar/events/", strings.TrimSpace(email))
+	for key := range syncedMap {
 		if !strings.HasPrefix(key, prefix) || !strings.HasSuffix(key, ".json") {
 			continue
 		}
-		segment := strings.TrimSuffix(strings.TrimPrefix(key, prefix), ".json")
-		if id := strings.TrimSpace(segment); id != "" {
+		rest := strings.TrimSuffix(strings.TrimPrefix(key, prefix), ".json")
+		parts := strings.Split(rest, "/")
+		if len(parts) != 2 {
+			continue
+		}
+		gotCalID := ParseCalendarIDFromPathSegment(parts[0])
+		gotEventID := ParseEventIDFromPathSegment(parts[1])
+		if gotCalID == wantCalID && gotEventID == wantEventID {
+			return true
+		}
+	}
+	return false
+}
+
+// BuildCalendarSyncedEventIDSet builds eventId set from synced keys under email/calendar/events/.
+func BuildCalendarSyncedEventIDSet(objectKeys map[string]bool, email, calendarID string) map[string]struct{} {
+	set := make(map[string]struct{})
+	email = strings.TrimSpace(email)
+	wantCalID := SanitizeCalendarPathSegment(calendarID)
+	eventRoot := fmt.Sprintf("%s/calendar/events/", email)
+	for key := range objectKeys {
+		key = strings.TrimSpace(key)
+		if !strings.HasPrefix(key, eventRoot) || !strings.HasSuffix(key, ".json") {
+			continue
+		}
+		rest := strings.TrimSuffix(strings.TrimPrefix(key, eventRoot), ".json")
+		parts := strings.Split(rest, "/")
+		if len(parts) != 2 {
+			continue
+		}
+		if ParseCalendarIDFromPathSegment(parts[0]) != wantCalID {
+			continue
+		}
+		if id := ParseEventIDFromPathSegment(parts[1]); id != "" {
 			set[id] = struct{}{}
 		}
 	}
@@ -272,8 +359,8 @@ func ParseCalendarEventObjectKey(objectKey string) (calendarID, eventID string, 
 	if len(parts) != 2 {
 		return "", "", false
 	}
-	calendarID = strings.TrimSpace(parts[0])
-	eventID = strings.TrimSpace(parts[1])
+	calendarID = ParseCalendarIDFromPathSegment(parts[0])
+	eventID = ParseEventIDFromPathSegment(parts[1])
 	if calendarID == "" || eventID == "" {
 		return "", "", false
 	}

@@ -81,7 +81,7 @@ func syncOneCalendar(ctx context.Context, input ProcessorInput, task *repo.Sched
 		return nil
 	}
 
-	meta, err := loadCalendarMeta(ctx, storx, task.LoginId, calendarID)
+	meta, err := loadCalendarMeta(ctx, storx, task.LoginId, calendarID, cal.Summary)
 	if err != nil {
 		logger.Warn(ctx, "calendar metadata load failed, continuing fresh", logger.String("calendar_id", calendarID), logger.ErrorField(err))
 		meta = google.CalendarMetadata{ID: calendarID}
@@ -102,10 +102,10 @@ func syncOneCalendar(ctx context.Context, input ProcessorInput, task *repo.Sched
 
 	var nextSyncToken string
 	if !state.BaselineDone && syncToken == "" {
-		nextSyncToken, err = runCalendarBaselineSync(ctx, input, task, service, calendarID)
+		nextSyncToken, err = runCalendarBaselineSync(ctx, input, task, service, calendarID, meta.Summary)
 		if err != nil {
 			if google.IsSyncTokenGone(err) {
-				nextSyncToken, err = runCalendarBaselineSync(ctx, input, task, service, calendarID)
+				nextSyncToken, err = runCalendarBaselineSync(ctx, input, task, service, calendarID, meta.Summary)
 			}
 			if err != nil {
 				return fmt.Errorf("calendar %s baseline: %w", calendarID, err)
@@ -114,13 +114,13 @@ func syncOneCalendar(ctx context.Context, input ProcessorInput, task *repo.Sched
 		state.BaselineDone = true
 	} else {
 		token := syncToken
-		nextSyncToken, err = runCalendarIncrementalSync(ctx, input, task, service, calendarID, token)
+		nextSyncToken, err = runCalendarIncrementalSync(ctx, input, task, service, calendarID, meta.Summary, token)
 		if err != nil {
 			if google.IsSyncTokenGone(err) {
 				state.BaselineDone = false
 				state.SyncToken = ""
 				meta.NextSyncToken = ""
-				nextSyncToken, err = runCalendarBaselineSync(ctx, input, task, service, calendarID)
+				nextSyncToken, err = runCalendarBaselineSync(ctx, input, task, service, calendarID, meta.Summary)
 				if err != nil {
 					return fmt.Errorf("calendar %s baseline after 410: %w", calendarID, err)
 				}
@@ -140,7 +140,7 @@ func syncOneCalendar(ctx context.Context, input ProcessorInput, task *repo.Sched
 	return saveCalendarMeta(ctx, input, task, storx, meta)
 }
 
-func runCalendarBaselineSync(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *calendar.Service, calendarID string) (string, error) {
+func runCalendarBaselineSync(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *calendar.Service, calendarID, calendarSummary string) (string, error) {
 	pageToken := ""
 	var lastSyncToken string
 	for {
@@ -151,7 +151,7 @@ func runCalendarBaselineSync(ctx context.Context, input ProcessorInput, task *re
 		if err != nil {
 			return "", err
 		}
-		if err := processCalendarEventsPage(ctx, input, task, calendarID, page.RawEvents); err != nil {
+		if err := processCalendarEventsPage(ctx, input, task, calendarID, calendarSummary, page.RawEvents); err != nil {
 			return "", err
 		}
 		if t := strings.TrimSpace(page.NextSyncToken); t != "" {
@@ -165,9 +165,9 @@ func runCalendarBaselineSync(ctx context.Context, input ProcessorInput, task *re
 	return lastSyncToken, nil
 }
 
-func runCalendarIncrementalSync(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *calendar.Service, calendarID, syncToken string) (string, error) {
+func runCalendarIncrementalSync(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *calendar.Service, calendarID, calendarSummary, syncToken string) (string, error) {
 	if strings.TrimSpace(syncToken) == "" {
-		return runCalendarBaselineSync(ctx, input, task, service, calendarID)
+		return runCalendarBaselineSync(ctx, input, task, service, calendarID, calendarSummary)
 	}
 	pageToken := ""
 	var lastSyncToken string
@@ -179,7 +179,7 @@ func runCalendarIncrementalSync(ctx context.Context, input ProcessorInput, task 
 		if err != nil {
 			return "", err
 		}
-		if err := processCalendarEventsPage(ctx, input, task, calendarID, page.RawEvents); err != nil {
+		if err := processCalendarEventsPage(ctx, input, task, calendarID, calendarSummary, page.RawEvents); err != nil {
 			return "", err
 		}
 		if t := strings.TrimSpace(page.NextSyncToken); t != "" {
@@ -194,12 +194,12 @@ func runCalendarIncrementalSync(ctx context.Context, input ProcessorInput, task 
 	return lastSyncToken, nil
 }
 
-func processCalendarEventsPage(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, calendarID string, events []*calendar.Event) error {
+func processCalendarEventsPage(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, calendarID, calendarSummary string, events []*calendar.Event) error {
 	for _, ev := range events {
 		if !google.EventShouldBackup(ev) {
 			continue
 		}
-		if err := retrySyncCalendarEvent(ctx, input, task, calendarID, ev); err != nil {
+		if err := retrySyncCalendarEvent(ctx, input, task, calendarID, calendarSummary, ev); err != nil {
 			logger.Warn(ctx, "calendar event sync failed",
 				logger.String("calendar_id", calendarID),
 				logger.String("event_id", ev.Id),
@@ -210,8 +210,8 @@ func processCalendarEventsPage(ctx context.Context, input ProcessorInput, task *
 	return nil
 }
 
-func syncCalendarEvent(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, calendarID string, ev *calendar.Event) error {
-	objectKey := google.CalendarObjectKey(task.LoginId, calendarID, ev.Id)
+func syncCalendarEvent(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, calendarID, calendarSummary string, ev *calendar.Event) error {
+	objectKey := google.CalendarObjectKey(task.LoginId, calendarID, calendarSummary, ev.Id, ev.Summary)
 	b, err := json.Marshal(ev)
 	if err != nil {
 		return fmt.Errorf("marshal event: %w", err)
@@ -219,10 +219,10 @@ func syncCalendarEvent(ctx context.Context, input ProcessorInput, task *repo.Sch
 	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Calendar, objectKey, b, task.UserID, input.StorxRecovery)
 }
 
-func retrySyncCalendarEvent(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, calendarID string, ev *calendar.Event) error {
+func retrySyncCalendarEvent(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, calendarID, calendarSummary string, ev *calendar.Event) error {
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		if err := syncCalendarEvent(ctx, input, task, calendarID, ev); err != nil {
+		if err := syncCalendarEvent(ctx, input, task, calendarID, calendarSummary, ev); err != nil {
 			lastErr = err
 			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
 			continue
@@ -232,9 +232,8 @@ func retrySyncCalendarEvent(ctx context.Context, input ProcessorInput, task *rep
 	return lastErr
 }
 
-func loadCalendarMeta(ctx context.Context, storx, email, calendarID string) (google.CalendarMetadata, error) {
-	key := google.CalendarMetaObjectKey(email, calendarID)
-	b, err := satellite.DownloadObject(ctx, storx, satellite.ReserveBucket_Calendar, key)
+func loadCalendarMeta(ctx context.Context, storx, email, calendarID, summary string) (google.CalendarMetadata, error) {
+	b, err := downloadCalendarMetaBytes(ctx, storx, email, calendarID, summary)
 	if err != nil {
 		return google.CalendarMetadata{}, err
 	}
@@ -245,11 +244,28 @@ func loadCalendarMeta(ctx context.Context, storx, email, calendarID string) (goo
 	return meta, nil
 }
 
+func downloadCalendarMetaBytes(ctx context.Context, storx, email, calendarID, summary string) ([]byte, error) {
+	candidates := make([]string, 0, 2)
+	if strings.TrimSpace(summary) != "" {
+		candidates = append(candidates, google.CalendarMetaObjectKey(email, calendarID, summary))
+	}
+	candidates = append(candidates, google.CalendarLegacyBareMetaKey(email, calendarID))
+	var lastErr error
+	for _, key := range candidates {
+		b, err := satellite.DownloadObject(ctx, storx, satellite.ReserveBucket_Calendar, key)
+		if err == nil {
+			return b, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
 func saveCalendarMeta(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, storx string, meta google.CalendarMetadata) error {
 	b, err := json.Marshal(meta)
 	if err != nil {
 		return fmt.Errorf("marshal calendar metadata: %w", err)
 	}
-	key := google.CalendarMetaObjectKey(task.LoginId, meta.ID)
+	key := google.CalendarMetaObjectKey(task.LoginId, meta.ID, meta.Summary)
 	return handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Calendar, key, b, task.UserID, input.StorxRecovery)
 }
