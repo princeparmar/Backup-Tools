@@ -104,7 +104,6 @@ type autosyncPolicyMoveRequest struct {
 	JobIDs         []uint `json:"job_ids"`
 }
 
-
 type PolicyScheduleView struct {
 	Interval      string     `json:"interval"`
 	On            string     `json:"on"`
@@ -1212,6 +1211,17 @@ func resolveOnboardingPolicyID(
 		return *batchPolicyID, nil
 	}
 
+	if req.PolicyID != nil && *req.PolicyID > 0 {
+		policy, err := loadPolicyForUser(database, userID, *req.PolicyID)
+		if err != nil {
+			return 0, fmt.Errorf("policy not found for user")
+		}
+		if batchPolicyID != nil {
+			*batchPolicyID = policy.ID
+		}
+		return policy.ID, nil
+	}
+
 	if isFirstConnection {
 		baseName := defaultPolicyName(cred)
 		name, err := database.PolicyRepo.EnsureUniquePolicyName(userID, baseName)
@@ -1221,17 +1231,6 @@ func resolveOnboardingPolicyID(
 		policy, err := database.PolicyRepo.CreatePolicy(userID, name, schedule.Interval, schedule.On, repo.RetentionNever)
 		if err != nil {
 			return 0, err
-		}
-		if batchPolicyID != nil {
-			*batchPolicyID = policy.ID
-		}
-		return policy.ID, nil
-	}
-
-	if req.PolicyID != nil && *req.PolicyID > 0 {
-		policy, err := loadPolicyForUser(database, userID, *req.PolicyID)
-		if err != nil {
-			return 0, fmt.Errorf("policy not found for user")
 		}
 		if batchPolicyID != nil {
 			*batchPolicyID = policy.ID

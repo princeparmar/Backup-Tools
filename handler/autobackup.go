@@ -154,13 +154,13 @@ func (r *GoogleBackupOnboardingRequest) hasPolicyID() bool {
 // onboardingNeedsScheduleInBody reports whether interval/on must come from the request
 // (auto-created first policy, or a new policy via policy_name). Existing policy_id skips this.
 func onboardingNeedsScheduleInBody(isFirstConnection bool, req *GoogleBackupOnboardingRequest) bool {
-	if isFirstConnection {
-		return true
-	}
 	if req.hasPolicyID() && strings.TrimSpace(req.PolicyName) == "" {
 		return false
 	}
-	return true
+	if isFirstConnection {
+		return true
+	}
+	return strings.TrimSpace(req.PolicyName) != ""
 }
 
 func (r *GoogleBackupOnboardingRequest) validate(userID string) error {
