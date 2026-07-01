@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
@@ -18,6 +20,45 @@ import (
 	"storj.io/common/grant"
 	"storj.io/uplink"
 )
+
+var satelliteHTTPClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:        32,
+		MaxIdleConnsPerHost: 8,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
+type accountCacheEntry struct {
+	userID    string
+	expiresAt time.Time
+}
+
+var accountUserIDCache sync.Map
+
+func cachedAccountUserID(tokenKey string) (string, bool) {
+	if v, ok := accountUserIDCache.Load(tokenKey); ok {
+		e := v.(accountCacheEntry)
+		if time.Now().Before(e.expiresAt) {
+			return e.userID, true
+		}
+		accountUserIDCache.Delete(tokenKey)
+	}
+	return "", false
+}
+
+func storeAccountUserID(tokenKey, userID string) {
+	accountUserIDCache.Store(tokenKey, accountCacheEntry{
+		userID:    userID,
+		expiresAt: time.Now().Add(2 * time.Minute),
+	})
+}
 
 const (
 	ReserveBucket_Gmail      = "gmail"
@@ -274,12 +315,18 @@ func DeleteObject(ctx context.Context, accessGrant, bucketName, objectKey string
 	return nil
 }
 
-// GetUserdetails retrieves user details from satellite service
+// GetUserdetails retrieves user details from satellite service (cached by token_key).
 func GetUserdetails(c echo.Context) (string, error) {
-	tokenKey := c.Request().Header.Get("token_key")
-	url := StorxSatelliteService + "/api/v0/auth/account"
+	tokenKey := strings.TrimSpace(c.Request().Header.Get("token_key"))
+	if tokenKey == "" {
+		return "", fmt.Errorf("token_key header is required")
+	}
+	if userID, ok := cachedAccountUserID(tokenKey); ok {
+		return userID, nil
+	}
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	url := StorxSatelliteService + "/api/v0/auth/account"
+	req, err := http.NewRequestWithContext(c.Request().Context(), http.MethodGet, url, nil)
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
@@ -287,8 +334,7 @@ func GetUserdetails(c echo.Context) (string, error) {
 	req.Header.Set("accept", "application/json")
 	req.Header.Set("cookie", "_tokenKey="+tokenKey)
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	res, err := client.Do(req)
+	res, err := satelliteHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("send request: %w", err)
 	}
@@ -311,8 +357,13 @@ func GetUserdetails(c echo.Context) (string, error) {
 	if response.Error != "" {
 		return "", fmt.Errorf("api error: %s", response.Error)
 	}
+	userID := strings.TrimSpace(response.ID)
+	if userID == "" {
+		return "", fmt.Errorf("empty account id")
+	}
 
-	return response.ID, nil
+	storeAccountUserID(tokenKey, userID)
+	return userID, nil
 }
 
 // GetProjectIDFromAccessGrant extracts project_id from access grant

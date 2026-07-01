@@ -2,6 +2,7 @@ package repo
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1411,6 +1412,63 @@ func (r *CronJobRepository) validateJobForActivation(job *CronJobListingDB) erro
 		}
 	}
 	return nil
+}
+
+// AutoSyncJobStats is mailbox counts + last snapshot time for GET /autosync/stats.
+type AutoSyncJobStats struct {
+	ConnectedAccounts           int
+	ConnectedAccountsGrowthWeek int
+	LastSyncAt                  *time.Time
+}
+
+var autosyncStatsWorkspaceMethods = []string{
+	"gmail", "google_drive", "google_photos", "google_contacts", "google_calendar",
+}
+
+// GetAutoSyncJobStats loads mailbox counts in one SQL round trip (no full job rows).
+func (r *CronJobRepository) GetAutoSyncJobStats(userID string) (*AutoSyncJobStats, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, fmt.Errorf("user_id is required")
+	}
+
+	const q = `
+WITH mailbox_first AS (
+  SELECT
+    LOWER(TRIM(COALESCE(NULLIF(TRIM(input_data->>'email'), ''), name))) AS mailbox,
+    MIN(created_at) AS first_created
+  FROM cron_job_listing_dbs
+  WHERE user_id = ?
+    AND deleted_at IS NULL
+    AND COALESCE(placeholder, false) = false
+    AND method IN ?
+    AND TRIM(COALESCE(NULLIF(TRIM(input_data->>'email'), ''), name)) <> ''
+  GROUP BY 1
+)
+SELECT
+  COALESCE((SELECT COUNT(*)::bigint FROM mailbox_first), 0) AS connected_accounts,
+  COALESCE((SELECT COUNT(*)::bigint FROM mailbox_first WHERE first_created > NOW() - INTERVAL '7 days'), 0) AS growth_week,
+  (SELECT MAX(last_run) FROM cron_job_listing_dbs
+    WHERE user_id = ? AND deleted_at IS NULL AND COALESCE(placeholder, false) = false) AS last_sync_at`
+
+	var row struct {
+		ConnectedAccounts int64
+		GrowthWeek        int64
+		LastSyncAt        sql.NullTime
+	}
+	if err := r.db.Raw(q, userID, autosyncStatsWorkspaceMethods, userID).Scan(&row).Error; err != nil {
+		return nil, fmt.Errorf("autosync job stats: %w", err)
+	}
+
+	out := &AutoSyncJobStats{
+		ConnectedAccounts:           int(row.ConnectedAccounts),
+		ConnectedAccountsGrowthWeek: int(row.GrowthWeek),
+	}
+	if row.LastSyncAt.Valid {
+		t := row.LastSyncAt.Time
+		out.LastSyncAt = &t
+	}
+	return out, nil
 }
 
 // MaskTokenForCronJobListingDB masks sensitive tokens in cron job data

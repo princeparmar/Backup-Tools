@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -20,7 +19,6 @@ import (
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/labstack/echo/v4"
-	"gorm.io/gorm"
 )
 
 var (
@@ -200,6 +198,7 @@ type DatabaseConnection struct {
 // AutoSyncStatsResponse — Backup-Tools dashboard slice (connected accounts + sync summary).
 // Storage quota and plan/trial come from Satellite.
 type AutoSyncStatsResponse struct {
+	// ConnectedAccounts is distinct mailbox emails with at least one non-placeholder backup job.
 	ConnectedAccounts           int        `json:"connected_accounts"`
 	ConnectedAccountsGrowthWeek int        `json:"connected_accounts_growth_this_week"`
 	LastSyncAt                  *time.Time `json:"last_sync_at,omitempty"`
@@ -2868,7 +2867,9 @@ func HandleAutomaticSyncStats(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
+	authStart := time.Now()
 	userID, err := satellite.GetUserdetails(c)
+	authMS := time.Since(authStart).Milliseconds()
 	if err != nil {
 		logger.Error(ctx, "Failed to authenticate user", logger.ErrorField(err))
 		return c.JSON(http.StatusUnauthorized, map[string]string{
@@ -2877,193 +2878,50 @@ func HandleAutomaticSyncStats(c echo.Context) error {
 	}
 
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
-	gdb := database.DB.WithContext(ctx)
 
-	/*
-		// active_syncs / failed_syncs / status — not used by Satellite dashboard.
-		var totalAccounts, activeSyncs, failedSyncs int64
-		var errTotal, errActive, errFailed error
+	dbStart := time.Now()
+	var (
+		jobStats    *repo.AutoSyncJobStats
+		itemsSynced int64
+		errJob      error
+		errItems    error
+	)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		jobStats, errJob = database.CronJobRepo.GetAutoSyncJobStats(userID)
+	}()
+	go func() {
+		defer wg.Done()
+		itemsSynced, errItems = database.SyncedObjectRepo.CountDashboardSyncedItems(userID)
+	}()
+	wg.Wait()
+	dbMS := time.Since(dbStart).Milliseconds()
 
-		var wg sync.WaitGroup
-		wg.Add(3)
-
-		go func() {
-			defer wg.Done()
-			errTotal = gdb.Session(&gorm.Session{}).
-				Model(&repo.CronJobListingDB{}).
-				Where("user_id = ? AND COALESCE(placeholder, false) = ?", userID, false).
-				Count(&totalAccounts).Error
-		}()
-
-		go func() {
-			defer wg.Done()
-			errActive = gdb.Session(&gorm.Session{}).
-				Model(&repo.CronJobListingDB{}).
-				Where("user_id = ? AND active = ? AND COALESCE(placeholder, false) = ?", userID, true, false).
-				Count(&activeSyncs).Error
-		}()
-
-		go func() {
-			defer wg.Done()
-			errFailed = gdb.Session(&gorm.Session{}).
-				Model(&repo.CronJobListingDB{}).
-				Where("user_id = ? AND COALESCE(placeholder, false) = ? AND ((active = ? AND message_status = ?) OR auto_deactivated = ?)",
-					userID, false, true, repo.JobMessageStatusError, true).
-				Count(&failedSyncs).Error
-		}()
-
-		wg.Wait()
-
-		if errTotal != nil || errActive != nil || errFailed != nil {
-			if errTotal != nil {
-				err = errTotal
-			} else if errActive != nil {
-				err = errActive
-			} else {
-				err = errFailed
-			}
-			logger.Error(ctx, "Failed to get autosync stats",
-				logger.ErrorField(errTotal),
-				logger.ErrorField(errActive),
-				logger.ErrorField(errFailed),
-			)
-			return c.JSON(http.StatusInternalServerError, map[string]string{
-				"message": "internal server error",
-			})
-		}
-
-		var status string
-		switch {
-		case totalAccounts == 0:
-			status = "add accounts"
-		case activeSyncs == 0:
-			status = "inactive"
-		case failedSyncs == 0:
-			status = "success"
-		case failedSyncs == activeSyncs:
-			status = "failed"
-		default:
-			status = "partial_success"
-		}
-	*/
-
-	connectedAccounts, growthWeek, errConnected := countConnectedAccountsForUser(gdb, userID)
-	if errConnected != nil {
-		logger.Error(ctx, "Failed to count connected accounts", logger.ErrorField(errConnected))
+	if errJob != nil {
+		logger.Error(ctx, "Failed to load autosync job stats", logger.ErrorField(errJob))
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"message": "internal server error",
+		})
+	}
+	if errItems != nil {
+		logger.Error(ctx, "Failed to count synced items", logger.ErrorField(errItems))
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"message": "internal server error",
 		})
 	}
 
-	lastSyncAt, lastSyncItems, errLast := lastSyncSnapshotForUser(gdb, userID)
-	if errLast != nil {
-		logger.Error(ctx, "Failed to load last sync snapshot", logger.ErrorField(errLast))
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"message": "internal server error",
-		})
-	}
+	logger.Info(ctx, "autosync stats timing",
+		logger.Int64("auth_ms", authMS),
+		logger.Int64("db_ms", dbMS),
+		logger.Int64("total_ms", authMS+dbMS),
+	)
 
 	return c.JSON(http.StatusOK, AutoSyncStatsResponse{
-		ConnectedAccounts:           connectedAccounts,
-		ConnectedAccountsGrowthWeek: growthWeek,
-		LastSyncAt:                  lastSyncAt,
-		LastSyncItemsSynced:         lastSyncItems,
-		// ActiveSyncs: int(activeSyncs),
-		// FailedSyncs: int(failedSyncs),
-		// Status:      status,
+		ConnectedAccounts:           jobStats.ConnectedAccounts,
+		ConnectedAccountsGrowthWeek: jobStats.ConnectedAccountsGrowthWeek,
+		LastSyncAt:                  jobStats.LastSyncAt,
+		LastSyncItemsSynced:         itemsSynced,
 	})
-}
-
-func countConnectedAccountsForUser(gdb *gorm.DB, userID string) (total int, growthThisWeek int, err error) {
-	type row struct {
-		ID        uint
-		CreatedAt time.Time
-	}
-	var creds []row
-	err = gdb.Table("google_backup_credential_dbs AS c").
-		Select("DISTINCT c.id, c.created_at").
-		Joins(`INNER JOIN cron_job_listing_dbs j ON (j.input_data->>'credential_id')::bigint = c.id AND j.deleted_at IS NULL`).
-		Where("j.user_id = ? AND COALESCE(j.placeholder, false) = ?", userID, false).
-		Where("(j.input_data->>'credential_id') IS NOT NULL AND (j.input_data->>'credential_id')::bigint > 0").
-		Scan(&creds).Error
-	if err != nil {
-		return 0, 0, err
-	}
-	total = len(creds)
-	weekAgo := time.Now().AddDate(0, 0, -7)
-	for _, c := range creds {
-		if !c.CreatedAt.IsZero() && c.CreatedAt.After(weekAgo) {
-			growthThisWeek++
-		}
-	}
-	return total, growthThisWeek, nil
-}
-
-func syncedObjectUserIDsForUser(gdb *gorm.DB, userID string) ([]string, error) {
-	ids := map[string]struct{}{userID: {}}
-
-	type mailboxRow struct {
-		Name  string
-		Email string
-	}
-	var rows []mailboxRow
-	err := gdb.Model(&repo.CronJobListingDB{}).
-		Select("name, COALESCE(input_data->>'email', '') AS email").
-		Where("user_id = ? AND COALESCE(placeholder, false) = ?", userID, false).
-		Scan(&rows).Error
-	if err != nil {
-		return nil, err
-	}
-	for _, r := range rows {
-		if name := strings.TrimSpace(r.Name); strings.Contains(name, "@") {
-			ids[name] = struct{}{}
-		}
-		if email := strings.TrimSpace(r.Email); strings.Contains(email, "@") {
-			ids[email] = struct{}{}
-		}
-	}
-
-	out := make([]string, 0, len(ids))
-	for id := range ids {
-		out = append(out, id)
-	}
-	return out, nil
-}
-
-func countTotalSyncedItemsForUser(gdb *gorm.DB, userID string) (int64, error) {
-	userIDs, err := syncedObjectUserIDsForUser(gdb, userID)
-	if err != nil {
-		return 0, err
-	}
-	var total int64
-	err = gdb.Model(&repo.SyncedObject{}).
-		Where("user_id IN ? AND deleted_at IS NULL AND object_key NOT LIKE ?", userIDs, "%/.file_placeholder").
-		Count(&total).Error
-	return total, err
-}
-
-func lastSyncSnapshotForUser(gdb *gorm.DB, userID string) (*time.Time, int64, error) {
-	var lastRun sql.NullTime
-	err := gdb.Model(&repo.CronJobListingDB{}).
-		Where("user_id = ? AND COALESCE(placeholder, false) = ? AND last_run IS NOT NULL", userID, false).
-		Select("MAX(last_run)").
-		Scan(&lastRun).Error
-	if err != nil {
-		return nil, 0, err
-	}
-
-	var totalSynced int64
-	totalSynced, err = countTotalSyncedItemsForUser(gdb, userID)
-	if err != nil {
-		if lastRun.Valid {
-			return &lastRun.Time, 0, err
-		}
-		return nil, 0, err
-	}
-
-	if !lastRun.Valid {
-		return nil, totalSynced, nil
-	}
-	syncAt := lastRun.Time
-	return &syncAt, totalSynced, nil
 }

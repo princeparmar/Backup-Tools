@@ -2,6 +2,7 @@ package repo
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/gorm"
@@ -185,4 +186,25 @@ func (r *SyncedObjectRepository) PermanentDeleteSyncedObjectsSoftDeletedBefore(b
 		return 0, fmt.Errorf("error permanently deleting soft-deleted synced objects: %v", result.Error)
 	}
 	return result.RowsAffected, nil
+}
+
+// CountDashboardSyncedItems counts synced_objects for the Satellite user_id.
+func (r *SyncedObjectRepository) CountDashboardSyncedItems(userID string) (int64, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return 0, nil
+	}
+
+	const q = `
+SELECT COUNT(*)::bigint
+FROM synced_objects
+WHERE user_id = ?
+  AND deleted_at IS NULL
+  AND object_key NOT LIKE '%/.file_placeholder'`
+
+	var total int64
+	if err := r.db.Raw(q, userID).Scan(&total).Error; err != nil {
+		return 0, fmt.Errorf("count dashboard synced items: %w", err)
+	}
+	return total, nil
 }

@@ -432,7 +432,7 @@ paths:
         - Auto Sync
       summary: Dashboard sync stats
       description: |
-        Satellite dashboard top-row metrics: connected accounts, growth this week,
+        Satellite dashboard top-row metrics: connected mailbox count, growth this week,
         last sync time, and total synced items count.
         Storage quota and plan/trial come from Satellite (not this endpoint).
       parameters:
@@ -3769,10 +3769,10 @@ components:
       properties:
         connected_accounts:
           type: integer
-          description: Distinct connected Google credentials linked to non-placeholder jobs.
+          description: Distinct mailbox emails with at least one non-placeholder backup job.
         connected_accounts_growth_this_week:
           type: integer
-          description: Credentials created in the last 7 days.
+          description: Mailboxes whose first backup job was created in the last 7 days.
         last_sync_at:
           type: string
           format: date-time

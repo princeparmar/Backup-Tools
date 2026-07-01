@@ -71,5 +71,15 @@ func (s *PostgresDb) Migrate() error {
 		return err
 	}
 
+	if err := s.DB.Exec(`CREATE INDEX IF NOT EXISTS idx_synced_objects_user_id ON synced_objects (user_id) WHERE deleted_at IS NULL`).Error; err != nil {
+		return err
+	}
+	if err := s.DB.Exec(`CREATE INDEX IF NOT EXISTS idx_synced_objects_dashboard_count ON synced_objects (user_id) WHERE deleted_at IS NULL AND object_key NOT LIKE '%/.file_placeholder'`).Error; err != nil {
+		return err
+	}
+	if err := s.DB.Exec(`CREATE INDEX IF NOT EXISTS idx_cron_jobs_user_placeholder ON cron_job_listing_dbs (user_id) WHERE deleted_at IS NULL AND COALESCE(placeholder, false) = false`).Error; err != nil {
+		return err
+	}
+
 	return nil
 }
