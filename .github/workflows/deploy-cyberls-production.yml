@@ -1,0 +1,140 @@
+name: Deploy to CyberLS Production
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger on version tags (e.g., v1.0.0, v2.1.3)
+  workflow_dispatch: # Manual trigger
+
+env:
+  APP_NAME: 'backuptools-windows-amd64.exe'
+  BUILD_DIR: 'D:\deployment'
+  DEPLOY_DIR: 'D:\bin'
+  SERVICE_NAME: 'backuptools'
+  GOMODCACHE: 'D:\gocache\mod'
+  GOCACHE: 'D:\gocache\build'
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, Windows, X64, production, cyberls]
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21.13'
+          cache: false # Use persistent GOMODCACHE/GOCACHE on runner disk instead
+
+      - name: Pre-download dependencies
+        run: |
+          Write-Host "Pre-downloading dependencies..."
+          go mod download
+
+      - name: Fast build application
+        run: |
+          # Ensure build directory exists
+          if (!(Test-Path "${{ env.BUILD_DIR }}")) {
+            New-Item -ItemType Directory -Path "${{ env.BUILD_DIR }}" -Force | Out-Null
+          }
+
+          $buildStart = Get-Date
+          Write-Host "Building with optimizations..."
+
+          # Use Go build optimizations
+          $env:GOFLAGS = "-buildvcs=false"
+          $buildTime = Get-Date -Format 'yyyy-MM-dd_HH:mm:ss'
+          $buildPath = Join-Path "${{ env.BUILD_DIR }}" "${{ env.APP_NAME }}"
+
+          go build -ldflags="-s -w -X main.buildTime=$buildTime" -trimpath -o $buildPath ./cmd
+
+          $buildDuration = (Get-Date) - $buildStart
+          if (Test-Path $buildPath) {
+            $size = (Get-Item $buildPath).Length
+            Write-Host "✅ Binary built in $([math]::Round($buildDuration.TotalSeconds, 1))s ($([math]::Round($size/1MB, 2)) MB)"
+          } else {
+            Write-Error "Build failed - binary not found"
+            exit 1
+          }
+
+      - name: Stop NSSM service
+        run: |
+          # Fast stop using optimized polling
+          $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
+          if ($service) {
+            $status = $service.Status
+            if ($status -eq "Running" -or $status -eq "Paused" -or $status -eq "StartPending") {
+              Stop-Service -Name "${{ env.SERVICE_NAME }}" -Force -WarningAction SilentlyContinue
+
+              # Quick wait with timeout
+              $timeout = 5
+              $elapsed = 0
+              while ($service.Status -ne 'Stopped' -and $elapsed -lt $timeout) {
+                Start-Sleep -Milliseconds 300
+                $service.Refresh()
+                $elapsed += 0.3
+              }
+              Write-Host "Service stopped"
+            } else {
+              Write-Host "Service already stopped"
+            }
+          }
+
+      - name: Quick file replacement
+        run: |
+          # Ensure deploy directory exists
+          if (!(Test-Path "${{ env.DEPLOY_DIR }}")) {
+            New-Item -ItemType Directory -Path "${{ env.DEPLOY_DIR }}" -Force | Out-Null
+          }
+
+          # Use Move-Item for faster replacement (atomic operation)
+          $buildPath = Join-Path "${{ env.BUILD_DIR }}" "${{ env.APP_NAME }}"
+          $deployPath = Join-Path "${{ env.DEPLOY_DIR }}" "${{ env.APP_NAME }}"
+
+          if (Test-Path $buildPath) {
+            # Remove old file if exists
+            if (Test-Path $deployPath) {
+              Remove-Item $deployPath -Force -ErrorAction SilentlyContinue
+            }
+            # Move new file (faster than copy)
+            Move-Item $buildPath $deployPath -Force
+            Write-Host "✅ File replaced at $deployPath"
+          } else {
+            Write-Error "Build file not found at: $buildPath"
+            exit 1
+          }
+
+      - name: Start NSSM service and verify
+        run: |
+          # Fast start with quick verification
+          $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
+          if (!$service) {
+            Write-Error "Service '${{ env.SERVICE_NAME }}' not found"
+            exit 1
+          }
+
+          # Suppress warnings and start service
+          $WarningPreference = 'SilentlyContinue'
+          Start-Service -Name "${{ env.SERVICE_NAME }}" -WarningAction SilentlyContinue
+
+          # Quick wait with timeout
+          $timeout = 8
+          $elapsed = 0
+          while ($service.Status -ne 'Running' -and $elapsed -lt $timeout) {
+            Start-Sleep -Milliseconds 300
+            $service.Refresh()
+            $elapsed += 0.3
+          }
+
+          # Verify deployment
+          if ($service.Status -eq 'Running') {
+            Write-Host "✅ CyberLS production deployment successful - Service is running"
+          } else {
+            Write-Error "Deployment failed - Service status: $($service.Status)"
+            exit 1
+          }
