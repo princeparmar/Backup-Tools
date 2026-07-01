@@ -2,6 +2,7 @@ package crons
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/repo"
 )
@@ -111,19 +112,26 @@ func cronEmailOutlookAuthRetry(attempt uint) string {
 	return fmt.Sprintf(cronTplEmailOutlookAuthRetry, a, m)
 }
 
-func cronEmailGenericRetry(attempt uint) string {
+func cronEmailGenericRetry(attempt uint, err error) string {
 	a, m := cronAttempt(attempt)
-	return fmt.Sprintf(cronTplEmailGenericRetry, a, m)
+	return cronRetryWithError(fmt.Sprintf(cronTplEmailGenericRetry, a, m), err)
 }
 
-func cronJobGenericRetry(attempt uint) string {
+func cronJobGenericRetry(attempt uint, err error) string {
 	a, m := cronAttempt(attempt)
-	return fmt.Sprintf(cronTplJobGenericRetry, a, m)
+	return cronRetryWithError(fmt.Sprintf(cronTplJobGenericRetry, a, m), err)
 }
 
-func cronTaskGenericRetry(attempt uint) string {
+func cronTaskGenericRetry(attempt uint, err error) string {
 	a, m := cronAttempt(attempt)
-	return fmt.Sprintf(cronTplTaskGenericRetry, a, m)
+	return cronRetryWithError(fmt.Sprintf(cronTplTaskGenericRetry, a, m), err)
+}
+
+func cronRetryWithError(base string, err error) string {
+	if err == nil || strings.TrimSpace(err.Error()) == "" {
+		return base
+	}
+	return fmt.Sprintf("%s Last error: %s", base, strings.TrimSpace(err.Error()))
 }
 
 func cronJobGoogleAuthRetry(attempt uint) string {

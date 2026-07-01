@@ -610,7 +610,7 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.Cron
 		return cronEmailNetworkFinal
 
 	default:
-		return cronEmailGenericRetry(task.RetryCount)
+		return cronEmailGenericRetry(task.RetryCount, processErr)
 	}
 }
 
@@ -705,8 +705,8 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		task.Message = cronTaskNetworkDeactivated
 
 	default:
-		job.Message = cronJobGenericRetry(task.RetryCount)
-		task.Message = cronTaskGenericRetry(task.RetryCount)
+		job.Message = cronJobGenericRetry(task.RetryCount, processErr)
+		task.Message = cronTaskGenericRetry(task.RetryCount, processErr)
 	}
 }
 
