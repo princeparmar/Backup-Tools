@@ -69,7 +69,18 @@ tags:
   - name: Monitoring
     description: System monitoring and metrics
   - name: Restore
-    description: Satellite-proxied restore-all (vault → Google). Requires token_key header; not for direct browser access.
+    description: |
+      Satellite-proxied restore-all (vault → Google). All routes require `token_key` header only
+      (no ACCESS_TOKEN). List routes resolve user_id from token_key internally — do not send
+      project_id or credential_id on GET /restore/credentials or GET /restore/workspaces.
+
+      **Breaking changes (list APIs):**
+      - Removed `GET /restore/workspace-mailboxes` — use `GET /restore/workspaces?domain=...` instead.
+      - `GET /restore/workspaces` without `domain` returns domain tab names (string array).
+      - `GET /restore/workspaces?domain=...` returns paginated mailbox emails from Google.
+      - `GET /restore/credentials` no longer accepts project_id; personal accounts only.
+
+      **Unchanged:** `GET /restore/prepare`, `POST /restore/all`, job polling routes still use project_id + login_id + service.
 
 paths:
   # Authentication Endpoints
@@ -2945,15 +2956,173 @@ paths:
                   http_requests_total{method="GET",endpoint="/api/health"} 100
 
   # Restore All Endpoints (Satellite BFF — token_key auth, aligned with /auto-sync)
+  /restore/workspaces:
+    get:
+      tags:
+        - Restore
+      summary: Workspace domain tabs or paginated mailbox list
+      description: |
+        Authenticated via token_key only — user_id is resolved from Satellite session and
+        admin credentials are looked up internally (no project_id or credential_id from UI).
+
+        Without domain — returns connected workspace domain names for UI tabs.
+        With domain — returns paginated mailbox emails from Google Admin SDK for that domain.
+        Supports search, limit, and offset. Optional login_id excludes one mailbox.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - in: query
+          name: domain
+          required: false
+          schema:
+            type: string
+          description: Workspace domain tab; when set, returns paginated mailboxes for that domain
+        - in: query
+          name: search
+          required: false
+          schema:
+            type: string
+          description: Filter mailboxes by email substring (only when domain is set)
+        - in: query
+          name: login_id
+          required: false
+          schema:
+            type: string
+          description: Optional mailbox to exclude (only when domain is set)
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            default: 20
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Workspace tabs or mailbox list
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      workspaces:
+                        type: array
+                        items:
+                          type: string
+                        description: Connected workspace domain names (one UI tab each)
+                  - type: object
+                    properties:
+                      mailboxes:
+                        type: array
+                        items:
+                          type: string
+                      pagination:
+                        $ref: '#/components/schemas/RestoreListPagination'
+        '422':
+          description: Admin reconnect required before listing from Google
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: admin Google reconnect required to list workspace mailboxes
+        '404':
+          description: No connected admin_workspace credential for the requested domain
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: workspace not found
+        '502':
+          description: Google Admin SDK directory list failed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: failed to list workspace mailboxes from Google
+
+  /restore/credentials:
+    get:
+      tags:
+        - Restore
+      summary: List personal Google accounts for restore
+      description: |
+        Authenticated via token_key only — credentials are loaded by user_id from DB
+        (no project_id). Workspace domains use GET /restore/workspaces.
+        Supports search, limit, and offset. Optional login_id excludes one mailbox.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - in: query
+          name: login_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: search
+          required: false
+          schema:
+            type: string
+          description: Filter personal accounts by email substring
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            default: 20
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Personal credential list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  credentials:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        email:
+                          type: string
+                        has_backup:
+                          type: boolean
+                        needs_google_reconnect:
+                          type: boolean
+                  pagination:
+                    $ref: '#/components/schemas/RestoreListPagination'
+        '401':
+          description: Missing or invalid token_key
+
   /restore/prepare:
     get:
       tags:
         - Restore
       summary: Pre-flight restore readiness
       description: |
-        Checks StorX grant, OAuth write scopes or Gmail DWD impersonation, backup data count,
-        and live API probe before POST /restore/all. Satellite proxies this route with token_key.
-        On missing OAuth scopes, user reconnects via existing PUT /auto-sync/job (not a new cred API).
+        Checks StorX grant (internal refresh if missing), OAuth write scopes or Workspace DWD
+        impersonation on the target mailbox, backup data count, and live API probe before
+        POST /restore/all. Optional target_email (≠ login_id) selects migration write mailbox.
+        Workspace targets attempt DWD when domain is non-consumer and SA is configured; probe
+        failure returns delegation_setup for Admin Console setup, or falls back to OAuth when
+        the target has a connected credential. Personal / consumer targets use OAuth.
       parameters:
         - $ref: '#/components/parameters/tokenKeyHeader'
         - in: query
@@ -2967,13 +3136,19 @@ paths:
           required: true
           schema:
             type: string
-          description: Mailbox to restore
+          description: Source backup mailbox (StorX prefix)
         - in: query
           name: service
           required: true
           schema:
             type: string
             enum: [gmail, drive, photos, calendar, contacts]
+        - in: query
+          name: target_email
+          required: false
+          schema:
+            type: string
+          description: Google account to restore into (migration). Picked from GET /restore/credentials (personal) or GET /restore/workspaces?domain=... (workspace). Omit or same as login_id for in-place restore.
       responses:
         '200':
           description: Readiness result (ready true or false with reason)
@@ -3013,6 +3188,14 @@ paths:
                     description: All restore scope URLs the Workspace admin must authorize together
                   reconnect_hint:
                     type: string
+                  target_email:
+                    type: string
+                    description: Target Google account email (derived from credential_id when migration)
+                  credential_id:
+                    type: integer
+                    description: Credential to reconnect (target write cred for migration)
+                  migration:
+                    type: boolean
         '401':
           description: Missing or invalid token_key
 
@@ -3169,6 +3352,9 @@ paths:
                 login_id:
                   type: string
                   example: user@gmail.com
+                target_email:
+                  type: string
+                  description: Migration write mailbox (optional). From personal picker or workspace domain list. Omit for in-place restore.
               required:
                 - service
                 - project_id
@@ -3398,6 +3584,25 @@ components:
         updated_at:
           type: string
           format: date-time
+
+    RestoreListPagination:
+      type: object
+      properties:
+        limit:
+          type: integer
+          example: 20
+        offset:
+          type: integer
+          example: 0
+        page:
+          type: integer
+          example: 1
+        total_pages:
+          type: integer
+          example: 3
+        total_count:
+          type: integer
+          example: 42
 
     LiveRestoreJob:
       type: object

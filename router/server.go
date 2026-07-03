@@ -108,6 +108,8 @@ func StartServer(db *db.PostgresDb, address string) {
 	autoSync.DELETE("/delete-jobs-by-email", handler.HandleDeleteJobsByEmail)
 
 	restoreGroup := e.Group("/restore")
+	restoreGroup.GET("/workspaces", handler.HandleRestoreWorkspaces)
+	restoreGroup.GET("/credentials", handler.HandleRestoreCredentials)
 	restoreGroup.GET("/prepare", handler.HandleRestorePrepare)
 	restoreGroup.GET("/live", handler.HandleRestoreLive)
 	restoreGroup.POST("/all", handler.HandleRestoreAll)

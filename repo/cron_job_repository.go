@@ -853,6 +853,67 @@ SELECT EXISTS (
 	return exists, nil
 }
 
+// ListBackupMailboxEmailsForUser returns distinct mailbox emails with backup jobs for a user (all projects).
+func (r *CronJobRepository) ListBackupMailboxEmailsForUser(userID, excludeEmail string) ([]string, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, fmt.Errorf("user_id is required")
+	}
+	var emails []string
+	err := r.db.Table("cron_job_listing_dbs AS j").
+		Select(`DISTINCT LOWER(TRIM(COALESCE(NULLIF(j.input_data->>'email', ''), j.name))) AS email`).
+		Joins(`INNER JOIN google_backup_credential_dbs c ON (j.input_data->>'credential_id')::bigint = c.id AND c.deleted_at IS NULL`).
+		Where("j.user_id = ? AND j.deleted_at IS NULL", userID).
+		Where("COALESCE(j.placeholder, false) = ?", false).
+		Order("email ASC").
+		Pluck("email", &emails).Error
+	if err != nil {
+		return nil, fmt.Errorf("list backup mailbox emails for user: %w", err)
+	}
+	if exclude := strings.TrimSpace(strings.ToLower(excludeEmail)); exclude != "" {
+		filtered := make([]string, 0, len(emails))
+		for _, e := range emails {
+			if strings.ToLower(strings.TrimSpace(e)) == exclude {
+				continue
+			}
+			filtered = append(filtered, strings.TrimSpace(e))
+		}
+		emails = filtered
+	}
+	return emails, nil
+}
+
+// ListBackupMailboxEmailsForUserProject returns distinct mailbox emails with backup jobs for a project.
+func (r *CronJobRepository) ListBackupMailboxEmailsForUserProject(userID, projectID, excludeEmail string) ([]string, error) {
+	userID = strings.TrimSpace(userID)
+	projectID = strings.TrimSpace(projectID)
+	if userID == "" || projectID == "" {
+		return nil, fmt.Errorf("user_id and project_id are required")
+	}
+	var emails []string
+	err := r.db.Table("cron_job_listing_dbs AS j").
+		Select(`DISTINCT LOWER(TRIM(COALESCE(NULLIF(j.input_data->>'email', ''), j.name))) AS email`).
+		Joins(`INNER JOIN google_backup_credential_dbs c ON (j.input_data->>'credential_id')::bigint = c.id AND c.deleted_at IS NULL`).
+		Where("j.user_id = ? AND j.deleted_at IS NULL AND c.storj_project_id = ?", userID, projectID).
+		Where("COALESCE(j.placeholder, false) = ?", false).
+		Order("email ASC").
+		Pluck("email", &emails).Error
+	if err != nil {
+		return nil, fmt.Errorf("list backup mailbox emails: %w", err)
+	}
+	if exclude := strings.TrimSpace(strings.ToLower(excludeEmail)); exclude != "" {
+		filtered := make([]string, 0, len(emails))
+		for _, e := range emails {
+			if strings.ToLower(strings.TrimSpace(e)) == exclude {
+				continue
+			}
+			filtered = append(filtered, strings.TrimSpace(e))
+		}
+		emails = filtered
+	}
+	return emails, nil
+}
+
 // ListAllAutosyncJobsForUser returns every autosync job for a user.
 func (r *CronJobRepository) ListAllAutosyncJobsForUser(userID string) ([]CronJobListingDB, error) {
 	userID = strings.TrimSpace(userID)

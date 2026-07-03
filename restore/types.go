@@ -87,11 +87,12 @@ type RestoreDeps struct {
 	CronJob       *repo.CronJobListingDB
 	StorxRecovery *storxrefresh.Recovery
 	AccessGrant   string
-	GoogleToken  string
-	RefreshToken string
-	AuthMode     string
-	LoginID      string
-	Config       ServiceConfig
+	GoogleToken        string
+	RefreshToken       string
+	AuthMode           string
+	LoginID            string
+	GoogleWriteSubject string // DWD impersonation target (migration cross-mailbox); defaults to LoginID
+	Config             ServiceConfig
 
 	GmailClient     *google.GmailClient
 	DriveService    *drive.Service

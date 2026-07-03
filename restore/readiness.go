@@ -22,23 +22,25 @@ type MissingPermission struct {
 
 // ReadinessResult is returned by GET /restore/prepare and inline validation on POST /restore/all.
 type ReadinessResult struct {
-	Ready              bool                   `json:"ready"`
-	Reason             string                 `json:"reason,omitempty"`
-	AuthMode           string                 `json:"auth_mode,omitempty"`
-	AccountType        string                 `json:"account_type,omitempty"`
-	Service            string                 `json:"service,omitempty"`
-	ProjectID          string                 `json:"project_id,omitempty"`
-	LoginID            string                 `json:"login_id,omitempty"`
-	CronJobID          uint                   `json:"cron_job_id,omitempty"`
-	CredentialID       uint                   `json:"credential_id,omitempty"`
-	BackupItemCount    uint                   `json:"backup_item_count,omitempty"`
-	OAuthHolderEmail   string                 `json:"oauth_holder_email,omitempty"`
-	MissingPermissions []MissingPermission      `json:"missing_permissions,omitempty"`
-	DelegationSetup    interface{}            `json:"delegation_setup,omitempty"`
-	ReconnectHint      string                 `json:"reconnect_hint,omitempty"`
-	GrantedScopes      []string               `json:"granted_scopes,omitempty"`
-	RequiredDWDScopes  []string               `json:"required_dwd_scopes,omitempty"`
-	Message            string                 `json:"message,omitempty"`
+	Ready              bool                `json:"ready"`
+	Reason             string              `json:"reason,omitempty"`
+	AuthMode           string              `json:"auth_mode,omitempty"`
+	AccountType        string              `json:"account_type,omitempty"`
+	Service            string              `json:"service,omitempty"`
+	ProjectID          string              `json:"project_id,omitempty"`
+	LoginID            string              `json:"login_id,omitempty"`
+	CronJobID          uint                `json:"cron_job_id,omitempty"`
+	CredentialID       uint                `json:"credential_id,omitempty"`
+	BackupItemCount    uint                `json:"backup_item_count,omitempty"`
+	OAuthHolderEmail   string              `json:"oauth_holder_email,omitempty"`
+	MissingPermissions []MissingPermission `json:"missing_permissions,omitempty"`
+	DelegationSetup    interface{}         `json:"delegation_setup,omitempty"`
+	ReconnectHint      string              `json:"reconnect_hint,omitempty"`
+	GrantedScopes      []string            `json:"granted_scopes,omitempty"`
+	RequiredDWDScopes  []string            `json:"required_dwd_scopes,omitempty"`
+	Message            string              `json:"message,omitempty"`
+	TargetEmail        string              `json:"target_email,omitempty"`
+	Migration          bool                `json:"migration,omitempty"`
 }
 
 const (
@@ -47,27 +49,47 @@ const (
 )
 
 const (
-	ReadinessReasonNoBackupJob       = "no_backup_job"
-	ReadinessReasonNoBackupData      = "no_backup_data"
-	ReadinessReasonNoCredential      = "no_credential"
+	ReadinessReasonNoBackupJob        = "no_backup_job"
+	ReadinessReasonNoBackupData       = "no_backup_data"
+	ReadinessReasonNoCredential       = "no_credential"
 	ReadinessReasonTokenRefreshFailed = "token_refresh_failed"
 	ReadinessReasonMissingPermissions = "missing_permissions"
-	ReadinessReasonDWDNotConfigured  = "dwd_not_configured"
-	ReadinessReasonAPIProbeFailed    = "api_probe_failed"
-	ReadinessReasonStorxMissing      = "storx_missing"
+	ReadinessReasonDWDNotConfigured   = "dwd_not_configured"
+	ReadinessReasonAPIProbeFailed     = "api_probe_failed"
+	ReadinessReasonStorxMissing       = "storx_missing"
 )
 
-// EvaluateReadiness runs prepare checks for Satellite restore-all.
+// ReadinessRequest is the input for prepare and restore-all readiness checks.
+type ReadinessRequest struct {
+	UserID      string
+	ProjectID   string
+	LoginID     string
+	Service     string
+	TargetEmail string // migration write mailbox (unique per user+project in creds table)
+}
+
+// EvaluateReadiness runs prepare checks for in-place restore-all.
 func EvaluateReadiness(ctx context.Context, store *db.PostgresDb, userID, projectID, loginID, service string) (*ReadinessResult, error) {
-	service = strings.TrimSpace(strings.ToLower(service))
-	projectID = strings.TrimSpace(projectID)
-	loginID = strings.TrimSpace(loginID)
-	userID = strings.TrimSpace(userID)
+	return EvaluateReadinessWithOptions(ctx, store, ReadinessRequest{
+		UserID: userID, ProjectID: projectID, LoginID: loginID, Service: service,
+	})
+}
+
+// EvaluateReadinessWithOptions runs prepare checks. target_email (≠ login_id) selects migration write account.
+func EvaluateReadinessWithOptions(ctx context.Context, store *db.PostgresDb, req ReadinessRequest) (*ReadinessResult, error) {
+	service := strings.TrimSpace(strings.ToLower(req.Service))
+	projectID := strings.TrimSpace(req.ProjectID)
+	loginID := strings.TrimSpace(req.LoginID)
+	userID := strings.TrimSpace(req.UserID)
+	targetEmail := strings.TrimSpace(req.TargetEmail)
 
 	out := &ReadinessResult{
 		Service:   service,
 		ProjectID: projectID,
 		LoginID:   loginID,
+	}
+	if targetEmail != "" {
+		out.TargetEmail = targetEmail
 	}
 
 	method, ok := APIServiceToMethod[APIService(service)]
@@ -109,9 +131,9 @@ func EvaluateReadiness(ctx context.Context, store *db.PostgresDb, userID, projec
 			return nil, err
 		}
 	}
-	out.CredentialID = cred.ID
-	out.AccountType = google.NormalizeAccountType(cred.AccountType)
-	out.OAuthHolderEmail = strings.TrimSpace(cred.Email)
+	sourceCred := cred
+	out.AccountType = google.NormalizeAccountType(sourceCred.AccountType)
+	out.OAuthHolderEmail = strings.TrimSpace(sourceCred.Email)
 
 	cfg, ok := ConfigForMethod(method)
 	if !ok {
@@ -135,12 +157,12 @@ func EvaluateReadiness(ctx context.Context, store *db.PostgresDb, userID, projec
 	if holder == "" {
 		holder = out.OAuthHolderEmail
 	}
-	authMode := ResolveRestoreAuthMode(service, out.AccountType, loginID, holder, cred, cronJob)
+	authMode := ResolveRestoreAuthMode(service, out.AccountType, loginID, holder, sourceCred, cronJob)
 	out.AuthMode = authMode
 
 	storx := strings.TrimSpace(store.CronJobRepo.ResolvedStorxToken(cronJob))
 	if storx == "" {
-		storx = strings.TrimSpace(cred.StorxToken)
+		storx = strings.TrimSpace(sourceCred.StorxToken)
 	}
 	if storx == "" {
 		recovery := storxrefresh.NewRecovery(store, cronJob)
@@ -170,12 +192,135 @@ func EvaluateReadiness(ctx context.Context, store *db.PostgresDb, userID, projec
 		return out, nil
 	}
 
+	if isMigrationRestore(loginID, targetEmail) {
+		out.Migration = true
+		out.TargetEmail = targetEmail
+		if migrationDWDAttemptEligible(targetEmail) {
+			dwdResult, err := evaluateDWDReadiness(ctx, out, service, targetEmail)
+			if err != nil {
+				return nil, err
+			}
+			if dwdResult.Ready {
+				dwdResult.CredentialID = sourceCred.ID
+				dwdResult.AuthMode = RestoreAuthModeDWD
+				return dwdResult, nil
+			}
+			_, credOK, credErr := store.CredentialRepo.FindByUserProjectAndEmail(userID, projectID, targetEmail)
+			if credErr != nil {
+				return nil, credErr
+			}
+			if credOK {
+				return evaluateMigrationTargetReadiness(ctx, store, out, service, userID, projectID, targetEmail)
+			}
+			return dwdResult, nil
+		}
+		return evaluateMigrationTargetReadiness(ctx, store, out, service, userID, projectID, targetEmail)
+	}
+
+	out.CredentialID = sourceCred.ID
 	switch authMode {
 	case RestoreAuthModeDWD:
 		return evaluateDWDReadiness(ctx, out, service, loginID)
 	default:
-		return evaluateOAuthReadiness(ctx, store, out, service, cronJob, cred)
+		return evaluateOAuthReadiness(ctx, store, out, service, cronJob, sourceCred)
 	}
+}
+
+func isMigrationRestore(loginID, targetEmail string) bool {
+	targetEmail = strings.TrimSpace(targetEmail)
+	if targetEmail == "" {
+		return false
+	}
+	return !strings.EqualFold(targetEmail, strings.TrimSpace(loginID))
+}
+
+func evaluateMigrationTargetReadiness(
+	ctx context.Context,
+	store *db.PostgresDb,
+	out *ReadinessResult,
+	service, userID, projectID, targetEmail string,
+) (*ReadinessResult, error) {
+	targetCred, ok, err := store.CredentialRepo.FindByUserProjectAndEmail(userID, projectID, targetEmail)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		out.Ready = false
+		out.Reason = ReadinessReasonNoCredential
+		out.Message = restoreReadinessNoTargetCredential
+		out.ReconnectHint = "Connect the target Google account via PUT /auto-sync/job/project"
+		return out, nil
+	}
+	out.CredentialID = targetCred.ID
+	out.OAuthHolderEmail = strings.TrimSpace(targetCred.Email)
+	out.AccountType = google.NormalizeAccountType(targetCred.AccountType)
+	if out.AccountType == "" {
+		out.AccountType = google.AccountTypePersonal
+	}
+	out.AuthMode = RestoreAuthModeOAuth
+	return evaluateCredentialOAuthReadiness(ctx, out, service, targetCred, targetEmail)
+}
+
+func evaluateCredentialOAuthReadiness(ctx context.Context, out *ReadinessResult, service string, cred *repo.GoogleBackupCredentialDB, probeLoginID string) (*ReadinessResult, error) {
+	refresh := ""
+	if cred != nil {
+		refresh = strings.TrimSpace(cred.RefreshToken)
+	}
+	if refresh == "" {
+		required := google.RestoreOAuthScopesForService(service)
+		out.Ready = false
+		out.Reason = ReadinessReasonMissingPermissions
+		out.GrantedScopes = []string{}
+		out.MissingPermissions = oauthMissingList(service, required)
+		out.ReconnectHint = "Use dashboard Google reconnect (auto-sync) to grant missing OAuth scopes"
+		out.Message = restoreReadinessMissingScopes
+		return out, nil
+	}
+
+	accessToken, err := google.AuthTokenUsingRefreshToken(refresh)
+	if err != nil {
+		out.Ready = false
+		out.Reason = ReadinessReasonTokenRefreshFailed
+		out.Message = restoreReadinessRefreshInvalid
+		out.ReconnectHint = "Use dashboard Google reconnect (auto-sync) to grant missing OAuth scopes"
+		return out, nil
+	}
+
+	details, err := google.GetGoogleAccountDetailsFromAccessToken(accessToken)
+	if err != nil {
+		out.Ready = false
+		out.Reason = ReadinessReasonTokenRefreshFailed
+		out.Message = restoreReadinessTokenValidation
+		out.ReconnectHint = "Use dashboard Google reconnect (auto-sync) to grant missing OAuth scopes"
+		return out, nil
+	}
+
+	required := google.RestoreOAuthScopesForService(service)
+	missing := google.TokenInfoMissingScopes(details.Scope, required)
+	if len(missing) > 0 {
+		out.Ready = false
+		out.Reason = ReadinessReasonMissingPermissions
+		out.GrantedScopes = strings.Fields(details.Scope)
+		out.MissingPermissions = oauthMissingList(service, missing)
+		out.ReconnectHint = "Use dashboard Google reconnect (auto-sync) to grant missing OAuth scopes"
+		out.Message = restoreReadinessMissingScopes
+		return out, nil
+	}
+	out.GrantedScopes = strings.Fields(details.Scope)
+
+	probeID := strings.TrimSpace(probeLoginID)
+	if probeID == "" && cred != nil {
+		probeID = strings.TrimSpace(cred.Email)
+	}
+	if err := probeOAuthRestore(ctx, service, accessToken, probeID); err != nil {
+		out.Ready = false
+		out.Reason = ReadinessReasonAPIProbeFailed
+		out.Message = err.Error()
+		return out, nil
+	}
+
+	out.Ready = true
+	return out, nil
 }
 
 // ResolveRestoreAuthMode picks oauth vs dwd from account_type (primary) with legacy fallback.
@@ -205,7 +350,11 @@ func ResolveRestoreAuthMode(service, accountType, loginID, holderEmail string, c
 	return RestoreAuthModeOAuth
 }
 
-func evaluateDWDReadiness(ctx context.Context, out *ReadinessResult, service, loginID string) (*ReadinessResult, error) {
+func evaluateDWDReadiness(ctx context.Context, out *ReadinessResult, service, subjectEmail string) (*ReadinessResult, error) {
+	subjectEmail = strings.TrimSpace(subjectEmail)
+	if subjectEmail == "" {
+		return nil, fmt.Errorf("dwd subject email is required")
+	}
 	setup, err := google.GetWorkspaceRestoreDelegationSetup()
 	if err != nil {
 		out.Ready = false
@@ -216,7 +365,7 @@ func evaluateDWDReadiness(ctx context.Context, out *ReadinessResult, service, lo
 	out.DelegationSetup = setup
 	out.RequiredDWDScopes = google.AllRestoreDWDScopeURLs()
 
-	if err := google.ProbeDWDRestore(ctx, service, loginID); err != nil {
+	if err := google.ProbeDWDRestore(ctx, service, subjectEmail); err != nil {
 		out.Ready = false
 		out.Reason = ReadinessReasonDWDNotConfigured
 		out.Message = restoreReadinessDWDNotConfigured
@@ -384,6 +533,7 @@ func CreateRestoreJobFromReadiness(ctx context.Context, store *db.PostgresDb, us
 		UserID:         userID,
 		StorjProjectID: prep.ProjectID,
 		LoginID:        prep.LoginID,
+		TargetEmail:    strings.TrimSpace(prep.TargetEmail),
 		Method:         method,
 		AccountType:    prep.AccountType,
 		CredentialID:   prep.CredentialID,

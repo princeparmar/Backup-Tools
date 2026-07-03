@@ -262,8 +262,9 @@ func buildAllServiceJobCounts(rows []repo.ServiceJobCountRow) []ServiceJobCountV
 // AutomaticBackupUpdateByProjectRequest is PUT /auto-sync/job/project — same fields as AutomaticBackupUpdateRequest plus project scope.
 type AutomaticBackupUpdateByProjectRequest struct {
 	AutomaticBackupUpdateRequest
-	ProjectID   string `json:"project_id"`
-	GoogleEmail string `json:"google_email"`
+	ProjectID    string `json:"project_id"`
+	GoogleEmail  string `json:"google_email"`
+	CredentialID uint   `json:"credential_id"`
 }
 
 func (r *AutomaticBackupUpdateRequest) hasUpdateFields() bool {
@@ -2082,11 +2083,17 @@ func credentialEmailMatches(cred *repo.GoogleBackupCredentialDB, email string) b
 func resolveUserCredentialByProjectAndEmail(database *db.PostgresDb, userID, projectID, email string) (*repo.GoogleBackupCredentialDB, error) {
 	projectID = strings.TrimSpace(projectID)
 	email = strings.TrimSpace(email)
+	userID = strings.TrimSpace(userID)
 	if projectID == "" {
 		return nil, httpErr(http.StatusBadRequest, "Invalid Request", "project_id is required")
 	}
 	if email == "" {
 		return nil, httpErr(http.StatusBadRequest, "Invalid Request", "google_email is required")
+	}
+	if cred, ok, err := database.CredentialRepo.FindByUserProjectAndEmail(userID, projectID, email); err != nil {
+		return nil, err
+	} else if ok {
+		return cred, nil
 	}
 	credID, ok, err := database.CredentialRepo.FindIDForUserProjectAndEmail(userID, projectID, email)
 	if err != nil {
@@ -2171,17 +2178,48 @@ func HandleAutomaticBackupUpdateByProject(c echo.Context) error {
 	connectedEmail := reqBody.connectedEmail()
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
-	cred, err := resolveUserCredentialByProjectAndEmail(database, userID, projectID, connectedEmail)
-	if err != nil {
-		var he *echo.HTTPError
-		if errors.As(err, &he) {
-			return c.JSON(he.Code, he.Message)
+	var cred *repo.GoogleBackupCredentialDB
+	if reqBody.CredentialID > 0 {
+		loaded, err := database.CredentialRepo.GetByID(reqBody.CredentialID)
+		if err != nil {
+			return c.JSON(http.StatusNotFound, map[string]interface{}{
+				"message": "Invalid Request",
+				"error":   "credential_id not found",
+			})
 		}
-		logger.Error(ctx, "resolve credential for connected account update", logger.ErrorField(err))
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
-			"message": "internal server error",
-			"error":   err.Error(),
-		})
+		if uid := strings.TrimSpace(loaded.UserID); uid != "" && !strings.EqualFold(uid, userID) {
+			return c.JSON(http.StatusForbidden, map[string]interface{}{
+				"message": "Invalid Request",
+				"error":   "credential does not belong to user",
+			})
+		}
+		if pid := strings.TrimSpace(loaded.StorjProjectID); pid != "" && !strings.EqualFold(pid, projectID) {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Request",
+				"error":   "project_id does not match credential",
+			})
+		}
+		if connectedEmail != "" && !credentialEmailMatches(loaded, connectedEmail) {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"message": "Invalid Request",
+				"error":   "google_email does not match credential_id",
+			})
+		}
+		cred = loaded
+	} else {
+		var err error
+		cred, err = resolveUserCredentialByProjectAndEmail(database, userID, projectID, connectedEmail)
+		if err != nil {
+			var he *echo.HTTPError
+			if errors.As(err, &he) {
+				return c.JSON(he.Code, he.Message)
+			}
+			logger.Error(ctx, "resolve credential for connected account update", logger.ErrorField(err))
+			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+				"message": "internal server error",
+				"error":   err.Error(),
+			})
+		}
 	}
 
 	jobs, err := database.CronJobRepo.ListJobsByCredentialID(userID, cred.ID)
@@ -2191,14 +2229,65 @@ func HandleAutomaticBackupUpdateByProject(c echo.Context) error {
 			"error":   err.Error(),
 		})
 	}
-	if len(jobs) == 0 {
+
+	updateReq := reqBody.AutomaticBackupUpdateRequest
+	tokenOnlyUpdate := (updateReq.RefreshToken != nil || updateReq.StorxToken != nil) &&
+		updateReq.Interval == nil && updateReq.On == nil && updateReq.Active == nil
+	if len(jobs) == 0 && !tokenOnlyUpdate {
 		return c.JSON(http.StatusNotFound, map[string]interface{}{
 			"message": "No jobs found for credential",
 			"error":   "no autosync jobs linked to this project_id",
 		})
 	}
-
-	updateReq := reqBody.AutomaticBackupUpdateRequest
+	if len(jobs) == 0 && tokenOnlyUpdate {
+		if updateReq.RefreshToken != nil {
+			rt := strings.TrimSpace(*updateReq.RefreshToken)
+			accessToken, tokenErr := google.AuthTokenUsingRefreshToken(rt)
+			if tokenErr != nil {
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "Invalid Refresh Token. Not able to generate auth token from refresh token",
+					"error":   tokenErr.Error(),
+				})
+			}
+			userDetails, detailsErr := google.GetGoogleAccountDetailsFromAccessToken(accessToken)
+			if detailsErr != nil || userDetails.Email == "" {
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "Invalid Refresh Token. May be it is expired or invalid",
+				})
+			}
+			if !credentialEmailMatches(cred, userDetails.Email) {
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "email id mismatch",
+				})
+			}
+			if err := database.CredentialRepo.UpdateTokens(cred.ID, &rt, nil); err != nil {
+				return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+					"message": "Failed to update refresh token",
+					"error":   err.Error(),
+				})
+			}
+		}
+		if updateReq.StorxToken != nil {
+			if strings.TrimSpace(*updateReq.StorxToken) == "" {
+				return c.JSON(http.StatusBadRequest, map[string]interface{}{
+					"message": "Invalid Request",
+					"error":   "storx_token cannot be empty",
+				})
+			}
+			storx := strings.TrimSpace(*updateReq.StorxToken)
+			if err := database.CredentialRepo.UpdateTokens(cred.ID, nil, &storx); err != nil {
+				return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+					"message": "Failed to update storx token",
+					"error":   err.Error(),
+				})
+			}
+		}
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"message":       "Credential updated",
+			"credential_id": cred.ID,
+			"success":       true,
+		})
+	}
 
 	if updateReq.Interval != nil || updateReq.On != nil {
 		intervalVal, onValue, schedErr := parseScheduleFromRequest(updateReq.Interval, updateReq.On)
