@@ -185,7 +185,7 @@ func runDriveIncrementalSync(ctx context.Context, input ProcessorInput, task *re
 			IncludeItemsFromAllDrives(true).
 			IncludeRemoved(true).
 			PageSize(1000).
-			Fields("nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,parents,modifiedTime,version,md5Checksum,permissions,driveId,starred,trashed,shortcutDetails(targetId))))").
+			Fields("nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,parents,modifiedTime,version,md5Checksum,permissions,driveId,starred,trashed,shortcutDetails(targetId,targetMimeType)))").
 			Do()
 		if err != nil {
 			return "", fmt.Errorf("drive changes list: %w", err)

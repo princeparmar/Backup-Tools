@@ -1007,6 +1007,32 @@ func (r *CronJobRepository) DeactivateJobsForCredentialOrLegacyGoogleAuth(job *C
 	return nil
 }
 
+// DeactivateAllActiveJobsForUser deactivates every active non-placeholder cron job for a user.
+func (r *CronJobRepository) DeactivateAllActiveJobsForUser(userID, message string) error {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil
+	}
+	if strings.TrimSpace(message) == "" {
+		message = "Automatic backup deactivated because your CyberLS storage limit was exceeded. Please free up space and reactivate."
+	}
+	updates := map[string]interface{}{
+		"active":           false,
+		"auto_deactivated": true,
+		"message":          message,
+		"message_status":   JobMessageStatusError,
+	}
+	if err := r.db.Model(&CronJobListingDB{}).
+		Where("user_id = ? AND active = ? AND COALESCE(placeholder, false) = ?", userID, true, false).
+		Updates(updates).Error; err != nil {
+		return fmt.Errorf("deactivate active jobs for user: %w", err)
+	}
+	return r.db.Model(&CronJobListingDB{}).
+		Where("user_id = ? AND COALESCE(placeholder, false) = ?", userID, false).
+		Where("status <> ?", JobStatusSuccess).
+		Updates(map[string]interface{}{"status": JobStatusCancelled}).Error
+}
+
 // DeactivateAllJobsForCredential deactivates every job with credential_id and optionally clears credential tokens.
 func (r *CronJobRepository) DeactivateAllJobsForCredential(credentialID uint, message string, clearCredentialTokens bool) error {
 	if credentialID == 0 {

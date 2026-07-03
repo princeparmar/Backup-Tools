@@ -23,6 +23,14 @@ func IsUplinkError(err error) bool {
 		strings.Contains(msg, "parse access grant")
 }
 
+// IsStorageLimitError reports whether err is a CyberLS/uplink quota exhaustion failure.
+func IsStorageLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "storage limit exceeded")
+}
+
 // RefreshAndSave mints a new storx grant via Satellite and persists it on the backup job/credential.
 func RefreshAndSave(ctx context.Context, store *db.PostgresDb, job *repo.CronJobListingDB) (string, error) {
 	if store == nil || job == nil {
