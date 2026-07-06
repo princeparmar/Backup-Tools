@@ -185,7 +185,7 @@ func runDriveIncrementalSync(ctx context.Context, input ProcessorInput, task *re
 			IncludeItemsFromAllDrives(true).
 			IncludeRemoved(true).
 			PageSize(1000).
-			Fields("nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,parents,modifiedTime,version,md5Checksum,permissions,driveId,starred,trashed,shortcutDetails(targetId,targetMimeType)))").
+			Fields("nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,size,parents,modifiedTime,version,md5Checksum,permissions,driveId,starred,trashed,shortcutDetails(targetId,targetMimeType)))").
 			Do()
 		if err != nil {
 			return "", fmt.Errorf("drive changes list: %w", err)
@@ -219,7 +219,7 @@ func syncDriveFileByID(ctx context.Context, input ProcessorInput, task *repo.Sch
 	file := preloaded
 	var err error
 	if file == nil || strings.TrimSpace(file.Id) == "" || strings.TrimSpace(file.MimeType) == "" || strings.TrimSpace(file.Name) == "" || strings.TrimSpace(file.ModifiedTime) == "" {
-		file, err = service.Files.Get(fileID).Fields("id,name,mimeType,parents,modifiedTime,version,md5Checksum,permissions,driveId,starred,trashed,shortcutDetails(targetId)").SupportsAllDrives(true).Do()
+		file, err = service.Files.Get(fileID).Fields("id,name,mimeType,size,parents,modifiedTime,version,md5Checksum,permissions,driveId,starred,trashed,shortcutDetails(targetId)").SupportsAllDrives(true).Do()
 		if err != nil {
 			return fmt.Errorf("get file metadata: %w", err)
 		}
@@ -230,7 +230,7 @@ func syncDriveFileByID(ctx context.Context, input ProcessorInput, task *repo.Sch
 		if cached, ok := shortcutTargetCache[targetID]; ok {
 			file = cached
 		} else {
-			file, err = service.Files.Get(targetID).Fields("id,name,mimeType,parents,modifiedTime,version,md5Checksum,permissions,driveId,starred,trashed").SupportsAllDrives(true).Do()
+			file, err = service.Files.Get(targetID).Fields("id,name,mimeType,size,parents,modifiedTime,version,md5Checksum,permissions,driveId,starred,trashed").SupportsAllDrives(true).Do()
 			if err != nil {
 				return fmt.Errorf("resolve shortcut target: %w", err)
 			}
@@ -273,15 +273,45 @@ func syncDriveFileByID(ctx context.Context, input ProcessorInput, task *repo.Sch
 		return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, metaKey, b, task.UserID, input.StorxRecovery)
 	}
 
-	content, exportMime, err := downloadDriveFileContent(service, file)
-	if err != nil {
-		return err
-	}
-	if exportMime != "" {
-		meta.ExportMimeType = exportMime
-	}
-	if err := handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, dataKey, content, task.UserID, input.StorxRecovery); err != nil {
-		return err
+	// Legacy path (files <= 10MB): download full content into memory, then upload.
+	// content, exportMime, err := downloadDriveFileContent(service, file)
+	// if err != nil {
+	// 	return err
+	// }
+	// if exportMime != "" {
+	// 	meta.ExportMimeType = exportMime
+	// }
+	// if err := handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, dataKey, content, task.UserID, input.StorxRecovery); err != nil {
+	// 	return err
+	// }
+
+	var exportMime string
+	if handler.ShouldUseStreamingUpload(file.Size, file.MimeType) {
+		resp, mime, err := openDriveFileDownload(service, file)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		exportMime = mime
+		if exportMime != "" {
+			meta.ExportMimeType = exportMime
+		}
+		if err := handler.UploadObjectStreamAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, dataKey, resp.Body, task.UserID, input.StorxRecovery); err != nil {
+			return err
+		}
+	} else {
+		content, mime, err := downloadDriveFileContent(service, file)
+		if err != nil {
+			return err
+		}
+		exportMime = mime
+		if exportMime != "" {
+			meta.ExportMimeType = exportMime
+		}
+		// if err := handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, dataKey, content, task.UserID, input.StorxRecovery); err != nil {
+		if err := handler.UploadBufferedObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, dataKey, content, task.UserID, input.StorxRecovery); err != nil {
+			return err
+		}
 	}
 	b, _ := json.Marshal(meta)
 	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, metaKey, b, task.UserID, input.StorxRecovery)
@@ -342,6 +372,19 @@ func downloadDriveCronMetaBytes(ctx context.Context, task *repo.ScheduledTasks, 
 }
 
 func downloadDriveFileContent(service *drive.Service, file *drive.File) ([]byte, string, error) {
+	resp, exportMime, err := openDriveFileDownload(service, file)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", err
+	}
+	return body, exportMime, nil
+}
+
+func openDriveFileDownload(service *drive.Service, file *drive.File) (*http.Response, string, error) {
 	var resp *http.Response
 	var err error
 	exportMime := ""
@@ -366,13 +409,42 @@ func downloadDriveFileContent(service *drive.Service, file *drive.File) ([]byte,
 	if err != nil {
 		return nil, "", err
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, "", err
-	}
-	return body, exportMime, nil
+	return resp, exportMime, nil
 }
+
+// Legacy implementation kept for reference (replaced by openDriveFileDownload + stream/direct branch).
+// func downloadDriveFileContent(service *drive.Service, file *drive.File) ([]byte, string, error) {
+// 	var resp *http.Response
+// 	var err error
+// 	exportMime := ""
+// 	if strings.HasPrefix(file.MimeType, "application/vnd.google-apps") {
+// 		switch file.MimeType {
+// 		case "application/vnd.google-apps.document":
+// 			exportMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+// 		case "application/vnd.google-apps.spreadsheet":
+// 			exportMime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+// 		case "application/vnd.google-apps.presentation":
+// 			exportMime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+// 		default:
+// 			exportMime = ""
+// 		}
+// 		if exportMime == "" {
+// 			return nil, "", fmt.Errorf("unsupported export mime for %s", file.MimeType)
+// 		}
+// 		resp, err = service.Files.Export(file.Id, exportMime).Download()
+// 	} else {
+// 		resp, err = service.Files.Get(file.Id).Download()
+// 	}
+// 	if err != nil {
+// 		return nil, "", err
+// 	}
+// 	defer resp.Body.Close()
+// 	body, err := io.ReadAll(resp.Body)
+// 	if err != nil {
+// 		return nil, "", err
+// 	}
+// 	return body, exportMime, nil
+// }
 
 func writeDriveRemovedMetadata(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, fileID string) error {
 	var lastKnownParents []string

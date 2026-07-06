@@ -146,14 +146,17 @@ func GetUploader(ctx context.Context, accessGrant, bucketName, objectKey string)
 
 // UploadObject uploads data to satellite storage
 func UploadObject(ctx context.Context, accessGrant, bucketName, objectKey string, data []byte) error {
+	return UploadObjectFromReader(ctx, accessGrant, bucketName, objectKey, bytes.NewReader(data))
+}
 
+// UploadObjectFromReader streams content to satellite storage without loading the full object into memory.
+func UploadObjectFromReader(ctx context.Context, accessGrant, bucketName, objectKey string, r io.Reader) error {
 	upload, err := GetUploader(ctx, accessGrant, bucketName, objectKey)
 	if err != nil {
 		return err
 	}
 
-	buf := bytes.NewBuffer(data)
-	_, err = io.Copy(upload, buf)
+	_, err = io.Copy(upload, r)
 	if err != nil {
 		_ = upload.Abort()
 		return fmt.Errorf("upload data: %w", err)

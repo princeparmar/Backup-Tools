@@ -216,7 +216,9 @@ func syncCalendarEvent(ctx context.Context, input ProcessorInput, task *repo.Sch
 	if err != nil {
 		return fmt.Errorf("marshal event: %w", err)
 	}
-	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Calendar, objectKey, b, task.UserID, input.StorxRecovery)
+	// Legacy direct upload:
+	// return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Calendar, objectKey, b, task.UserID, input.StorxRecovery)
+	return handler.UploadBufferedObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Calendar, objectKey, b, task.UserID, input.StorxRecovery)
 }
 
 func retrySyncCalendarEvent(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, calendarID, calendarSummary string, ev *calendar.Event) error {
@@ -267,5 +269,7 @@ func saveCalendarMeta(ctx context.Context, input ProcessorInput, task *repo.Sche
 		return fmt.Errorf("marshal calendar metadata: %w", err)
 	}
 	key := google.CalendarMetaObjectKey(task.LoginId, meta.ID, meta.Summary)
-	return handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Calendar, key, b, task.UserID, input.StorxRecovery)
+	// Legacy direct upload:
+	// return handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Calendar, key, b, task.UserID, input.StorxRecovery)
+	return handler.UploadBufferedObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Calendar, key, b, task.UserID, input.StorxRecovery)
 }
