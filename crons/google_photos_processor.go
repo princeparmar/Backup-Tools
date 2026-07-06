@@ -215,12 +215,35 @@ func syncPhotosMediaByID(ctx context.Context, input ProcessorInput, task *repo.S
 		b, _ := json.Marshal(meta)
 		return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Photos, metaKey, b, task.UserID, input.StorxRecovery)
 	}
-	body, err := downloadPhotosMediaContent(ctx, item.BaseURL)
+	// Legacy path (media <= 10MB): download full content into memory, then upload.
+	// body, err := downloadPhotosMediaContent(ctx, item.BaseURL)
+	// if err != nil {
+	// 	return err
+	// }
+	// if err := handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Photos, dataKey, body, task.UserID, input.StorxRecovery); err != nil {
+	// 	return err
+	// }
+
+	resp, err := openPhotosMediaDownload(ctx, item.BaseURL)
 	if err != nil {
 		return err
 	}
-	if err := handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Photos, dataKey, body, task.UserID, input.StorxRecovery); err != nil {
-		return err
+	defer resp.Body.Close()
+
+	contentLength := resp.ContentLength
+	if handler.ShouldUseStreamingUpload(contentLength, item.MimeType) {
+		if err := handler.UploadObjectStreamAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Photos, dataKey, resp.Body, task.UserID, input.StorxRecovery); err != nil {
+			return err
+		}
+	} else {
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("read photo body: %w", err)
+		}
+		// if err := handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Photos, dataKey, body, task.UserID, input.StorxRecovery); err != nil {
+		if err := handler.UploadBufferedObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Photos, dataKey, body, task.UserID, input.StorxRecovery); err != nil {
+			return err
+		}
 	}
 	b, _ := json.Marshal(meta)
 	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Photos, metaKey, b, task.UserID, input.StorxRecovery)
@@ -257,7 +280,7 @@ func shouldSkipPhotosContentUpload(ctx context.Context, task *repo.ScheduledTask
 		strings.TrimSpace(prev.Filename) == strings.TrimSpace(next.Filename), nil
 }
 
-func downloadPhotosMediaContent(ctx context.Context, baseURL string) ([]byte, error) {
+func openPhotosMediaDownload(ctx context.Context, baseURL string) (*http.Response, error) {
 	baseURL = strings.TrimSpace(baseURL)
 	if baseURL == "" {
 		return nil, fmt.Errorf("empty base URL")
@@ -271,9 +294,31 @@ func downloadPhotosMediaContent(ctx context.Context, baseURL string) ([]byte, er
 	if err != nil {
 		return nil, fmt.Errorf("download photo: %w", err)
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("download photo status: %s", resp.Status)
 	}
-	return io.ReadAll(resp.Body)
+	return resp, nil
 }
+
+// Legacy implementation kept for reference (replaced by openPhotosMediaDownload + stream/direct branch).
+// func downloadPhotosMediaContent(ctx context.Context, baseURL string) ([]byte, error) {
+// 	baseURL = strings.TrimSpace(baseURL)
+// 	if baseURL == "" {
+// 		return nil, fmt.Errorf("empty base URL")
+// 	}
+// 	downloadURL := baseURL + "=d"
+// 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("create download request: %w", err)
+// 	}
+// 	resp, err := http.DefaultClient.Do(req)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("download photo: %w", err)
+// 	}
+// 	defer resp.Body.Close()
+// 	if resp.StatusCode != http.StatusOK {
+// 		return nil, fmt.Errorf("download photo status: %s", resp.Status)
+// 	}
+// 	return io.ReadAll(resp.Body)
+// }

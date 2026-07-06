@@ -158,7 +158,9 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 			}
 
 			syncedData = true
-			err = handler.UploadObjectAndSync(context.TODO(), input.Database, storxToken, "gmail", messagePath, b, input.Job.UserID, input.StorxRecovery)
+			// Legacy direct upload (all payloads in memory):
+			// err = handler.UploadObjectAndSync(context.TODO(), input.Database, storxToken, "gmail", messagePath, b, input.Job.UserID, input.StorxRecovery)
+			err = handler.UploadBufferedObjectAndSync(context.TODO(), input.Database, storxToken, "gmail", messagePath, b, input.Job.UserID, input.StorxRecovery)
 			if err != nil {
 				return err
 			}

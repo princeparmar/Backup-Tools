@@ -444,7 +444,7 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 		}
 
 		// Update cron job status based on task status (StorX credential deactivation preserves success).
-		if handler.IsStorxSatelliteRefreshError(processErr) {
+		if handler.IsStorxSatelliteRefreshError(processErr) || handler.IsStorxStorageLimitError(processErr) {
 			if job.Status != repo.JobStatusSuccess {
 				updateMap["status"] = repo.JobStatusCancelled
 			}
@@ -560,11 +560,33 @@ func (a *AutosyncManager) deactivatePersonalGmailAuth(job *repo.CronJobListingDB
 	task.Message = cronTaskPersonalGoogleAuthDeactivated
 }
 
+func (a *AutosyncManager) deactivateAllJobsForStorageLimit(job *repo.CronJobListingDB, task *repo.TaskListingDB) {
+	if job == nil {
+		return
+	}
+	if err := a.store.CronJobRepo.DeactivateAllActiveJobsForUser(job.UserID, cronJobStorxStorageLimitFinal); err != nil {
+		logger.Warn(context.Background(), "Failed to deactivate jobs after storage limit exceeded",
+			logger.String("user_id", job.UserID),
+			logger.Int("job_id", int(job.ID)),
+			logger.ErrorField(err))
+	}
+	job.Active = false
+	job.AutoDeactivated = true
+	job.Message = cronJobStorxStorageLimitFinal
+	if task != nil {
+		task.Message = cronTaskStorxStorageLimitDeactivated
+		task.RetryCount = repo.MaxRetryCount
+	}
+}
+
 func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.CronJobListingDB, task *repo.TaskListingDB) string {
 	errMsg := processErr.Error()
 	errLower := strings.ToLower(errMsg)
 
 	switch {
+	case handler.IsStorxStorageLimitError(processErr):
+		return cronEmailStorxStorageLimitFinal
+
 	case handler.IsStorxSatelliteRefreshError(processErr):
 		return cronEmailStorxSatelliteRefreshFinal
 
@@ -619,6 +641,9 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 	errLower := strings.ToLower(errMsg)
 
 	switch {
+	case handler.IsStorxStorageLimitError(processErr):
+		a.deactivateAllJobsForStorageLimit(job, task)
+
 	case handler.IsStorxSatelliteRefreshError(processErr):
 		job.Message = cronJobStorxSatelliteRefreshFinal
 		task.Message = cronTaskStorxSatelliteRefreshFinal

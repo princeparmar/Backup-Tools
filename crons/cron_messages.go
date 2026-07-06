@@ -25,6 +25,8 @@ const (
 
 	cronEmailStorxUplinkFinal = "Your automatic backup has been temporarily disabled due to insufficient StorX permissions. Please update your StorX permissions and reactivate the backup from your dashboard."
 
+	cronEmailStorxStorageLimitFinal = "Your automatic backups have been paused because your CyberLS storage limit was exceeded. Free up space or upgrade your storage plan, then reactivate backups from your dashboard."
+
 	cronEmailNetworkFinal = "Your automatic backup has been temporarily disabled due to network connectivity issues. Please check your internet connection and reactivate the backup from your dashboard."
 
 	cronEmailFailurePeriodsExhausted = "Your automatic backup still failed after we retried each run up to 3 times, on 3 separate scheduled runs (daily, weekly, or monthly—depending on your settings). The backup has been turned off to avoid endless errors. Check the last error in your backup history, fix the underlying issue if you can, then reactivate the backup from your dashboard."
@@ -56,6 +58,8 @@ const (
 
 	cronJobNetworkFinal = "Automatic backup failed due to network issues. Please check your connection and reactivate."
 
+	cronJobStorxStorageLimitFinal = "CyberLS storage limit exceeded. Free up storage or upgrade your plan, then reactivate automatic backup from your dashboard."
+
 	cronJobFailurePeriodsExhausted = "Backup failed after 3 scheduled runs, each with up to 3 automatic retries. Job has been deactivated—reactivate from your dashboard after fixing the issue."
 )
 
@@ -82,6 +86,8 @@ const (
 	cronTaskOutlookAuthDeactivated = "Microsoft Outlook Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
 
 	cronTaskNetworkDeactivated = "Task failed due to network connectivity issues. Job has been deactivated."
+
+	cronTaskStorxStorageLimitDeactivated = "CyberLS storage limit exceeded. All active automatic backups for your account have been deactivated."
 
 	cronTaskFailurePeriodsExhausted = "Failed after multiple scheduled runs (3 runs × up to 3 retries each). Automatic backup has been deactivated."
 )

@@ -181,7 +181,9 @@ func syncContactByID(ctx context.Context, input ProcessorInput, task *repo.Sched
 	if err != nil {
 		return fmt.Errorf("marshal contact: %w", err)
 	}
-	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Contacts, objectKey, b, task.UserID, input.StorxRecovery)
+	// Legacy direct upload:
+	// return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Contacts, objectKey, b, task.UserID, input.StorxRecovery)
+	return handler.UploadBufferedObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Contacts, objectKey, b, task.UserID, input.StorxRecovery)
 }
 
 func retrySyncContactByID(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, item google.FlatContact) error {

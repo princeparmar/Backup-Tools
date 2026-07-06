@@ -33,6 +33,11 @@ func NewStorxRecovery(store *db.PostgresDb, job *repo.CronJobListingDB) *StorxRe
 	return storxrefresh.NewRecovery(store, job)
 }
 
+// IsStorxStorageLimitError reports whether err is a CyberLS storage quota exhaustion failure.
+func IsStorxStorageLimitError(err error) bool {
+	return storxrefresh.IsStorageLimitError(err)
+}
+
 // IsStorxUplinkError reports whether err is a missing/invalid storx grant or uplink permission failure.
 func IsStorxUplinkError(err error) bool {
 	if err == nil {
