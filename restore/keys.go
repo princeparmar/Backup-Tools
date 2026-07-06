@@ -32,9 +32,11 @@ func RestoreGmailKeyWithSession(ctx context.Context, sess *StorxGrantSession, cl
 	})
 }
 
-// RestoreGmailKey downloads one message from Satellite and inserts into Gmail.
+// RestoreGmailKey downloads one message from Satellite and inserts into Gmail (restore-all).
 func RestoreGmailKey(ctx context.Context, accessGrant string, client *google.GmailClient, objectKey string) error {
-	data, err := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Gmail, objectKey)
+	data, err := downloadBytesRestoreAll(ctx, accessGrant, satellite.ReserveBucket_Gmail, objectKey, restoreDownloadHints{
+		mimeType: "application/json",
+	})
 	if err != nil {
 		return err
 	}
@@ -54,11 +56,9 @@ func RestoreDriveKeyWithSession(ctx context.Context, sess *StorxGrantSession, sr
 	}, srv, userEmail, objectKey)
 }
 
-// RestoreDriveKey restores one Drive backup object.
+// RestoreDriveKey restores one Drive backup object (restore-all with streaming for large files).
 func RestoreDriveKey(ctx context.Context, accessGrant string, srv *drive.Service, userEmail, objectKey string) error {
-	return restoreDriveObjectKey(ctx, func(bucket, key string) ([]byte, error) {
-		return satellite.DownloadObject(ctx, accessGrant, bucket, key)
-	}, srv, userEmail, objectKey)
+	return restoreDriveObjectKeyRestoreAll(ctx, accessGrant, srv, userEmail, objectKey)
 }
 
 func restoreDriveObjectKey(
@@ -120,6 +120,61 @@ func restoreDriveObjectKey(
 	})
 }
 
+func restoreDriveObjectKeyRestoreAll(
+	ctx context.Context,
+	accessGrant string,
+	srv *drive.Service,
+	userEmail, objectKey string,
+) error {
+	if google.IsDriveIDBasedMetaKey(objectKey) {
+		metaBytes, err := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Drive, objectKey)
+		if err != nil {
+			return err
+		}
+		var meta google.DriveCronBackupMeta
+		if err := json.Unmarshal(metaBytes, &meta); err != nil {
+			return fmt.Errorf("parse drive cron meta: %w", err)
+		}
+		if meta.RemovedFromDrive {
+			return fmt.Errorf("skip removed drive file %s", strings.TrimSpace(meta.FileID))
+		}
+		dataKey := strings.TrimSpace(meta.DataObjectKey)
+		if dataKey == "" && strings.TrimSpace(meta.FileID) != "" {
+			displayName := google.DriveBackupDisplayName(meta.Name, meta.MimeType)
+			if displayName != "" && displayName != "untitled" {
+				dataKey = google.DriveIDBasedDataKey(strings.TrimSpace(userEmail), meta.FileID, displayName)
+			}
+			if dataKey == "" {
+				dataKey = google.DriveLegacyBareDataKey(strings.TrimSpace(userEmail), meta.FileID)
+			}
+		}
+		if dataKey == "" {
+			return fmt.Errorf("missing data_object_key for %s", objectKey)
+		}
+		driveMeta := google.CronMetaToDriveFileMetadata(&meta, dataKey)
+		metadataJSON, err := json.Marshal(driveMeta)
+		if err != nil {
+			return err
+		}
+		return restoreDriveDataFromStorxStream(ctx, accessGrant, srv, userEmail, dataKey, metadataJSON)
+	}
+
+	data, err := downloadBytesRestoreAll(ctx, accessGrant, satellite.ReserveBucket_Drive, objectKey, restoreDownloadHints{
+		mimeType: "application/json",
+	})
+	if err != nil {
+		return err
+	}
+	var backupItem google.DriveBackupItem
+	if err := json.Unmarshal(data, &backupItem); err != nil {
+		return fmt.Errorf("parse drive backup: %w", err)
+	}
+	metadataJSON, _ := json.Marshal(backupItem.Metadata)
+	return RetryGoogle(ctx, func() error {
+		return google.RestoreFromBackup(ctx, srv, userEmail, metadataJSON, backupItem.Content)
+	})
+}
+
 // RestoreCalendarKeyWithSession restores one calendar event using DB storx grant (manual restore).
 func RestoreCalendarKeyWithSession(ctx context.Context, sess *StorxGrantSession, service *calendar.Service, objectKey string) error {
 	if !google.IsCalendarEventRestoreObjectKey(objectKey) {
@@ -138,7 +193,7 @@ func RestoreCalendarKeyWithSession(ctx context.Context, sess *StorxGrantSession,
 	})
 }
 
-// RestoreCalendarKey restores one calendar event JSON blob.
+// RestoreCalendarKey restores one calendar event JSON blob (restore-all).
 func RestoreCalendarKey(ctx context.Context, accessGrant string, service *calendar.Service, objectKey string) error {
 	if !google.IsCalendarEventRestoreObjectKey(objectKey) {
 		return fmt.Errorf("invalid calendar restore key")
@@ -147,7 +202,9 @@ func RestoreCalendarKey(ctx context.Context, accessGrant string, service *calend
 	if !ok {
 		return fmt.Errorf("parse calendar key")
 	}
-	data, err := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Calendar, objectKey)
+	data, err := downloadBytesRestoreAll(ctx, accessGrant, satellite.ReserveBucket_Calendar, objectKey, restoreDownloadHints{
+		mimeType: "application/json",
+	})
 	if err != nil {
 		return err
 	}
@@ -170,12 +227,14 @@ func RestoreContactKeyWithSession(ctx context.Context, sess *StorxGrantSession, 
 	})
 }
 
-// RestoreContactKey restores one contact JSON blob.
+// RestoreContactKey restores one contact JSON blob (restore-all).
 func RestoreContactKey(ctx context.Context, accessGrant string, service *people.Service, objectKey string) error {
 	if !google.IsContactsRestoreObjectKey(objectKey) {
 		return fmt.Errorf("invalid contacts restore key")
 	}
-	data, err := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Contacts, objectKey)
+	data, err := downloadBytesRestoreAll(ctx, accessGrant, satellite.ReserveBucket_Contacts, objectKey, restoreDownloadHints{
+		mimeType: "application/json",
+	})
 	if err != nil {
 		return err
 	}
@@ -184,42 +243,46 @@ func RestoreContactKey(ctx context.Context, accessGrant string, service *people.
 	})
 }
 
-// RestorePhotosKey restores one photo (legacy or ID-based satellite keys).
+// RestorePhotosKey restores one photo (legacy or ID-based satellite keys, restore-all).
 func RestorePhotosKey(ctx context.Context, deps *RestoreDeps, objectKey string) error {
 	if strings.Contains(objectKey, "/.file_placeholder") {
 		return fmt.Errorf("skip placeholder")
 	}
 
 	var (
-		data       []byte
 		albumID    string
 		albumTitle string
 		filename   string
+		mimeType   string
+		dataKey    string
 		err        error
 	)
+
+	tempDir := filepath.Join("./cache", "restore", fmt.Sprintf("job-%d", deps.Job.ID))
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		return err
+	}
+
 	if dataKey, metaKey, idBased := parsePhotosIDBasedRestoreKeys(objectKey); idBased {
-		data, filename, err = downloadPhotosIDBasedRestorePayloadWithGrant(ctx, deps.AccessGrant, objectKey, dataKey, metaKey)
+		filename, mimeType, dataKey, err = resolvePhotosIDBasedRestoreGrant(ctx, deps.AccessGrant, objectKey, dataKey, metaKey)
 		if err != nil {
 			return err
 		}
 	} else {
-		data, err = satellite.DownloadObject(ctx, deps.AccessGrant, satellite.ReserveBucket_Photos, objectKey)
-		if err != nil {
-			return err
-		}
 		albumID, albumTitle, filename = parseGooglePhotosKey(objectKey)
+		dataKey = objectKey
+		mimeType = mimeFromFilename(filename)
 	}
 
 	if strings.TrimSpace(filename) == "" {
 		filename = "restored_photo"
 	}
-
-	tempDir := filepath.Join("./cache", "restore", fmt.Sprintf("job-%d", deps.Job.ID))
-	if err := os.MkdirAll(tempDir, 0755); err != nil {
-		return err
+	if strings.TrimSpace(mimeType) == "" {
+		mimeType = mimeFromFilename(filename)
 	}
+
 	tempPath := filepath.Join(tempDir, filepath.Base(filename))
-	if err := os.WriteFile(tempPath, data, 0644); err != nil {
+	if err := streamToFileRestoreAll(ctx, deps.AccessGrant, satellite.ReserveBucket_Photos, dataKey, tempPath); err != nil {
 		return err
 	}
 	defer os.Remove(tempPath)
@@ -276,6 +339,7 @@ func (d *RestoreDeps) getOrCreateAlbum(ctx context.Context, albumID, albumTitle 
 type photosRestoreMeta struct {
 	MediaItemID   string `json:"media_item_id"`
 	Filename      string `json:"filename"`
+	MimeType      string `json:"mime_type"`
 	DataObjectKey string `json:"data_object_key"`
 }
 
@@ -336,6 +400,28 @@ func parseGooglePhotosKey(key string) (albumID, albumTitle, filename string) {
 // DownloadPhotosIDBasedPayloadWithSession downloads ID-based photo backup using DB storx grant (manual restore).
 func DownloadPhotosIDBasedPayloadWithSession(ctx context.Context, sess *StorxGrantSession, triggerKey, dataKey, metaKey string) ([]byte, string, error) {
 	return downloadPhotosIDBasedRestorePayload(ctx, sess, triggerKey, dataKey, metaKey)
+}
+
+func resolvePhotosIDBasedRestoreGrant(ctx context.Context, accessGrant, triggerKey, dataKey, metaKey string) (filename, mimeType, resolvedDataKey string, err error) {
+	dataKey = strings.TrimSpace(dataKey)
+	metaKey = strings.TrimSpace(metaKey)
+	if metaKey != "" {
+		metaBytes, metaErr := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Photos, metaKey)
+		if metaErr == nil {
+			var meta photosRestoreMeta
+			if json.Unmarshal(metaBytes, &meta) == nil {
+				filename = strings.TrimSpace(meta.Filename)
+				mimeType = strings.TrimSpace(meta.MimeType)
+				if dataKey == "" {
+					dataKey = strings.TrimSpace(meta.DataObjectKey)
+				}
+			}
+		}
+	}
+	if dataKey == "" {
+		return "", "", "", fmt.Errorf("missing data object key for %s", triggerKey)
+	}
+	return filename, mimeType, dataKey, nil
 }
 
 func downloadPhotosIDBasedRestorePayloadWithGrant(ctx context.Context, accessGrant, triggerKey, dataKey, metaKey string) ([]byte, string, error) {

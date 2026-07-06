@@ -153,6 +153,9 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 	}
 	defer proc.Cleanup(ctx, deps)
 
+	batchStarted := time.Now()
+	deps.touchJobHeartbeat()
+
 	cfg := deps.Config
 	prefix := strings.TrimSuffix(job.LoginID, "/") + "/"
 
@@ -291,7 +294,9 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 		logger.Int("batch_failed", int(batchResult.Failed)),
 		logger.Int("cursor_end_id", int(newCursor)),
 		logger.Int("job_processed", int(job.ProcessedCount+batchResult.Processed)),
-		logger.Int("job_total", int(job.TotalCount)))
+		logger.Int("job_total", int(job.TotalCount)),
+		logger.Int64("batch_duration_ms", time.Since(batchStarted).Milliseconds()),
+		logger.Float64("batch_items_per_sec", batchItemsPerSec(batchResult.Processed+batchResult.Failed, time.Since(batchStarted))))
 
 	recordBatchItems(job.Method, batchResult.Processed, batchResult.Failed)
 	maybeNotifyProgress(ctx, job)
@@ -368,6 +373,13 @@ func resolveJobTerminalStatus(failedCount uint) (status, message string) {
 
 func shouldFetchAnotherBatch(rowCount, batchSize int) bool {
 	return rowCount >= batchSize
+}
+
+func batchItemsPerSec(items uint, elapsed time.Duration) float64 {
+	if items == 0 || elapsed <= 0 {
+		return 0
+	}
+	return float64(items) / elapsed.Seconds()
 }
 
 func IsActiveRestoreConflict(err error) bool {

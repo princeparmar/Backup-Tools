@@ -220,7 +220,7 @@ func (r *RestoreJobRepository) ClaimNextQueuedJob() (*RestoreJobListingDB, error
 	return &job, nil
 }
 
-const restoreRunningBatchGap = 25 * time.Second
+const restoreRunningBatchGap = 2 * time.Minute
 
 // ClaimNextRunningJob claims a running job ready for the next batch (heartbeat not updated recently).
 func (r *RestoreJobRepository) ClaimNextRunningJob() (*RestoreJobListingDB, error) {

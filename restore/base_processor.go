@@ -4,10 +4,28 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"golang.org/x/sync/errgroup"
 )
+
+const restoreJobHeartbeatMinInterval = 10 * time.Second
+
+// touchJobHeartbeat updates last_heart_beat while a batch is in flight (throttled).
+func (d *RestoreDeps) touchJobHeartbeat() {
+	if d == nil || d.Store == nil || d.Job == nil {
+		return
+	}
+	d.heartbeatMu.Lock()
+	defer d.heartbeatMu.Unlock()
+	if !d.lastHeartbeat.IsZero() && time.Since(d.lastHeartbeat) < restoreJobHeartbeatMinInterval {
+		return
+	}
+	d.lastHeartbeat = time.Now()
+	_ = d.Store.RestoreJobRepo.UpdateHeartBeat(d.Job.ID)
+}
 
 // RunBatch restores a page of synced objects with centralized backpressure.
 func RunBatch(ctx context.Context, deps *RestoreDeps, proc Processor, rows []repo.SyncedObject) BatchResult {
@@ -29,6 +47,15 @@ func RunBatch(ctx context.Context, deps *RestoreDeps, proc Processor, rows []rep
 			Reason:    err.Error(),
 			ErrorCode: ErrorCodeFromErr(err),
 		})
+		if deps != nil && deps.Job != nil {
+			logger.Warn(ctx, "Restore item failed",
+				logger.Int("job_id", int(deps.Job.ID)),
+				logger.String("method", deps.Job.Method),
+				logger.String("login_id", deps.Job.LoginID),
+				logger.String("object_key", objectKey),
+				logger.String("error_code", ErrorCodeFromErr(err)),
+				logger.ErrorField(err))
+		}
 	}
 
 	for _, row := range rows {
@@ -37,6 +64,7 @@ func RunBatch(ctx context.Context, deps *RestoreDeps, proc Processor, rows []rep
 			continue
 		}
 		g.Go(func() error {
+			started := time.Now()
 			if err := deps.waitRate(gctx); err != nil {
 				recordFailure(row.ObjectKey, err)
 				return nil
@@ -46,11 +74,21 @@ func RunBatch(ctx context.Context, deps *RestoreDeps, proc Processor, rows []rep
 			})
 			if err != nil {
 				recordFailure(row.ObjectKey, err)
+				deps.touchJobHeartbeat()
 				return nil
 			}
 			mu.Lock()
 			result.Processed++
 			mu.Unlock()
+			deps.touchJobHeartbeat()
+			if deps.Job != nil {
+				logger.Info(ctx, "Restore item completed",
+					logger.Int("job_id", int(deps.Job.ID)),
+					logger.String("method", deps.Job.Method),
+					logger.String("login_id", deps.Job.LoginID),
+					logger.String("object_key", row.ObjectKey),
+					logger.Int64("duration_ms", time.Since(started).Milliseconds()))
+			}
 			return nil
 		})
 	}

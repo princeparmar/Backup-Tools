@@ -1710,7 +1710,19 @@ func (rc *RestoreContext) CheckFileExists(ctx context.Context, fileName, parentI
 	return nil, nil
 }
 
+func (rc *RestoreContext) RestoreFileFromReader(ctx context.Context, metadata *DriveFileMetadata, content io.Reader) error {
+	return rc.restoreFileWithContent(ctx, metadata, content)
+}
+
 func (rc *RestoreContext) RestoreFile(ctx context.Context, metadata *DriveFileMetadata, fileBytes []byte) error {
+	var content io.Reader
+	if len(fileBytes) > 0 {
+		content = bytes.NewReader(fileBytes)
+	}
+	return rc.restoreFileWithContent(ctx, metadata, content)
+}
+
+func (rc *RestoreContext) restoreFileWithContent(ctx context.Context, metadata *DriveFileMetadata, content io.Reader) error {
 	parentID, err := rc.RebuildFolderHierarchy(ctx, metadata.Key)
 	if err != nil {
 		return err
@@ -1767,10 +1779,22 @@ func (rc *RestoreContext) RestoreFile(ctx context.Context, metadata *DriveFileMe
 		}
 	}
 
-	return rc.CreateFile(ctx, name, parentID, metadata, fileBytes)
+	return rc.CreateFileFromReader(ctx, name, parentID, metadata, content)
+}
+
+func (rc *RestoreContext) CreateFileFromReader(ctx context.Context, fileName, parentID string, metadata *DriveFileMetadata, content io.Reader) error {
+	return rc.createFileWithContent(ctx, fileName, parentID, metadata, content)
 }
 
 func (rc *RestoreContext) CreateFile(ctx context.Context, fileName, parentID string, metadata *DriveFileMetadata, fileBytes []byte) error {
+	var content io.Reader
+	if len(fileBytes) > 0 {
+		content = bytes.NewReader(fileBytes)
+	}
+	return rc.createFileWithContent(ctx, fileName, parentID, metadata, content)
+}
+
+func (rc *RestoreContext) createFileWithContent(ctx context.Context, fileName, parentID string, metadata *DriveFileMetadata, content io.Reader) error {
 	file := &drive.File{
 		Name:     fileName,
 		Parents:  []string{parentID},
@@ -1782,8 +1806,8 @@ func (rc *RestoreContext) CreateFile(ctx context.Context, fileName, parentID str
 	if rc.DriveID != "" {
 		createCall = createCall.SupportsAllDrives(true)
 	}
-	if len(fileBytes) > 0 {
-		createCall = createCall.Media(bytes.NewReader(fileBytes))
+	if content != nil {
+		createCall = createCall.Media(content)
 	}
 
 	created, err := createCall.Do()
@@ -2014,6 +2038,24 @@ func RestoreFromBackup(ctx context.Context, srv *drive.Service, userEmail string
 		return rc.RestoreFolder(ctx, metadata)
 	}
 	return rc.RestoreFile(ctx, metadata, fileBytes)
+}
+
+// RestoreFromBackupReader restores a file from metadata JSON and a content reader (restore-all streaming).
+func RestoreFromBackupReader(ctx context.Context, srv *drive.Service, userEmail string, metadataJSON []byte, content io.Reader) error {
+	metadata, err := ParseBackupMetadata(metadataJSON)
+	if err != nil {
+		return err
+	}
+
+	rc := NewRestoreContext(srv, userEmail)
+	if err := rc.ValidateAccess(ctx, metadata); err != nil {
+		return err
+	}
+
+	if metadata.Type == "folder" {
+		return rc.RestoreFolder(ctx, metadata)
+	}
+	return rc.RestoreFileFromReader(ctx, metadata, content)
 }
 
 func escapeSingleQuotes(s string) string {

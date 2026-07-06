@@ -2,6 +2,7 @@ package restore
 
 import (
 	"sync"
+	"time"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/db"
@@ -105,6 +106,9 @@ type RestoreDeps struct {
 
 	googleLimiter *rate.Limiter
 	vaultSem      chan struct{}
+
+	heartbeatMu   sync.Mutex
+	lastHeartbeat time.Time
 }
 
 // BatchResult summarizes one batch execution.

@@ -19,7 +19,8 @@ func NewRestoreManager(store *db.PostgresDb) *RestoreManager {
 }
 
 func (m *RestoreManager) Start() {
-	c := cron.New()
+	// Skip a new tick while the previous restore worker run is still processing batches.
+	c := cron.New(cron.WithChain(cron.DelayIfStillRunning(cron.DefaultLogger)))
 	c.AddFunc("@every 30s", func() {
 		ctx := createRestoreCronContext()
 		if err := restore.ProcessRestoreJobs(ctx, m.store); err != nil {
