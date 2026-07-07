@@ -35,6 +35,13 @@ var (
 	}
 )
 
+var (
+	errBackupNowOneTimeJob    = errors.New("use POST /auto-sync/task/:job_id for one-time jobs")
+	errBackupNowNotDailyJob   = errors.New("on-demand backup is only for interval autosync jobs")
+	errBackupNowInactiveJob   = errors.New("job is not active")
+	errBackupNowMissingPolicy = errors.New("job has no backup policy assigned")
+)
+
 // onboardingIntervalValues — Satellite onboarding JSON `interval` + GET /auto-sync/job/interval.
 var onboardingIntervalValues = map[string][]string{
 	"3h":    {""},
@@ -1754,12 +1761,12 @@ func checkExistingJobs(userID, name, syncType, method string, db *db.PostgresDb)
 
 		// Check if there are running tasks for this job (for same sync type)
 		if job.SyncType == syncType {
-			hasRunningTasks, err := hasRunningTasksForJob(db.TaskRepo, job.ID)
+			inProgress, err := isAutosyncBackupInProgress(&job, db.TaskRepo)
 			if err != nil {
 				return jsonError(http.StatusInternalServerError, "Failed to check task status", err)
 			}
 
-			if hasRunningTasks {
+			if inProgress {
 				errorMsg := fmt.Sprintf("A backup job for this %s is currently running. Cannot create %s backup.", serviceName, syncType)
 				return jsonErrorMsg(http.StatusBadRequest, errorMsg, errorMsg)
 			}
@@ -1770,18 +1777,60 @@ func checkExistingJobs(userID, name, syncType, method string, db *db.PostgresDb)
 }
 
 func hasRunningTasksForJob(taskRepo *repo.TaskRepository, jobID uint) (bool, error) {
-	// Get all tasks for the job and check if any are running or pushed
 	tasks, err := taskRepo.ListAllTasksByJobID(jobID, 100, 0)
 	if err != nil {
 		return false, err
 	}
 
 	for _, task := range tasks {
-		if task.Status == "running" || task.Status == "pushed" {
+		if task.Status == repo.TaskStatusRunning || task.Status == repo.TaskStatusPushed {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// isAutosyncBackupInProgress reports whether a job already has a queued or running backup.
+func isAutosyncBackupInProgress(job *repo.CronJobListingDB, taskRepo *repo.TaskRepository) (bool, error) {
+	if job == nil {
+		return false, nil
+	}
+	switch job.Status {
+	case repo.JobStatusInQueue, repo.JobStatusInProgress:
+		return true, nil
+	}
+	return hasRunningTasksForJob(taskRepo, job.ID)
+}
+
+// validateBackupNowJob checks whether an interval autosync job can run an on-demand backup.
+func validateBackupNowJob(job *repo.CronJobListingDB) error {
+	if job == nil {
+		return errors.New("job not found")
+	}
+	if job.SyncType == "one_time" {
+		return errBackupNowOneTimeJob
+	}
+	if job.SyncType != "daily" {
+		return errBackupNowNotDailyJob
+	}
+	if !job.Active {
+		return errBackupNowInactiveJob
+	}
+	if job.PolicyID == 0 {
+		return errBackupNowMissingPolicy
+	}
+	return nil
+}
+
+// validateBackupNowPolicy ensures the linked policy exists and is not expired.
+func validateBackupNowPolicy(policy *repo.AutosyncBackupPolicyDB, now time.Time) error {
+	if policy == nil {
+		return errBackupNowMissingPolicy
+	}
+	if repo.IsPolicyExpired(policy, now) {
+		return errors.New("backup policy is expired; update retention policy before running backup")
+	}
+	return nil
 }
 
 func getServiceName(method string) string {
@@ -2006,12 +2055,12 @@ func HandleAutomaticSyncCreateTask(c echo.Context) error {
 		return sendJSONError(c, http.StatusBadRequest, "Job is not a one-time job", nil)
 	}
 
-	hasRunningTasks, err := hasRunningTasksForJob(database.TaskRepo, job.ID)
+	inProgress, err := isAutosyncBackupInProgress(job, database.TaskRepo)
 	if err != nil {
 		return sendJSONError(c, http.StatusInternalServerError, "Failed to check task status", err)
 	}
 
-	if hasRunningTasks {
+	if inProgress {
 		return sendJSONError(c, http.StatusBadRequest, "one time backup is already running wait for it to complete", nil)
 	}
 
@@ -2022,6 +2071,61 @@ func HandleAutomaticSyncCreateTask(c echo.Context) error {
 	}
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Task created successfully",
+		"data":    task,
+	})
+}
+
+// HandleAutomaticSyncBackupNow queues an instant on-demand backup for an interval autosync job.
+// Cron interval scheduling is unchanged; finishing this task does not shift the next scheduled run.
+func HandleAutomaticSyncBackupNow(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	jobID, err := strconv.Atoi(c.Param("job_id"))
+	if err != nil {
+		return sendJSONError(c, http.StatusBadRequest, "Invalid Job ID", err)
+	}
+
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		return sendJSONError(c, http.StatusUnauthorized, "Invalid Request", err)
+	}
+
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+
+	job, err := database.CronJobRepo.GetJobByIDForUser(userID, uint(jobID))
+	if err != nil {
+		return sendJSONError(c, http.StatusNotFound, "Job not found", err)
+	}
+
+	if err := validateBackupNowJob(job); err != nil {
+		return sendJSONError(c, http.StatusBadRequest, err.Error(), nil)
+	}
+
+	policy, err := database.PolicyRepo.GetByID(job.PolicyID)
+	if err != nil {
+		return sendJSONError(c, http.StatusBadRequest, "job has no backup policy assigned", err)
+	}
+	if err := validateBackupNowPolicy(policy, time.Now().UTC()); err != nil {
+		return sendJSONError(c, http.StatusBadRequest, err.Error(), nil)
+	}
+
+	inProgress, err := isAutosyncBackupInProgress(job, database.TaskRepo)
+	if err != nil {
+		return sendJSONError(c, http.StatusInternalServerError, "Failed to check task status", err)
+	}
+	if inProgress {
+		return sendJSONError(c, http.StatusBadRequest, "A backup is already running for this job. Wait for it to complete.", nil)
+	}
+
+	task, err := database.TaskRepo.CreateOnDemandTaskForCronJob(job.ID)
+	if err != nil {
+		return sendJSONError(c, http.StatusInternalServerError, "Failed to create on-demand backup task", err)
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message": "On-demand backup queued successfully",
 		"data":    task,
 	})
 }

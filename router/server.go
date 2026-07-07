@@ -101,6 +101,7 @@ func StartServer(db *db.PostgresDb, address string) {
 	policy.DELETE("/:policy_id", handler.HandleAutosyncPolicyDelete)
 
 	task := autoSync.Group("/task")
+	task.POST("/:job_id/backup-now", handler.HandleAutomaticSyncBackupNow)
 	task.POST("/:job_id", handler.HandleAutomaticSyncCreateTask)
 	task.GET("/:job_id", handler.HandleAutomaticSyncTaskList)
 

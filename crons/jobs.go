@@ -347,17 +347,28 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 
 	// Initialize default values for success case
 	task.Status = repo.TaskStatusSuccess
-	task.Message = "Automatic backup completed successfully"
+	onDemand := repo.IsOnDemandTask(task)
+	if onDemand {
+		task.Message = "On-demand backup completed successfully"
+	} else {
+		task.Message = "Automatic backup completed successfully"
+	}
 
 	if task.StartTime != nil {
 		task.Execution = uint64(time.Since(*task.StartTime).Seconds())
 	}
 
 	if job != nil {
-		job.Message = "Automatic backup completed successfully"
+		if onDemand {
+			job.Message = "On-demand backup completed successfully"
+		} else {
+			job.Message = "Automatic backup completed successfully"
+		}
 		job.MessageStatus = repo.JobMessageStatusInfo
-		now := time.Now()
-		job.LastRun = &now
+		if !onDemand {
+			now := time.Now()
+			job.LastRun = &now
+		}
 	}
 
 	// Handle error case
@@ -367,13 +378,23 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 
 		// Record task failure
 		if job != nil {
-			job.Message = "Last task execution failed"
+			if onDemand {
+				job.Message = "On-demand backup failed"
+				task.Message = processErr.Error()
+			} else {
+				job.Message = "Last task execution failed"
+			}
 			job.MessageStatus = repo.JobMessageStatusError
-			now := time.Now()
-			job.LastRun = &now
+			if !onDemand {
+				now := time.Now()
+				job.LastRun = &now
+			}
 
 			a.handleErrorScenarios(processErr, job, task)
-			emailOverride := applyIntervalFailurePeriod(job, task)
+			emailOverride := ""
+			if !onDemand {
+				emailOverride = applyIntervalFailurePeriod(job, task)
+			}
 			emailMessage := a.determineErrorMessage(processErr, job, task)
 			if emailOverride != "" {
 				emailMessage = emailOverride
@@ -434,10 +455,12 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 		updateMap := map[string]interface{}{
 			"message":          job.Message,
 			"message_status":   job.MessageStatus,
-			"last_run":         job.LastRun,
 			"storx_token":      job.StorxToken,
 			"active":           job.Active,
 			"auto_deactivated": job.AutoDeactivated,
+		}
+		if !repo.IsOnDemandTask(task) {
+			updateMap["last_run"] = job.LastRun
 		}
 		if job.InputData != nil {
 			updateMap["input_data"] = job.InputData

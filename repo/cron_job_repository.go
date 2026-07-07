@@ -39,6 +39,9 @@ const (
 	TaskStatusRunning = "running"
 	TaskStatusSuccess = "success"
 	TaskStatusFailed  = "failed"
+
+	TaskTriggerScheduled = "scheduled"
+	TaskTriggerOnDemand  = "on_demand"
 )
 
 // Other constants
