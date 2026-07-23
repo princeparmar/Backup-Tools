@@ -146,9 +146,8 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 				continue
 			}
 
-			messagePath := pathPrefix + "/" + utils.GenerateTitleFromGmailMessage(message)
-			_, synced := emailListFromBucket[messagePath]
-			if synced {
+			messagePath := google.GmailObjectKey(pathPrefix, message)
+			if google.IsGmailMessageSynced(emailListFromBucket, pathPrefix, message) {
 				continue
 			}
 

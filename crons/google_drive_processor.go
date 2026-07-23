@@ -185,7 +185,7 @@ func runDriveIncrementalSync(ctx context.Context, input ProcessorInput, task *re
 			IncludeItemsFromAllDrives(true).
 			IncludeRemoved(true).
 			PageSize(1000).
-			Fields("nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,size,parents,modifiedTime,version,md5Checksum,permissions,driveId,starred,trashed,shortcutDetails(targetId,targetMimeType)))").
+			Fields("nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,size,parents,createdTime,modifiedTime,version,md5Checksum,permissions,driveId,starred,trashed,shortcutDetails(targetId,targetMimeType)))").
 			Do()
 		if err != nil {
 			return "", fmt.Errorf("drive changes list: %w", err)
@@ -219,7 +219,7 @@ func syncDriveFileByID(ctx context.Context, input ProcessorInput, task *repo.Sch
 	file := preloaded
 	var err error
 	if file == nil || strings.TrimSpace(file.Id) == "" || strings.TrimSpace(file.MimeType) == "" || strings.TrimSpace(file.Name) == "" || strings.TrimSpace(file.ModifiedTime) == "" {
-		file, err = service.Files.Get(fileID).Fields("id,name,mimeType,size,parents,modifiedTime,version,md5Checksum,permissions,driveId,starred,trashed,shortcutDetails(targetId)").SupportsAllDrives(true).Do()
+		file, err = service.Files.Get(fileID).Fields("id,name,mimeType,size,parents,createdTime,modifiedTime,version,md5Checksum,permissions,driveId,starred,trashed,shortcutDetails(targetId)").SupportsAllDrives(true).Do()
 		if err != nil {
 			return fmt.Errorf("get file metadata: %w", err)
 		}
@@ -230,7 +230,7 @@ func syncDriveFileByID(ctx context.Context, input ProcessorInput, task *repo.Sch
 		if cached, ok := shortcutTargetCache[targetID]; ok {
 			file = cached
 		} else {
-			file, err = service.Files.Get(targetID).Fields("id,name,mimeType,size,parents,modifiedTime,version,md5Checksum,permissions,driveId,starred,trashed").SupportsAllDrives(true).Do()
+			file, err = service.Files.Get(targetID).Fields("id,name,mimeType,size,parents,createdTime,modifiedTime,version,md5Checksum,permissions,driveId,starred,trashed").SupportsAllDrives(true).Do()
 			if err != nil {
 				return fmt.Errorf("resolve shortcut target: %w", err)
 			}
@@ -238,13 +238,15 @@ func syncDriveFileByID(ctx context.Context, input ProcessorInput, task *repo.Sch
 		}
 	}
 	displayName := google.DriveBackupDisplayName(file.Name, file.MimeType)
-	metaKey := google.DriveIDBasedMetaKey(task.LoginId, file.Id, displayName)
-	dataKey := google.DriveIDBasedDataKey(task.LoginId, file.Id, displayName)
+	createdTime := strings.TrimSpace(file.CreatedTime)
+	metaKey := google.DriveIDBasedMetaKey(task.LoginId, file.Id, displayName, createdTime)
+	dataKey := google.DriveIDBasedDataKey(task.LoginId, file.Id, displayName, createdTime)
 	meta := google.DriveCronBackupMeta{
 		FileID:        file.Id,
 		Name:          file.Name,
 		MimeType:      file.MimeType,
 		Parents:       file.Parents,
+		CreatedTime:   createdTime,
 		ModifiedTime:  file.ModifiedTime,
 		Version:       file.Version,
 		Md5Checksum:   file.Md5Checksum,
@@ -264,7 +266,7 @@ func syncDriveFileByID(ctx context.Context, input ProcessorInput, task *repo.Sch
 		return nil
 	}
 
-	metaChangedOnly, err := shouldSkipDriveContentUpload(ctx, task, task.LoginId, file.Id, displayName, meta)
+	metaChangedOnly, err := shouldSkipDriveContentUpload(ctx, task, task.LoginId, file.Id, displayName, createdTime, meta)
 	if err != nil {
 		logger.Warn(ctx, "drive metadata compare failed; continuing with full upload", logger.String("file_id", file.Id), logger.ErrorField(err))
 	}
@@ -331,8 +333,8 @@ func retrySyncDriveFileByID(ctx context.Context, input ProcessorInput, task *rep
 	return lastErr
 }
 
-func shouldSkipDriveContentUpload(ctx context.Context, task *repo.ScheduledTasks, loginID, fileID, displayName string, next google.DriveCronBackupMeta) (bool, error) {
-	oldBytes, err := downloadDriveCronMetaBytes(ctx, task, loginID, fileID, displayName)
+func shouldSkipDriveContentUpload(ctx context.Context, task *repo.ScheduledTasks, loginID, fileID, displayName, createdTime string, next google.DriveCronBackupMeta) (bool, error) {
+	oldBytes, err := downloadDriveCronMetaBytes(ctx, task, loginID, fileID, displayName, createdTime)
 	if err != nil {
 		// Missing previous metadata/object is expected on first sync.
 		return false, nil
@@ -354,21 +356,12 @@ func shouldSkipDriveContentUpload(ctx context.Context, task *repo.ScheduledTasks
 	return contentSame, nil
 }
 
-func downloadDriveCronMetaBytes(ctx context.Context, task *repo.ScheduledTasks, loginID, fileID, displayName string) ([]byte, error) {
-	candidates := make([]string, 0, 2)
-	if strings.TrimSpace(displayName) != "" {
-		candidates = append(candidates, google.DriveIDBasedMetaKey(loginID, fileID, displayName))
+func downloadDriveCronMetaBytes(ctx context.Context, task *repo.ScheduledTasks, loginID, fileID, displayName, createdTime string) ([]byte, error) {
+	if strings.TrimSpace(displayName) == "" {
+		return nil, fmt.Errorf("missing display name for drive meta key")
 	}
-	candidates = append(candidates, google.DriveLegacyBareMetaKey(loginID, fileID))
-	var lastErr error
-	for _, key := range candidates {
-		b, err := satellite.DownloadObject(ctx, task.StorxToken, satellite.ReserveBucket_Drive, key)
-		if err == nil {
-			return b, nil
-		}
-		lastErr = err
-	}
-	return nil, lastErr
+	key := google.DriveIDBasedMetaKey(loginID, fileID, displayName, createdTime)
+	return satellite.DownloadObject(ctx, task.StorxToken, satellite.ReserveBucket_Drive, key)
 }
 
 func downloadDriveFileContent(service *drive.Service, file *drive.File) ([]byte, string, error) {
@@ -447,27 +440,15 @@ func openDriveFileDownload(service *drive.Service, file *drive.File) (*http.Resp
 // }
 
 func writeDriveRemovedMetadata(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, fileID string) error {
-	var lastKnownParents []string
-	var displayName string
-	if oldBytes, err := downloadDriveCronMetaBytes(ctx, task, task.LoginId, fileID, ""); err == nil {
-		var prev google.DriveCronBackupMeta
-		if err := json.Unmarshal(oldBytes, &prev); err == nil {
-			if len(prev.Parents) > 0 {
-				lastKnownParents = prev.Parents
-			}
-			displayName = google.DriveBackupDisplayName(prev.Name, prev.MimeType)
-		}
-	}
-	if strings.TrimSpace(displayName) == "" || displayName == "untitled" {
-		displayName = fileID
-	}
-	metaKey := google.DriveIDBasedMetaKey(task.LoginId, fileID, displayName)
+	displayName := fileID
+	createdTime := ""
+	metaKey := google.DriveIDBasedMetaKey(task.LoginId, fileID, displayName, createdTime)
 	meta := google.DriveCronBackupMeta{
 		FileID:           fileID,
+		CreatedTime:      createdTime,
 		RemovedFromDrive: true,
 		Trashed:          true,
 		DeletedAt:        time.Now().UTC().Format(time.RFC3339),
-		LastKnownParents: lastKnownParents,
 		UpdatedAt:        time.Now().UTC().Format(time.RFC3339),
 	}
 	b, _ := json.Marshal(meta)

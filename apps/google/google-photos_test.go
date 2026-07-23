@@ -10,35 +10,34 @@ func TestBuildPhotosSyncedIDSet(t *testing.T) {
 		wantIDs    []string
 	}{
 		{
-			name: "meta and data keys with filename in data path",
+			name: "dated meta and data keys",
 			objectKeys: map[string]bool{
-				"user@gmail.com/meta/abc123.json":           true,
-				"user@gmail.com/data/xyz789_holiday.jpg":    true,
+				"user@gmail.com/meta/2026/07/21/abc123.json":        true,
+				"user@gmail.com/data/2026/07/21/xyz789_holiday.jpg": true,
 			},
 			email:   "user@gmail.com",
 			wantIDs: []string{"abc123", "xyz789"},
 		},
 		{
-			name: "legacy bare data id",
+			name: "ignores undated keys",
 			objectKeys: map[string]bool{
-				"user@gmail.com/data/xyz789": true,
+				"user@gmail.com/meta/abc123.json":        true,
+				"user@gmail.com/data/xyz789_holiday.jpg": true,
 			},
 			email:   "user@gmail.com",
-			wantIDs: []string{"xyz789"},
-		},
-		{
-			name: "legacy standalone path",
-			objectKeys: map[string]bool{
-				"user@gmail.com/PhotoID123_filename.jpg": true,
-			},
-			email:   "user@gmail.com",
-			wantIDs: []string{"PhotoID123"},
+			wantIDs: nil,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := BuildPhotosSyncedIDSet(tt.objectKeys, tt.email)
+			if len(tt.wantIDs) == 0 {
+				if len(got) != 0 {
+					t.Fatalf("expected empty set, got %v", got)
+				}
+				return
+			}
 			for _, id := range tt.wantIDs {
 				if _, ok := got[id]; !ok {
 					t.Fatalf("expected id %q in set, got %v", id, got)
@@ -49,8 +48,8 @@ func TestBuildPhotosSyncedIDSet(t *testing.T) {
 }
 
 func TestPhotosIDBasedDataKey(t *testing.T) {
-	got := PhotosIDBasedDataKey("user@gmail.com", "ABC", "photo.jpg")
-	want := "user@gmail.com/data/ABC_photo.jpg"
+	got := PhotosIDBasedDataKey("user@gmail.com", "ABC", "photo.jpg", "2026-07-21T10:00:00Z")
+	want := "user@gmail.com/data/2026/07/21/ABC_photo.jpg"
 	if got != want {
 		t.Fatalf("PhotosIDBasedDataKey() = %q, want %q", got, want)
 	}
@@ -79,8 +78,9 @@ func TestPageHasAnyNewPhotosItems(t *testing.T) {
 
 func TestIsPhotosMediaItemSynced(t *testing.T) {
 	syncedMap := map[string]bool{
-		"user@gmail.com/meta/id1.json":      true,
-		"user@gmail.com/data/id2_photo.jpg": true,
+		"user@gmail.com/meta/2026/07/21/id4.json":    true,
+		"user@gmail.com/data/2026/07/21/id5_pic.jpg": true,
+		"user@gmail.com/meta/id1.json":               true,
 	}
 	tests := []struct {
 		name     string
@@ -88,8 +88,9 @@ func TestIsPhotosMediaItemSynced(t *testing.T) {
 		filename string
 		want     bool
 	}{
-		{name: "id meta synced", id: "id1", want: true},
-		{name: "id data synced", id: "id2", filename: "photo.jpg", want: true},
+		{name: "dated meta synced", id: "id4", want: true},
+		{name: "dated data synced", id: "id5", filename: "pic.jpg", want: true},
+		{name: "undated ignored", id: "id1", want: false},
 		{name: "not synced", id: "id3", want: false},
 	}
 

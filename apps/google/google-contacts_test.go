@@ -23,8 +23,8 @@ func TestContactsIDFromResourceName(t *testing.T) {
 }
 
 func TestContactsObjectKey(t *testing.T) {
-	got := ContactsObjectKey("user@gmail.com", "people/c123")
-	want := "user@gmail.com/contacts/c123.json"
+	got := ContactsObjectKey("user@gmail.com", "people/c123", "2026-07-21T10:00:00Z")
+	want := "user@gmail.com/contacts/2026/07/21/c123.json"
 	if got != want {
 		t.Fatalf("ContactsObjectKey() = %q, want %q", got, want)
 	}
@@ -38,18 +38,19 @@ func TestBuildContactsSyncedIDSet(t *testing.T) {
 		wantIDs    []string
 	}{
 		{
-			name: "contacts json keys",
+			name: "dated contacts json keys",
 			objectKeys: map[string]bool{
-				"user@gmail.com/contacts/c123.json": true,
-				"user@gmail.com/contacts/c456.json": true,
+				"user@gmail.com/contacts/2026/07/21/c123.json": true,
+				"user@gmail.com/contacts/2026/07/22/c456.json": true,
 			},
 			email:   "user@gmail.com",
 			wantIDs: []string{"c123", "c456"},
 		},
 		{
-			name: "ignores non contact keys",
+			name: "ignores undated and placeholders",
 			objectKeys: map[string]bool{
-				"user@gmail.com/.file_placeholder": true,
+				"user@gmail.com/contacts/c123.json": true,
+				"user@gmail.com/.file_placeholder":  true,
 			},
 			email:   "user@gmail.com",
 			wantIDs: nil,
@@ -94,15 +95,17 @@ func TestPageHasAnyNewContactsItems(t *testing.T) {
 
 func TestIsContactSynced(t *testing.T) {
 	syncedMap := map[string]bool{
-		"user@gmail.com/contacts/c123.json": true,
+		"user@gmail.com/contacts/c123.json":            true,
+		"user@gmail.com/contacts/2026/07/21/c999.json": true,
 	}
 	tests := []struct {
 		name         string
 		resourceName string
 		want         bool
 	}{
-		{name: "synced", resourceName: "people/c123", want: true},
-		{name: "not synced", resourceName: "people/c999", want: false},
+		{name: "undated ignored", resourceName: "people/c123", want: false},
+		{name: "dated synced", resourceName: "people/c999", want: true},
+		{name: "not synced", resourceName: "people/c000", want: false},
 	}
 
 	for _, tt := range tests {

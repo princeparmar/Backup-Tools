@@ -27,13 +27,14 @@ func (p *googleContactsProcessor) Run(input ProcessorInput) error {
 }
 
 type contactsStoredObject struct {
-	ResourceName  string   `json:"resource_name"`
-	Name          string   `json:"name"`
-	Phones        []string `json:"phones"`
-	Emails        []string `json:"emails"`
-	Organizations []string `json:"organizations,omitempty"`
-	ETag          string   `json:"etag"`
-	UpdatedAt     string   `json:"updated_at"`
+	ResourceName    string   `json:"resource_name"`
+	Name            string   `json:"name"`
+	Phones          []string `json:"phones"`
+	Emails          []string `json:"emails"`
+	Organizations   []string `json:"organizations,omitempty"`
+	ETag            string   `json:"etag"`
+	SourceUpdatedAt string   `json:"source_updated_at,omitempty"`
+	UpdatedAt       string   `json:"updated_at"`
 }
 
 func runGoogleContactsAutosync(input ProcessorInput) error {
@@ -167,15 +168,16 @@ func processContactsPage(ctx context.Context, input ProcessorInput, task *repo.S
 }
 
 func syncContactByID(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, item google.FlatContact) error {
-	objectKey := google.ContactsObjectKey(task.LoginId, item.ID)
+	objectKey := google.ContactsObjectKey(task.LoginId, item.ID, item.SourceUpdatedAt)
 	payload := contactsStoredObject{
-		ResourceName:  item.ID,
-		Name:          item.Name,
-		Phones:        item.Phones,
-		Emails:        item.Emails,
-		Organizations: item.Organizations,
-		ETag:          item.ETag,
-		UpdatedAt:     time.Now().UTC().Format(time.RFC3339),
+		ResourceName:    item.ID,
+		Name:            item.Name,
+		Phones:          item.Phones,
+		Emails:          item.Emails,
+		Organizations:   item.Organizations,
+		ETag:            item.ETag,
+		SourceUpdatedAt: item.SourceUpdatedAt,
+		UpdatedAt:       time.Now().UTC().Format(time.RFC3339),
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {

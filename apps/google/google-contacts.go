@@ -23,31 +23,33 @@ const (
 
 // ContactsBackupObject is the JSON stored in the vault by cron autosync.
 type ContactsBackupObject struct {
-	ResourceName  string   `json:"resource_name"`
-	Name          string   `json:"name"`
-	Phones        []string `json:"phones"`
-	Emails        []string `json:"emails"`
-	Organizations []string `json:"organizations,omitempty"`
-	ETag          string   `json:"etag"`
-	UpdatedAt     string   `json:"updated_at"`
+	ResourceName    string   `json:"resource_name"`
+	Name            string   `json:"name"`
+	Phones          []string `json:"phones"`
+	Emails          []string `json:"emails"`
+	Organizations   []string `json:"organizations,omitempty"`
+	ETag            string   `json:"etag"`
+	SourceUpdatedAt string   `json:"source_updated_at,omitempty"`
+	UpdatedAt       string   `json:"updated_at"`
 }
 
 // FlatContactsResponse is the paginated contacts listing (HTTP route + cron).
 type FlatContactsResponse struct {
-	Contacts          []FlatContact `json:"contacts"`
-	NextPageToken     string        `json:"nextPageToken"`
-	NextPageTokenLegacy string      `json:"next_page_token,omitempty"`
+	Contacts            []FlatContact `json:"contacts"`
+	NextPageToken       string        `json:"nextPageToken"`
+	NextPageTokenLegacy string        `json:"next_page_token,omitempty"`
 }
 
 // FlatContact is a slim contact for listing and sync.
 type FlatContact struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Phones       []string `json:"phones"`
-	Emails       []string `json:"emails"`
-	Organizations []string `json:"organizations,omitempty"`
-	ETag         string   `json:"etag,omitempty"`
-	Synced       bool     `json:"synced,omitempty"`
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	Phones          []string `json:"phones"`
+	Emails          []string `json:"emails"`
+	Organizations   []string `json:"organizations,omitempty"`
+	ETag            string   `json:"etag,omitempty"`
+	SourceUpdatedAt string   `json:"source_updated_at,omitempty"`
+	Synced          bool     `json:"synced,omitempty"`
 }
 
 // ListAllContactsFlat returns a paginated connections list via People API.
@@ -127,6 +129,28 @@ func flatContactFromPerson(person *people.Person) FlatContact {
 		ID:   strings.TrimSpace(person.ResourceName),
 		ETag: strings.TrimSpace(person.Etag),
 	}
+	if person.Metadata != nil {
+		for _, src := range person.Metadata.Sources {
+			if src == nil {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(src.Type), "CONTACT") && strings.TrimSpace(src.UpdateTime) != "" {
+				out.SourceUpdatedAt = strings.TrimSpace(src.UpdateTime)
+				break
+			}
+		}
+		if out.SourceUpdatedAt == "" {
+			for _, src := range person.Metadata.Sources {
+				if src == nil {
+					continue
+				}
+				if v := strings.TrimSpace(src.UpdateTime); v != "" {
+					out.SourceUpdatedAt = v
+					break
+				}
+			}
+		}
+	}
 	if len(person.Names) > 0 {
 		name := person.Names[0]
 		if strings.TrimSpace(name.DisplayName) != "" {
@@ -179,13 +203,18 @@ func ContactsIDFromResourceName(resourceName string) string {
 	return strings.ReplaceAll(resourceName, "/", "_")
 }
 
-// ContactsObjectKey returns storage path: {email}/contacts/{contactId}.json
-func ContactsObjectKey(email, resourceName string) string {
+// ContactsObjectKey returns storage path: {email}/contacts/{yyyy}/{mm}/{dd}/{contactId}.json
+// sourceUpdatedAt is People API sources[].updateTime (RFC3339).
+func ContactsObjectKey(email, resourceName, sourceUpdatedAt string) string {
 	id := ContactsIDFromResourceName(resourceName)
-	return fmt.Sprintf("%s/contacts/%s.json", strings.TrimSpace(email), id)
+	return fmt.Sprintf("%s/contacts/%s/%s.json",
+		strings.TrimSpace(email),
+		ObjectKeyDatePathFromRFC3339(sourceUpdatedAt),
+		id,
+	)
 }
 
-// BuildContactsSyncedIDSet builds a contactId set from synced object keys under email prefix.
+// BuildContactsSyncedIDSet builds a contactId set from dated synced object keys under email prefix.
 func BuildContactsSyncedIDSet(objectKeys map[string]bool, emailPrefix string) map[string]struct{} {
 	set := make(map[string]struct{})
 	prefix := strings.TrimSpace(emailPrefix)
@@ -199,7 +228,12 @@ func BuildContactsSyncedIDSet(objectKeys map[string]bool, emailPrefix string) ma
 			continue
 		}
 		segment := strings.TrimSuffix(strings.TrimPrefix(key, contactsPrefix), ".json")
-		if id := strings.TrimSpace(segment); id != "" {
+		// Expect yyyy/mm/dd/{id}
+		parts := strings.Split(segment, "/")
+		if len(parts) != 4 {
+			continue
+		}
+		if id := strings.TrimSpace(parts[3]); id != "" {
 			set[id] = struct{}{}
 		}
 	}
@@ -220,12 +254,27 @@ func PageHasAnyNewContactsItems(items []FlatContact, syncedSet map[string]struct
 	return false
 }
 
-// IsContactSynced checks whether a contact object exists in synced_objects paths.
+// IsContactSynced checks whether a contact object exists in dated synced_objects paths.
 func IsContactSynced(syncedMap map[string]bool, email, resourceName string) bool {
 	if syncedMap == nil {
 		return false
 	}
-	return syncedMap[ContactsObjectKey(email, resourceName)]
+	id := ContactsIDFromResourceName(resourceName)
+	if id == "" {
+		return false
+	}
+	suffix := "/" + id + ".json"
+	prefix := strings.TrimSpace(email) + "/contacts/"
+	for key := range syncedMap {
+		if !strings.HasPrefix(key, prefix) || !strings.HasSuffix(key, suffix) {
+			continue
+		}
+		rest := strings.TrimSuffix(strings.TrimPrefix(key, prefix), ".json")
+		if len(strings.Split(rest, "/")) == 4 {
+			return true
+		}
+	}
+	return false
 }
 
 // IsContactsRestoreObjectKey returns true for backed-up contact JSON paths (not placeholders).

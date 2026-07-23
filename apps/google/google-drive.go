@@ -1896,12 +1896,13 @@ type DriveBackupItem struct {
 	Content  []byte            `json:"content,omitempty"`
 }
 
-// DriveCronBackupMeta is JSON at {email}/meta/{fileId}.json (cron autosync).
+// DriveCronBackupMeta is JSON at {email}/meta/{yyyy}/{mm}/{dd}/{fileId}_{name}.json (cron autosync).
 type DriveCronBackupMeta struct {
 	FileID           string            `json:"file_id"`
 	Name             string            `json:"name"`
 	MimeType         string            `json:"mime_type"`
 	Parents          []string          `json:"parents,omitempty"`
+	CreatedTime      string            `json:"created_time,omitempty"`
 	ModifiedTime     string            `json:"modified_time,omitempty"`
 	Version          int64             `json:"version,omitempty"`
 	Md5Checksum      string            `json:"md5_checksum,omitempty"`
@@ -1936,32 +1937,25 @@ func DriveBackupDisplayName(name, mimeType string) string {
 	return addGoogleAppsFileExtension(name, mimeType)
 }
 
-// DriveIDBasedMetaKey is cron metadata: {email}/meta/{fileId}_{displayName}.json
-func DriveIDBasedMetaKey(email, fileID, displayName string) string {
-	return fmt.Sprintf("%s/meta/%s_%s.json",
+// DriveIDBasedMetaKey is cron metadata: {email}/meta/{yyyy}/{mm}/{dd}/{fileId}_{displayName}.json
+// createdTime is the Drive API createdTime (RFC3339); missing/invalid falls back to 1970/01/01.
+func DriveIDBasedMetaKey(email, fileID, displayName, createdTime string) string {
+	return fmt.Sprintf("%s/meta/%s/%s_%s.json",
 		strings.TrimSpace(email),
+		ObjectKeyDatePathFromRFC3339(createdTime),
 		strings.TrimSpace(fileID),
 		SanitizeDrivePathSegment(displayName),
 	)
 }
 
-// DriveLegacyBareMetaKey is older cron layout {email}/meta/{fileId}.json (still recognized).
-func DriveLegacyBareMetaKey(email, fileID string) string {
-	return fmt.Sprintf("%s/meta/%s.json", strings.TrimSpace(email), strings.TrimSpace(fileID))
-}
-
-// DriveIDBasedDataKey is cron file bytes: {email}/data/{fileId}_{displayName}
-func DriveIDBasedDataKey(email, fileID, displayName string) string {
-	return fmt.Sprintf("%s/data/%s_%s",
+// DriveIDBasedDataKey is cron file bytes: {email}/data/{yyyy}/{mm}/{dd}/{fileId}_{displayName}
+func DriveIDBasedDataKey(email, fileID, displayName, createdTime string) string {
+	return fmt.Sprintf("%s/data/%s/%s_%s",
 		strings.TrimSpace(email),
+		ObjectKeyDatePathFromRFC3339(createdTime),
 		strings.TrimSpace(fileID),
 		SanitizeDrivePathSegment(displayName),
 	)
-}
-
-// DriveLegacyBareDataKey is older cron layout {email}/data/{fileId} (still recognized).
-func DriveLegacyBareDataKey(email, fileID string) string {
-	return fmt.Sprintf("%s/data/%s", strings.TrimSpace(email), strings.TrimSpace(fileID))
 }
 
 // IsDriveIDBasedMetaKey reports cron meta paths.

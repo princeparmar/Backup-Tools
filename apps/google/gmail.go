@@ -69,6 +69,36 @@ type Attachment struct {
 	Data     []byte
 }
 
+// GmailObjectKey returns {email}/{yyyy}/{mm}/{dd}/{from} - {subject} - {messageId}.gmail
+// using message internalDate via ObjectKeyDatePathFromUnixMilli (same date helper as other Google services).
+func GmailObjectKey(email string, msg *gmail.Message) string {
+	email = strings.TrimSpace(email)
+	title := utils.GenerateTitleFromGmailMessage(msg)
+	ms := int64(0)
+	if msg != nil {
+		ms = msg.InternalDate
+	}
+	return email + "/" + ObjectKeyDatePathFromUnixMilli(ms) + "/" + title
+}
+
+// IsGmailMessageSynced reports whether a message exists under a dated Gmail object key.
+func IsGmailMessageSynced(syncedMap map[string]bool, email string, msg *gmail.Message) bool {
+	if syncedMap == nil || msg == nil {
+		return false
+	}
+	if syncedMap[GmailObjectKey(email, msg)] {
+		return true
+	}
+	suffix := " - " + msg.Id + ".gmail"
+	prefix := strings.TrimSpace(email) + "/"
+	for key := range syncedMap {
+		if strings.HasPrefix(key, prefix) && strings.HasSuffix(key, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 func NewGmailClient(c echo.Context) (*GmailClient, error) {
 
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)

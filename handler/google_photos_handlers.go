@@ -878,7 +878,7 @@ func parsePhotosIDBasedRestoreKeys(key string) (dataKey, metaKey string, ok bool
 			id = segment
 		}
 		prefix := strings.TrimSpace(key[:idx])
-		return key, google.PhotosIDBasedMetaKey(prefix, id), true
+		return key, google.PhotosIDBasedMetaKey(prefix, id, ""), true
 	}
 	return "", "", false
 }

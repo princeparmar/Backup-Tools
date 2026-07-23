@@ -224,31 +224,16 @@ func CalendarMetaObjectKey(email, calendarID, summary string) string {
 	)
 }
 
-// CalendarLegacyBareMetaKey is older layout {email}/calendar/calendars/{calendarId}.json (still recognized).
-func CalendarLegacyBareMetaKey(email, calendarID string) string {
-	return fmt.Sprintf("%s/calendar/calendars/%s.json",
-		strings.TrimSpace(email),
-		SanitizeCalendarPathSegment(calendarID),
-	)
-}
-
-// CalendarObjectKey returns {email}/calendar/events/{calendarId}_{calSummary}/{eventId}_{eventSummary}.json
-func CalendarObjectKey(email, calendarID, calendarSummary, eventID, eventSummary string) string {
-	return fmt.Sprintf("%s/calendar/events/%s_%s/%s_%s.json",
+// CalendarObjectKey returns {email}/calendar/events/{calendarId}_{calSummary}/{yyyy}/{mm}/{dd}/{eventId}_{eventSummary}.json
+// createdTime is the Calendar API event.created (RFC3339).
+func CalendarObjectKey(email, calendarID, calendarSummary, eventID, eventSummary, createdTime string) string {
+	return fmt.Sprintf("%s/calendar/events/%s_%s/%s/%s_%s.json",
 		strings.TrimSpace(email),
 		SanitizeCalendarPathSegment(calendarID),
 		CalendarBackupDisplayName(calendarSummary),
+		ObjectKeyDatePathFromRFC3339(createdTime),
 		SanitizeCalendarPathSegment(eventID),
 		CalendarBackupDisplayName(eventSummary),
-	)
-}
-
-// CalendarLegacyBareEventKey is older layout {email}/calendar/events/{calendarId}/{eventId}.json (still recognized).
-func CalendarLegacyBareEventKey(email, calendarID, eventID string) string {
-	return fmt.Sprintf("%s/calendar/events/%s/%s.json",
-		strings.TrimSpace(email),
-		SanitizeCalendarPathSegment(calendarID),
-		SanitizeCalendarPathSegment(eventID),
 	)
 }
 
@@ -275,14 +260,6 @@ func IsCalendarEventSynced(syncedMap map[string]bool, email, calendarID, eventID
 	if syncedMap == nil {
 		return false
 	}
-	if syncedMap[CalendarLegacyBareEventKey(email, calendarID, eventID)] {
-		return true
-	}
-	if strings.TrimSpace(calendarSummary) != "" || strings.TrimSpace(eventSummary) != "" {
-		if syncedMap[CalendarObjectKey(email, calendarID, calendarSummary, eventID, eventSummary)] {
-			return true
-		}
-	}
 	return calendarEventSyncedByScan(syncedMap, email, calendarID, eventID)
 }
 
@@ -296,11 +273,12 @@ func calendarEventSyncedByScan(syncedMap map[string]bool, email, calendarID, eve
 		}
 		rest := strings.TrimSuffix(strings.TrimPrefix(key, prefix), ".json")
 		parts := strings.Split(rest, "/")
-		if len(parts) != 2 {
+		// Dated: {calSeg}/{yyyy}/{mm}/{dd}/{eventSeg}
+		if len(parts) != 5 {
 			continue
 		}
 		gotCalID := ParseCalendarIDFromPathSegment(parts[0])
-		gotEventID := ParseEventIDFromPathSegment(parts[1])
+		gotEventID := ParseEventIDFromPathSegment(parts[4])
 		if gotCalID == wantCalID && gotEventID == wantEventID {
 			return true
 		}
@@ -308,7 +286,7 @@ func calendarEventSyncedByScan(syncedMap map[string]bool, email, calendarID, eve
 	return false
 }
 
-// BuildCalendarSyncedEventIDSet builds eventId set from synced keys under email/calendar/events/.
+// BuildCalendarSyncedEventIDSet builds eventId set from dated synced keys under email/calendar/events/.
 func BuildCalendarSyncedEventIDSet(objectKeys map[string]bool, email, calendarID string) map[string]struct{} {
 	set := make(map[string]struct{})
 	email = strings.TrimSpace(email)
@@ -321,13 +299,13 @@ func BuildCalendarSyncedEventIDSet(objectKeys map[string]bool, email, calendarID
 		}
 		rest := strings.TrimSuffix(strings.TrimPrefix(key, eventRoot), ".json")
 		parts := strings.Split(rest, "/")
-		if len(parts) != 2 {
+		if len(parts) != 5 {
 			continue
 		}
 		if ParseCalendarIDFromPathSegment(parts[0]) != wantCalID {
 			continue
 		}
-		if id := ParseEventIDFromPathSegment(parts[1]); id != "" {
+		if id := ParseEventIDFromPathSegment(parts[4]); id != "" {
 			set[id] = struct{}{}
 		}
 	}
@@ -346,7 +324,7 @@ func IsCalendarEventRestoreObjectKey(objectKey string) bool {
 	return !strings.Contains(objectKey, ".file_placeholder")
 }
 
-// ParseCalendarEventObjectKey extracts calendarId and eventId from a vault object key.
+// ParseCalendarEventObjectKey extracts calendarId and eventId from a dated vault object key.
 func ParseCalendarEventObjectKey(objectKey string) (calendarID, eventID string, ok bool) {
 	objectKey = strings.TrimSpace(objectKey)
 	const marker = "/calendar/events/"
@@ -356,11 +334,12 @@ func ParseCalendarEventObjectKey(objectKey string) (calendarID, eventID string, 
 	}
 	rest := strings.TrimSuffix(objectKey[idx+len(marker):], ".json")
 	parts := strings.Split(rest, "/")
-	if len(parts) != 2 {
+	// Dated: {calSeg}/{yyyy}/{mm}/{dd}/{eventSeg}
+	if len(parts) != 5 {
 		return "", "", false
 	}
 	calendarID = ParseCalendarIDFromPathSegment(parts[0])
-	eventID = ParseEventIDFromPathSegment(parts[1])
+	eventID = ParseEventIDFromPathSegment(parts[4])
 	if calendarID == "" || eventID == "" {
 		return "", "", false
 	}

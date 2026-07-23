@@ -487,7 +487,7 @@ func PageHasAnyNewPhotosItems(items []FlatPhotosMediaItem, syncedSet map[string]
 	return false
 }
 
-// BuildPhotosSyncedIDSet builds a mediaItemId set from synced object keys under email prefix.
+// BuildPhotosSyncedIDSet builds a mediaItemId set from dated cron object keys under email prefix.
 func BuildPhotosSyncedIDSet(objectKeys map[string]bool, emailPrefix string) map[string]struct{} {
 	set := make(map[string]struct{})
 	prefix := strings.TrimSpace(emailPrefix)
@@ -507,10 +507,6 @@ func BuildPhotosSyncedIDSet(objectKeys map[string]bool, emailPrefix string) map[
 		}
 		if id := extractPhotosIDFromDataKey(key, dataPrefix); id != "" {
 			set[id] = struct{}{}
-			continue
-		}
-		if id := extractPhotosIDFromLegacyObjectKey(key, prefix); id != "" {
-			set[id] = struct{}{}
 		}
 	}
 	return set
@@ -520,18 +516,26 @@ func extractPhotosIDFromMetaKey(key, metaPrefix string) string {
 	if !strings.HasPrefix(key, metaPrefix) || !strings.HasSuffix(key, ".json") {
 		return ""
 	}
-	id := strings.TrimSuffix(strings.TrimPrefix(key, metaPrefix), ".json")
-	return strings.TrimSpace(id)
+	rest := strings.TrimSuffix(strings.TrimPrefix(key, metaPrefix), ".json")
+	// Expect yyyy/mm/dd/{id}
+	parts := strings.Split(rest, "/")
+	if len(parts) != 4 {
+		return ""
+	}
+	return strings.TrimSpace(parts[3])
 }
 
 func extractPhotosIDFromDataKey(key, dataPrefix string) string {
 	if !strings.HasPrefix(key, dataPrefix) {
 		return ""
 	}
-	segment := strings.TrimSpace(strings.TrimPrefix(key, dataPrefix))
-	if segment == "" || strings.Contains(segment, "/") {
+	rest := strings.TrimSpace(strings.TrimPrefix(key, dataPrefix))
+	// Expect yyyy/mm/dd/{id}_{filename}
+	parts := strings.Split(rest, "/")
+	if len(parts) != 4 {
 		return ""
 	}
+	segment := parts[3]
 	if id := extractMediaItemIDFromFilenameSegment(segment); id != "" {
 		return id
 	}
@@ -541,21 +545,6 @@ func extractPhotosIDFromDataKey(key, dataPrefix string) string {
 // MediaItemIDFromPhotosObjectSegment extracts Google media item id from PhotoID_filename segment.
 func MediaItemIDFromPhotosObjectSegment(segment string) string {
 	return extractMediaItemIDFromFilenameSegment(segment)
-}
-
-func extractPhotosIDFromLegacyObjectKey(key, emailPrefix string) string {
-	if emailPrefix != "" && !strings.HasPrefix(key, emailPrefix) {
-		return ""
-	}
-	rest := strings.TrimPrefix(key, emailPrefix)
-	if rest == "" || strings.Contains(rest, "/meta/") || strings.Contains(rest, "/data/") {
-		return ""
-	}
-	// Standalone: PhotoID_Filename or album/PhotoID_Filename — take last segment.
-	if idx := strings.LastIndex(rest, "/"); idx >= 0 {
-		rest = rest[idx+1:]
-	}
-	return extractMediaItemIDFromFilenameSegment(rest)
 }
 
 func extractMediaItemIDFromFilenameSegment(segment string) string {
@@ -573,56 +562,80 @@ func extractMediaItemIDFromFilenameSegment(segment string) string {
 	return ""
 }
 
-// PhotosStandaloneObjectKey is legacy manual standalone storage (email root, no meta/data folders).
-func PhotosStandaloneObjectKey(email, mediaItemID, filename string) string {
-	return fmt.Sprintf("%s/%s_%s", strings.TrimSpace(email), strings.TrimSpace(mediaItemID), strings.TrimSpace(filename))
+// PhotosMetaKeyFromDataOrMetaKey derives the paired meta key for dated cron layouts.
+func PhotosMetaKeyFromDataOrMetaKey(key string) (dataKey, metaKey string, ok bool) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", "", false
+	}
+	const metaMarker = "/meta/"
+	const dataMarker = "/data/"
+	if idx := strings.Index(key, metaMarker); idx >= 0 && strings.HasSuffix(key, ".json") {
+		after := strings.TrimSuffix(key[idx+len(metaMarker):], ".json")
+		if len(strings.Split(after, "/")) != 4 {
+			return "", "", false
+		}
+		return "", key, true
+	}
+	if idx := strings.Index(key, dataMarker); idx >= 0 {
+		after := strings.TrimSpace(key[idx+len(dataMarker):])
+		parts := strings.Split(after, "/")
+		if len(parts) != 4 {
+			return "", "", false
+		}
+		prefix := strings.TrimSpace(key[:idx])
+		segment := parts[3]
+		id := extractMediaItemIDFromFilenameSegment(segment)
+		if id == "" {
+			id = segment
+		}
+		if id == "" {
+			return "", "", false
+		}
+		datePath := strings.Join(parts[:3], "/")
+		return key, fmt.Sprintf("%s/meta/%s/%s.json", prefix, datePath, id), true
+	}
+	return "", "", false
 }
 
-// PhotosIDBasedMetaKey returns cron metadata object key: {email}/meta/{mediaItemId}.json
-func PhotosIDBasedMetaKey(email, mediaItemID string) string {
-	return fmt.Sprintf("%s/meta/%s.json", strings.TrimSpace(email), strings.TrimSpace(mediaItemID))
+// PhotosIDBasedMetaKey returns cron metadata object key: {email}/meta/{yyyy}/{mm}/{dd}/{mediaItemId}.json
+// creationTime is Photos API creationTime (RFC3339).
+func PhotosIDBasedMetaKey(email, mediaItemID, creationTime string) string {
+	return fmt.Sprintf("%s/meta/%s/%s.json",
+		strings.TrimSpace(email),
+		ObjectKeyDatePathFromRFC3339(creationTime),
+		strings.TrimSpace(mediaItemID),
+	)
 }
 
-// PhotosIDBasedDataKey returns cron photo bytes key: {email}/data/{mediaItemId}_{filename}
-func PhotosIDBasedDataKey(email, mediaItemID, filename string) string {
-	return fmt.Sprintf("%s/data/%s_%s", strings.TrimSpace(email), strings.TrimSpace(mediaItemID), strings.TrimSpace(filename))
+// PhotosIDBasedDataKey returns cron photo bytes key: {email}/data/{yyyy}/{mm}/{dd}/{mediaItemId}_{filename}
+func PhotosIDBasedDataKey(email, mediaItemID, filename, creationTime string) string {
+	return fmt.Sprintf("%s/data/%s/%s_%s",
+		strings.TrimSpace(email),
+		ObjectKeyDatePathFromRFC3339(creationTime),
+		strings.TrimSpace(mediaItemID),
+		strings.TrimSpace(filename),
+	)
 }
 
-// PhotosLegacyBareDataKey is older cron layout {email}/data/{id} (still recognized for dedupe/restore).
-func PhotosLegacyBareDataKey(email, mediaItemID string) string {
-	return fmt.Sprintf("%s/data/%s", strings.TrimSpace(email), strings.TrimSpace(mediaItemID))
-}
-
-// IsPhotosMediaItemSynced checks ID-based and legacy synced object paths.
+// IsPhotosMediaItemSynced checks dated cron synced object paths by media item ID.
 func IsPhotosMediaItemSynced(syncedMap map[string]bool, email, mediaItemID, filename, albumID, safeAlbumTitle string) bool {
 	if syncedMap == nil {
 		return false
 	}
 	id := strings.TrimSpace(mediaItemID)
 	em := strings.TrimSpace(email)
-	fn := strings.TrimSpace(filename)
-	if id != "" {
-		if syncedMap[PhotosIDBasedMetaKey(em, id)] {
-			return true
-		}
-		if fn != "" && syncedMap[PhotosIDBasedDataKey(em, id, fn)] {
-			return true
-		}
-		if syncedMap[PhotosLegacyBareDataKey(em, id)] {
-			return true
-		}
+	if id == "" {
+		return false
 	}
-	if fn != "" {
-		if syncedMap[em+"/"+fn] {
+	metaPrefix := em + "/meta/"
+	dataPrefix := em + "/data/"
+	for key := range syncedMap {
+		if extractPhotosIDFromMetaKey(key, metaPrefix) == id {
 			return true
 		}
-		if id != "" && syncedMap[fmt.Sprintf("%s/%s_%s", em, id, fn)] {
+		if extractPhotosIDFromDataKey(key, dataPrefix) == id {
 			return true
-		}
-		if albumID != "" && safeAlbumTitle != "" && id != "" && fn != "" {
-			if syncedMap[fmt.Sprintf("%s/%s_%s/%s_%s", em, albumID, safeAlbumTitle, id, fn)] {
-				return true
-			}
 		}
 	}
 	return false

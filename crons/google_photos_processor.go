@@ -193,8 +193,8 @@ func processPhotosPage(ctx context.Context, input ProcessorInput, task *repo.Sch
 }
 
 func syncPhotosMediaByID(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, item google.FlatPhotosMediaItem) error {
-	metaKey := google.PhotosIDBasedMetaKey(task.LoginId, item.ID)
-	dataKey := google.PhotosIDBasedDataKey(task.LoginId, item.ID, item.Filename)
+	metaKey := google.PhotosIDBasedMetaKey(task.LoginId, item.ID, item.CreationTime)
+	dataKey := google.PhotosIDBasedDataKey(task.LoginId, item.ID, item.Filename, item.CreationTime)
 	meta := photosMetaObject{
 		MediaItemID:   item.ID,
 		Filename:      item.Filename,

@@ -211,7 +211,7 @@ func processCalendarEventsPage(ctx context.Context, input ProcessorInput, task *
 }
 
 func syncCalendarEvent(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, calendarID, calendarSummary string, ev *calendar.Event) error {
-	objectKey := google.CalendarObjectKey(task.LoginId, calendarID, calendarSummary, ev.Id, ev.Summary)
+	objectKey := google.CalendarObjectKey(task.LoginId, calendarID, calendarSummary, ev.Id, ev.Summary, ev.Created)
 	b, err := json.Marshal(ev)
 	if err != nil {
 		return fmt.Errorf("marshal event: %w", err)
@@ -247,20 +247,8 @@ func loadCalendarMeta(ctx context.Context, storx, email, calendarID, summary str
 }
 
 func downloadCalendarMetaBytes(ctx context.Context, storx, email, calendarID, summary string) ([]byte, error) {
-	candidates := make([]string, 0, 2)
-	if strings.TrimSpace(summary) != "" {
-		candidates = append(candidates, google.CalendarMetaObjectKey(email, calendarID, summary))
-	}
-	candidates = append(candidates, google.CalendarLegacyBareMetaKey(email, calendarID))
-	var lastErr error
-	for _, key := range candidates {
-		b, err := satellite.DownloadObject(ctx, storx, satellite.ReserveBucket_Calendar, key)
-		if err == nil {
-			return b, nil
-		}
-		lastErr = err
-	}
-	return nil, lastErr
+	key := google.CalendarMetaObjectKey(email, calendarID, summary)
+	return satellite.DownloadObject(ctx, storx, satellite.ReserveBucket_Calendar, key)
 }
 
 func saveCalendarMeta(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, storx string, meta google.CalendarMetadata) error {

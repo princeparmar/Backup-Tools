@@ -82,11 +82,8 @@ func restoreDriveObjectKey(
 		dataKey := strings.TrimSpace(meta.DataObjectKey)
 		if dataKey == "" && strings.TrimSpace(meta.FileID) != "" {
 			displayName := google.DriveBackupDisplayName(meta.Name, meta.MimeType)
-			if displayName != "" && displayName != "untitled" {
-				dataKey = google.DriveIDBasedDataKey(strings.TrimSpace(userEmail), meta.FileID, displayName)
-			}
-			if dataKey == "" {
-				dataKey = google.DriveLegacyBareDataKey(strings.TrimSpace(userEmail), meta.FileID)
+			if displayName != "" && displayName != "untitled" && strings.TrimSpace(meta.CreatedTime) != "" {
+				dataKey = google.DriveIDBasedDataKey(strings.TrimSpace(userEmail), meta.FileID, displayName, meta.CreatedTime)
 			}
 		}
 		if dataKey == "" {
@@ -280,28 +277,7 @@ type photosRestoreMeta struct {
 }
 
 func parsePhotosIDBasedRestoreKeys(key string) (dataKey, metaKey string, ok bool) {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return "", "", false
-	}
-	const metaMarker = "/meta/"
-	const dataMarker = "/data/"
-	if idx := strings.Index(key, metaMarker); idx >= 0 && strings.HasSuffix(key, ".json") {
-		return "", key, true
-	}
-	if idx := strings.Index(key, dataMarker); idx >= 0 {
-		segment := strings.TrimSpace(key[idx+len(dataMarker):])
-		if segment == "" || strings.Contains(segment, "/") {
-			return "", "", false
-		}
-		id := google.MediaItemIDFromPhotosObjectSegment(segment)
-		if id == "" {
-			id = segment
-		}
-		prefix := strings.TrimSpace(key[:idx])
-		return key, google.PhotosIDBasedMetaKey(prefix, id), true
-	}
-	return "", "", false
+	return google.PhotosMetaKeyFromDataOrMetaKey(key)
 }
 
 func parseGooglePhotosKey(key string) (albumID, albumTitle, filename string) {
