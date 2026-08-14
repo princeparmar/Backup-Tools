@@ -52,7 +52,8 @@ const (
 
 // Readiness / prepare API messages.
 const (
-	restoreReadinessNoCredential     = "No backup credential found for this project"
+	restoreReadinessNoCredential      = "No backup credential found for this project"
+	restoreReadinessNoTargetCredential = "No credential found for target account — connect via PUT /auto-sync/job/project"
 	restoreReadinessNoBackupJob      = "No backup job found for this account and service"
 	restoreReadinessNoBackupData     = "No backed-up items found for this account and service"
 	restoreReadinessStorxMissing     = "StorX access grant is missing — reconnect via auto-sync"

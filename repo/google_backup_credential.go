@@ -10,12 +10,13 @@ import (
 )
 
 // GoogleBackupCredentialDB stores shared Google OAuth + StorX tokens for autosync jobs.
-// Uniqueness: (storj_project_id, email) — multiple Google accounts may share one Storj project.
+// Uniqueness: (user_id, storj_project_id, email) — same email may exist per Satellite user.
 type GoogleBackupCredentialDB struct {
 	gorm.GormModel
 
-	Email          string `json:"email" gorm:"column:email;uniqueIndex:idx_google_backup_cred_project_email"`
-	StorjProjectID string `json:"storj_project_id,omitempty" gorm:"column:storj_project_id;uniqueIndex:idx_google_backup_cred_project_email;index:idx_google_backup_cred_project_id"`
+	UserID         string `json:"user_id,omitempty" gorm:"column:user_id;not null;default:'';index;uniqueIndex:idx_google_backup_cred_user_project_email,priority:1"`
+	Email          string `json:"email" gorm:"column:email;uniqueIndex:idx_google_backup_cred_user_project_email,priority:3"`
+	StorjProjectID string `json:"storj_project_id,omitempty" gorm:"column:storj_project_id;uniqueIndex:idx_google_backup_cred_user_project_email,priority:2;index:idx_google_backup_cred_project_id"`
 	AccountType    string `json:"account_type" gorm:"column:account_type;not null;default:personal"`
 	RefreshToken   string `json:"refresh_token,omitempty" gorm:"column:refresh_token"`
 	StorxToken     string `json:"storx_token,omitempty" gorm:"column:storx_token"`
@@ -135,6 +136,28 @@ func (r *GoogleBackupCredentialRepository) FindIDForUserAndEmail(userID, email s
 	return cred.ID, true, nil
 }
 
+// FindByUserProjectAndEmail loads a credential row scoped by user_id + project + email (no cron job required).
+func (r *GoogleBackupCredentialRepository) FindByUserProjectAndEmail(userID, projectID, email string) (*GoogleBackupCredentialDB, bool, error) {
+	projectID = strings.TrimSpace(projectID)
+	email = strings.TrimSpace(email)
+	userID = strings.TrimSpace(userID)
+	if projectID == "" || email == "" || userID == "" {
+		return nil, false, nil
+	}
+	var row GoogleBackupCredentialDB
+	err := r.db.Where(
+		"user_id = ? AND storj_project_id = ? AND LOWER(TRIM(email)) = LOWER(?)",
+		userID, projectID, email,
+	).First(&row).Error
+	if err != nil {
+		if errors.Is(err, gormio.ErrRecordNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("find credential by user, project, email: %w", err)
+	}
+	return &row, true, nil
+}
+
 // FindIDForUserProjectAndEmail returns credential id for a user's linked jobs matching project_id and OAuth holder email.
 func (r *GoogleBackupCredentialRepository) FindIDForUserProjectAndEmail(userID, projectID, email string) (uint, bool, error) {
 	projectID = strings.TrimSpace(projectID)
@@ -171,13 +194,19 @@ func normalizeCredentialAccountType(s string) string {
 	}
 }
 
-// Create inserts a new credential row.
+// Create inserts a new credential row (legacy — prefer CreateForUser).
 func (r *GoogleBackupCredentialRepository) Create(email, projectID, accountType, refreshToken, storxToken string) (*GoogleBackupCredentialDB, error) {
+	return r.CreateForUser("", email, projectID, accountType, refreshToken, storxToken)
+}
+
+// CreateForUser inserts a new user-scoped credential row.
+func (r *GoogleBackupCredentialRepository) CreateForUser(userID, email, projectID, accountType, refreshToken, storxToken string) (*GoogleBackupCredentialDB, error) {
 	acct := normalizeCredentialAccountType(accountType)
 	if acct == "" {
 		acct = "personal"
 	}
 	row := GoogleBackupCredentialDB{
+		UserID:         strings.TrimSpace(userID),
 		Email:          strings.TrimSpace(email),
 		StorjProjectID: strings.TrimSpace(projectID),
 		AccountType:    acct,
@@ -202,30 +231,76 @@ func (r *GoogleBackupCredentialRepository) Create(email, projectID, accountType,
 func (r *GoogleBackupCredentialRepository) FindOrCreateForUser(userID, email, projectID, accountType, refreshToken, storxToken string) (*GoogleBackupCredentialDB, error) {
 	email = strings.TrimSpace(email)
 	projectID = strings.TrimSpace(projectID)
+	userID = strings.TrimSpace(userID)
+	if userID != "" && projectID != "" {
+		if row, ok, err := r.FindByUserProjectAndEmail(userID, projectID, email); err != nil {
+			return nil, err
+		} else if ok {
+			return r.mergeAndReload(row.ID, email, projectID, accountType, refreshToken, storxToken, userID)
+		}
+	}
 	if id, ok, err := r.FindIDForUserAndEmail(userID, email); err != nil {
 		return nil, err
 	} else if ok {
-		return r.mergeAndReload(id, email, projectID, accountType, refreshToken, storxToken)
+		return r.mergeAndReload(id, email, projectID, accountType, refreshToken, storxToken, userID)
 	}
 	if projectID != "" {
 		if id, ok, err := r.FindIDForUserProjectAndEmail(userID, projectID, email); err != nil {
 			return nil, err
 		} else if ok {
-			return r.mergeAndReload(id, email, projectID, accountType, refreshToken, storxToken)
+			return r.mergeAndReload(id, email, projectID, accountType, refreshToken, storxToken, userID)
 		}
 	}
-	return r.Create(email, projectID, accountType, refreshToken, storxToken)
+	return r.CreateForUser(userID, email, projectID, accountType, refreshToken, storxToken)
 }
 
-func (r *GoogleBackupCredentialRepository) mergeAndReload(id uint, email, projectID, accountType, refreshToken, storxToken string) (*GoogleBackupCredentialDB, error) {
-	if err := r.mergeFieldsIfProvided(id, email, projectID, accountType, refreshToken, storxToken); err != nil {
+// ListByUserID returns all credentials for a user, optionally excluding a mailbox email.
+func (r *GoogleBackupCredentialRepository) ListByUserID(userID, excludeEmail string) ([]GoogleBackupCredentialDB, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, fmt.Errorf("user_id is required")
+	}
+	q := r.db.Where("user_id = ?", userID)
+	if exclude := strings.TrimSpace(excludeEmail); exclude != "" {
+		q = q.Where("LOWER(TRIM(email)) <> LOWER(?)", exclude)
+	}
+	var rows []GoogleBackupCredentialDB
+	if err := q.Order("email ASC").Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("list credentials by user: %w", err)
+	}
+	return rows, nil
+}
+
+// ListByUserAndProject returns credentials for a user and project, optionally excluding a mailbox email.
+func (r *GoogleBackupCredentialRepository) ListByUserAndProject(userID, projectID, excludeEmail string) ([]GoogleBackupCredentialDB, error) {
+	userID = strings.TrimSpace(userID)
+	projectID = strings.TrimSpace(projectID)
+	if userID == "" || projectID == "" {
+		return nil, fmt.Errorf("user_id and project_id are required")
+	}
+	q := r.db.Where("user_id = ? AND storj_project_id = ?", userID, projectID)
+	if exclude := strings.TrimSpace(excludeEmail); exclude != "" {
+		q = q.Where("LOWER(TRIM(email)) <> LOWER(?)", exclude)
+	}
+	var rows []GoogleBackupCredentialDB
+	if err := q.Order("email ASC").Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("list credentials by user and project: %w", err)
+	}
+	return rows, nil
+}
+
+func (r *GoogleBackupCredentialRepository) mergeAndReload(id uint, email, projectID, accountType, refreshToken, storxToken, userID string) (*GoogleBackupCredentialDB, error) {
+	if err := r.mergeFieldsIfProvided(id, email, projectID, accountType, refreshToken, storxToken, userID); err != nil {
 		return nil, err
 	}
 	return r.GetByID(id)
 }
 
-func (r *GoogleBackupCredentialRepository) mergeFieldsIfProvided(id uint, email, projectID, accountType, refreshToken, storxToken string) error {
+func (r *GoogleBackupCredentialRepository) mergeFieldsIfProvided(id uint, email, projectID, accountType, refreshToken, storxToken, userID string) error {
 	patch := map[string]interface{}{}
+	if t := strings.TrimSpace(userID); t != "" {
+		patch["user_id"] = t
+	}
 	if t := strings.TrimSpace(email); t != "" {
 		patch["email"] = t
 	}

@@ -81,6 +81,12 @@ func AuthModeForJob(store *db.PostgresDb, job *repo.RestoreJobListingDB) string 
 	if job == nil {
 		return RestoreAuthModeOAuth
 	}
+	if repo.IsRestoreJobMigration(job) {
+		if migrationDWDJobTarget(store, job) {
+			return RestoreAuthModeDWD
+		}
+		return RestoreAuthModeOAuth
+	}
 	service := repo.APIServiceFromMethod(job.Method)
 	var cred *repo.GoogleBackupCredentialDB
 	var cronJob *repo.CronJobListingDB
@@ -103,6 +109,8 @@ func AuthModeForJob(store *db.PostgresDb, job *repo.RestoreJobListingDB) string 
 }
 
 // buildRestoreDeps resolves StorX + Google auth from job snapshot and DB credentials.
+// credential_id on the job is the Google write cred (target for migration, source for in-place).
+// StorX read always comes from cron_job_id (source backup).
 func buildRestoreDeps(ctx context.Context, store *db.PostgresDb, job *repo.RestoreJobListingDB) (*RestoreDeps, error) {
 	cfg, ok := ConfigForMethod(job.Method)
 	if !ok {
@@ -119,8 +127,9 @@ func buildRestoreDeps(ctx context.Context, store *db.PostgresDb, job *repo.Resto
 		vaultSem:         make(chan struct{}, cfg.VaultConcurrency),
 	}
 
+	isMigration := repo.IsRestoreJobMigration(job)
+
 	var cronJob *repo.CronJobListingDB
-	var cred *repo.GoogleBackupCredentialDB
 	if job.CronJobID > 0 {
 		j, err := store.CronJobRepo.GetCronJobByID(job.CronJobID)
 		if err == nil {
@@ -132,18 +141,41 @@ func buildRestoreDeps(ctx context.Context, store *db.PostgresDb, job *repo.Resto
 		deps.CronJob = cronJob
 		deps.StorxRecovery = storxrefresh.NewRecovery(store, cronJob)
 		deps.AccessGrant = strings.TrimSpace(store.CronJobRepo.ResolvedStorxToken(cronJob))
-		deps.RefreshToken = strings.TrimSpace(store.CronJobRepo.ResolvedRefreshToken(cronJob))
-	}
-	if deps.AccessGrant == "" && job.CredentialID > 0 {
-		c, err := store.CredentialRepo.GetByID(job.CredentialID)
-		if err == nil {
-			cred = c
-			deps.AccessGrant = strings.TrimSpace(cred.StorxToken)
-			if deps.RefreshToken == "" {
-				deps.RefreshToken = strings.TrimSpace(cred.RefreshToken)
+		if !isMigration {
+			deps.RefreshToken = strings.TrimSpace(store.CronJobRepo.ResolvedRefreshToken(cronJob))
+		}
+		if deps.AccessGrant == "" {
+			if cid := repo.JobCredentialID(cronJob); cid > 0 {
+				if c, err := store.CredentialRepo.GetByID(cid); err == nil && c != nil {
+					deps.AccessGrant = strings.TrimSpace(c.StorxToken)
+				}
 			}
 		}
 	}
+
+	if !isMigration && deps.AccessGrant == "" && job.CredentialID > 0 {
+		if c, err := store.CredentialRepo.GetByID(job.CredentialID); err == nil && c != nil {
+			deps.AccessGrant = strings.TrimSpace(c.StorxToken)
+			if deps.RefreshToken == "" {
+				deps.RefreshToken = strings.TrimSpace(c.RefreshToken)
+			}
+		}
+	}
+
+	if job.CredentialID > 0 {
+		if !(isMigration && migrationDWDJobTarget(store, job)) {
+			writeCred, err := store.CredentialRepo.GetByID(job.CredentialID)
+			if err != nil {
+				return nil, fmt.Errorf("credential not found: %w", err)
+			}
+			if isMigration {
+				deps.RefreshToken = strings.TrimSpace(writeCred.RefreshToken)
+			} else if deps.RefreshToken == "" {
+				deps.RefreshToken = strings.TrimSpace(writeCred.RefreshToken)
+			}
+		}
+	}
+
 	if deps.AccessGrant == "" && deps.StorxRecovery != nil {
 		if err := checkJobContinuable(store, job.ID); err != nil {
 			return nil, err
@@ -158,7 +190,13 @@ func buildRestoreDeps(ctx context.Context, store *db.PostgresDb, job *repo.Resto
 		deps.AccessGrant = strings.TrimSpace(grant)
 	}
 
-	deps.AuthMode = AuthModeForJob(store, job)
+	if deps.AuthMode == "" {
+		deps.AuthMode = AuthModeForJob(store, job)
+	}
+
+	if isMigration && deps.AuthMode == RestoreAuthModeDWD {
+		deps.GoogleWriteSubject = strings.TrimSpace(job.TargetEmail)
+	}
 
 	if deps.AuthMode == RestoreAuthModeDWD {
 		return deps, nil

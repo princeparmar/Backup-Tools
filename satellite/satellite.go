@@ -170,36 +170,44 @@ func UploadObjectFromReader(ctx context.Context, accessGrant, bucketName, object
 	return nil
 }
 
-// DownloadObject downloads data from satellite storage
-func DownloadObject(ctx context.Context, accessGrant, bucketName, objectKey string) ([]byte, error) {
+// DownloadObjectTo streams an object from satellite storage into w.
+func DownloadObjectTo(ctx context.Context, accessGrant, bucketName, objectKey string, w io.Writer) error {
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
-		return nil, fmt.Errorf("parse access grant: %w", err)
+		return fmt.Errorf("parse access grant: %w", err)
 	}
 
 	project, err := uplink.OpenProject(ctx, access)
 	if err != nil {
-		return nil, fmt.Errorf("open project: %w", err)
+		return fmt.Errorf("open project: %w", err)
 	}
 	defer project.Close()
 
 	_, err = project.EnsureBucket(ctx, bucketName)
 	if err != nil {
-		return nil, fmt.Errorf("ensure bucket: %w", err)
+		return fmt.Errorf("ensure bucket: %w", err)
 	}
 
 	download, err := project.DownloadObject(ctx, bucketName, objectKey, nil)
 	if err != nil {
-		return nil, fmt.Errorf("open object: %w", err)
+		return fmt.Errorf("open object: %w", err)
 	}
 	defer download.Close()
 
-	receivedContents, err := io.ReadAll(download)
-	if err != nil {
-		return nil, fmt.Errorf("read data: %w", err)
+	if _, err := io.Copy(w, download); err != nil {
+		return fmt.Errorf("read data: %w", err)
 	}
 
-	return receivedContents, nil
+	return nil
+}
+
+// DownloadObject downloads data from satellite storage
+func DownloadObject(ctx context.Context, accessGrant, bucketName, objectKey string) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := DownloadObjectTo(ctx, accessGrant, bucketName, objectKey, &buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // ListObjects lists all objects in a bucket

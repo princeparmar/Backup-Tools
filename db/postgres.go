@@ -66,11 +66,6 @@ func (s *PostgresDb) Migrate() error {
 		return err
 	}
 
-	// Allow multiple Google accounts (emails) per storj_project_id.
-	if err := s.DB.Exec(`DROP INDEX IF EXISTS idx_google_backup_cred_project_id`).Error; err != nil {
-		return err
-	}
-
 	if err := s.DB.Exec(`CREATE INDEX IF NOT EXISTS idx_synced_objects_user_id ON synced_objects (user_id) WHERE deleted_at IS NULL`).Error; err != nil {
 		return err
 	}

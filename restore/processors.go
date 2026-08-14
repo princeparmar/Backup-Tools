@@ -42,7 +42,6 @@ func requireGoogleToken(deps *RestoreDeps) error {
 	return nil
 }
 
-
 // baseProcessor helpers
 type gmailProcessor struct{}
 
@@ -54,7 +53,7 @@ func (g *gmailProcessor) Config() ServiceConfig {
 func (g *gmailProcessor) ShouldRestoreKey(key string) bool { return !ShouldSkipObjectKey(key) }
 func (g *gmailProcessor) Setup(ctx context.Context, deps *RestoreDeps) error {
 	if deps.AuthMode == RestoreAuthModeDWD {
-		client, err := google.NewGmailClientWithServiceAccountDelegationForRestore(ctx, deps.LoginID)
+		client, err := google.NewGmailClientWithServiceAccountDelegationForRestore(ctx, deps.GoogleWriteEmail())
 		if err != nil {
 			return err
 		}
@@ -95,7 +94,7 @@ func (d *driveProcessor) ShouldRestoreKey(key string) bool {
 }
 func (d *driveProcessor) Setup(ctx context.Context, deps *RestoreDeps) error {
 	if deps.AuthMode == RestoreAuthModeDWD {
-		srv, err := google.GetDriveServiceForRestoreDWD(ctx, deps.LoginID)
+		srv, err := google.GetDriveServiceForRestoreDWD(ctx, deps.GoogleWriteEmail())
 		if err != nil {
 			return err
 		}
@@ -113,7 +112,7 @@ func (d *driveProcessor) Setup(ctx context.Context, deps *RestoreDeps) error {
 	return nil
 }
 func (d *driveProcessor) RestoreKey(ctx context.Context, deps *RestoreDeps, objectKey string) error {
-	return RestoreDriveKey(ctx, deps.AccessGrant, deps.DriveService, deps.LoginID, objectKey)
+	return RestoreDriveKey(ctx, deps.AccessGrant, deps.DriveService, deps.GoogleWriteEmail(), objectKey)
 }
 func (d *driveProcessor) Cleanup(ctx context.Context, deps *RestoreDeps) error { return nil }
 
@@ -127,7 +126,7 @@ func (p *photosProcessor) Config() ServiceConfig {
 func (p *photosProcessor) ShouldRestoreKey(key string) bool { return !ShouldSkipObjectKey(key) }
 func (p *photosProcessor) Setup(ctx context.Context, deps *RestoreDeps) error {
 	if deps.AuthMode == RestoreAuthModeDWD {
-		client, err := google.NewGPhotosClientForRestoreDWD(ctx, deps.LoginID)
+		client, err := google.NewGPhotosClientForRestoreDWD(ctx, deps.GoogleWriteEmail())
 		if err != nil {
 			return err
 		}
@@ -161,7 +160,7 @@ func (c *calendarProcessor) ShouldRestoreKey(key string) bool {
 }
 func (c *calendarProcessor) Setup(ctx context.Context, deps *RestoreDeps) error {
 	if deps.AuthMode == RestoreAuthModeDWD {
-		svc, err := google.NewCalendarServiceForRestoreDWD(ctx, deps.LoginID)
+		svc, err := google.NewCalendarServiceForRestoreDWD(ctx, deps.GoogleWriteEmail())
 		if err != nil {
 			return err
 		}
@@ -195,7 +194,7 @@ func (c *contactsProcessor) ShouldRestoreKey(key string) bool {
 }
 func (c *contactsProcessor) Setup(ctx context.Context, deps *RestoreDeps) error {
 	if deps.AuthMode == RestoreAuthModeDWD {
-		svc, err := google.NewPeopleServiceForRestoreDWD(ctx, deps.LoginID)
+		svc, err := google.NewPeopleServiceForRestoreDWD(ctx, deps.GoogleWriteEmail())
 		if err != nil {
 			return err
 		}

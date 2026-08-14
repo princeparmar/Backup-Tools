@@ -2,6 +2,7 @@ package restore
 
 import (
 	"sync"
+	"time"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/db"
@@ -87,11 +88,12 @@ type RestoreDeps struct {
 	CronJob       *repo.CronJobListingDB
 	StorxRecovery *storxrefresh.Recovery
 	AccessGrant   string
-	GoogleToken  string
-	RefreshToken string
-	AuthMode     string
-	LoginID      string
-	Config       ServiceConfig
+	GoogleToken        string
+	RefreshToken       string
+	AuthMode           string
+	LoginID            string
+	GoogleWriteSubject string // DWD impersonation target (migration cross-mailbox); defaults to LoginID
+	Config             ServiceConfig
 
 	GmailClient     *google.GmailClient
 	DriveService    *drive.Service
@@ -104,6 +106,9 @@ type RestoreDeps struct {
 
 	googleLimiter *rate.Limiter
 	vaultSem      chan struct{}
+
+	heartbeatMu   sync.Mutex
+	lastHeartbeat time.Time
 }
 
 // BatchResult summarizes one batch execution.

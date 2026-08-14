@@ -39,6 +39,7 @@ type RestoreJobListingDB struct {
 	UserID         string `json:"user_id" gorm:"not null;index:idx_restore_jobs_user_service_login,priority:1"`
 	StorjProjectID string `json:"storj_project_id" gorm:"column:storj_project_id;index:idx_restore_jobs_project"`
 	LoginID        string `json:"login_id" gorm:"not null;index:idx_restore_jobs_user_service_login,priority:3"`
+	TargetEmail    string `json:"target_email,omitempty" gorm:"column:target_email;type:varchar(255)"`
 	Method         string `json:"method" gorm:"not null;index:idx_restore_jobs_user_service_login,priority:2"`
 	AccountType    string `json:"account_type" gorm:"column:account_type;not null;default:personal"`
 	CredentialID   uint   `json:"credential_id" gorm:"column:credential_id;index"`
@@ -128,6 +129,18 @@ func NewRestoreJobRepository(db *gorm.DB) *RestoreJobRepository {
 	return &RestoreJobRepository{db: db}
 }
 
+// IsRestoreJobMigration reports cross-account restore (target_email set and differs from login_id).
+func IsRestoreJobMigration(job *RestoreJobListingDB) bool {
+	if job == nil {
+		return false
+	}
+	target := strings.TrimSpace(job.TargetEmail)
+	if target == "" {
+		return false
+	}
+	return !strings.EqualFold(target, strings.TrimSpace(job.LoginID))
+}
+
 // EffectiveRestoreMessageStatus returns stored message_status or derives it from job status.
 func EffectiveRestoreMessageStatus(job *RestoreJobListingDB) string {
 	if job != nil && strings.TrimSpace(job.MessageStatus) != "" {
@@ -207,7 +220,7 @@ func (r *RestoreJobRepository) ClaimNextQueuedJob() (*RestoreJobListingDB, error
 	return &job, nil
 }
 
-const restoreRunningBatchGap = 25 * time.Second
+const restoreRunningBatchGap = 2 * time.Minute
 
 // ClaimNextRunningJob claims a running job ready for the next batch (heartbeat not updated recently).
 func (r *RestoreJobRepository) ClaimNextRunningJob() (*RestoreJobListingDB, error) {
