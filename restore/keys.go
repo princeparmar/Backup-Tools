@@ -138,11 +138,8 @@ func restoreDriveObjectKeyRestoreAll(
 		dataKey := strings.TrimSpace(meta.DataObjectKey)
 		if dataKey == "" && strings.TrimSpace(meta.FileID) != "" {
 			displayName := google.DriveBackupDisplayName(meta.Name, meta.MimeType)
-			if displayName != "" && displayName != "untitled" {
-				dataKey = google.DriveIDBasedDataKey(strings.TrimSpace(userEmail), meta.FileID, displayName)
-			}
-			if dataKey == "" {
-				dataKey = google.DriveLegacyBareDataKey(strings.TrimSpace(userEmail), meta.FileID)
+			if displayName != "" && displayName != "untitled" && strings.TrimSpace(meta.CreatedTime) != "" {
+				dataKey = google.DriveIDBasedDataKey(strings.TrimSpace(userEmail), meta.FileID, displayName, meta.CreatedTime)
 			}
 		}
 		if dataKey == "" {
