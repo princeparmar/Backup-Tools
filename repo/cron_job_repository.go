@@ -277,6 +277,7 @@ type UsersGroupsJobFilter struct {
 	MailboxEmail string // exact match on job name or input_data.email
 	Method       string
 	Domain       string
+	OrgUnitPath  string
 }
 
 // ListJobsForUsersGroups returns non-placeholder cron jobs for users-groups listing.
@@ -299,7 +300,10 @@ func (r *CronJobRepository) ListJobsForUsersGroups(userID string, f *UsersGroups
 		}
 		if search := strings.TrimSpace(f.EmailSearch); search != "" {
 			like := "%" + search + "%"
-			query = query.Where("(cron_job_listing_dbs.name ILIKE ? OR cron_job_listing_dbs.input_data->>'email' ILIKE ?)", like, like)
+			query = query.Where("(cron_job_listing_dbs.name ILIKE ? OR cron_job_listing_dbs.input_data->>'email' ILIKE ? OR cron_job_listing_dbs.input_data->>'org_unit_path' ILIKE ?)", like, like, like)
+		}
+		if orgUnit := strings.TrimSpace(f.OrgUnitPath); orgUnit != "" {
+			query = query.Where("LOWER(TRIM(COALESCE(cron_job_listing_dbs.input_data->>'org_unit_path', ''))) = LOWER(?)", orgUnit)
 		}
 		if method := strings.TrimSpace(f.Method); method != "" {
 			query = query.Where("cron_job_listing_dbs.method = ?", method)

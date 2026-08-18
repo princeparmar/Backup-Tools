@@ -45,23 +45,11 @@ type DownloadResult struct {
 	Message      string   `json:"message"`
 }
 
-type gmailAccountCount struct {
-	Email      string `json:"email"`
-	EmailCount int64  `json:"email_count"`
-}
-
-type gmailGroupedEmails struct {
-	AdminEmail      string              `json:"admin_email"`
-	EmailCount      int64               `json:"email_count"`
-	ConnectedEmails []gmailAccountCount `json:"connected_emails"`
-}
-
 type gmailCorporateAdminResponse struct {
-	Account         string                           `json:"account"`
-	AccountType     string                           `json:"account_type"`
-	Count           int                              `json:"count"`
-	Grouped         gmailGroupedEmails               `json:"grouped_emails"`
-	DelegationSetup *google.WorkspaceDelegationSetup `json:"delegation_setup,omitempty"`
+	Account             string                           `json:"account"`
+	AccountType         string                           `json:"account_type"`
+	OrganizationalUnits []google.DomainOrgUnit           `json:"organizational_units"`
+	DelegationSetup     *google.WorkspaceDelegationSetup `json:"delegation_setup,omitempty"`
 }
 
 // GmailService provides consolidated Gmail operations
@@ -726,7 +714,7 @@ func getSatelliteGoogleAccessTokenForDomainUsers(c echo.Context) (string, error)
 // }
 
 // HandleGmailCorporateDomainUsers is called by Satellite with token_key + ACCESS_TOKEN (plain Google access token).
-// Personal/employee: account_type + email. Admin: + domain directory users (Gmail per-mailbox counts disabled; see commented block below).
+// Personal/employee: account_type + email. Admin: domain users grouped by Organizational Unit.
 func HandleGmailCorporateDomainUsers(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
@@ -771,14 +759,9 @@ func HandleGmailCorporateDomainUsers(c echo.Context) error {
 	}
 
 	resp := gmailCorporateAdminResponse{
-		Account:     userDetails.Email,
-		AccountType: accountType,
-		Count:       0,
-		Grouped: gmailGroupedEmails{
-			AdminEmail:      userDetails.Email,
-			EmailCount:      0,
-			ConnectedEmails: []gmailAccountCount{},
-		},
+		Account:             userDetails.Email,
+		AccountType:         accountType,
+		OrganizationalUnits: []google.DomainOrgUnit{},
 	}
 	if setup, setupErr := google.GetWorkspaceDelegationSetup(); setupErr == nil {
 		resp.DelegationSetup = setup
@@ -789,7 +772,7 @@ func HandleGmailCorporateDomainUsers(c echo.Context) error {
 		return c.JSON(http.StatusOK, resp)
 	}
 
-	users, err := google.ListAllDomainUsers(ctx, accessToken, domain)
+	users, err := google.ListAllDomainUsersDetailed(ctx, accessToken, domain)
 	if err != nil {
 		logger.Warn(ctx, "List domain users failed", logger.ErrorField(err))
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": "Failed to list domain users. Check admin permissions or domain access."})
@@ -856,17 +839,6 @@ func HandleGmailCorporateDomainUsers(c echo.Context) error {
 		return c.JSON(http.StatusOK, resp)
 	*/
 
-	targetUsers := make([]string, 0, len(users))
-	for _, email := range users {
-		if email != userDetails.Email {
-			targetUsers = append(targetUsers, email)
-		}
-	}
-	results := make([]gmailAccountCount, 0, len(targetUsers))
-	for _, email := range targetUsers {
-		results = append(results, gmailAccountCount{Email: email})
-	}
-	resp.Count = len(results)
-	resp.Grouped.ConnectedEmails = results
+	resp.OrganizationalUnits = google.GroupDomainUsersByOrgUnit(users)
 	return c.JSON(http.StatusOK, resp)
 }

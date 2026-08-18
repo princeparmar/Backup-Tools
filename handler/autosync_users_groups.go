@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
@@ -93,6 +94,7 @@ type UsersGroupsEntityView struct {
 	Name             string                           `json:"name"`
 	Email            string                           `json:"email"`
 	AccountType      string                           `json:"account_type"`
+	OrgUnitPath      string                           `json:"org_unit_path,omitempty"`
 	CredentialStatus string                           `json:"credential_status"`
 	Credential       UsersGroupsMailboxCredentialView `json:"credential"`
 	Services         []UsersGroupsEntityServiceView   `json:"services"`
@@ -590,6 +592,7 @@ func buildUsersGroupsEntities(
 			Name:             nameFromMailboxEmail(email),
 			Email:            email,
 			AccountType:      usersGroupsAccountType(email, cred),
+			OrgUnitPath:      mailboxOrgUnitPath(emailJobs),
 			CredentialStatus: usersGroupsCredentialStatus(needsGoogle, needsStorx),
 			Credential:       buildMailboxCredentialView(cronRepo, cred, emailJobs),
 			Services:         buildUsersGroupsEntityServices(emailJobs, policies),
@@ -724,6 +727,70 @@ func filterUsersGroupsEntitiesByActive(entities []UsersGroupsEntityView, jobs []
 			out = append(out, entities[i])
 		}
 	}
+	return out
+}
+
+func mailboxOrgUnitPath(jobs []repo.CronJobListingDB) string {
+	for i := range jobs {
+		if path := jobOrgUnitPath(&jobs[i]); path != "" {
+			return path
+		}
+	}
+	return ""
+}
+
+func jobOrgUnitPath(job *repo.CronJobListingDB) string {
+	if job == nil || job.InputData == nil || job.InputData.Json() == nil {
+		return ""
+	}
+	raw, ok := (*job.InputData.Json())["org_unit_path"].(string)
+	if !ok {
+		return ""
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	return google.NormalizeOrgUnitPath(raw)
+}
+
+func parseUsersGroupsOrgUnitPath(c echo.Context) string {
+	raw := strings.TrimSpace(c.QueryParam("org_unit_path"))
+	if raw == "" || strings.EqualFold(raw, "all") || strings.EqualFold(raw, "all_org_units") {
+		return ""
+	}
+	return google.NormalizeOrgUnitPath(raw)
+}
+
+func filterUsersGroupsEntitiesByOrgUnitPath(entities []UsersGroupsEntityView, orgUnitPath string) []UsersGroupsEntityView {
+	if orgUnitPath == "" {
+		return entities
+	}
+	out := make([]UsersGroupsEntityView, 0, len(entities))
+	for i := range entities {
+		if google.NormalizeOrgUnitPath(entities[i].OrgUnitPath) == orgUnitPath {
+			out = append(out, entities[i])
+		}
+	}
+	return out
+}
+
+func uniqueUsersGroupsOrgUnitPaths(entities []UsersGroupsEntityView) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	for i := range entities {
+		path := strings.TrimSpace(entities[i].OrgUnitPath)
+		if path == "" {
+			continue
+		}
+		path = google.NormalizeOrgUnitPath(path)
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		out = append(out, path)
+	}
+	sort.Strings(out)
 	return out
 }
 
@@ -1174,6 +1241,7 @@ func HandleAutosyncUsersGroupsList(c echo.Context) error {
 	jobs, err := database.CronJobRepo.ListJobsForUsersGroups(userID, &repo.UsersGroupsJobFilter{
 		Domain:      strings.TrimSpace(c.QueryParam("domain")),
 		EmailSearch: strings.TrimSpace(c.QueryParam("search")),
+		OrgUnitPath: parseUsersGroupsOrgUnitPath(c),
 	})
 	if err != nil {
 		return usersGroupsInternalError(c, ctx, "Failed to list jobs for users-groups", err)
@@ -1186,9 +1254,12 @@ func HandleAutosyncUsersGroupsList(c echo.Context) error {
 	allEntities = filterUsersGroupsEntitiesByActive(allEntities, jobs, activeFilter)
 	allEntities = filterUsersGroupsEntitiesByAccountType(allEntities, accountType)
 	allEntities = filterUsersGroupsEntitiesByCredentialStatus(allEntities, credentialStatus)
+	allEntities = filterUsersGroupsEntitiesByOrgUnitPath(allEntities, parseUsersGroupsOrgUnitPath(c))
+	orgUnits := uniqueUsersGroupsOrgUnitPaths(allEntities)
 	entities, pagination := paginateUsersGroupsEntities(allEntities, limit, offset)
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"entities":   entities,
+		"org_units":  orgUnits,
 		"pagination": pagination,
 	})
 }

@@ -69,18 +69,19 @@ var onboardingServiceToMethod = map[string]string{
 // GoogleBackupOnboardingRequest is the Satellite → Backup-Tools job create body (POST /google/backup/onboarding/jobs or POST /auto-sync/job).
 // sync_type is query only (?sync_type=daily). Future: outlook/psql via services[] in this JSON (legacy POST /auto-sync/job/:method is commented out).
 type GoogleBackupOnboardingRequest struct {
-	Services        []string `json:"services"`
-	Interval        string   `json:"interval"` // required when creating a new policy; optional when policy_id selects an existing policy
-	On              string   `json:"on"`       // required for weekly/monthly new policies; optional with policy_id
-	GoogleEmail     string   `json:"google_email"`
-	AccountType     string   `json:"account_type"`
-	ProjectID       string   `json:"project_id"`
-	SatelliteUserID string   `json:"satellite_user_id"`
-	RefreshToken    string   `json:"refresh_token"`
-	StorxToken      string   `json:"storx_token,omitempty"`
-	Emails          []string `json:"emails"`
-	PolicyID        *uint    `json:"policy_id,omitempty"`
-	PolicyName      string   `json:"policy_name,omitempty"`
+	Services        []string          `json:"services"`
+	Interval        string            `json:"interval"` // required when creating a new policy; optional when policy_id selects an existing policy
+	On              string            `json:"on"`       // required for weekly/monthly new policies; optional with policy_id
+	GoogleEmail     string            `json:"google_email"`
+	AccountType     string            `json:"account_type"`
+	ProjectID       string            `json:"project_id"`
+	SatelliteUserID string            `json:"satellite_user_id"`
+	RefreshToken    string            `json:"refresh_token"`
+	StorxToken      string            `json:"storx_token,omitempty"`
+	Emails          []string          `json:"emails"`
+	EmailOrgUnits   map[string]string `json:"email_org_units,omitempty"`
+	PolicyID        *uint             `json:"policy_id,omitempty"`
+	PolicyName      string            `json:"policy_name,omitempty"`
 }
 
 // Legacy unified create body (onboarding + outlook code + DB fields) — not used; onboarding uses GoogleBackupOnboardingRequest only.
@@ -832,6 +833,10 @@ func handleSatelliteOnboardingCreate(c echo.Context, ctx context.Context, userID
 	if err := validateGmailAdminDomainForOnboarding(emails, req.GoogleEmail, req.AccountType); err != nil {
 		return err
 	}
+	orgUnitByEmail := resolveOnboardingOrgUnitPaths(ctx, req, emails)
+	if len(orgUnitByEmail) > 0 {
+		req.EmailOrgUnits = orgUnitByEmail
+	}
 	cred, err := database.CredentialRepo.FindOrCreateForUser(userID, req.GoogleEmail, req.ProjectID, req.AccountType, req.RefreshToken, req.StorxToken)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
@@ -1025,7 +1030,7 @@ func createGoogleJobsForServiceEmails(
 	var jobs []onboardingJobResult
 	var failed []onboardingFailedResult
 	for _, targetEmail := range emails {
-		cronJob, createErr := createSyncJobWithCredential(userID, targetEmail, method, syncType, cred.ID, c)
+		cronJob, createErr := createSyncJobWithCredential(userID, targetEmail, method, syncType, cred.ID, orgUnitInputData(req, targetEmail), c)
 		if createErr != nil {
 			failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: extractCreateJobError(createErr)})
 			continue
@@ -1067,12 +1072,76 @@ func createGoogleJobsForServiceEmails(
 	return jobs, failed
 }
 
-func createSyncJobWithCredential(userID, name, method, syncType string, credentialID uint, c echo.Context) (*repo.CronJobListingDB, error) {
+func createSyncJobWithCredential(userID, name, method, syncType string, credentialID uint, extraInput map[string]interface{}, c echo.Context) (*repo.CronJobListingDB, error) {
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	if err := checkExistingJobs(userID, name, syncType, method, database); err != nil {
 		return nil, err
 	}
-	return database.CronJobRepo.CreateCronJobForUserWithCredential(userID, name, method, syncType, credentialID, nil)
+	return database.CronJobRepo.CreateCronJobForUserWithCredential(userID, name, method, syncType, credentialID, extraInput)
+}
+
+func orgUnitInputData(req *GoogleBackupOnboardingRequest, email string) map[string]interface{} {
+	path := orgUnitPathForEmail(req, email)
+	if path == "" {
+		return nil
+	}
+	return map[string]interface{}{"org_unit_path": path}
+}
+
+func orgUnitPathForEmail(req *GoogleBackupOnboardingRequest, email string) string {
+	if req == nil || len(req.EmailOrgUnits) == 0 {
+		return ""
+	}
+	email = strings.TrimSpace(email)
+	if path, ok := req.EmailOrgUnits[email]; ok {
+		return google.NormalizeOrgUnitPath(path)
+	}
+	for k, path := range req.EmailOrgUnits {
+		if strings.EqualFold(strings.TrimSpace(k), email) {
+			return google.NormalizeOrgUnitPath(path)
+		}
+	}
+	return ""
+}
+
+func resolveOnboardingOrgUnitPaths(ctx context.Context, req *GoogleBackupOnboardingRequest, emails []string) map[string]string {
+	out := make(map[string]string)
+	if req != nil {
+		for k, path := range req.EmailOrgUnits {
+			k = strings.TrimSpace(k)
+			if k == "" || strings.TrimSpace(path) == "" {
+				continue
+			}
+			out[k] = google.NormalizeOrgUnitPath(path)
+		}
+	}
+	if req == nil || !strings.EqualFold(strings.TrimSpace(req.AccountType), "admin_workspace") {
+		return out
+	}
+	refresh := strings.TrimSpace(req.RefreshToken)
+	domain := google.ExtractDomainFromEmail(req.GoogleEmail)
+	if refresh == "" || domain == "" {
+		return out
+	}
+	users, err := google.ListAllDomainUsersDetailedWithToken(ctx, refresh, domain)
+	if err != nil {
+		logger.Warn(ctx, "onboarding org unit lookup failed", logger.ErrorField(err))
+		return out
+	}
+	wanted := make(map[string]struct{}, len(emails))
+	for _, e := range emails {
+		wanted[strings.ToLower(strings.TrimSpace(e))] = struct{}{}
+	}
+	for _, u := range users {
+		if _, ok := wanted[strings.ToLower(u.Email)]; !ok {
+			continue
+		}
+		if _, exists := out[u.Email]; exists {
+			continue
+		}
+		out[u.Email] = u.OrgUnitPath
+	}
+	return out
 }
 
 func parseOnboardingSchedule(rawInterval, rawOn string) (onboardingSchedule, error) {

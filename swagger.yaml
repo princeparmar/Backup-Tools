@@ -260,6 +260,7 @@ paths:
         schedule, and policy fields; disconnected rows only include method and connected false.
         credential block covers the Credentials tab. account_type and credential_status support list filters.
         Data from cron jobs only (mailboxes with at least one job).
+        Optional org_unit_path filter and org_units unique list are additive; existing filters unchanged.
       parameters:
         - $ref: '#/components/parameters/tokenKeyHeader'
         - name: domain
@@ -273,7 +274,14 @@ paths:
           required: false
           schema:
             type: string
-          description: Email search (partial match on job name or input_data.email)
+          description: Email or OU search (partial match on job name, input_data.email, or org_unit_path)
+        - name: org_unit_path
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            Filter mailboxes by Google Workspace OU path (e.g. /Sales). Omit, all, or all_org_units = no filter.
         - name: method
           in: query
           required: false
@@ -3914,6 +3922,11 @@ components:
             re_auth_required when either token is missing — UI should prompt reconnect.
         credential:
           $ref: '#/components/schemas/UsersGroupsMailboxCredentialView'
+        org_unit_path:
+          type: string
+          description: |
+            Google Workspace Organizational Unit path from Admin Directory, stored on the job at create
+            (e.g. /Sales). Empty for individual Gmail and for jobs created before OU capture.
         services:
           type: array
           description: Always five rows (gmail, drive, photos, calendar, contacts) in stable order.
@@ -3944,6 +3957,11 @@ components:
             $ref: '#/components/schemas/UsersGroupsEntityView'
         pagination:
           $ref: '#/components/schemas/UsersGroupsPaginationView'
+        org_units:
+          type: array
+          items:
+            type: string
+          description: Unique Workspace OU paths among the filtered mailbox set (for the Org Units dropdown). Empty when none stored.
 
     ServiceJobCountView:
       type: object
