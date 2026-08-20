@@ -69,9 +69,10 @@ var onboardingServiceToMethod = map[string]string{
 
 // OrgUnitScheduleInput is one OU schedule when policy_scope=org_unit (separate interval per group).
 type OrgUnitScheduleInput struct {
-	PolicyName string `json:"policy_name,omitempty"`
-	Interval   string `json:"interval"`
-	On         string `json:"on,omitempty"`
+	PolicyName string   `json:"policy_name,omitempty"`
+	Interval   string   `json:"interval"`
+	On         string   `json:"on,omitempty"`
+	Services   []string `json:"services,omitempty"` // optional; omit = use top-level services[]
 }
 
 // Onboarding policy_scope values (corporate create-new).
@@ -230,9 +231,6 @@ func (r *GoogleBackupOnboardingRequest) validate(userID string) error {
 	if r.GoogleEmail == "" {
 		return errors.New("google_email is required")
 	}
-	if len(r.Services) == 0 {
-		return errors.New("services is required")
-	}
 	scope := r.normalizedPolicyScope()
 	if scope != OnboardingPolicyScopeAll && scope != OnboardingPolicyScopeOrgUnit {
 		return errors.New("policy_scope must be all or org_unit")
@@ -244,7 +242,18 @@ func (r *GoogleBackupOnboardingRequest) validate(userID string) error {
 		if !strings.EqualFold(strings.TrimSpace(r.AccountType), "admin_workspace") {
 			return errors.New("policy_scope=org_unit requires account_type=admin_workspace")
 		}
-	} else if !r.hasPolicyID() && r.Interval == "" {
+		if err := validateOnboardingServiceNames(r.Services); err != nil {
+			return err
+		}
+	} else {
+		if len(normalizeOnboardingServices(r.Services)) == 0 {
+			return errors.New("services is required")
+		}
+		if err := validateOnboardingServiceNames(r.Services); err != nil {
+			return err
+		}
+	}
+	if !r.isOrgUnitPolicyScope() && !r.hasPolicyID() && r.Interval == "" {
 		// When selecting an existing policy (policy_id), interval/on come from that policy.
 		return errors.New("interval is required")
 	}
@@ -944,26 +953,7 @@ func handleSatelliteOnboardingCreate(c echo.Context, ctx context.Context, userID
 	}
 
 	policyBatch := &onboardingPolicyBatch{}
-	var jobs []onboardingJobResult
-	var failed []onboardingFailedResult
-	var servicesOut []string
-	seenSvc := make(map[string]struct{})
-
-	for _, raw := range req.Services {
-		svc := strings.ToLower(strings.TrimSpace(raw))
-		if svc == "" {
-			continue
-		}
-		if _, dup := seenSvc[svc]; dup {
-			continue
-		}
-		seenSvc[svc] = struct{}{}
-		servicesOut = append(servicesOut, svc)
-
-		j, f := onboardingCreateForService(ctx, c, userID, syncType, svc, schedule, req, cred, isFirstConnection, policyBatch, emails, database)
-		jobs = append(jobs, j...)
-		failed = append(failed, f...)
-	}
+	jobs, failed, servicesOut := createOnboardingJobsByScope(ctx, c, userID, syncType, schedule, req, cred, isFirstConnection, policyBatch, emails, database)
 
 	orgUnits := uniqueOnboardingOrgUnitPaths(req, emails)
 	policies := onboardingPoliciesFromBatch(database, policyBatch)
@@ -1312,6 +1302,113 @@ func applyOnboardingJobSchedule(
 	return database.PolicyRepo.AssignPolicyToJob(jobID, policyID)
 }
 
+func createOnboardingJobsByScope(
+	ctx context.Context, c echo.Context, userID, syncType string, schedule onboardingSchedule,
+	req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB, isFirstConnection bool,
+	policyBatch *onboardingPolicyBatch, emails []string, database *db.PostgresDb,
+) (jobs []onboardingJobResult, failed []onboardingFailedResult, servicesOut []string) {
+	if req != nil && req.isOrgUnitPolicyScope() {
+		seenSvc := make(map[string]struct{})
+		for _, path := range uniqueOnboardingOrgUnitPaths(req, emails) {
+			ouEmails := emailsForOnboardingOrgUnit(req, emails, path)
+			if len(ouEmails) == 0 {
+				continue
+			}
+			svcs, err := servicesForOnboardingOrgUnit(req, path)
+			if err != nil {
+				failed = append(failed, onboardingFailedResult{Error: err.Error()})
+				continue
+			}
+			for _, svc := range svcs {
+				if _, dup := seenSvc[svc]; !dup {
+					seenSvc[svc] = struct{}{}
+					servicesOut = append(servicesOut, svc)
+				}
+				j, f := onboardingCreateForService(ctx, c, userID, syncType, svc, schedule, req, cred, isFirstConnection, policyBatch, ouEmails, database)
+				jobs = append(jobs, j...)
+				failed = append(failed, f...)
+			}
+		}
+		return jobs, failed, servicesOut
+	}
+
+	seenSvc := make(map[string]struct{})
+	for _, svc := range normalizeOnboardingServices(req.Services) {
+		if _, dup := seenSvc[svc]; dup {
+			continue
+		}
+		seenSvc[svc] = struct{}{}
+		servicesOut = append(servicesOut, svc)
+		j, f := onboardingCreateForService(ctx, c, userID, syncType, svc, schedule, req, cred, isFirstConnection, policyBatch, emails, database)
+		jobs = append(jobs, j...)
+		failed = append(failed, f...)
+	}
+	return jobs, failed, servicesOut
+}
+
+func normalizeOnboardingServices(raw []string) []string {
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]struct{})
+	for _, s := range raw {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+func validateOnboardingServiceNames(raw []string) error {
+	for _, svc := range normalizeOnboardingServices(raw) {
+		if _, ok := onboardingServiceToMethod[svc]; !ok {
+			return fmt.Errorf("unknown service %q", svc)
+		}
+	}
+	return nil
+}
+
+func emailsForOnboardingOrgUnit(req *GoogleBackupOnboardingRequest, emails []string, orgUnitPath string) []string {
+	orgUnitPath = google.NormalizeOrgUnitPath(orgUnitPath)
+	out := make([]string, 0, len(emails))
+	for _, email := range emails {
+		path := orgUnitPathForEmail(req, email)
+		if path == "" && req != nil && req.isOrgUnitPolicyScope() {
+			path = "/"
+		}
+		if google.NormalizeOrgUnitPath(path) == orgUnitPath {
+			out = append(out, email)
+		}
+	}
+	return out
+}
+
+func servicesForOnboardingOrgUnit(req *GoogleBackupOnboardingRequest, orgUnitPath string) ([]string, error) {
+	if input, ok := lookupOrgUnitScheduleInput(req, orgUnitPath); ok {
+		if svcs := normalizeOnboardingServices(input.Services); len(svcs) > 0 {
+			if err := validateOnboardingServiceNames(svcs); err != nil {
+				return nil, fmt.Errorf("org_unit_schedules[%s]: %w", orgUnitPath, err)
+			}
+			return svcs, nil
+		}
+	}
+	svcs := normalizeOnboardingServices(nil)
+	if req != nil {
+		svcs = normalizeOnboardingServices(req.Services)
+	}
+	if len(svcs) == 0 {
+		return nil, fmt.Errorf("org_unit_schedules[%s].services is required (or provide top-level services)", orgUnitPath)
+	}
+	if err := validateOnboardingServiceNames(svcs); err != nil {
+		return nil, err
+	}
+	return svcs, nil
+}
+
 func uniqueOnboardingOrgUnitPaths(req *GoogleBackupOnboardingRequest, emails []string) []string {
 	seen := make(map[string]struct{})
 	out := make([]string, 0)
@@ -1359,12 +1456,18 @@ func validateOrgUnitOnboardingSchedules(req *GoogleBackupOnboardingRequest, emai
 			if _, err := parseOnboardingSchedule(interval, on); err != nil {
 				return fmt.Errorf("org_unit_schedules[%s]: %w", path, err)
 			}
+			if _, err := servicesForOnboardingOrgUnit(req, path); err != nil {
+				return err
+			}
 			continue
 		}
 		if !fallbackOK {
 			return fmt.Errorf("org_unit_schedules missing entry for %s (or provide top-level interval as fallback)", path)
 		}
 		if _, err := parseOnboardingSchedule(req.Interval, req.On); err != nil {
+			return err
+		}
+		if _, err := servicesForOnboardingOrgUnit(req, path); err != nil {
 			return err
 		}
 	}

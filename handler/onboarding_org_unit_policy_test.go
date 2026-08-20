@@ -57,8 +57,8 @@ func TestValidateOrgUnitOnboardingSchedules(t *testing.T) {
 			"b@co.com": "/HR",
 		},
 		OrgUnitSchedules: map[string]OrgUnitScheduleInput{
-			"/SAles": {Interval: "daily", On: "12am", PolicyName: "Sales"},
-			"/HR":    {Interval: "weekly", On: "Monday"},
+			"/SAles": {Interval: "daily", On: "12am", PolicyName: "Sales", Services: []string{"gmail"}},
+			"/HR":    {Interval: "weekly", On: "Monday", Services: []string{"gmail"}},
 		},
 	}
 	if err := validateOrgUnitOnboardingSchedules(req, []string{"a@co.com", "b@co.com"}); err != nil {
@@ -81,12 +81,81 @@ func TestValidateOrgUnitOnboardingSchedules(t *testing.T) {
 		PolicyScope: OnboardingPolicyScopeOrgUnit,
 		Interval:    "daily",
 		On:          "12am",
+		Services:    []string{"gmail"},
 		EmailOrgUnits: map[string]string{
 			"a@co.com": "/SAles",
 		},
 	}
 	if err := validateOrgUnitOnboardingSchedules(reqFallback, []string{"a@co.com"}); err != nil {
 		t.Fatalf("fallback should work: %v", err)
+	}
+
+	reqPerOUServices := &GoogleBackupOnboardingRequest{
+		AccountType: "admin_workspace",
+		PolicyScope: OnboardingPolicyScopeOrgUnit,
+		EmailOrgUnits: map[string]string{
+			"a@co.com": "/SAles",
+			"b@co.com": "/HR",
+		},
+		OrgUnitSchedules: map[string]OrgUnitScheduleInput{
+			"/SAles": {Interval: "daily", On: "12am", Services: []string{"gmail", "drive"}},
+			"/HR":    {Interval: "weekly", On: "Monday", Services: []string{"gmail"}},
+		},
+	}
+	if err := validateOrgUnitOnboardingSchedules(reqPerOUServices, []string{"a@co.com", "b@co.com"}); err != nil {
+		t.Fatalf("per-OU services should work: %v", err)
+	}
+
+	reqMissingServices := &GoogleBackupOnboardingRequest{
+		AccountType: "admin_workspace",
+		PolicyScope: OnboardingPolicyScopeOrgUnit,
+		EmailOrgUnits: map[string]string{
+			"a@co.com": "/SAles",
+		},
+		OrgUnitSchedules: map[string]OrgUnitScheduleInput{
+			"/SAles": {Interval: "daily", On: "12am"},
+		},
+	}
+	if err := validateOrgUnitOnboardingSchedules(reqMissingServices, []string{"a@co.com"}); err == nil {
+		t.Fatal("expected missing services error")
+	}
+}
+
+func TestServicesForOnboardingOrgUnit(t *testing.T) {
+	req := &GoogleBackupOnboardingRequest{
+		Services: []string{"gmail", "drive"},
+		OrgUnitSchedules: map[string]OrgUnitScheduleInput{
+			"/SAles": {Services: []string{"gmail", "contacts"}},
+		},
+	}
+	got, err := servicesForOnboardingOrgUnit(req, "/SAles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "gmail" || got[1] != "contacts" {
+		t.Fatalf("override: %#v", got)
+	}
+	got, err = servicesForOnboardingOrgUnit(req, "/HR")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "gmail" || got[1] != "drive" {
+		t.Fatalf("fallback: %#v", got)
+	}
+}
+
+func TestEmailsForOnboardingOrgUnit(t *testing.T) {
+	req := &GoogleBackupOnboardingRequest{
+		PolicyScope: OnboardingPolicyScopeOrgUnit,
+		EmailOrgUnits: map[string]string{
+			"a@co.com": "/SAles",
+			"b@co.com": "/SAles",
+			"c@co.com": "/HR",
+		},
+	}
+	got := emailsForOnboardingOrgUnit(req, []string{"a@co.com", "b@co.com", "c@co.com"}, "/SAles")
+	if len(got) != 2 {
+		t.Fatalf("got %#v", got)
 	}
 }
 
