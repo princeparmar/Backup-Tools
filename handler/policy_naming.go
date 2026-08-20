@@ -26,6 +26,41 @@ func defaultPolicyName(cred *repo.GoogleBackupCredentialDB) string {
 	}
 }
 
+// onboardingPolicyBaseName uses UI policy_name when present; otherwise the credential default
+// (corporate: "Corporate defaults", personal: mailbox email).
+func onboardingPolicyBaseName(cred *repo.GoogleBackupCredentialDB, req *GoogleBackupOnboardingRequest) string {
+	if req != nil {
+		if name := strings.TrimSpace(req.PolicyName); name != "" {
+			return name
+		}
+	}
+	return defaultPolicyName(cred)
+}
+
+// defaultOrgUnitPolicyName names a corporate policy created per Organizational Unit.
+func defaultOrgUnitPolicyName(orgUnitPath string) string {
+	name := strings.TrimSpace(displayNameFromOrgUnitPath(orgUnitPath))
+	if name == "" || name == "/" {
+		return "OU Root defaults"
+	}
+	return fmt.Sprintf("OU %s defaults", name)
+}
+
+func displayNameFromOrgUnitPath(orgUnitPath string) string {
+	path := strings.TrimSpace(orgUnitPath)
+	if path == "" || path == "/" {
+		return "/"
+	}
+	path = strings.TrimSuffix(path, "/")
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		seg := strings.TrimSpace(path[i+1:])
+		if seg != "" {
+			return seg
+		}
+	}
+	return path
+}
+
 // displayNameFromMailboxEmail humanizes a mailbox email for UI display.
 func displayNameFromMailboxEmail(email string) string {
 	local := strings.TrimSpace(nameFromMailboxEmail(email))

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -66,6 +67,19 @@ var onboardingServiceToMethod = map[string]string{
 	// Future: "outlook": "outlook", "psql": "psql_database", "mysql": "mysql_database",
 }
 
+// OrgUnitScheduleInput is one OU schedule when policy_scope=org_unit (separate interval per group).
+type OrgUnitScheduleInput struct {
+	PolicyName string `json:"policy_name,omitempty"`
+	Interval   string `json:"interval"`
+	On         string `json:"on,omitempty"`
+}
+
+// Onboarding policy_scope values (corporate create-new).
+const (
+	OnboardingPolicyScopeAll     = "all"      // one policy for all selected mailboxes (default / existing)
+	OnboardingPolicyScopeOrgUnit = "org_unit" // one policy per Organizational Unit
+)
+
 // GoogleBackupOnboardingRequest is the Satellite → Backup-Tools job create body (POST /google/backup/onboarding/jobs or POST /auto-sync/job).
 // sync_type is query only (?sync_type=daily). Future: outlook/psql via services[] in this JSON (legacy POST /auto-sync/job/:method is commented out).
 type GoogleBackupOnboardingRequest struct {
@@ -82,6 +96,19 @@ type GoogleBackupOnboardingRequest struct {
 	EmailOrgUnits   map[string]string `json:"email_org_units,omitempty"`
 	PolicyID        *uint             `json:"policy_id,omitempty"`
 	PolicyName      string            `json:"policy_name,omitempty"`
+	// PolicyScope: "all" (default) applies one policy to every mailbox; "org_unit" creates one policy per OU.
+	PolicyScope string `json:"policy_scope,omitempty"`
+	// OrgUnitSchedules maps OU path → schedule/name. Used only when PolicyScope is org_unit.
+	OrgUnitSchedules map[string]OrgUnitScheduleInput `json:"org_unit_schedules,omitempty"`
+}
+
+// onboardingPolicyCreated is one policy created/used during onboarding (response hint for UI).
+type onboardingPolicyCreated struct {
+	PolicyID    uint   `json:"policy_id"`
+	Name        string `json:"name,omitempty"`
+	OrgUnitPath string `json:"org_unit_path,omitempty"`
+	Interval    string `json:"interval,omitempty"`
+	On          string `json:"on,omitempty"`
 }
 
 // Legacy unified create body (onboarding + outlook code + DB fields) — not used; onboarding uses GoogleBackupOnboardingRequest only.
@@ -153,15 +180,40 @@ func (r *GoogleBackupOnboardingRequest) trim() {
 	r.Interval = strings.TrimSpace(r.Interval)
 	r.On = strings.TrimSpace(r.On)
 	r.SatelliteUserID = strings.TrimSpace(r.SatelliteUserID)
+	r.PolicyName = strings.TrimSpace(r.PolicyName)
+	r.PolicyScope = strings.TrimSpace(r.PolicyScope)
+	r.AccountType = strings.TrimSpace(r.AccountType)
 }
 
 func (r *GoogleBackupOnboardingRequest) hasPolicyID() bool {
 	return r.PolicyID != nil && *r.PolicyID > 0
 }
 
+func (r *GoogleBackupOnboardingRequest) normalizedPolicyScope() string {
+	if r == nil {
+		return OnboardingPolicyScopeAll
+	}
+	switch strings.ToLower(strings.TrimSpace(r.PolicyScope)) {
+	case "", OnboardingPolicyScopeAll:
+		return OnboardingPolicyScopeAll
+	case OnboardingPolicyScopeOrgUnit, "ou", "group", "groups", "org_units":
+		return OnboardingPolicyScopeOrgUnit
+	default:
+		return strings.ToLower(strings.TrimSpace(r.PolicyScope))
+	}
+}
+
+func (r *GoogleBackupOnboardingRequest) isOrgUnitPolicyScope() bool {
+	return r.normalizedPolicyScope() == OnboardingPolicyScopeOrgUnit
+}
+
 // onboardingNeedsScheduleInBody reports whether interval/on must come from the request
 // (auto-created first policy, or a new policy via policy_name). Existing policy_id skips this.
+// Org-unit scope uses org_unit_schedules (top-level interval optional as fallback).
 func onboardingNeedsScheduleInBody(isFirstConnection bool, req *GoogleBackupOnboardingRequest) bool {
+	if req != nil && req.isOrgUnitPolicyScope() {
+		return false
+	}
 	if req.hasPolicyID() && strings.TrimSpace(req.PolicyName) == "" {
 		return false
 	}
@@ -181,8 +233,19 @@ func (r *GoogleBackupOnboardingRequest) validate(userID string) error {
 	if len(r.Services) == 0 {
 		return errors.New("services is required")
 	}
-	// When selecting an existing policy (policy_id), interval/on come from that policy.
-	if !r.hasPolicyID() && r.Interval == "" {
+	scope := r.normalizedPolicyScope()
+	if scope != OnboardingPolicyScopeAll && scope != OnboardingPolicyScopeOrgUnit {
+		return errors.New("policy_scope must be all or org_unit")
+	}
+	if r.isOrgUnitPolicyScope() {
+		if r.hasPolicyID() {
+			return errors.New("policy_id cannot be combined with policy_scope=org_unit")
+		}
+		if !strings.EqualFold(strings.TrimSpace(r.AccountType), "admin_workspace") {
+			return errors.New("policy_scope=org_unit requires account_type=admin_workspace")
+		}
+	} else if !r.hasPolicyID() && r.Interval == "" {
+		// When selecting an existing policy (policy_id), interval/on come from that policy.
 		return errors.New("interval is required")
 	}
 	if r.ProjectID == "" {
@@ -837,6 +900,9 @@ func handleSatelliteOnboardingCreate(c echo.Context, ctx context.Context, userID
 	if len(orgUnitByEmail) > 0 {
 		req.EmailOrgUnits = orgUnitByEmail
 	}
+	if err := validateOrgUnitOnboardingSchedules(req, emails); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+	}
 	cred, err := database.CredentialRepo.FindOrCreateForUser(userID, req.GoogleEmail, req.ProjectID, req.AccountType, req.RefreshToken, req.StorxToken)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
@@ -860,7 +926,7 @@ func handleSatelliteOnboardingCreate(c echo.Context, ctx context.Context, userID
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": perr.Error()})
 	}
 	isFirstConnection := isFirstOnboardingConnection(cred, hasJobs, userHasPolicies)
-	if !isFirstConnection && (req.PolicyID == nil || *req.PolicyID == 0) && strings.TrimSpace(req.PolicyName) == "" {
+	if !isFirstConnection && (req.PolicyID == nil || *req.PolicyID == 0) && strings.TrimSpace(req.PolicyName) == "" && !req.isOrgUnitPolicyScope() {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"error": "policy_id or policy_name is required for subsequent connections",
 		})
@@ -877,7 +943,7 @@ func handleSatelliteOnboardingCreate(c echo.Context, ctx context.Context, userID
 		}
 	}
 
-	var batchPolicyID uint
+	policyBatch := &onboardingPolicyBatch{}
 	var jobs []onboardingJobResult
 	var failed []onboardingFailedResult
 	var servicesOut []string
@@ -894,17 +960,22 @@ func handleSatelliteOnboardingCreate(c echo.Context, ctx context.Context, userID
 		seenSvc[svc] = struct{}{}
 		servicesOut = append(servicesOut, svc)
 
-		j, f := onboardingCreateForService(ctx, c, userID, syncType, svc, schedule, req, cred, isFirstConnection, &batchPolicyID, emails, database)
+		j, f := onboardingCreateForService(ctx, c, userID, syncType, svc, schedule, req, cred, isFirstConnection, policyBatch, emails, database)
 		jobs = append(jobs, j...)
 		failed = append(failed, f...)
 	}
 
+	orgUnits := uniqueOnboardingOrgUnitPaths(req, emails)
+	policies := onboardingPoliciesFromBatch(database, policyBatch)
+
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"success":  len(failed) == 0,
-		"message":  syncCreateMessage(syncType),
-		"jobs":     nullSliceJSON(jobs),
-		"failed":   nullSliceJSON(failed),
-		"services": nullSliceJSON(servicesOut),
+		"success":   len(failed) == 0,
+		"message":   syncCreateMessage(syncType),
+		"jobs":      nullSliceJSON(jobs),
+		"failed":    nullSliceJSON(failed),
+		"services":  nullSliceJSON(servicesOut),
+		"org_units": nullSliceJSON(orgUnits),
+		"policies":  nullSliceJSON(policies),
 	})
 }
 
@@ -991,7 +1062,7 @@ func resolveStorxTokenForOnboarding(ctx context.Context, c echo.Context, project
 
 func onboardingCreateForService(
 	ctx context.Context, c echo.Context, userID, syncType, svc string, schedule onboardingSchedule,
-	req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB, isFirstConnection bool, batchPolicyID *uint,
+	req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB, isFirstConnection bool, policyBatch *onboardingPolicyBatch,
 	emails []string, database *db.PostgresDb,
 ) ([]onboardingJobResult, []onboardingFailedResult) {
 	method, ok := onboardingServiceToMethod[svc]
@@ -1001,7 +1072,7 @@ func onboardingCreateForService(
 	if !allowedMethods[method] {
 		return nil, []onboardingFailedResult{{Service: svc, Error: "method not enabled"}}
 	}
-	return createGoogleJobsForServiceEmails(ctx, c, userID, method, svc, syncType, schedule, req, cred, isFirstConnection, batchPolicyID, emails, database)
+	return createGoogleJobsForServiceEmails(ctx, c, userID, method, svc, syncType, schedule, req, cred, isFirstConnection, policyBatch, emails, database)
 
 	// LEGACY(credential-migration): per-service create before unified credential_id flow.
 	/*
@@ -1023,7 +1094,7 @@ func onboardingCreateForService(
 
 func createGoogleJobsForServiceEmails(
 	ctx context.Context, c echo.Context, userID, method, svc, syncType string, schedule onboardingSchedule,
-	req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB, isFirstConnection bool, batchPolicyID *uint,
+	req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB, isFirstConnection bool, policyBatch *onboardingPolicyBatch,
 	emails []string, database *db.PostgresDb,
 ) ([]onboardingJobResult, []onboardingFailedResult) {
 	emails = dedupeEmailsPreservingOrder(emails)
@@ -1035,7 +1106,7 @@ func createGoogleJobsForServiceEmails(
 			failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: extractCreateJobError(createErr)})
 			continue
 		}
-		if err := applyOnboardingJobSchedule(database, userID, cronJob.ID, schedule, cred, req, isFirstConnection, batchPolicyID); err != nil {
+		if err := applyOnboardingJobSchedule(database, userID, cronJob.ID, targetEmail, schedule, cred, req, isFirstConnection, policyBatch); err != nil {
 			if errors.Is(err, repo.ErrPolicyNameExists) {
 				failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: "policy name already exists for user"})
 				continue
@@ -1227,17 +1298,77 @@ func applyOnboardingJobSchedule(
 	database *db.PostgresDb,
 	userID string,
 	jobID uint,
+	email string,
 	schedule onboardingSchedule,
 	cred *repo.GoogleBackupCredentialDB,
 	req *GoogleBackupOnboardingRequest,
 	isFirstConnection bool,
-	batchPolicyID *uint,
+	policyBatch *onboardingPolicyBatch,
 ) error {
-	policyID, err := resolveOnboardingPolicyID(database, userID, cred, req, schedule, isFirstConnection, batchPolicyID)
+	policyID, err := resolveOnboardingPolicyID(database, userID, cred, req, email, schedule, isFirstConnection, policyBatch)
 	if err != nil {
 		return err
 	}
 	return database.PolicyRepo.AssignPolicyToJob(jobID, policyID)
+}
+
+func uniqueOnboardingOrgUnitPaths(req *GoogleBackupOnboardingRequest, emails []string) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	for _, email := range emails {
+		path := orgUnitPathForEmail(req, email)
+		if path == "" {
+			if req != nil && req.isOrgUnitPolicyScope() {
+				path = "/"
+			} else {
+				continue
+			}
+		}
+		path = google.NormalizeOrgUnitPath(path)
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		out = append(out, path)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func validateOrgUnitOnboardingSchedules(req *GoogleBackupOnboardingRequest, emails []string) error {
+	if req == nil || !req.isOrgUnitPolicyScope() {
+		return nil
+	}
+	paths := uniqueOnboardingOrgUnitPaths(req, emails)
+	if len(paths) == 0 {
+		return errors.New("policy_scope=org_unit requires selected emails with org unit paths")
+	}
+	fallbackOK := strings.TrimSpace(req.Interval) != ""
+	for _, path := range paths {
+		input, ok := lookupOrgUnitScheduleInput(req, path)
+		if ok {
+			if strings.TrimSpace(input.Interval) == "" && !fallbackOK {
+				return fmt.Errorf("org_unit_schedules[%s].interval is required", path)
+			}
+			interval := strings.TrimSpace(input.Interval)
+			on := strings.TrimSpace(input.On)
+			if interval == "" {
+				interval = req.Interval
+				on = req.On
+			}
+			if _, err := parseOnboardingSchedule(interval, on); err != nil {
+				return fmt.Errorf("org_unit_schedules[%s]: %w", path, err)
+			}
+			continue
+		}
+		if !fallbackOK {
+			return fmt.Errorf("org_unit_schedules missing entry for %s (or provide top-level interval as fallback)", path)
+		}
+		if _, err := parseOnboardingSchedule(req.Interval, req.On); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Legacy: set storx_token on create and auto-activate daily jobs when grant was resolved on onboarding.

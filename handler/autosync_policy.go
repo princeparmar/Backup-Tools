@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/repo"
@@ -1197,18 +1198,33 @@ func HandleAutosyncPolicyAvailableAssignments(c echo.Context) error {
 	})
 }
 
+// onboardingPolicyBatch caches policy ids created during one onboarding request.
+// allID is used for policy_scope=all; byOU is used for policy_scope=org_unit.
+type onboardingPolicyBatch struct {
+	allID uint
+	byOU  map[string]uint
+}
+
 // resolveOnboardingPolicyID resolves or creates the policy for onboarding job assignment.
 func resolveOnboardingPolicyID(
 	database *db.PostgresDb,
 	userID string,
 	cred *repo.GoogleBackupCredentialDB,
 	req *GoogleBackupOnboardingRequest,
+	email string,
 	schedule onboardingSchedule,
 	isFirstConnection bool,
-	batchPolicyID *uint,
+	batch *onboardingPolicyBatch,
 ) (uint, error) {
-	if batchPolicyID != nil && *batchPolicyID > 0 {
-		return *batchPolicyID, nil
+	if batch == nil {
+		batch = &onboardingPolicyBatch{}
+	}
+	if req != nil && req.isOrgUnitPolicyScope() {
+		return resolveOnboardingOrgUnitPolicyID(database, userID, req, email, schedule, batch)
+	}
+
+	if batch.allID > 0 {
+		return batch.allID, nil
 	}
 
 	if req.PolicyID != nil && *req.PolicyID > 0 {
@@ -1216,25 +1232,33 @@ func resolveOnboardingPolicyID(
 		if err != nil {
 			return 0, fmt.Errorf("policy not found for user")
 		}
-		if batchPolicyID != nil {
-			*batchPolicyID = policy.ID
-		}
+		batch.allID = policy.ID
 		return policy.ID, nil
 	}
 
 	if isFirstConnection {
-		baseName := defaultPolicyName(cred)
-		name, err := database.PolicyRepo.EnsureUniquePolicyName(userID, baseName)
-		if err != nil {
-			return 0, err
+		baseName := onboardingPolicyBaseName(cred, req)
+		if strings.TrimSpace(baseName) == "" {
+			return 0, fmt.Errorf("policy name is required")
+		}
+		var name string
+		if req != nil && strings.TrimSpace(req.PolicyName) != "" {
+			name = strings.TrimSpace(req.PolicyName)
+		} else {
+			unique, err := database.PolicyRepo.EnsureUniquePolicyName(userID, baseName)
+			if err != nil {
+				return 0, err
+			}
+			name = unique
 		}
 		policy, err := database.PolicyRepo.CreatePolicy(userID, name, schedule.Interval, schedule.On, repo.RetentionNever)
 		if err != nil {
+			if errors.Is(err, repo.ErrPolicyNameExists) {
+				return 0, repo.ErrPolicyNameExists
+			}
 			return 0, err
 		}
-		if batchPolicyID != nil {
-			*batchPolicyID = policy.ID
-		}
+		batch.allID = policy.ID
 		return policy.ID, nil
 	}
 
@@ -1249,8 +1273,136 @@ func resolveOnboardingPolicyID(
 		}
 		return 0, err
 	}
-	if batchPolicyID != nil {
-		*batchPolicyID = created.ID
-	}
+	batch.allID = created.ID
 	return created.ID, nil
+}
+
+func resolveOnboardingOrgUnitPolicyID(
+	database *db.PostgresDb,
+	userID string,
+	req *GoogleBackupOnboardingRequest,
+	email string,
+	fallback onboardingSchedule,
+	batch *onboardingPolicyBatch,
+) (uint, error) {
+	path := orgUnitPathForEmail(req, email)
+	if path == "" {
+		path = "/"
+	}
+	path = google.NormalizeOrgUnitPath(path)
+	if batch.byOU == nil {
+		batch.byOU = make(map[string]uint)
+	}
+	if id, ok := batch.byOU[path]; ok && id > 0 {
+		return id, nil
+	}
+
+	sched, baseName, err := orgUnitOnboardingSchedule(req, path, fallback)
+	if err != nil {
+		return 0, err
+	}
+	name, err := database.PolicyRepo.EnsureUniquePolicyName(userID, baseName)
+	if err != nil {
+		return 0, err
+	}
+	created, err := database.PolicyRepo.CreatePolicy(userID, name, sched.Interval, sched.On, repo.RetentionNever)
+	if err != nil {
+		if errors.Is(err, repo.ErrPolicyNameExists) {
+			return 0, repo.ErrPolicyNameExists
+		}
+		return 0, err
+	}
+	batch.byOU[path] = created.ID
+	return created.ID, nil
+}
+
+func lookupOrgUnitScheduleInput(req *GoogleBackupOnboardingRequest, path string) (OrgUnitScheduleInput, bool) {
+	if req == nil || len(req.OrgUnitSchedules) == 0 {
+		return OrgUnitScheduleInput{}, false
+	}
+	path = google.NormalizeOrgUnitPath(path)
+	if input, ok := req.OrgUnitSchedules[path]; ok {
+		return input, true
+	}
+	for k, input := range req.OrgUnitSchedules {
+		if google.NormalizeOrgUnitPath(k) == path {
+			return input, true
+		}
+	}
+	return OrgUnitScheduleInput{}, false
+}
+
+func orgUnitOnboardingSchedule(req *GoogleBackupOnboardingRequest, path string, fallback onboardingSchedule) (onboardingSchedule, string, error) {
+	path = google.NormalizeOrgUnitPath(path)
+	baseName := defaultOrgUnitPolicyName(path)
+	if input, ok := lookupOrgUnitScheduleInput(req, path); ok {
+		if name := strings.TrimSpace(input.PolicyName); name != "" {
+			baseName = name
+		}
+		interval := strings.TrimSpace(input.Interval)
+		on := strings.TrimSpace(input.On)
+		if interval == "" {
+			interval = fallback.Interval
+			on = fallback.On
+			if interval == "" && req != nil {
+				interval = req.Interval
+				on = req.On
+			}
+		}
+		sched, err := parseOnboardingSchedule(interval, on)
+		if err != nil {
+			return onboardingSchedule{}, "", err
+		}
+		return sched, baseName, nil
+	}
+	if fallback.Interval != "" {
+		return fallback, baseName, nil
+	}
+	if req != nil && strings.TrimSpace(req.Interval) != "" {
+		sched, err := parseOnboardingSchedule(req.Interval, req.On)
+		if err != nil {
+			return onboardingSchedule{}, "", err
+		}
+		return sched, baseName, nil
+	}
+	return onboardingSchedule{}, "", fmt.Errorf("org_unit_schedules missing entry for %s", path)
+}
+
+func onboardingPoliciesFromBatch(database *db.PostgresDb, batch *onboardingPolicyBatch) []onboardingPolicyCreated {
+	if batch == nil {
+		return nil
+	}
+	out := make([]onboardingPolicyCreated, 0)
+	seen := make(map[uint]struct{})
+	add := func(id uint, orgUnitPath string) {
+		if id == 0 {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		entry := onboardingPolicyCreated{PolicyID: id, OrgUnitPath: orgUnitPath}
+		if database != nil {
+			if policy, err := database.PolicyRepo.GetByID(id); err == nil && policy != nil {
+				entry.Name = policy.Name
+				entry.Interval = policy.Interval
+				entry.On = policy.On
+			}
+		}
+		out = append(out, entry)
+	}
+	if len(batch.byOU) > 0 {
+		paths := make([]string, 0, len(batch.byOU))
+		for path := range batch.byOU {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+		for _, path := range paths {
+			add(batch.byOU[path], path)
+		}
+		return out
+	}
+	add(batch.allID, "")
+	return out
 }

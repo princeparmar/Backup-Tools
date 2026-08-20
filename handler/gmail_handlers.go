@@ -49,6 +49,7 @@ type gmailCorporateAdminResponse struct {
 	Account             string                           `json:"account"`
 	AccountType         string                           `json:"account_type"`
 	OrganizationalUnits []google.DomainOrgUnit           `json:"organizational_units"`
+	OrgUnits            []string                         `json:"org_units,omitempty"`
 	DelegationSetup     *google.WorkspaceDelegationSetup `json:"delegation_setup,omitempty"`
 }
 
@@ -840,5 +841,23 @@ func HandleGmailCorporateDomainUsers(c echo.Context) error {
 	*/
 
 	resp.OrganizationalUnits = google.GroupDomainUsersByOrgUnit(users)
+	resp.OrgUnits = orgUnitPathsFromDomainOrgUnits(resp.OrganizationalUnits)
 	return c.JSON(http.StatusOK, resp)
+}
+
+func orgUnitPathsFromDomainOrgUnits(units []google.DomainOrgUnit) []string {
+	if len(units) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(units))
+	seen := make(map[string]struct{}, len(units))
+	for _, u := range units {
+		path := google.NormalizeOrgUnitPath(u.OrgUnitPath)
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		out = append(out, path)
+	}
+	return out
 }
