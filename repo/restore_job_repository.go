@@ -70,6 +70,20 @@ func APIServiceFromMethod(method string) string {
 		return "calendar"
 	case "google_contacts":
 		return "contacts"
+	case "outlook":
+		return "outlook"
+	case "outlook_calendar":
+		return "outlook_calendar"
+	case "outlook_contacts":
+		return "outlook_contacts"
+	case "outlook_onedrive":
+		return "outlook_onedrive"
+	case "outlook_sharepoint":
+		return "outlook_sharepoint"
+	case "outlook_teams":
+		return "outlook_teams"
+	case "outlook_groups":
+		return "outlook_groups"
 	default:
 		return method
 	}

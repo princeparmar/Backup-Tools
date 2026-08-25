@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -18,6 +19,11 @@ type GoogleBackupCredentialDB struct {
 	Email          string `json:"email" gorm:"column:email;uniqueIndex:idx_google_backup_cred_user_project_email,priority:3"`
 	StorjProjectID string `json:"storj_project_id,omitempty" gorm:"column:storj_project_id;uniqueIndex:idx_google_backup_cred_user_project_email,priority:2;index:idx_google_backup_cred_project_id"`
 	AccountType    string `json:"account_type" gorm:"column:account_type;not null;default:personal"`
+	TenantID       string `json:"tenant_id,omitempty" gorm:"column:tenant_id"`
+	TenantName     string `json:"tenant_name,omitempty" gorm:"column:tenant_name"`
+	MicrosoftAuthMode        string `json:"microsoft_auth_mode,omitempty" gorm:"column:microsoft_auth_mode"`
+	MicrosoftAppClientID     string `json:"microsoft_app_client_id,omitempty" gorm:"column:microsoft_app_client_id"`
+	MicrosoftAppClientSecret string `json:"microsoft_app_client_secret,omitempty" gorm:"column:microsoft_app_client_secret"`
 	RefreshToken   string `json:"refresh_token,omitempty" gorm:"column:refresh_token"`
 	StorxToken     string `json:"storx_token,omitempty" gorm:"column:storx_token"`
 }
@@ -201,6 +207,11 @@ func (r *GoogleBackupCredentialRepository) Create(email, projectID, accountType,
 
 // CreateForUser inserts a new user-scoped credential row.
 func (r *GoogleBackupCredentialRepository) CreateForUser(userID, email, projectID, accountType, refreshToken, storxToken string) (*GoogleBackupCredentialDB, error) {
+	return r.CreateForUserWithTenant(userID, email, projectID, accountType, "", "", refreshToken, storxToken)
+}
+
+// CreateForUserWithTenant inserts a new user-scoped credential row including Microsoft tenant metadata.
+func (r *GoogleBackupCredentialRepository) CreateForUserWithTenant(userID, email, projectID, accountType, tenantID, tenantName, refreshToken, storxToken string) (*GoogleBackupCredentialDB, error) {
 	acct := normalizeCredentialAccountType(accountType)
 	if acct == "" {
 		acct = "personal"
@@ -210,6 +221,8 @@ func (r *GoogleBackupCredentialRepository) CreateForUser(userID, email, projectI
 		Email:          strings.TrimSpace(email),
 		StorjProjectID: strings.TrimSpace(projectID),
 		AccountType:    acct,
+		TenantID:       strings.TrimSpace(tenantID),
+		TenantName:     strings.TrimSpace(tenantName),
 		RefreshToken:   strings.TrimSpace(refreshToken),
 		StorxToken:     strings.TrimSpace(storxToken),
 	}
@@ -229,6 +242,11 @@ func (r *GoogleBackupCredentialRepository) CreateForUser(userID, email, projectI
 // Reconnecting the same google_email updates tokens on the existing row; a different email always creates a new row
 // even when project_id matches another connected account.
 func (r *GoogleBackupCredentialRepository) FindOrCreateForUser(userID, email, projectID, accountType, refreshToken, storxToken string) (*GoogleBackupCredentialDB, error) {
+	return r.FindOrCreateForUserWithTenant(userID, email, projectID, accountType, "", "", refreshToken, storxToken)
+}
+
+// FindOrCreateForUserWithTenant is FindOrCreateForUser with optional Microsoft tenant_id / tenant_name.
+func (r *GoogleBackupCredentialRepository) FindOrCreateForUserWithTenant(userID, email, projectID, accountType, tenantID, tenantName, refreshToken, storxToken string) (*GoogleBackupCredentialDB, error) {
 	email = strings.TrimSpace(email)
 	projectID = strings.TrimSpace(projectID)
 	userID = strings.TrimSpace(userID)
@@ -236,22 +254,22 @@ func (r *GoogleBackupCredentialRepository) FindOrCreateForUser(userID, email, pr
 		if row, ok, err := r.FindByUserProjectAndEmail(userID, projectID, email); err != nil {
 			return nil, err
 		} else if ok {
-			return r.mergeAndReload(row.ID, email, projectID, accountType, refreshToken, storxToken, userID)
+			return r.mergeAndReloadWithTenant(row.ID, email, projectID, accountType, tenantID, tenantName, refreshToken, storxToken, userID)
 		}
 	}
 	if id, ok, err := r.FindIDForUserAndEmail(userID, email); err != nil {
 		return nil, err
 	} else if ok {
-		return r.mergeAndReload(id, email, projectID, accountType, refreshToken, storxToken, userID)
+		return r.mergeAndReloadWithTenant(id, email, projectID, accountType, tenantID, tenantName, refreshToken, storxToken, userID)
 	}
 	if projectID != "" {
 		if id, ok, err := r.FindIDForUserProjectAndEmail(userID, projectID, email); err != nil {
 			return nil, err
 		} else if ok {
-			return r.mergeAndReload(id, email, projectID, accountType, refreshToken, storxToken, userID)
+			return r.mergeAndReloadWithTenant(id, email, projectID, accountType, tenantID, tenantName, refreshToken, storxToken, userID)
 		}
 	}
-	return r.CreateForUser(userID, email, projectID, accountType, refreshToken, storxToken)
+	return r.CreateForUserWithTenant(userID, email, projectID, accountType, tenantID, tenantName, refreshToken, storxToken)
 }
 
 // ListByUserID returns all credentials for a user, optionally excluding a mailbox email.
@@ -290,13 +308,21 @@ func (r *GoogleBackupCredentialRepository) ListByUserAndProject(userID, projectI
 }
 
 func (r *GoogleBackupCredentialRepository) mergeAndReload(id uint, email, projectID, accountType, refreshToken, storxToken, userID string) (*GoogleBackupCredentialDB, error) {
-	if err := r.mergeFieldsIfProvided(id, email, projectID, accountType, refreshToken, storxToken, userID); err != nil {
+	return r.mergeAndReloadWithTenant(id, email, projectID, accountType, "", "", refreshToken, storxToken, userID)
+}
+
+func (r *GoogleBackupCredentialRepository) mergeAndReloadWithTenant(id uint, email, projectID, accountType, tenantID, tenantName, refreshToken, storxToken, userID string) (*GoogleBackupCredentialDB, error) {
+	if err := r.mergeFieldsIfProvidedWithTenant(id, email, projectID, accountType, tenantID, tenantName, refreshToken, storxToken, userID); err != nil {
 		return nil, err
 	}
 	return r.GetByID(id)
 }
 
 func (r *GoogleBackupCredentialRepository) mergeFieldsIfProvided(id uint, email, projectID, accountType, refreshToken, storxToken, userID string) error {
+	return r.mergeFieldsIfProvidedWithTenant(id, email, projectID, accountType, "", "", refreshToken, storxToken, userID)
+}
+
+func (r *GoogleBackupCredentialRepository) mergeFieldsIfProvidedWithTenant(id uint, email, projectID, accountType, tenantID, tenantName, refreshToken, storxToken, userID string) error {
 	patch := map[string]interface{}{}
 	if t := strings.TrimSpace(userID); t != "" {
 		patch["user_id"] = t
@@ -309,6 +335,12 @@ func (r *GoogleBackupCredentialRepository) mergeFieldsIfProvided(id uint, email,
 	}
 	if t := normalizeCredentialAccountType(accountType); t != "" {
 		patch["account_type"] = t
+	}
+	if t := strings.TrimSpace(tenantID); t != "" {
+		patch["tenant_id"] = t
+	}
+	if t := strings.TrimSpace(tenantName); t != "" {
+		patch["tenant_name"] = t
 	}
 	if t := strings.TrimSpace(refreshToken); t != "" {
 		patch["refresh_token"] = t
@@ -391,6 +423,24 @@ func (r *GoogleBackupCredentialRepository) ListUniqueDomainsForUser(userID strin
 	}
 	return domains, nil
 }
+
+// UpdateMicrosoftAppCredentials stores tenant app-only auth metadata on a credential row.
+func (r *GoogleBackupCredentialRepository) UpdateMicrosoftAppCredentials(ctx context.Context, id uint, authMode, clientID, clientSecret string) error {
+	if id == 0 {
+		return fmt.Errorf("credential id is required")
+	}
+	authMode = strings.TrimSpace(authMode)
+	if authMode == "" {
+		authMode = microsoftAuthModeDelegated
+	}
+	return r.db.WithContext(ctx).Model(&GoogleBackupCredentialDB{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"microsoft_auth_mode":          authMode,
+		"microsoft_app_client_id":      strings.TrimSpace(clientID),
+		"microsoft_app_client_secret":  strings.TrimSpace(clientSecret),
+	}).Error
+}
+
+const microsoftAuthModeDelegated = "delegated"
 
 // OAuthHolderEmail returns the credential email when it differs from the mailbox (corporate delegation).
 func OAuthHolderEmail(cred *GoogleBackupCredentialDB, mailbox string) string {

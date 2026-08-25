@@ -44,6 +44,14 @@ var (
 		return set
 	}()
 
+	microsoftWorkspaceServiceMethods = func() map[string]struct{} {
+		set := make(map[string]struct{}, len(microsoftAutosyncServiceMethodsOrder))
+		for _, method := range microsoftAutosyncServiceMethodsOrder {
+			set[method] = struct{}{}
+		}
+		return set
+	}()
+
 	validUsersGroupsAccountTypes = map[string]struct{}{
 		usersGroupsAccountCorporate:  {},
 		usersGroupsAccountIndividual: {},
@@ -347,14 +355,41 @@ func enrichJobsFromPolicies(jobs []repo.CronJobListingDB, policies map[uint]*rep
 }
 
 func filterUsersGroupsWorkspaceJobs(jobs []repo.CronJobListingDB) []repo.CronJobListingDB {
-	out := make([]repo.CronJobListingDB, 0, len(jobs))
+	return repo.FilterJobsByMethods(jobs, repo.IsGoogleAutosyncMethod)
+}
+
+func filterUsersGroupsMicrosoftJobs(jobs []repo.CronJobListingDB) []repo.CronJobListingDB {
+	return repo.FilterJobsByMethods(jobs, repo.IsMicrosoftAutosyncMethod)
+}
+
+func filterUsersGroupsSharedJobs(jobs []repo.CronJobListingDB) []repo.CronJobListingDB {
+	return repo.FilterJobsByMethods(jobs, repo.IsSharedCredentialAutosyncMethod)
+}
+
+// dashboardAlertsServiceMethodOrder picks Google, Microsoft, or both service rows
+// for shared GET /autosync/dashboard-alerts mailbox cards.
+func dashboardAlertsServiceMethodOrder(jobs []repo.CronJobListingDB) []string {
+	hasGoogle := false
+	hasMicrosoft := false
 	for i := range jobs {
-		if _, ok := workspaceServiceMethods[strings.TrimSpace(jobs[i].Method)]; !ok {
-			continue
+		if repo.IsGoogleAutosyncMethod(jobs[i].Method) {
+			hasGoogle = true
 		}
-		out = append(out, jobs[i])
+		if repo.IsMicrosoftAutosyncMethod(jobs[i].Method) {
+			hasMicrosoft = true
+		}
 	}
-	return out
+	switch {
+	case hasGoogle && hasMicrosoft:
+		out := make([]string, 0, len(autosyncServiceMethodsOrder)+len(microsoftAutosyncServiceMethodsOrder))
+		out = append(out, autosyncServiceMethodsOrder...)
+		out = append(out, microsoftAutosyncServiceMethodsOrder...)
+		return out
+	case hasMicrosoft:
+		return microsoftAutosyncServiceMethodsOrder
+	default:
+		return autosyncServiceMethodsOrder
+	}
 }
 
 func indexUsersGroupsJobsByMethod(jobs []repo.CronJobListingDB) map[string]repo.CronJobListingDB {
@@ -379,9 +414,13 @@ func enrichUsersGroupsJobs(database *db.PostgresDb, jobs []repo.CronJobListingDB
 // ---------------------------------------------------------------------------
 
 func buildUsersGroupsEntityServices(jobs []repo.CronJobListingDB, policies map[uint]*repo.AutosyncBackupPolicyDB) []UsersGroupsEntityServiceView {
+	return buildUsersGroupsEntityServicesForOrder(jobs, policies, autosyncServiceMethodsOrder)
+}
+
+func buildUsersGroupsEntityServicesForOrder(jobs []repo.CronJobListingDB, policies map[uint]*repo.AutosyncBackupPolicyDB, order []string) []UsersGroupsEntityServiceView {
 	byMethod := indexUsersGroupsJobsByMethod(jobs)
-	out := make([]UsersGroupsEntityServiceView, 0, len(autosyncServiceMethodsOrder))
-	for _, method := range autosyncServiceMethodsOrder {
+	out := make([]UsersGroupsEntityServiceView, 0, len(order))
+	for _, method := range order {
 		job, ok := byMethod[method]
 		if !ok {
 			out = append(out, UsersGroupsEntityServiceView{Method: method, Connected: false})
@@ -456,7 +495,7 @@ func mailboxFirstJobCreatedAt(jobs []repo.CronJobListingDB) time.Time {
 
 func indexUsersGroupsJobsByEmail(jobs []repo.CronJobListingDB) map[string][]repo.CronJobListingDB {
 	byEmail := make(map[string][]repo.CronJobListingDB)
-	for _, job := range filterUsersGroupsWorkspaceJobs(jobs) {
+	for _, job := range filterUsersGroupsSharedJobs(jobs) {
 		email := jobMailboxEmail(&job)
 		if email == "" {
 			continue
@@ -506,7 +545,9 @@ func buildAutosyncDashboardMailboxView(
 		CredentialStatus: usersGroupsCredentialStatus(needsGoogle, needsStorx),
 		ConnectedAt:      connectedAt,
 		Credential:       credView,
-		Services:         buildAutosyncDashboardServiceViews(buildUsersGroupsEntityServices(emailJobs, policies)),
+		Services: buildAutosyncDashboardServiceViews(
+			buildUsersGroupsEntityServicesForOrder(emailJobs, policies, dashboardAlertsServiceMethodOrder(emailJobs)),
+		),
 	}
 }
 
@@ -568,8 +609,19 @@ func buildUsersGroupsEntities(
 	credByID map[uint]*repo.GoogleBackupCredentialDB,
 	policies map[uint]*repo.AutosyncBackupPolicyDB,
 ) []UsersGroupsEntityView {
+	return buildUsersGroupsEntitiesForFamily(jobs, cronRepo, credByID, policies, filterUsersGroupsWorkspaceJobs, autosyncServiceMethodsOrder)
+}
+
+func buildUsersGroupsEntitiesForFamily(
+	jobs []repo.CronJobListingDB,
+	cronRepo *repo.CronJobRepository,
+	credByID map[uint]*repo.GoogleBackupCredentialDB,
+	policies map[uint]*repo.AutosyncBackupPolicyDB,
+	filterFn func([]repo.CronJobListingDB) []repo.CronJobListingDB,
+	methodOrder []string,
+) []UsersGroupsEntityView {
 	byEmail := make(map[string][]repo.CronJobListingDB)
-	for _, job := range filterUsersGroupsWorkspaceJobs(jobs) {
+	for _, job := range filterFn(jobs) {
 		email := jobMailboxEmail(&job)
 		if email == "" {
 			continue
@@ -595,7 +647,7 @@ func buildUsersGroupsEntities(
 			OrgUnitPath:      mailboxOrgUnitPath(emailJobs),
 			CredentialStatus: usersGroupsCredentialStatus(needsGoogle, needsStorx),
 			Credential:       buildMailboxCredentialView(cronRepo, cred, emailJobs),
-			Services:         buildUsersGroupsEntityServices(emailJobs, policies),
+			Services:         buildUsersGroupsEntityServicesForOrder(emailJobs, policies, methodOrder),
 		})
 	}
 	return out
@@ -878,6 +930,13 @@ func loadUsersGroupsMailboxJobs(database *db.PostgresDb, userID, email string) (
 }
 
 func loadUsersGroupsMailboxContext(c echo.Context) (context.Context, string, string, usersGroupsMailboxData, error) {
+	return loadUsersGroupsMailboxContextForFamily(c, filterUsersGroupsWorkspaceJobs)
+}
+
+func loadUsersGroupsMailboxContextForFamily(
+	c echo.Context,
+	filterFn func([]repo.CronJobListingDB) []repo.CronJobListingDB,
+) (context.Context, string, string, usersGroupsMailboxData, error) {
 	empty := usersGroupsMailboxData{}
 	ctx, userID, database, err := usersGroupsAuth(c)
 	if err != nil {
@@ -891,7 +950,7 @@ func loadUsersGroupsMailboxContext(c echo.Context) (context.Context, string, str
 	if err != nil {
 		return ctx, userID, email, empty, err
 	}
-	workspaceJobs := filterUsersGroupsWorkspaceJobs(jobs)
+	workspaceJobs := filterFn(jobs)
 	if len(workspaceJobs) == 0 {
 		return ctx, userID, email, empty, errUsersGroupsMailboxNotFound
 	}
@@ -1046,7 +1105,8 @@ func handleUsersGroupsMailboxTab(c echo.Context, logMsg string, build func(email
 // Handlers
 // ---------------------------------------------------------------------------
 
-// HandleAutosyncDashboardAlerts returns counts for Satellite dashboard alert cards.
+// HandleAutosyncDashboardAlerts returns counts for Satellite dashboard alert cards
+// (Google + Microsoft mailboxes on the shared product path).
 func HandleAutosyncDashboardAlerts(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error

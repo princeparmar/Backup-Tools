@@ -53,7 +53,17 @@ tags:
   - name: Dropbox
     description: Dropbox file operations
   - name: Office 365
-    description: Office 365 Outlook message operations
+    description: Office 365 Outlook message operations (legacy browse; prefer /microsoft for autosync product)
+  - name: Microsoft Autosync
+    description: |
+      Microsoft/Outlook autosync product APIs (method = outlook, outlook_calendar, outlook_contacts, outlook_onedrive, outlook_sharepoint).
+      Same Postgres as Google; separate HTTP surface under /microsoft/*.
+      Satellite should proxy as /api/v0/microsoft-backup/* without rewriting to Google routes.
+      Onboarding create only: POST /microsoft/auto-sync/job and POST /microsoft/backup/onboarding/jobs (same handler).
+      Shared job management (list, live, update, policy, backup-now): use /auto-sync/* (Google + Microsoft).
+      Dashboard alerts: GET /autosync/dashboard-alerts (Google + Microsoft).
+      OneDrive vault bucket: outlook-onedrive (Satellite must reserve). SharePoint vault bucket: outlook-sharepoint.
+      Existing OAuth users need reconnect + Files.Read.All and Sites.Read.All (SharePoint) admin consent.
   - name: AWS S3
     description: AWS S3 bucket and object operations
   - name: GitHub
@@ -163,6 +173,479 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SuccessResponse'
+
+  # Microsoft Autosync (product twin of Google autosync; filter by outlook* methods)
+  /microsoft/backup/onboarding/jobs:
+    post:
+      tags:
+        - Microsoft Autosync
+      summary: Create Microsoft autosync jobs (onboarding alias)
+      description: |
+        Same handler as POST /microsoft/auto-sync/job.
+        Body uses microsoft_email + services[] (outlook|mail|calendar|contacts|onedrive|sharepoint|teams|groups).
+        SharePoint requires sites[]; Teams requires teams[]; Groups requires groups[].
+        Jobs store input_data.credential_id on google_backup_credential_dbs (table name unchanged).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: sync_type
+          in: query
+          schema:
+            type: string
+            enum: [daily, one_time]
+            default: daily
+        - name: token_key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [services, microsoft_email, project_id, refresh_token]
+              properties:
+                services:
+                  type: array
+                  items:
+                    type: string
+                    enum: [outlook, mail, calendar, contacts, onedrive, sharepoint, teams, groups]
+                microsoft_email:
+                  type: string
+                account_type:
+                  type: string
+                project_id:
+                  type: string
+                refresh_token:
+                  type: string
+                storx_token:
+                  type: string
+                emails:
+                  type: array
+                  items:
+                    type: string
+                sites:
+                  type: array
+                  description: Required when services includes sharepoint; one job per site.
+                  items:
+                    type: object
+                    properties:
+                      site_id:
+                        type: string
+                      site_url:
+                        type: string
+                policy_id:
+                  type: integer
+                policy_name:
+                  type: string
+                interval:
+                  type: string
+                on:
+                  type: string
+      responses:
+        '200':
+          description: Jobs created
+        '400':
+          description: Validation error
+
+  /microsoft/auto-sync/job:
+    post:
+      tags:
+        - Microsoft Autosync
+      summary: Create Microsoft autosync jobs
+      description: |
+        Microsoft onboarding create only (same handler as POST /microsoft/backup/onboarding/jobs).
+        List/live/update/policy/backup-now use shared /auto-sync/* (Google + Microsoft).
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Jobs created
+
+  /microsoft/users-groups:
+    get:
+      tags:
+        - Microsoft Autosync
+      summary: List Microsoft Users & Groups mailboxes
+      description: Same shape as GET /users-groups but Microsoft methods only.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Mailbox entities
+
+  /microsoft/query-messages:
+    get:
+      tags:
+        - Microsoft Autosync
+      summary: Browse Outlook messages
+      description: Requires REFRESH_TOKEN header. Prefer this over legacy /office365 for new Microsoft UI.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: REFRESH_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Message list
+
+  /microsoft/contacts/list:
+    get:
+      tags:
+        - Microsoft Autosync
+      summary: Browse Outlook contacts
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Contacts list
+
+  /microsoft/calendar/list:
+    get:
+      tags:
+        - Microsoft Autosync
+      summary: Browse Outlook calendars
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Calendars list
+
+  /microsoft/calendar/events/{calendarId}:
+    get:
+      tags:
+        - Microsoft Autosync
+      summary: Browse Outlook calendar events
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: calendarId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Events list
+
+  /microsoft/onedrive/flat-files:
+    get:
+      tags:
+        - Microsoft Autosync
+      summary: Browse OneDrive flat non-folder files
+      description: |
+        Twin of GET /google/drive-flat-files for Microsoft OneDrive.
+        Requires REFRESH_TOKEN header. Optional email/mailbox selects /users/{mailbox}/drive vs /me/drive.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: REFRESH_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: email
+          in: query
+          schema:
+            type: string
+        - name: skip
+          in: query
+          schema:
+            type: integer
+        - name: top
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Flat file list
+
+  /microsoft/outlook/flat-files:
+    get:
+      tags:
+        - Microsoft Autosync
+      summary: Browse Outlook inbox messages
+      description: |
+        Twin of Gmail browse for Microsoft Outlook mail.
+        Requires REFRESH_TOKEN header. Optional mailbox/email selects /users/{mailbox} vs /me.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: REFRESH_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: mailbox
+          in: query
+          schema:
+            type: string
+        - name: email
+          in: query
+          schema:
+            type: string
+        - name: skip
+          in: query
+          schema:
+            type: integer
+        - name: top
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Outlook message list
+
+  /microsoft/sharepoint/sites:
+    get:
+      tags:
+        - Microsoft Autosync
+      summary: Browse SharePoint sites (site picker)
+      description: |
+        Lists SharePoint sites visible to the signed-in user via Microsoft Graph site search.
+        Requires REFRESH_TOKEN header and Sites.Read.All (admin consent).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: REFRESH_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: top
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: SharePoint sites list
+
+  /microsoft/sharepoint/flat-files:
+    get:
+      tags:
+        - Microsoft Autosync
+      summary: Browse SharePoint document library flat non-folder files
+      description: |
+        Twin of GET /microsoft/onedrive/flat-files for a SharePoint document library drive.
+        Requires REFRESH_TOKEN header and drive_id query (resolved at onboarding via GET /sites/{site_id}/drive).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: REFRESH_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: drive_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: skip
+          in: query
+          schema:
+            type: integer
+        - name: top
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Flat file list
+
+  /microsoft/teams/list:
+    get:
+      tags:
+        - Microsoft Autosync
+      summary: Browse Teams (team picker)
+      description: Lists Teams visible to the signed-in user. Work/school accounts only.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: REFRESH_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: top
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Teams list
+
+  /microsoft/teams/channels:
+    get:
+      tags:
+        - Microsoft Autosync
+      summary: Browse channels for a Team
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: REFRESH_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: team_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Team channels list
+
+  /microsoft/teams/flat-messages:
+    get:
+      tags:
+        - Microsoft Autosync
+      summary: Browse Teams channel messages
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: REFRESH_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: team_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: channel_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: skip
+          in: query
+          schema:
+            type: integer
+        - name: top
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Channel messages list
+
+  /microsoft/groups/list:
+    get:
+      tags:
+        - Microsoft Autosync
+      summary: Browse M365 Groups (group picker)
+      description: Lists M365 groups visible to the signed-in user. Work/school accounts only.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: REFRESH_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: top
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Groups list
+
+  /microsoft/groups/flat-conversations:
+    get:
+      tags:
+        - Microsoft Autosync
+      summary: Browse M365 Group conversation threads
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: REFRESH_TOKEN
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: group_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: top
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Group conversations list
+
+  /microsoft/outlook/corporate/domain-users:
+    get:
+      tags:
+        - Microsoft Autosync
+      summary: Detect Microsoft account type (Google twin)
+      description: |
+        Resolves account_type (personal, employee_workspace, admin_workspace), tenant_id, and tenant_name.
+        Admin accounts include a first page of directory users in entities[].
+        Requires REFRESH_TOKEN header (Satellite convention).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: top
+          in: query
+          schema:
+            type: integer
+          description: Max directory users for admin_workspace (default 200)
+      responses:
+        '200':
+          description: Account detection result
+
+  /microsoft/account/detect:
+    get:
+      tags:
+        - Microsoft Autosync
+      summary: Alias of GET /microsoft/outlook/corporate/domain-users
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Account detection result
+
+  /microsoft/directory/users:
+    get:
+      tags:
+        - Microsoft Autosync
+      summary: Paginated Microsoft tenant directory users (admin picker)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: top
+          in: query
+          schema:
+            type: integer
+        - name: next_link
+          in: query
+          schema:
+            type: string
+        - name: skip_token
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Paginated directory users
+        '403':
+          description: Requires admin_workspace
 
   # Auto Sync Endpoints
   /auto-sync/live:
@@ -453,6 +936,7 @@ paths:
       description: |
         Satellite dashboard top-row metrics: connected mailbox count, growth this week,
         last sync time, and total synced items count.
+        Includes both Google and Microsoft autosync mailboxes (shared product path).
         Storage quota and plan/trial come from Satellite (not this endpoint).
       parameters:
         - $ref: '#/components/parameters/tokenKeyHeader'
@@ -484,8 +968,10 @@ paths:
       description: |
         Satellite dashboard alert strip: auth errors, paused backups, and new mailboxes (24h).
         Each section returns count plus mailbox rows grouped by email.
-        Personal accounts include all connected Google services (up to five jobs) under one item.
-        Re-auth detection uses missing Google refresh_token or StorX grant (credential_status only; no tokens returned).
+        Includes Google and Microsoft autosync mailboxes (shared product path).
+        Personal Google accounts include connected Google services under one item;
+        Microsoft mailboxes list outlook / outlook_calendar / outlook_contacts / outlook_onedrive / outlook_sharepoint / .
+        Re-auth detection uses missing provider refresh_token or StorX grant (credential_status only; no tokens returned).
         Paused count = number of jobs with active false (per job, not per mailbox).
         Paused items group paused jobs by mailbox email (only inactive services listed).
         New = mailbox first job created_at within the last 24 hours.
@@ -3112,8 +3598,12 @@ paths:
                           type: string
                         has_backup:
                           type: boolean
+                        needs_reconnect:
+                          type: boolean
+                          description: OAuth reconnect required (Google or Microsoft)
                         needs_google_reconnect:
                           type: boolean
+                          description: Legacy alias of needs_reconnect (Google clients)
                   pagination:
                     $ref: '#/components/schemas/RestoreListPagination'
         '401':
@@ -3988,7 +4478,7 @@ components:
 
     AutoSyncStatsResponse:
       type: object
-      description: Satellite dashboard sync summary (GET /autosync/stats).
+      description: Satellite dashboard sync summary (GET /autosync/stats). Counts Google and Microsoft autosync mailboxes.
       properties:
         connected_accounts:
           type: integer
@@ -4013,7 +4503,7 @@ components:
           type: integer
         method:
           type: string
-          enum: [gmail, google_drive, google_photos, google_contacts, google_calendar]
+          enum: [gmail, google_drive, google_photos, google_contacts, google_calendar, outlook, outlook_calendar, outlook_contacts, outlook_onedrive, outlook_sharepoint]
         connected:
           type: boolean
         active:

@@ -19,6 +19,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/restore"
+	googlestore "github.com/StorX2-0/Backup-Tools/restore/google"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"golang.org/x/sync/errgroup"
 
@@ -139,7 +140,7 @@ func (s *GmailService) DownloadMessagesFromSatellite(ctx context.Context, sess *
 			continue
 		}
 		g.Go(func() error {
-			if err := restore.RestoreGmailKeyWithSession(ctx, sess, s.client, key); err != nil {
+			if err := googlestore.RestoreGmailKeyWithSession(ctx, sess, s.client, key); err != nil {
 				logger.Info(ctx, "error restoring message into Gmail", logger.ErrorField(err))
 				failedIDs.Add(key)
 			} else {

@@ -13,7 +13,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
-	"github.com/StorX2-0/Backup-Tools/restore"
+	googlestore "github.com/StorX2-0/Backup-Tools/restore/google"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 
 	"github.com/labstack/echo/v4"
@@ -148,7 +148,7 @@ func HandleGoogleContactsRestore(c echo.Context) error {
 			continue
 		}
 		g.Go(func() error {
-			if restoreErr := restore.RestoreContactKeyWithSession(ctx, storxSess, service, key); restoreErr != nil {
+			if restoreErr := googlestore.RestoreContactKeyWithSession(ctx, storxSess, service, key); restoreErr != nil {
 				logger.Warn(ctx, "Failed to restore contact", logger.String("key", key), logger.ErrorField(restoreErr))
 				failedKeys.Add(key)
 			} else {

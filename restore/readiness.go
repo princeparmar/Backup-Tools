@@ -97,6 +97,10 @@ func EvaluateReadinessWithOptions(ctx context.Context, store *db.PostgresDb, req
 		return nil, fmt.Errorf("unsupported service")
 	}
 
+	if IsMicrosoftRestoreMethod(method) {
+		return evaluateMicrosoftReadiness(ctx, store, out, userID, projectID, loginID, service, method, targetEmail)
+	}
+
 	cronJob, jobOK, err := store.CronJobRepo.FindJobForRestore(userID, method, loginID)
 	if err != nil {
 		return nil, err

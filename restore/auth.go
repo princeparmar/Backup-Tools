@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	google "github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
@@ -79,6 +78,9 @@ func (s *StorxGrantSession) DownloadObject(ctx context.Context, bucket, objectKe
 // AuthModeForJob derives oauth vs dwd from account_type and linked credential/cron.
 func AuthModeForJob(store *db.PostgresDb, job *repo.RestoreJobListingDB) string {
 	if job == nil {
+		return RestoreAuthModeOAuth
+	}
+	if IsMicrosoftRestoreMethod(job.Method) {
 		return RestoreAuthModeOAuth
 	}
 	if repo.IsRestoreJobMigration(job) {
@@ -168,6 +170,7 @@ func buildRestoreDeps(ctx context.Context, store *db.PostgresDb, job *repo.Resto
 			if err != nil {
 				return nil, fmt.Errorf("credential not found: %w", err)
 			}
+			deps.WriteCred = writeCred
 			if isMigration {
 				deps.RefreshToken = strings.TrimSpace(writeCred.RefreshToken)
 			} else if deps.RefreshToken == "" {
@@ -202,31 +205,16 @@ func buildRestoreDeps(ctx context.Context, store *db.PostgresDb, job *repo.Resto
 		return deps, nil
 	}
 
+	if IsMicrosoftRestoreMethod(job.Method) {
+		if err := deps.mintMicrosoftAccessToken(ctx); err != nil {
+			return nil, err
+		}
+		return deps, nil
+	}
+
 	if err := deps.mintGoogleAccessToken(ctx); err != nil {
 		return nil, err
 	}
 	return deps, nil
 }
 
-func (d *RestoreDeps) mintGoogleAccessToken(ctx context.Context) error {
-	_ = ctx
-	if strings.TrimSpace(d.GoogleToken) != "" {
-		return nil
-	}
-	rt := strings.TrimSpace(d.RefreshToken)
-	if rt == "" {
-		return fmt.Errorf("google refresh token missing")
-	}
-	tok, err := google.AuthTokenUsingRefreshToken(rt)
-	if err != nil {
-		return fmt.Errorf("google token refresh: %w", err)
-	}
-	d.GoogleToken = tok
-	return nil
-}
-
-// RefreshGoogleAccessToken forces a new access token (401 retry path).
-func (d *RestoreDeps) RefreshGoogleAccessToken(ctx context.Context) error {
-	d.GoogleToken = ""
-	return d.mintGoogleAccessToken(ctx)
-}

@@ -8,36 +8,34 @@ import (
 	"path/filepath"
 	"strings"
 
-	google "github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/satellite"
-	"google.golang.org/api/drive/v3"
 )
 
-// restoreStreamThresholdBytes matches handler.AutosyncStreamThresholdBytes (10 MB).
-const restoreStreamThresholdBytes = 10 * 1024 * 1024
+// StreamThresholdBytes matches handler.AutosyncStreamThresholdBytes (10 MB).
+const StreamThresholdBytes = 10 * 1024 * 1024
 
-// restoreDownloadHints carries optional size/mime for restore-all streaming decisions.
-type restoreDownloadHints struct {
-	size     int64 // negative when unknown
-	mimeType string
+// DownloadHints carries optional size/mime for restore-all streaming decisions.
+type DownloadHints struct {
+	Size     int64 // negative when unknown; <=0 means unknown
+	MimeType string
 }
 
 // shouldStreamRestoreDownload mirrors handler.ShouldUseStreamingUpload for StorX → Google restore-all.
-func shouldStreamRestoreDownload(h restoreDownloadHints) bool {
-	mime := strings.TrimSpace(h.mimeType)
+func shouldStreamRestoreDownload(h DownloadHints) bool {
+	mime := strings.TrimSpace(h.MimeType)
 	if strings.HasPrefix(mime, "application/vnd.google-apps") {
 		return true
 	}
-	if h.size > restoreStreamThresholdBytes {
+	if h.Size > StreamThresholdBytes {
 		return true
 	}
-	if h.size <= 0 && strings.HasPrefix(strings.ToLower(mime), "video/") {
+	if h.Size <= 0 && strings.HasPrefix(strings.ToLower(mime), "video/") {
 		return true
 	}
 	return false
 }
 
-func downloadBytesRestoreAll(ctx context.Context, grant, bucket, key string, h restoreDownloadHints) ([]byte, error) {
+func DownloadBytes(ctx context.Context, grant, bucket, key string, h DownloadHints) ([]byte, error) {
 	if shouldStreamRestoreDownload(h) {
 		var buf bytes.Buffer
 		if err := satellite.DownloadObjectTo(ctx, grant, bucket, key, &buf); err != nil {
@@ -48,7 +46,7 @@ func downloadBytesRestoreAll(ctx context.Context, grant, bucket, key string, h r
 	return satellite.DownloadObject(ctx, grant, bucket, key)
 }
 
-func downloadToFileRestoreAll(ctx context.Context, grant, bucket, key, destPath string, h restoreDownloadHints) error {
+func DownloadToFile(ctx context.Context, grant, bucket, key, destPath string, h DownloadHints) error {
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 		return err
 	}
@@ -70,7 +68,7 @@ func downloadToFileRestoreAll(ctx context.Context, grant, bucket, key, destPath 
 	return os.WriteFile(destPath, data, 0o644)
 }
 
-func streamFromStorxRestoreAll(ctx context.Context, grant, bucket, key string) (io.Reader, <-chan error) {
+func StreamFromStorx(ctx context.Context, grant, bucket, key string) (io.Reader, <-chan error) {
 	pr, pw := io.Pipe()
 	errCh := make(chan error, 1)
 	go func() {
@@ -81,7 +79,7 @@ func streamFromStorxRestoreAll(ctx context.Context, grant, bucket, key string) (
 	return pr, errCh
 }
 
-func mimeFromFilename(filename string) string {
+func MimeFromFilename(filename string) string {
 	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(filename)))
 	switch ext {
 	case ".jpg", ".jpeg":
@@ -107,7 +105,7 @@ func mimeFromFilename(filename string) string {
 	}
 }
 
-func awaitStorxStream(errCh <-chan error, restoreErr error) error {
+func AwaitStorxStream(errCh <-chan error, restoreErr error) error {
 	dlErr := <-errCh
 	if restoreErr != nil {
 		return restoreErr
@@ -116,7 +114,7 @@ func awaitStorxStream(errCh <-chan error, restoreErr error) error {
 }
 
 // streamToFileRestoreAll writes a StorX object to disk via io.Copy (restore-all photos; avoids RAM).
-func streamToFileRestoreAll(ctx context.Context, grant, bucket, key, destPath string) error {
+func StreamToFile(ctx context.Context, grant, bucket, key, destPath string) error {
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 		return err
 	}
@@ -129,22 +127,4 @@ func streamToFileRestoreAll(ctx context.Context, grant, bucket, key, destPath st
 		return err
 	}
 	return f.Close()
-}
-
-// restoreDriveDataFromStorxStream pipes StorX file bytes into Google Drive (restore-all; no full RAM buffer).
-func restoreDriveDataFromStorxStream(
-	ctx context.Context,
-	accessGrant string,
-	srv *drive.Service,
-	userEmail, dataKey string,
-	metadataJSON []byte,
-) error {
-	content, errCh := streamFromStorxRestoreAll(ctx, accessGrant, satellite.ReserveBucket_Drive, dataKey)
-	if pr, ok := content.(*io.PipeReader); ok {
-		defer pr.Close()
-	}
-	restoreErr := RetryGoogle(ctx, func() error {
-		return google.RestoreFromBackupReader(ctx, srv, userEmail, metadataJSON, content)
-	})
-	return awaitStorxStream(errCh, restoreErr)
 }

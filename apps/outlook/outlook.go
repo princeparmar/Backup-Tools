@@ -75,6 +75,9 @@ func (client *OutlookClient) GetCurrentUser() (*OutlookUser, error) {
 		return nil, errors.New("user ID is empty")
 	}
 	if u.Mail == "" {
+		u.Mail = strings.TrimSpace(u.UserPrincipalName)
+	}
+	if u.Mail == "" {
 		return nil, errors.New("user email is empty")
 	}
 

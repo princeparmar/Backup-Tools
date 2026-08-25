@@ -32,13 +32,19 @@ type Processor interface {
 }
 
 var processorMap = map[string]Processor{
-	"gmail":           NewGmailProcessor(),
-	"outlook":         NewOutlookProcessor(),
-	"psql_database":   NewPsqlDatabaseProcessor(),
-	"google_drive":    NewGoogleDriveProcessor(),
-	"google_photos":   NewGooglePhotosProcessor(),
-	"google_contacts": NewGoogleContactsProcessor(),
-	"google_calendar": NewGoogleCalendarProcessor(),
+	"gmail":            NewGmailProcessor(),
+	"outlook":          NewOutlookProcessor(),
+	"outlook_calendar": NewOutlookCalendarProcessor(),
+	"outlook_contacts": NewOutlookContactsProcessor(),
+	"outlook_onedrive":   NewOutlookOneDriveProcessor(),
+	"outlook_sharepoint": NewOutlookSharePointProcessor(),
+	"outlook_teams":      NewOutlookTeamsProcessor(),
+	"outlook_groups":     NewOutlookGroupsProcessor(),
+	"psql_database":      NewPsqlDatabaseProcessor(),
+	"google_drive":     NewGoogleDriveProcessor(),
+	"google_photos":    NewGooglePhotosProcessor(),
+	"google_contacts":  NewGoogleContactsProcessor(),
+	"google_calendar":  NewGoogleCalendarProcessor(),
 }
 
 type AutosyncManager struct {
@@ -245,6 +251,14 @@ func (a *AutosyncManager) ProcessTask(ctx context.Context) error {
 
 		// Process the task
 		processErr := a.processTask(ctx, task, job)
+		if processErr != nil {
+			logger.Error(ctx, "Processor failed for task",
+				logger.Int("task_id", int(task.ID)),
+				logger.Int("job_id", int(job.ID)),
+				logger.String("method", job.Method),
+				logger.ErrorField(processErr),
+			)
+		}
 
 		// Update task status
 		if updateErr := a.UpdateTaskStatus(task, job, processErr); updateErr != nil {
@@ -523,7 +537,7 @@ func (a *AutosyncManager) gmailStorxMissing(job *repo.CronJobListingDB) bool {
 	if job == nil {
 		return true
 	}
-	if repo.IsGoogleMediaOrGmailMethod(job.Method) {
+	if repo.IsSharedCredentialAutosyncMethod(job.Method) {
 		return strings.TrimSpace(a.store.CronJobRepo.ResolvedStorxToken(job)) == ""
 	}
 	return strings.TrimSpace(job.StorxToken) == ""
@@ -641,7 +655,7 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.Cron
 		return cronEmailGoogleAuthRetry(task.RetryCount)
 
 	case strings.Contains(errMsg, "Access is denied") ||
-		(job != nil && job.Method == "outlook" && strings.Contains(strings.ToLower(errMsg), "invalid_grant")) ||
+		(job != nil && repo.IsMicrosoftAutosyncMethod(job.Method) && strings.Contains(strings.ToLower(errMsg), "invalid_grant")) ||
 		(strings.Contains(errMsg, "microsoftgraph") && (strings.Contains(errMsg, "401") || strings.Contains(errMsg, "403"))) ||
 		(strings.Contains(errMsg, "Microsoft Graph API") && (strings.Contains(errMsg, "401") || strings.Contains(errMsg, "403"))):
 		if task.RetryCount == repo.MaxRetryCount-1 {
@@ -707,9 +721,9 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		strings.Contains(errMsg, "refresh token not found"):
 		// gmailRefreshOrTokenExchangeFailure(job, errMsg):
 		if task.RetryCount == repo.MaxRetryCount-1 {
-			if repo.IsGoogleMediaOrGmailMethod(job.Method) {
+			if repo.IsSharedCredentialAutosyncMethod(job.Method) {
 				if err := a.store.CronJobRepo.DeactivateJobsForCredentialOrLegacyGoogleAuth(job, cronJobGoogleAuthDeactivate); err != nil {
-					logger.Warn(context.Background(), "Failed to deactivate jobs after Google auth failure",
+					logger.Warn(context.Background(), "Failed to deactivate jobs after auth failure",
 						logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
 				}
 				repo.StripGmailRefreshTokenFromCronJobInputData(job)
@@ -728,7 +742,7 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		}
 
 	case strings.Contains(errMsg, "Access is denied") ||
-		(job != nil && job.Method == "outlook" && strings.Contains(strings.ToLower(errMsg), "invalid_grant")) ||
+		(job != nil && repo.IsMicrosoftAutosyncMethod(job.Method) && strings.Contains(strings.ToLower(errMsg), "invalid_grant")) ||
 		(strings.Contains(errMsg, "microsoftgraph") && (strings.Contains(errMsg, "401") || strings.Contains(errMsg, "403"))) ||
 		(strings.Contains(errMsg, "Microsoft Graph API") && (strings.Contains(errMsg, "401") || strings.Contains(errMsg, "403"))):
 		if task.RetryCount == repo.MaxRetryCount-1 {

@@ -119,6 +119,25 @@ type TaskMemory struct {
 	DrivePageToken    *string `json:"drive_page_token,omitempty"`
 	DriveBaselineDone bool    `json:"drive_baseline_done,omitempty"`
 
+	// OneDrive incremental sync state (Graph delta; do not reuse DrivePageToken)
+	OneDriveDeltaLink    *string `json:"onedrive_delta_link,omitempty"`
+	OneDriveBaselineDone bool    `json:"onedrive_baseline_done,omitempty"`
+
+	// SharePoint incremental sync state (Graph delta on /drives/{drive_id}; per job/site)
+	SharePointDeltaLink    *string `json:"sharepoint_delta_link,omitempty"`
+	SharePointBaselineDone bool    `json:"sharepoint_baseline_done,omitempty"`
+
+	// Outlook mail incremental sync state (Graph mail delta on inbox messages)
+	OutlookMailDeltaLink    *string `json:"outlook_mail_delta_link,omitempty"`
+	OutlookMailBaselineDone bool    `json:"outlook_mail_baseline_done,omitempty"`
+	// OutlookMailFolderDeltas maps mailFolderId -> deltaLink (sentitems, archive, etc.).
+	OutlookMailFolderDeltas map[string]string `json:"outlook_mail_folder_deltas,omitempty"`
+
+	// Deprecated: legacy exchange_* task_memory keys (read-only fallback in outlook processor).
+	ExchangeDeltaLink    *string `json:"exchange_delta_link,omitempty"`
+	ExchangeBaselineDone bool    `json:"exchange_baseline_done,omitempty"`
+	ExchangeFolderDeltas map[string]string `json:"exchange_folder_deltas,omitempty"`
+
 	// Photos incremental sync state (ID-based autosync architecture)
 	PhotosBaselineDone bool `json:"photos_baseline_done,omitempty"`
 
@@ -127,6 +146,46 @@ type TaskMemory struct {
 
 	// Calendar incremental sync state (per-calendar syncToken; see CalendarCalendarState)
 	CalendarCalendars map[string]CalendarCalendarState `json:"calendar_calendars,omitempty"`
+
+	// Teams incremental sync state (per-channel; delta OR re-enumeration+dedup)
+	TeamsChannels map[string]TeamsChannelSyncState `json:"teams_channels,omitempty"`
+
+	// Groups incremental sync state (independent sub-syncs)
+	GroupsSync GroupsSyncState `json:"groups_sync,omitempty"`
+}
+
+// TeamsChannelSyncState tracks per-channel Teams backup cursor state.
+type TeamsChannelSyncState struct {
+	NextLink     string     `json:"next_link,omitempty"`
+	DeltaLink    string     `json:"delta_link,omitempty"`
+	LastSyncAt   *time.Time `json:"last_sync_at,omitempty"`
+	BaselineDone bool       `json:"baseline_done,omitempty"`
+}
+
+// GroupsSyncState holds independent cursors for group conversations, calendar, and drive.
+type GroupsSyncState struct {
+	Conversations GroupsConversationSyncState `json:"conversations,omitempty"`
+	Calendar      GroupsCalendarSyncState     `json:"calendar,omitempty"`
+	Drive         GroupsDriveSyncState        `json:"drive,omitempty"`
+}
+
+// GroupsConversationSyncState tracks paginated group conversation/thread backup.
+type GroupsConversationSyncState struct {
+	NextLink     string     `json:"next_link,omitempty"`
+	BaselineDone bool       `json:"baseline_done,omitempty"`
+	LastSyncAt   *time.Time `json:"last_sync_at,omitempty"`
+}
+
+// GroupsCalendarSyncState tracks group calendar event backup.
+type GroupsCalendarSyncState struct {
+	BaselineDone bool   `json:"baseline_done,omitempty"`
+	NextLink     string `json:"next_link,omitempty"`
+}
+
+// GroupsDriveSyncState tracks group drive delta backup.
+type GroupsDriveSyncState struct {
+	DeltaLink    *string `json:"delta_link,omitempty"`
+	BaselineDone bool    `json:"baseline_done,omitempty"`
 }
 
 // CalendarCalendarState holds baseline + sync token for one Google calendar.
@@ -628,9 +687,28 @@ func credentialIDFromInputData(m map[string]interface{}) uint {
 	return 0
 }
 
-// IsGoogleMediaOrGmailMethod is true for Google autosync methods that use shared credentials.
-func IsGoogleMediaOrGmailMethod(method string) bool {
-	switch method {
+// GoogleAutosyncMethods is the ordered set of Google workspace autosync job methods.
+var GoogleAutosyncMethods = []string{
+	"gmail", "google_drive", "google_photos", "google_contacts", "google_calendar",
+}
+
+// MicrosoftAutosyncMethods is the ordered set of Microsoft autosync job methods.
+var MicrosoftAutosyncMethods = []string{
+	"outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive", "outlook_sharepoint", "outlook_teams", "outlook_groups",
+}
+
+// AllAutosyncMethods returns Google + Microsoft methods for shared dashboard queries
+// (GET /autosync/stats, GET /autosync/dashboard-alerts).
+func AllAutosyncMethods() []string {
+	out := make([]string, 0, len(GoogleAutosyncMethods)+len(MicrosoftAutosyncMethods))
+	out = append(out, GoogleAutosyncMethods...)
+	out = append(out, MicrosoftAutosyncMethods...)
+	return out
+}
+
+// IsGoogleAutosyncMethod is true for Google autosync methods that use shared credentials.
+func IsGoogleAutosyncMethod(method string) bool {
+	switch strings.TrimSpace(method) {
 	case "gmail", "google_drive", "google_photos", "google_calendar", "google_contacts":
 		return true
 	default:
@@ -638,7 +716,55 @@ func IsGoogleMediaOrGmailMethod(method string) bool {
 	}
 }
 
-// ResolvedOAuthHolderEmail returns the Google account that holds OAuth (credential email or mailbox).
+// IsMicrosoftAutosyncMethod is true for Microsoft autosync methods that use shared credentials.
+func IsMicrosoftAutosyncMethod(method string) bool {
+	switch strings.TrimSpace(method) {
+	case "outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive", "outlook_sharepoint", "outlook_teams", "outlook_groups":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsSharedCredentialAutosyncMethod is true when the job resolves OAuth/StorX via credential_id.
+func IsSharedCredentialAutosyncMethod(method string) bool {
+	return IsGoogleAutosyncMethod(method) || IsMicrosoftAutosyncMethod(method)
+}
+
+// IsGoogleMediaOrGmailMethod is kept as an alias for existing call sites.
+func IsGoogleMediaOrGmailMethod(method string) bool {
+	return IsGoogleAutosyncMethod(method)
+}
+
+// FilterJobsByMethods returns jobs whose Method is allowed (nil allowed → unchanged).
+func FilterJobsByMethods(jobs []CronJobListingDB, allowed func(string) bool) []CronJobListingDB {
+	if allowed == nil {
+		return jobs
+	}
+	out := make([]CronJobListingDB, 0, len(jobs))
+	for i := range jobs {
+		if allowed(jobs[i].Method) {
+			out = append(out, jobs[i])
+		}
+	}
+	return out
+}
+
+// FilterLiveJobsByMethods filters live job rows by method family.
+func FilterLiveJobsByMethods(jobs []LiveCronJobListingDB, allowed func(string) bool) []LiveCronJobListingDB {
+	if allowed == nil {
+		return jobs
+	}
+	out := make([]LiveCronJobListingDB, 0, len(jobs))
+	for i := range jobs {
+		if allowed(jobs[i].Method) {
+			out = append(out, jobs[i])
+		}
+	}
+	return out
+}
+
+// ResolvedOAuthHolderEmail returns the OAuth holder account (credential email or mailbox).
 func (r *CronJobRepository) ResolvedOAuthHolderEmail(job *CronJobListingDB) string {
 	if job == nil {
 		return ""
@@ -677,12 +803,12 @@ func (r *CronJobRepository) GmailResolvedRefreshToken(job *CronJobListingDB) str
 	return ""
 }
 
-// ResolvedRefreshToken resolves refresh_token for any Google autosync method.
+// ResolvedRefreshToken resolves refresh_token for credential-linked autosync methods (Google + Microsoft).
 func (r *CronJobRepository) ResolvedRefreshToken(job *CronJobListingDB) string {
 	if job == nil {
 		return ""
 	}
-	if IsGoogleMediaOrGmailMethod(job.Method) {
+	if IsSharedCredentialAutosyncMethod(job.Method) {
 		return r.GmailResolvedRefreshToken(job)
 	}
 	if job.InputData == nil || job.InputData.Json() == nil {
@@ -734,17 +860,17 @@ func (r *CronJobRepository) EnrichCronJobFromCredential(job *CronJobListingDB) {
 	if pid := r.ResolvedStorjProjectID(job); pid != "" {
 		job.StorjProjectID = pid
 	}
-	if JobCredentialID(job) > 0 && IsGoogleMediaOrGmailMethod(job.Method) {
+	if JobCredentialID(job) > 0 && IsSharedCredentialAutosyncMethod(job.Method) {
 		job.StorxToken = ""
 	}
 }
 
-// ResolvedStorxToken resolves storx_token for any Google autosync method.
+// ResolvedStorxToken resolves storx_token for credential-linked autosync methods (Google + Microsoft).
 func (r *CronJobRepository) ResolvedStorxToken(job *CronJobListingDB) string {
 	if job == nil {
 		return ""
 	}
-	if IsGoogleMediaOrGmailMethod(job.Method) {
+	if IsSharedCredentialAutosyncMethod(job.Method) {
 		return r.GmailResolvedStorxToken(job)
 	}
 	return strings.TrimSpace(job.StorxToken)
@@ -1491,10 +1617,31 @@ func (r *CronJobRepository) validateJobForActivation(job *CronJobListingDB) erro
 		if emailVal == "" {
 			return fmt.Errorf("email is required in input_data or job name for gmail method")
 		}
-	case "outlook", "google_drive", "google_photos", "google_calendar", "google_contacts":
+	case "outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive", "outlook_sharepoint", "outlook_teams", "outlook_groups",
+		"google_drive", "google_photos", "google_calendar", "google_contacts":
 		rt := r.ResolvedRefreshToken(job)
 		if strings.TrimSpace(rt) == "" {
 			return fmt.Errorf("refresh_token is required in input_data for %s method", job.Method)
+		}
+		if job.Method == "outlook_teams" {
+			if JobTeamsTeamID(job) == "" {
+				return fmt.Errorf("team_id is required in input_data for outlook_teams method")
+			}
+		}
+		if job.Method == "outlook_groups" {
+			if JobGroupsGroupID(job) == "" {
+				return fmt.Errorf("group_id is required in input_data for outlook_groups method")
+			}
+		}
+		if job.Method == "outlook_sharepoint" {
+			siteID := JobSharePointSiteID(job)
+			driveID := JobSharePointDriveID(job)
+			if siteID == "" {
+				return fmt.Errorf("site_id is required in input_data for outlook_sharepoint method")
+			}
+			if driveID == "" {
+				return fmt.Errorf("drive_id is required in input_data for outlook_sharepoint method")
+			}
 		}
 	case "database", "psql_database", "mysql_database":
 		// Check if database connection details exist in input_data
@@ -1515,15 +1662,25 @@ type AutoSyncJobStats struct {
 	LastSyncAt                  *time.Time
 }
 
-var autosyncStatsWorkspaceMethods = []string{
-	"gmail", "google_drive", "google_photos", "google_contacts", "google_calendar",
+// GetAutoSyncJobStats loads Google + Microsoft mailbox counts in one SQL round trip
+// for the shared Satellite dashboard path GET /autosync/stats.
+func (r *CronJobRepository) GetAutoSyncJobStats(userID string) (*AutoSyncJobStats, error) {
+	return r.GetAutoSyncJobStatsForMethods(userID, AllAutosyncMethods())
 }
 
-// GetAutoSyncJobStats loads mailbox counts in one SQL round trip (no full job rows).
-func (r *CronJobRepository) GetAutoSyncJobStats(userID string) (*AutoSyncJobStats, error) {
+// GetMicrosoftAutoSyncJobStats loads Microsoft mailbox counts.
+func (r *CronJobRepository) GetMicrosoftAutoSyncJobStats(userID string) (*AutoSyncJobStats, error) {
+	return r.GetAutoSyncJobStatsForMethods(userID, MicrosoftAutosyncMethods)
+}
+
+// GetAutoSyncJobStatsForMethods loads mailbox counts for the given job methods.
+func (r *CronJobRepository) GetAutoSyncJobStatsForMethods(userID string, methods []string) (*AutoSyncJobStats, error) {
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
 		return nil, fmt.Errorf("user_id is required")
+	}
+	if len(methods) == 0 {
+		return &AutoSyncJobStats{}, nil
 	}
 
 	const q = `
@@ -1543,14 +1700,14 @@ SELECT
   COALESCE((SELECT COUNT(*)::bigint FROM mailbox_first), 0) AS connected_accounts,
   COALESCE((SELECT COUNT(*)::bigint FROM mailbox_first WHERE first_created > NOW() - INTERVAL '7 days'), 0) AS growth_week,
   (SELECT MAX(last_run) FROM cron_job_listing_dbs
-    WHERE user_id = ? AND deleted_at IS NULL AND COALESCE(placeholder, false) = false) AS last_sync_at`
+    WHERE user_id = ? AND deleted_at IS NULL AND COALESCE(placeholder, false) = false AND method IN ?) AS last_sync_at`
 
 	var row struct {
 		ConnectedAccounts int64
 		GrowthWeek        int64
 		LastSyncAt        sql.NullTime
 	}
-	if err := r.db.Raw(q, userID, autosyncStatsWorkspaceMethods, userID).Scan(&row).Error; err != nil {
+	if err := r.db.Raw(q, userID, methods, userID, methods).Scan(&row).Error; err != nil {
 		return nil, fmt.Errorf("autosync job stats: %w", err)
 	}
 
@@ -1563,6 +1720,50 @@ SELECT
 		out.LastSyncAt = &t
 	}
 	return out, nil
+}
+
+// JobSharePointSiteID returns input_data.site_id for outlook_sharepoint jobs.
+func JobSharePointSiteID(job *CronJobListingDB) string {
+	if job == nil || job.InputData == nil || job.InputData.Json() == nil {
+		return ""
+	}
+	if v, ok := (*job.InputData.Json())["site_id"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+// JobSharePointDriveID returns input_data.drive_id for outlook_sharepoint jobs.
+func JobSharePointDriveID(job *CronJobListingDB) string {
+	if job == nil || job.InputData == nil || job.InputData.Json() == nil {
+		return ""
+	}
+	if v, ok := (*job.InputData.Json())["drive_id"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+// JobTeamsTeamID returns input_data.team_id for outlook_teams jobs.
+func JobTeamsTeamID(job *CronJobListingDB) string {
+	if job == nil || job.InputData == nil || job.InputData.Json() == nil {
+		return ""
+	}
+	if v, ok := (*job.InputData.Json())["team_id"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+// JobGroupsGroupID returns input_data.group_id for outlook_groups jobs.
+func JobGroupsGroupID(job *CronJobListingDB) string {
+	if job == nil || job.InputData == nil || job.InputData.Json() == nil {
+		return ""
+	}
+	if v, ok := (*job.InputData.Json())["group_id"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
 }
 
 // MaskTokenForCronJobListingDB masks sensitive tokens in cron job data

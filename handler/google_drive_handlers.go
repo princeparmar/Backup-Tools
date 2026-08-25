@@ -13,7 +13,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
-	"github.com/StorX2-0/Backup-Tools/restore"
+	googlestore "github.com/StorX2-0/Backup-Tools/restore/google"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"golang.org/x/sync/errgroup"
 
@@ -849,7 +849,7 @@ func HandleGoogleDriveDownloadAndRestore(c echo.Context) error {
 		}
 		key := key
 		g.Go(func() error {
-			if err := restore.RestoreDriveKeyWithSession(ctx, storxSess, srv, userDetails.Email, key); err != nil {
+			if err := googlestore.RestoreDriveKeyWithSession(ctx, storxSess, srv, userDetails.Email, key); err != nil {
 				logger.Warn(ctx, "Failed to restore item", logger.String("key", key), logger.ErrorField(err))
 				failedKeys.Add(key)
 			} else {

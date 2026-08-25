@@ -149,12 +149,18 @@ type PolicyAvailableServiceView struct {
 }
 
 var policyServiceLabels = map[string]string{
-	"gmail":           "Gmail",
-	"google_drive":    "Drive",
-	"google_calendar": "Calendar",
-	"google_contacts": "Contacts",
-	"google_photos":   "Photos",
-	"outlook":         "Outlook",
+	"gmail":             "Gmail",
+	"google_drive":      "Drive",
+	"google_calendar":   "Calendar",
+	"google_contacts":   "Contacts",
+	"google_photos":     "Photos",
+	"outlook":           "Outlook",
+	"outlook_calendar":  "Outlook Calendar",
+	"outlook_contacts":  "Outlook Contacts",
+	"outlook_onedrive":  "OneDrive",
+	"outlook_sharepoint": "SharePoint",
+	"outlook_teams":      "Teams",
+	"outlook_groups":     "Groups",
 }
 
 func normalizeEmail(email string) string {
@@ -1182,6 +1188,7 @@ func HandleAutosyncPolicyAvailableAssignments(c echo.Context) error {
 	if err != nil {
 		return p.serverError("Failed to load jobs", err)
 	}
+	allJobs = repo.FilterJobsByMethods(allJobs, repo.IsSharedCredentialAutosyncMethod)
 
 	selectedEmail := strings.TrimSpace(p.echo.QueryParam("email"))
 	if selectedEmail != "" {

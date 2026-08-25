@@ -2,7 +2,6 @@ package restore
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"time"
 
@@ -120,8 +119,3 @@ func (d *RestoreDeps) withVault(ctx context.Context, fn func() error) error {
 	}
 }
 
-// ShouldSkipObjectKey filters placeholders and empty keys (shared by processors and tests).
-func ShouldSkipObjectKey(objectKey string) bool {
-	key := strings.TrimSpace(objectKey)
-	return key == "" || strings.Contains(key, "/.file_placeholder")
-}

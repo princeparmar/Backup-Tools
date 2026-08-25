@@ -86,17 +86,20 @@ func (s *OutlookService) DownloadMessagesFromSatellite(ctx context.Context, keys
 	}, nil
 }
 
-// getAccessTokens extracts and validates access tokens from request
+// getAccessTokens extracts StorX grant + Microsoft Graph token.
+// Authorization may be a Backup-Tools microsoft-auth JWT (from POST /microsoft-auth) or a raw Graph access token.
 func getAccessTokens(c echo.Context) (accessGrant, accessToken string, err error) {
 	accessGrant = c.Request().Header.Get("ACCESS_TOKEN")
-	accessToken = c.Request().Header.Get("Authorization")
+	authHeader := c.Request().Header.Get("Authorization")
 
-	if accessGrant == "" || accessToken == "" {
+	if accessGrant == "" || authHeader == "" {
 		return "", "", echo.NewHTTPError(http.StatusForbidden, "ACCESS_TOKEN and Authorization headers are required")
 	}
 
-	// Remove "Bearer " prefix if present
-	accessToken = strings.TrimPrefix(accessToken, "Bearer ")
+	accessToken, err = outlook.ResolveGraphAccessToken(c, authHeader)
+	if err != nil {
+		return "", "", echo.NewHTTPError(http.StatusUnauthorized, err.Error())
+	}
 	return accessGrant, accessToken, nil
 }
 
@@ -121,6 +124,10 @@ func parseMessageIDs(c echo.Context) ([]string, error) {
 		if decoded, err := base64.StdEncoding.DecodeString(ids[i]); err == nil {
 			ids[i] = string(decoded)
 		}
+	}
+
+	if len(ids) > microsoftManualRestoreMaxKeys {
+		return nil, echo.NewHTTPError(http.StatusBadRequest, "maximum 10 keys allowed")
 	}
 
 	return ids, nil

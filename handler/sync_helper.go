@@ -65,19 +65,23 @@ func MaxStorxUplinkRecoveriesPerRun() int {
 }
 
 // deriveSource derives source (provider) from bucket name
-// Currently only supports Google services: gmail, google-photos, google-drive
 func deriveSource(bucketName string) string {
-	if bucketName == "gmail" || bucketName == "google-photos" || bucketName == "google-drive" || bucketName == "google-contacts" || bucketName == "google-calendar" {
+	switch bucketName {
+	case "gmail", "google-photos", "google-drive", "google-contacts", "google-calendar":
 		return "google"
+	case "outlook", "outlook-calendar", "outlook-contacts", "outlook-onedrive", "outlook-sharepoint", "outlook-teams", "outlook-groups":
+		return "outlook"
 	}
 	if strings.HasPrefix(bucketName, "google-") {
 		return "google"
+	}
+	if strings.HasPrefix(bucketName, "outlook-") {
+		return "outlook"
 	}
 	return bucketName
 }
 
 // deriveType derives type from bucket name
-// Currently only supports: gmail, google-photos, google-drive
 func deriveType(bucketName string) string {
 	switch bucketName {
 	case "gmail":
@@ -90,9 +94,22 @@ func deriveType(bucketName string) string {
 		return "contacts"
 	case "google-calendar":
 		return "calendar"
+	case "outlook":
+		return "outlook"
+	case "outlook-calendar":
+		return "outlook_calendar"
+	case "outlook-contacts":
+		return "outlook_contacts"
+	case "outlook-onedrive":
+		return "outlook_onedrive"
+	case "outlook-sharepoint":
+		return "outlook_sharepoint"
 	default:
 		if strings.HasPrefix(bucketName, "google-") {
 			return strings.TrimPrefix(bucketName, "google-")
+		}
+		if strings.HasPrefix(bucketName, "outlook-") {
+			return "outlook_" + strings.ReplaceAll(strings.TrimPrefix(bucketName, "outlook-"), "-", "_")
 		}
 		return bucketName
 	}

@@ -65,6 +65,34 @@ func (r *AuthRepository) ReadGoogleAuthToken(JWTtoken string) (string, error) {
 	return res.AccessToken, nil
 }
 
+// MicrosoftAuthStorage stores Graph access tokens for restore (POST /microsoft-auth), mirrors GoogleAuthStorage.
+// Covers all Microsoft Graph restore services, not Outlook mail only.
+type MicrosoftAuthStorage struct {
+	gorm.GormModel
+	JWTtoken string
+	oauth2.Token
+}
+
+// WriteMicrosoftAuthToken stores a Graph access token keyed by a random lookup id (embedded in microsoft-auth JWT).
+func (r *AuthRepository) WriteMicrosoftAuthToken(JWTtoken, accessToken string) error {
+	data := &MicrosoftAuthStorage{
+		JWTtoken: JWTtoken,
+		Token: oauth2.Token{
+			AccessToken: accessToken,
+		},
+	}
+	return r.db.Create(data).Error
+}
+
+// ReadMicrosoftAuthToken returns the Graph access token for a microsoft-auth JWT lookup key.
+func (r *AuthRepository) ReadMicrosoftAuthToken(JWTtoken string) (string, error) {
+	var res MicrosoftAuthStorage
+	if err := r.db.Where("jw_ttoken = ?", JWTtoken).First(&res).Error; err != nil {
+		return "", err
+	}
+	return res.AccessToken, nil
+}
+
 // Shopify Auth operations
 func (r *AuthRepository) WriteShopifyAuthToken(cookie, token string) error {
 	return r.writeToken(&ShopifyAuthStorage{Cookie: cookie, Token: token})

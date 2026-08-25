@@ -46,6 +46,7 @@ func NewPostgresStore(dsn string, queryLogging bool) (*PostgresDb, error) {
 func (s *PostgresDb) Migrate() error {
 	if err := s.DB.Migrate(
 		&repo.GoogleAuthStorage{},
+		&repo.MicrosoftAuthStorage{},
 		&repo.ShopifyAuthStorage{},
 		&repo.QuickbooksAuthStorage{},
 		&repo.GoogleBackupCredentialDB{},
