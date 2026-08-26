@@ -857,6 +857,9 @@ func HandleAutomaticSyncCreate(c echo.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := RejectIfAccountPendingDelete(c, userID); err != nil {
+		return err
+	}
 
 	var req GoogleBackupOnboardingRequest
 	if err := c.Bind(&req); err != nil {

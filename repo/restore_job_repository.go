@@ -199,6 +199,10 @@ func (r *RestoreJobRepository) ClaimNextQueuedJob() (*RestoreJobListingDB, error
 	}
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
 		Where("status = ?", RestoreJobStatusQueued).
+		Where(`user_id NOT IN (
+			SELECT satellite_user_id FROM account_tombstone_dbs
+			WHERE deleted_at IS NULL AND status = ?
+		)`, AccountTombstoneStatusPendingDelete).
 		Order("id ASC").
 		First(&job).Error; err != nil {
 		tx.Rollback()
@@ -232,6 +236,10 @@ func (r *RestoreJobRepository) ClaimNextRunningJob() (*RestoreJobListingDB, erro
 	}
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
 		Where("status = ? AND (last_heart_beat IS NULL OR last_heart_beat < ?)", RestoreJobStatusRunning, readyBefore).
+		Where(`user_id NOT IN (
+			SELECT satellite_user_id FROM account_tombstone_dbs
+			WHERE deleted_at IS NULL AND status = ?
+		)`, AccountTombstoneStatusPendingDelete).
 		Order("last_heart_beat ASC NULLS FIRST").
 		First(&job).Error; err != nil {
 		tx.Rollback()

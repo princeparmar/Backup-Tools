@@ -434,6 +434,9 @@ func HandleRestoreAll(c echo.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := RejectIfAccountPendingDelete(c, userID); err != nil {
+		return err
+	}
 
 	var req restoreAllRequest
 	if err := c.Bind(&req); err != nil {

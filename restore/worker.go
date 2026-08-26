@@ -118,6 +118,24 @@ func processRetryTask(ctx context.Context, store *db.PostgresDb) error {
 }
 
 func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.RestoreJobListingDB, retryTask *repo.RestoreTaskListingDB) error {
+	if store.AccountLifecycleRepo != nil {
+		pending, err := store.AccountLifecycleRepo.IsPendingDelete(job.UserID)
+		if err != nil {
+			return err
+		}
+		if pending {
+			logger.Info(ctx, "Skipping restore job; account pending deletion",
+				logger.String("user_id", job.UserID),
+				logger.Int("job_id", int(job.ID)),
+			)
+			_ = store.RestoreJobRepo.UpdateJob(job.ID, map[string]interface{}{
+				"status":  repo.RestoreJobStatusCancelled,
+				"message": "account pending deletion",
+			})
+			return nil
+		}
+	}
+
 	if err := checkJobContinuable(store, job.ID); err != nil {
 		if isInactiveRestoreJobErr(err) {
 			return nil

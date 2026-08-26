@@ -18,6 +18,7 @@ type PostgresDb struct {
 	RestoreJobRepo        *repo.RestoreJobRepository
 	RestoreTaskRepo       *repo.RestoreTaskRepository
 	BackupRestoreLogsRepo *repo.BackupRestoreLogsRepository
+	AccountLifecycleRepo  *repo.AccountLifecycleRepository
 }
 
 func NewPostgresStore(dsn string, queryLogging bool) (*PostgresDb, error) {
@@ -40,6 +41,7 @@ func NewPostgresStore(dsn string, queryLogging bool) (*PostgresDb, error) {
 		RestoreJobRepo:        repo.NewRestoreJobRepository(db),
 		RestoreTaskRepo:       repo.NewRestoreTaskRepository(db),
 		BackupRestoreLogsRepo: repo.NewBackupRestoreLogsRepository(db),
+		AccountLifecycleRepo:  repo.NewAccountLifecycleRepository(db),
 	}, nil
 }
 
@@ -58,6 +60,7 @@ func (s *PostgresDb) Migrate() error {
 		&repo.RestoreJobListingDB{},
 		&repo.RestoreTaskListingDB{},
 		&repo.RestoreDeadItemDB{},
+		&repo.AccountTombstoneDB{},
 	); err != nil {
 		return err
 	}

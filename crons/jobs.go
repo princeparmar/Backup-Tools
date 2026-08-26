@@ -276,6 +276,20 @@ func (a *AutosyncManager) processTask(ctx context.Context, task *repo.TaskListin
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
+	if a.store.AccountLifecycleRepo != nil {
+		pending, pendErr := a.store.AccountLifecycleRepo.IsPendingDelete(job.UserID)
+		if pendErr != nil {
+			return pendErr
+		}
+		if pending {
+			logger.Info(ctx, "Skipping task; account pending deletion",
+				logger.String("user_id", job.UserID),
+				logger.Int("job_id", int(job.ID)),
+			)
+			return nil
+		}
+	}
+
 	processor, ok := processorMap[job.Method]
 	if !ok {
 		return fmt.Errorf("processor for method '%s' not found", job.Method)

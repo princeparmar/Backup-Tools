@@ -494,6 +494,13 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 			)
 			AND c2.deleted_at IS NULL
 			AND COALESCE(c2.placeholder, false) = false
+			AND NOT EXISTS (
+				SELECT 1
+				FROM account_tombstone_dbs tomb
+				WHERE tomb.satellite_user_id = c2.user_id
+				AND tomb.deleted_at IS NULL
+				AND tomb.status = ?
+			)
 			LIMIT 10
 		)
 		FOR UPDATE OF c
@@ -507,12 +514,16 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 	threeHourStart := PeriodStartForInterval("3h", now, location)
 	twelveHourStart := PeriodStartForInterval("12h", now, location)
 
+	// Parameter order: message, status_not_in_1, status_not_in_2,
+	// daily, weekly, monthly, 3h, 12h period starts, daily (ELSE),
+	// weekday, day, task_running, task_pushed, tombstone_status
 	rawQuery := tx.Raw(sqlQuery,
 		JobMessagePushToQueue,
 		JobStatusInQueue, JobStatusInProgress,
 		dailyStart, weeklyStart, monthlyStart, threeHourStart, twelveHourStart, dailyStart,
 		now.Weekday().String(), fmt.Sprint(now.Day()),
-		TaskStatusRunning, TaskStatusPushed)
+		TaskStatusRunning, TaskStatusPushed,
+		AccountTombstoneStatusPendingDelete)
 
 	scanResult := rawQuery.Scan(&res)
 	if scanResult.Error != nil {

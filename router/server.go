@@ -53,6 +53,13 @@ func StartServer(db *db.PostgresDb, address string) {
 	e.POST("/satellite-auth", satellite.HandleSatelliteAuthentication)
 	e.POST("/google-auth", googlepack.Autentificate)
 	e.GET("/google-auth", googlepack.Autentificateg)
+
+	// Satellite → Backup-Tools account deletion lifecycle (X-API-Key = BACKUP_TOOLS_API_KEY).
+	internalAccount := e.Group("/internal/account")
+	internalAccount.POST("/pending-delete", handler.HandleAccountPendingDelete)
+	internalAccount.POST("/resume", handler.HandleAccountResume)
+	internalAccount.POST("/purge", handler.HandleAccountPurge)
+
 	// e.POST("/auth/google/connect", handler.HandleGoogleConnect)
 	e.GET("/google/gmail/corporate/domain-users", handler.HandleGmailCorporateDomainUsers)
 	// Microsoft OAuth login moved to Satellite.
