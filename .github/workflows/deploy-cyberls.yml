@@ -22,13 +22,18 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-          
-      - name: Setup Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.21.13'
-          cache: false  # Disable cache to avoid tar/gzip errors on Windows
-          
+          clean: true
+
+      - name: Verify Go
+        shell: powershell
+        run: |
+          $verOutput = go version
+          Write-Host $verOutput
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Go is not available on this runner. Install Go 1.24+ on the CyberLS host."
+            exit 1
+          }
+
       - name: Pre-download dependencies
         run: |
           Write-Host "Pre-downloading dependencies..."
