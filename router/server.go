@@ -28,6 +28,7 @@ func StartServer(db *db.PostgresDb, address string) {
 
 	// Swagger documentation endpoints
 	e.GET("/swagger", handler.SwaggerUIHandler)
+	e.GET("/swagger.yaml", handler.SwaggerYAMLHandler)
 
 	e.GET("/health", func(c echo.Context) error {
 		return c.String(http.StatusOK, "OK")
@@ -52,32 +53,78 @@ func StartServer(db *db.PostgresDb, address string) {
 	e.POST("/satellite-auth", satellite.HandleSatelliteAuthentication)
 	e.POST("/google-auth", googlepack.Autentificate)
 	e.GET("/google-auth", googlepack.Autentificateg)
-	e.POST("/auth/google/connect", handler.HandleGoogleConnect)
+
+	// Satellite → Backup-Tools account deletion lifecycle (X-API-Key = BACKUP_TOOLS_API_KEY).
+	internalAccount := e.Group("/internal/account")
+	internalAccount.POST("/pending-delete", handler.HandleAccountPendingDelete)
+	internalAccount.POST("/resume", handler.HandleAccountResume)
+	internalAccount.POST("/purge", handler.HandleAccountPurge)
+
+	// e.POST("/auth/google/connect", handler.HandleGoogleConnect)
 	e.GET("/google/gmail/corporate/domain-users", handler.HandleGmailCorporateDomainUsers)
-	e.GET("/auth/microsoft/start", handler.HandleMicrosoftAuthRedirect)
+	// Microsoft OAuth login moved to Satellite.
+	// e.GET("/auth/microsoft/start", handler.HandleMicrosoftAuthRedirect)
 	e.GET("/autobackup/summary", handler.HandleAutomaticBackupSummary)
 	e.GET("/autosync/stats", handler.HandleAutomaticSyncStats)
+	e.GET("/autosync/dashboard-alerts", handler.HandleAutosyncDashboardAlerts)
+
+	backupRestore := e.Group("/backup-restore")
+	backupRestore.GET("/logs", handler.HandleBackupRestoreLogs)
+
+	usersGroups := e.Group("/users-groups")
+	usersGroups.GET("/domains", handler.HandleAutosyncUsersGroupsDomains)
+	usersGroups.PUT("/jobs/active", handler.HandleUsersGroupsJobsActive)
+	usersGroups.GET("", handler.HandleAutosyncUsersGroupsList)
+	usersGroups.GET("/mailbox/overview", handler.HandleAutosyncUsersGroupsMailboxOverview)
+	usersGroups.GET("/mailbox/services", handler.HandleAutosyncUsersGroupsMailboxServices)
+	usersGroups.GET("/mailbox/schedule", handler.HandleAutosyncUsersGroupsMailboxSchedule)
+	usersGroups.GET("/mailbox/credentials", handler.HandleAutosyncUsersGroupsMailboxCredentials)
 
 	autoSync := e.Group("/auto-sync")
 	autoSync.GET("/live", handler.HandleAutomaticSyncActiveJobsForUser)
 	autoSync.PUT("/task/hide", handler.HandleHideTask)
 
 	job := autoSync.Group("/job")
+	job.GET("/services", handler.HandleAutomaticSyncServicesForUser)
 	job.GET("/", handler.HandleAutomaticSyncListForUser)
+	job.POST("", handler.HandleAutomaticSyncCreate)
+	job.GET("/interval", handler.HandleIntervalOnConfig)
+	job.PUT("/project", handler.HandleAutomaticBackupUpdateByProject)
 	job.GET("/:job_id", handler.HandleAutomaticSyncDetails)
-	job.POST("/:method", handler.HandleAutomaticSyncCreate)
-	job.PUT("/:method/bulk-update", handler.HandleAutomaticBackupBulkUpdateByParent)
 	job.PUT("/:job_id", handler.HandleAutomaticBackupUpdate)
+	// job.PUT("/:method/bulk-update", handler.HandleAutomaticBackupBulkUpdateByParent)
 	job.DELETE("/:job_id", handler.HandleAutomaticSyncDelete)
 
-	job.GET("/interval", handler.HandleIntervalOnConfig)
+	policy := autoSync.Group("/policy")
+	policy.GET("", handler.HandleAutosyncPolicyList)
+	policy.GET("/options", handler.HandleAutosyncPolicyOptions)
+	policy.GET("/available-assignments", handler.HandleAutosyncPolicyAvailableAssignments)
+	policy.POST("", handler.HandleAutosyncPolicyCreate)
+	policy.POST("/move", handler.HandleAutosyncPolicyMove)
+	policy.GET("/merge/preview", handler.HandleAutosyncPolicyMergePreview)
+	policy.POST("/merge", handler.HandleAutosyncPolicyMerge)
+	policy.GET("/:policy_id", handler.HandleAutosyncPolicyByID)
+	policy.PUT("/:policy_id", handler.HandleAutosyncPolicyUpdate)
+	policy.DELETE("/:policy_id", handler.HandleAutosyncPolicyDelete)
 
 	task := autoSync.Group("/task")
+	task.POST("/:job_id/backup-now", handler.HandleAutomaticSyncBackupNow)
 	task.POST("/:job_id", handler.HandleAutomaticSyncCreateTask)
 	task.GET("/:job_id", handler.HandleAutomaticSyncTaskList)
 
 	// Admin endpoint for deleting jobs by email
 	autoSync.DELETE("/delete-jobs-by-email", handler.HandleDeleteJobsByEmail)
+
+	restoreGroup := e.Group("/restore")
+	restoreGroup.GET("/workspaces", handler.HandleRestoreWorkspaces)
+	restoreGroup.GET("/credentials", handler.HandleRestoreCredentials)
+	restoreGroup.GET("/prepare", handler.HandleRestorePrepare)
+	restoreGroup.GET("/live", handler.HandleRestoreLive)
+	restoreGroup.POST("/all", handler.HandleRestoreAll)
+	restoreGroup.GET("/jobs", handler.HandleListRestoreJobs)
+	restoreGroup.GET("/job/:job_id", handler.HandleGetRestoreJob)
+	restoreGroup.POST("/job/:job_id/cancel", handler.HandleCancelRestoreJob)
+	restoreGroup.GET("/job/:job_id/dead-items", handler.HandleListRestoreDeadItems)
 
 	google := e.Group("/google")
 
@@ -93,6 +140,8 @@ func StartServer(db *db.PostgresDb, address string) {
 	google.GET("/drive-root-file-names", handler.HandleRootGoogleDriveFileNames)
 	// List all files in root and not in root folder. Only files and folders in Root
 	google.GET("/drive-get-file-names", handler.HandleGetGoogleDriveFileNames)
+	// Flat list of non-folder files across all drives (pagination supported)
+	google.GET("/drive-flat-files", handler.HandleFlatGoogleDriveFiles)
 	google.GET("/drive-get-file/:ID", googlepack.GetFileByID)
 
 	// list drive files in satellite
@@ -117,7 +166,17 @@ func StartServer(db *db.PostgresDb, address string) {
 	// Send a list of items from google drive to satellite
 	// google.POST("/sync-list-from-drive", handler.HandleSendListFromGoogleDriveToSatellite)
 
+	// Google Contacts
+	google.GET("/contacts/list", handler.HandleListContacts)
+	google.POST("/satellite-to-contacts", handler.HandleGoogleContactsRestore)
+
+	// Google Calendar
+	google.GET("/calendar/list", handler.HandleListCalendars)
+	google.GET("/calendar/events/:calendarId", handler.HandleListCalendarEvents)
+	google.POST("/satellite-to-calendar", handler.HandleGoogleCalendarRestore)
+
 	// Google Photos
+	google.GET("/photos-flat-media", handler.HandleFlatPhotosMedia)
 	google.GET("/photos-list-albums", handler.HandleListGPhotosAlbums)
 	google.GET("/photos-list-photos-in-album/:ID", handler.HandleListPhotosInAlbum)
 	google.GET("/photos-list-all", handler.HandleListAllPhotos)

@@ -2,6 +2,7 @@ package crons
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/repo"
 )
@@ -9,6 +10,10 @@ import (
 // Centralized user-facing copy for cron failure emails (determineErrorMessage).
 const (
 	cronEmailStorxInsufficient = "Your automatic backup has been temporarily disabled due to insufficient permissions. Please update your StorX permissions and reactivate the backup from your dashboard."
+
+	cronEmailStorxRefreshRetry = "Your automatic backup encountered a StorX access issue. We are refreshing your StorX token automatically and will retry."
+
+	cronEmailStorxSatelliteRefreshFinal = "Your automatic backup has been paused because StorX access could not be renewed from Satellite. Please contact support."
 
 	cronEmailDelegationFinal = "Google Workspace blocked access to a mailbox (domain-wide delegation). Ask your admin to add this app's OAuth client in Admin Console → Security → API controls → Domain-wide delegation, with the required Gmail scopes, or remove mailboxes that cannot be delegated."
 
@@ -19,6 +24,8 @@ const (
 	cronEmailOutlookAuthFinal = "Your automatic backup has been temporarily disabled due to invalid Microsoft Outlook credentials. Please update your Outlook account permissions and reactivate the backup from your dashboard."
 
 	cronEmailStorxUplinkFinal = "Your automatic backup has been temporarily disabled due to insufficient StorX permissions. Please update your StorX permissions and reactivate the backup from your dashboard."
+
+	cronEmailStorxStorageLimitFinal = "Your automatic backups have been paused because your CyberLS storage limit was exceeded. Free up space or upgrade your storage plan, then reactivate backups from your dashboard."
 
 	cronEmailNetworkFinal = "Your automatic backup has been temporarily disabled due to network connectivity issues. Please check your internet connection and reactivate the backup from your dashboard."
 
@@ -37,15 +44,21 @@ const (
 const (
 	cronJobStorxInsufficientShort = "Insufficient permissions to upload to storx. Please update the permissions and reactivate the automatic backup"
 
+	cronJobStorxSatelliteRefreshFinal = "StorX access could not be renewed from Satellite. Automatic backup has been paused—please contact support."
+
 	cronJobDelegationFinal = "Google Workspace denied access to this mailbox (delegation). Ask your admin to enable domain-wide delegation for this app or adjust which accounts are backed up."
 
 	cronJobGoogleAuthDeactivate = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
+
+	cronJobPersonalGoogleAuthDeactivate = "Google sign-in failed for this personal Gmail account. Reconnect your Google account in the dashboard and reactivate the backup."
 
 	cronJobGoogleInsufficientScope = "Gmail access for this backup is incomplete (missing Google permissions). Reconnect your Google account and grant all requested Gmail scopes, then reactivate the automatic backup."
 
 	cronJobOutlookAuthDeactivate = "Invalid Microsoft Outlook credentials. Please update the credentials and reactivate the automatic backup"
 
 	cronJobNetworkFinal = "Automatic backup failed due to network issues. Please check your connection and reactivate."
+
+	cronJobStorxStorageLimitFinal = "CyberLS storage limit exceeded. Free up storage or upgrade your plan, then reactivate automatic backup from your dashboard."
 
 	cronJobFailurePeriodsExhausted = "Backup failed after 3 scheduled runs, each with up to 3 automatic retries. Job has been deactivated—reactivate from your dashboard after fixing the issue."
 )
@@ -60,15 +73,21 @@ const (
 const (
 	cronTaskStorxInsufficientDeactivated = "Insufficient permissions to upload to storx. Please update the permissions. Automatic backup will be deactivated"
 
+	cronTaskStorxSatelliteRefreshFinal = "StorX token could not be renewed from Satellite. Automatic backup has been deactivated—please contact support."
+
 	cronTaskDelegationFinal = "Delegation denied by Google Workspace. Your admin must authorize this app for domain-wide delegation (Gmail scopes) for the affected users."
 
 	cronTaskGoogleAuthDeactivated = "Google Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
+
+	cronTaskPersonalGoogleAuthDeactivated = "Personal Gmail sign-in failed. Reconnect your Google account in the dashboard, then reactivate this backup."
 
 	cronTaskGoogleInsufficientScope = "Gmail backup stopped: the connected Google account does not include the required Gmail permissions. Reconnect Google with full app permissions and reactivate the job."
 
 	cronTaskOutlookAuthDeactivated = "Microsoft Outlook Credentials are invalid. Please update the credentials. Automatic backup will be deactivated"
 
 	cronTaskNetworkDeactivated = "Task failed due to network connectivity issues. Job has been deactivated."
+
+	cronTaskStorxStorageLimitDeactivated = "CyberLS storage limit exceeded. All active automatic backups for your account have been deactivated."
 
 	cronTaskFailurePeriodsExhausted = "Failed after multiple scheduled runs (3 runs × up to 3 retries each). Automatic backup has been deactivated."
 )
@@ -99,19 +118,26 @@ func cronEmailOutlookAuthRetry(attempt uint) string {
 	return fmt.Sprintf(cronTplEmailOutlookAuthRetry, a, m)
 }
 
-func cronEmailGenericRetry(attempt uint) string {
+func cronEmailGenericRetry(attempt uint, err error) string {
 	a, m := cronAttempt(attempt)
-	return fmt.Sprintf(cronTplEmailGenericRetry, a, m)
+	return cronRetryWithError(fmt.Sprintf(cronTplEmailGenericRetry, a, m), err)
 }
 
-func cronJobGenericRetry(attempt uint) string {
+func cronJobGenericRetry(attempt uint, err error) string {
 	a, m := cronAttempt(attempt)
-	return fmt.Sprintf(cronTplJobGenericRetry, a, m)
+	return cronRetryWithError(fmt.Sprintf(cronTplJobGenericRetry, a, m), err)
 }
 
-func cronTaskGenericRetry(attempt uint) string {
+func cronTaskGenericRetry(attempt uint, err error) string {
 	a, m := cronAttempt(attempt)
-	return fmt.Sprintf(cronTplTaskGenericRetry, a, m)
+	return cronRetryWithError(fmt.Sprintf(cronTplTaskGenericRetry, a, m), err)
+}
+
+func cronRetryWithError(base string, err error) string {
+	if err == nil || strings.TrimSpace(err.Error()) == "" {
+		return base
+	}
+	return fmt.Sprintf("%s Last error: %s", base, strings.TrimSpace(err.Error()))
 }
 
 func cronJobGoogleAuthRetry(attempt uint) string {

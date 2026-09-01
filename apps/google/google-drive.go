@@ -53,6 +53,26 @@ type PaginatedFilesResponse struct {
 	TotalFiles    int64        `json:"total_files"`
 }
 
+// FlatDriveFile is a non-folder file projection used by scalable autosync baseline listing.
+type FlatDriveFile struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	MimeType     string   `json:"mime_type"`
+	Parents      []string `json:"parents,omitempty"`
+	ModifiedTime string   `json:"modified_time,omitempty"`
+	Size         int64    `json:"size,omitempty"`
+	Md5Checksum  string   `json:"md5_checksum,omitempty"`
+	Version      int64    `json:"version,omitempty"`
+	DriveID      string   `json:"drive_id,omitempty"`
+}
+
+type FlatDriveFilesResponse struct {
+	Files               []FlatDriveFile `json:"files"`
+	NextPageToken       string          `json:"nextPageToken,omitempty"`
+	NextPageTokenLegacy string          `json:"next_page_token,omitempty"`
+	PageSize            int64           `json:"page_size"`
+}
+
 // createFilesJSON creates a FilesJSON object from a Google Drive file
 func createFilesJSON(file *drive.File, synced bool, path string) *FilesJSON {
 	// Parse created time
@@ -85,6 +105,53 @@ func createFilesJSON(file *drive.File, synced bool, path string) *FilesJSON {
 		CreatedAt:         createdAt,
 		Synced:            synced,
 	}
+}
+
+// ListNonFolderFilesFlat returns a flat, paginated list of non-folder files across My Drive and shared drives.
+func ListNonFolderFilesFlat(c echo.Context, pageToken string) (*FlatDriveFilesResponse, error) {
+	srv, err := getDriveService(c)
+	if err != nil {
+		return nil, err
+	}
+	return ListNonFolderFilesFlatWithService(srv, pageToken)
+}
+
+// ListNonFolderFilesFlatWithService is shared by HTTP route and cron flow.
+func ListNonFolderFilesFlatWithService(srv *drive.Service, pageToken string) (*FlatDriveFilesResponse, error) {
+	query := "trashed=false and mimeType!='application/vnd.google-apps.folder'"
+	call := srv.Files.List().
+		Q(query).
+		SupportsAllDrives(true).
+		IncludeItemsFromAllDrives(true).
+		Fields("nextPageToken, files(id,name,mimeType,parents,modifiedTime,size,md5Checksum,version,driveId)")
+	if strings.TrimSpace(pageToken) != "" {
+		call = call.PageToken(strings.TrimSpace(pageToken))
+	}
+	resp, err := call.Do()
+	if err != nil {
+		return nil, fmt.Errorf("list non-folder drive files: %w", err)
+	}
+
+	out := make([]FlatDriveFile, 0, len(resp.Files))
+	for _, f := range resp.Files {
+		out = append(out, FlatDriveFile{
+			ID:           f.Id,
+			Name:         f.Name,
+			MimeType:     f.MimeType,
+			Parents:      f.Parents,
+			ModifiedTime: f.ModifiedTime,
+			Size:         f.Size,
+			Md5Checksum:  f.Md5Checksum,
+			Version:      f.Version,
+			DriveID:      f.DriveId,
+		})
+	}
+	return &FlatDriveFilesResponse{
+		Files:               out,
+		NextPageToken:       resp.NextPageToken,
+		NextPageTokenLegacy: resp.NextPageToken,
+		PageSize:            int64(len(resp.Files)),
+	}, nil
 }
 
 // GetFileNames retrieves all file names and their IDs from Google Drive
@@ -280,12 +347,30 @@ func GetDriveService(c echo.Context) (*drive.Service, error) {
 	return getDriveService(c)
 }
 
+// GetDriveServiceUsingToken builds a Drive API client for background restore workers.
+func GetDriveServiceUsingToken(accessToken string) (*drive.Service, error) {
+	client, err := clientUsingTokenScopes(accessToken, restoreDriveScope)
+	if err != nil {
+		return nil, err
+	}
+	return drive.NewService(context.Background(), option.WithHTTPClient(client))
+}
+
 func clientUsingToken(token string) (*http.Client, error) {
+	return clientUsingTokenScopes(token,
+		drive.DriveScope,
+		gs.CloudPlatformScope,
+		gs.DevstorageFullControlScope,
+		gs.DevstorageReadWriteScope,
+	)
+}
+
+func clientUsingTokenScopes(token string, scopes ...string) (*http.Client, error) {
 	b, err := os.ReadFile("credentials.json")
 	if err != nil {
 		return nil, fmt.Errorf("unable to read client secret file: %v", err)
 	}
-	config, err := google.ConfigFromJSON(b, drive.DriveScope, gs.CloudPlatformScope, gs.DevstorageFullControlScope, gs.DevstorageReadWriteScope)
+	config, err := google.ConfigFromJSON(b, scopes...)
 	if err != nil {
 		return nil, fmt.Errorf("unable to parse client secret file to config: %v", err)
 	}
@@ -1625,7 +1710,19 @@ func (rc *RestoreContext) CheckFileExists(ctx context.Context, fileName, parentI
 	return nil, nil
 }
 
+func (rc *RestoreContext) RestoreFileFromReader(ctx context.Context, metadata *DriveFileMetadata, content io.Reader) error {
+	return rc.restoreFileWithContent(ctx, metadata, content)
+}
+
 func (rc *RestoreContext) RestoreFile(ctx context.Context, metadata *DriveFileMetadata, fileBytes []byte) error {
+	var content io.Reader
+	if len(fileBytes) > 0 {
+		content = bytes.NewReader(fileBytes)
+	}
+	return rc.restoreFileWithContent(ctx, metadata, content)
+}
+
+func (rc *RestoreContext) restoreFileWithContent(ctx context.Context, metadata *DriveFileMetadata, content io.Reader) error {
 	parentID, err := rc.RebuildFolderHierarchy(ctx, metadata.Key)
 	if err != nil {
 		return err
@@ -1682,10 +1779,22 @@ func (rc *RestoreContext) RestoreFile(ctx context.Context, metadata *DriveFileMe
 		}
 	}
 
-	return rc.CreateFile(ctx, name, parentID, metadata, fileBytes)
+	return rc.CreateFileFromReader(ctx, name, parentID, metadata, content)
+}
+
+func (rc *RestoreContext) CreateFileFromReader(ctx context.Context, fileName, parentID string, metadata *DriveFileMetadata, content io.Reader) error {
+	return rc.createFileWithContent(ctx, fileName, parentID, metadata, content)
 }
 
 func (rc *RestoreContext) CreateFile(ctx context.Context, fileName, parentID string, metadata *DriveFileMetadata, fileBytes []byte) error {
+	var content io.Reader
+	if len(fileBytes) > 0 {
+		content = bytes.NewReader(fileBytes)
+	}
+	return rc.createFileWithContent(ctx, fileName, parentID, metadata, content)
+}
+
+func (rc *RestoreContext) createFileWithContent(ctx context.Context, fileName, parentID string, metadata *DriveFileMetadata, content io.Reader) error {
 	file := &drive.File{
 		Name:     fileName,
 		Parents:  []string{parentID},
@@ -1697,8 +1806,8 @@ func (rc *RestoreContext) CreateFile(ctx context.Context, fileName, parentID str
 	if rc.DriveID != "" {
 		createCall = createCall.SupportsAllDrives(true)
 	}
-	if len(fileBytes) > 0 {
-		createCall = createCall.Media(bytes.NewReader(fileBytes))
+	if content != nil {
+		createCall = createCall.Media(content)
 	}
 
 	created, err := createCall.Do()
@@ -1811,6 +1920,103 @@ type DriveBackupItem struct {
 	Content  []byte            `json:"content,omitempty"`
 }
 
+// DriveCronBackupMeta is JSON at {email}/meta/{yyyy}/{mm}/{dd}/{fileId}_{name}.json (cron autosync).
+type DriveCronBackupMeta struct {
+	FileID           string            `json:"file_id"`
+	Name             string            `json:"name"`
+	MimeType         string            `json:"mime_type"`
+	Parents          []string          `json:"parents,omitempty"`
+	CreatedTime      string            `json:"created_time,omitempty"`
+	ModifiedTime     string            `json:"modified_time,omitempty"`
+	Version          int64             `json:"version,omitempty"`
+	Md5Checksum      string            `json:"md5_checksum,omitempty"`
+	DriveID          string            `json:"drive_id,omitempty"`
+	LocationType     string            `json:"location_type,omitempty"`
+	Permissions      []DrivePermission `json:"permissions,omitempty"`
+	Starred          bool              `json:"starred"`
+	Trashed          bool              `json:"trashed"`
+	RemovedFromDrive bool              `json:"removed_from_drive,omitempty"`
+	DeletedAt        string            `json:"deleted_at,omitempty"`
+	LastKnownParents []string          `json:"last_known_parents,omitempty"`
+	IsFolder         bool              `json:"is_folder"`
+	DataObjectKey    string            `json:"data_object_key,omitempty"`
+	ExportMimeType   string            `json:"export_mime_type,omitempty"`
+	UpdatedAt        string            `json:"updated_at,omitempty"`
+}
+
+// SanitizeDrivePathSegment makes file/folder names safe for vault object keys.
+func SanitizeDrivePathSegment(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "/", "_")
+	s = strings.ReplaceAll(s, "\\", "_")
+	return s
+}
+
+// DriveBackupDisplayName returns a vault-safe display name (adds Google Apps extensions).
+func DriveBackupDisplayName(name, mimeType string) string {
+	name = SanitizeDrivePathSegment(name)
+	if name == "" {
+		name = "untitled"
+	}
+	return addGoogleAppsFileExtension(name, mimeType)
+}
+
+// DriveIDBasedMetaKey is cron metadata: {email}/meta/{yyyy}/{mm}/{dd}/{fileId}_{displayName}.json
+// createdTime is the Drive API createdTime (RFC3339); missing/invalid falls back to 1970/01/01.
+func DriveIDBasedMetaKey(email, fileID, displayName, createdTime string) string {
+	return fmt.Sprintf("%s/meta/%s/%s_%s.json",
+		strings.TrimSpace(email),
+		ObjectKeyDatePathFromRFC3339(createdTime),
+		strings.TrimSpace(fileID),
+		SanitizeDrivePathSegment(displayName),
+	)
+}
+
+// DriveIDBasedDataKey is cron file bytes: {email}/data/{yyyy}/{mm}/{dd}/{fileId}_{displayName}
+func DriveIDBasedDataKey(email, fileID, displayName, createdTime string) string {
+	return fmt.Sprintf("%s/data/%s/%s_%s",
+		strings.TrimSpace(email),
+		ObjectKeyDatePathFromRFC3339(createdTime),
+		strings.TrimSpace(fileID),
+		SanitizeDrivePathSegment(displayName),
+	)
+}
+
+// IsDriveIDBasedMetaKey reports cron meta paths.
+func IsDriveIDBasedMetaKey(key string) bool {
+	key = strings.TrimSpace(key)
+	return strings.Contains(key, "/meta/") && strings.HasSuffix(key, ".json")
+}
+
+// IsDriveIDBasedDataKey reports cron data paths (meta/data split layout).
+func IsDriveIDBasedDataKey(key string) bool {
+	key = strings.TrimSpace(key)
+	return strings.Contains(key, "/data/") && !strings.HasSuffix(key, ".json")
+}
+
+// CronMetaToDriveFileMetadata maps cron meta JSON to restore metadata.
+func CronMetaToDriveFileMetadata(m *DriveCronBackupMeta, objectKey string) DriveFileMetadata {
+	if m == nil {
+		return DriveFileMetadata{}
+	}
+	fileType := "file"
+	if m.IsFolder {
+		fileType = "folder"
+	}
+	return DriveFileMetadata{
+		Key:          objectKey,
+		Type:         fileType,
+		Name:         m.Name,
+		MimeType:     m.MimeType,
+		Parents:      m.Parents,
+		DriveID:      m.DriveID,
+		LocationType: m.LocationType,
+		Permissions:  m.Permissions,
+		ModifiedTime: m.ModifiedTime,
+		Starred:      m.Starred,
+	}
+}
+
 func RestoreFromBackup(ctx context.Context, srv *drive.Service, userEmail string, metadataJSON, fileBytes []byte) error {
 	metadata, err := ParseBackupMetadata(metadataJSON)
 	if err != nil {
@@ -1826,6 +2032,24 @@ func RestoreFromBackup(ctx context.Context, srv *drive.Service, userEmail string
 		return rc.RestoreFolder(ctx, metadata)
 	}
 	return rc.RestoreFile(ctx, metadata, fileBytes)
+}
+
+// RestoreFromBackupReader restores a file from metadata JSON and a content reader (restore-all streaming).
+func RestoreFromBackupReader(ctx context.Context, srv *drive.Service, userEmail string, metadataJSON []byte, content io.Reader) error {
+	metadata, err := ParseBackupMetadata(metadataJSON)
+	if err != nil {
+		return err
+	}
+
+	rc := NewRestoreContext(srv, userEmail)
+	if err := rc.ValidateAccess(ctx, metadata); err != nil {
+		return err
+	}
+
+	if metadata.Type == "folder" {
+		return rc.RestoreFolder(ctx, metadata)
+	}
+	return rc.RestoreFileFromReader(ctx, metadata, content)
 }
 
 func escapeSingleQuotes(s string) string {

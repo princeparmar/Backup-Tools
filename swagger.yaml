@@ -68,6 +68,19 @@ tags:
     description: Scheduled task management
   - name: Monitoring
     description: System monitoring and metrics
+  - name: Restore
+    description: |
+      Satellite-proxied restore-all (vault → Google). All routes require `token_key` header only
+      (no ACCESS_TOKEN). List routes resolve user_id from token_key internally — do not send
+      project_id or credential_id on GET /restore/credentials or GET /restore/workspaces.
+
+      **Breaking changes (list APIs):**
+      - Removed `GET /restore/workspace-mailboxes` — use `GET /restore/workspaces?domain=...` instead.
+      - `GET /restore/workspaces` without `domain` returns domain tab names (string array).
+      - `GET /restore/workspaces?domain=...` returns paginated mailbox emails from Google.
+      - `GET /restore/credentials` no longer accepts project_id; personal accounts only.
+
+      **Unchanged:** `GET /restore/prepare`, `POST /restore/all`, job polling routes still use project_id + login_id + service.
 
 paths:
   # Authentication Endpoints
@@ -181,28 +194,375 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /users-groups/domains:
+    get:
+      tags:
+        - Auto Sync
+      summary: List Connected Domains
+      description: |
+        Returns unique domain strings from connected credentials for the Users & Groups domain dropdown.
+        Scoped to credentials linked to the user's non-placeholder jobs.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      responses:
+        '200':
+          description: Unique domain strings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsersGroupsDomainsResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /users-groups/jobs/active:
+    put:
+      tags:
+        - Auto Sync
+      summary: Bulk update job active state (pause/resume)
+      description: |
+        Sets active true or false on multiple cron jobs in one request.
+        Each job is updated individually (same validation as PUT /auto-sync/job/{job_id}):
+        activating requires policy, schedule, StorX grant, and Google refresh_token where applicable.
+        Failures do not stop other jobs; see success and failed arrays in the response.
+        Use job_id from GET /users-groups entities[].services[] or mailbox overview.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UsersGroupsBulkActiveRequest'
+      responses:
+        '200':
+          description: Jobs updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsersGroupsBulkActiveResponse'
+        '400':
+          description: Invalid request
+        '401':
+          description: Unauthorized
+
+  /users-groups:
+    get:
+      tags:
+        - Auto Sync
+      summary: List Users and Groups (by email)
+      description: |
+        Paginated mailbox listing with full side-panel data per entity (no separate mailbox tab calls required).
+        Each entity has one services[] array (all five Google services): connected rows include job, backup timing,
+        schedule, and policy fields; disconnected rows only include method and connected false.
+        credential block covers the Credentials tab. account_type and credential_status support list filters.
+        Data from cron jobs only (mailboxes with at least one job).
+        Optional org_unit_path filter and org_units unique list are additive; existing filters unchanged.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - name: domain
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter to jobs under credentials matching this domain (from domains dropdown)
+        - name: search
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Email or OU search (partial match on job name, input_data.email, or org_unit_path)
+        - name: org_unit_path
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            Filter mailboxes by Google Workspace OU path (e.g. /Sales). Omit, all, or all_org_units = no filter.
+        - name: method
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [all, all_services, gmail, google_drive, google_photos, google_contacts, google_calendar]
+          description: |
+            Service filter (All Services dropdown). Omit, all, or all_services = no filter.
+            Otherwise only mailbox rows that have a job for that service; each row still lists all services.
+        - name: account_type
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [all, all_types, corporate, individual]
+          description: |
+            Mailbox account type filter. corporate = Workspace admin or delegated domain mailboxes;
+            individual = personal Gmail. Omit, all, or all_types = no filter.
+        - name: credential_status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [all, all_statuses, healthy, re_auth_required]
+          description: |
+            Credential health filter. Omit, all, or all_statuses = no filter.
+            re_auth_required = missing Google refresh_token or StorX access grant.
+        - name: active
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [all, all_statuses, true, false]
+          description: |
+            Backup active state filter. true = mailboxes with at least one active job;
+            false = mailboxes with at least one paused job. Omit or all = no filter.
+            Each entity row still lists all services with per-service active status.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 10
+          description: Max entities to return (default 10)
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+          description: Number of entities to skip
+      responses:
+        '200':
+          description: Paginated entity list
+        '400':
+          description: Invalid pagination parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsersGroupsListResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /users-groups/mailbox/overview:
+    get:
+      tags:
+        - Auto Sync
+      summary: Mailbox Overview tab (lazy-loaded side panel)
+      description: |
+        Overview tab when user opens a mailbox row. Per-service backup timing and active state.
+        Pause/resume via PUT /auto-sync/job/{job_id}. Restore via GET /restore/prepare + POST /restore/all.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - name: email
+          in: query
+          required: true
+          schema:
+            type: string
+          example: s.jenkins@acme.com
+      responses:
+        '200':
+          description: Mailbox overview
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsersGroupsMailboxOverviewResponse'
+        '400':
+          description: Missing email
+        '404':
+          description: No jobs for mailbox
+
+  /users-groups/mailbox/services:
+    get:
+      tags:
+        - Auto Sync
+      summary: Mailbox Services tab
+      description: |
+        All five Google workspace services with connected flag. Connect via POST /auto-sync/job onboarding.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - name: email
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Mailbox services
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsersGroupsMailboxServicesResponse'
+
+  /users-groups/mailbox/schedule:
+    get:
+      tags:
+        - Auto Sync
+      summary: Mailbox Schedule tab
+      description: |
+        Policy schedule per connected service. Edit via PUT /auto-sync/policy/{policy_id}.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - name: email
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Mailbox schedules
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsersGroupsMailboxScheduleResponse'
+
+  /users-groups/mailbox/credentials:
+    get:
+      tags:
+        - Auto Sync
+      summary: Mailbox Credentials tab
+      description: |
+        Shared OAuth credential for the mailbox. Reconnect via PUT /auto-sync/job/project.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - name: email
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Mailbox credential
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsersGroupsMailboxCredentialsResponse'
+
+  /autosync/stats:
+    get:
+      tags:
+        - Auto Sync
+      summary: Dashboard sync stats
+      description: |
+        Satellite dashboard top-row metrics: connected mailbox count, growth this week,
+        last sync time, and total synced items count.
+        Storage quota and plan/trial come from Satellite (not this endpoint).
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      responses:
+        '200':
+          description: Dashboard sync stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AutoSyncStatsResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /autosync/dashboard-alerts:
+    get:
+      tags:
+        - Auto Sync
+      summary: Dashboard alert cards
+      description: |
+        Satellite dashboard alert strip: auth errors, paused backups, and new mailboxes (24h).
+        Each section returns count plus mailbox rows grouped by email.
+        Personal accounts include all connected Google services (up to five jobs) under one item.
+        Re-auth detection uses missing Google refresh_token or StorX grant (credential_status only; no tokens returned).
+        Paused count = number of jobs with active false (per job, not per mailbox).
+        Paused items group paused jobs by mailbox email (only inactive services listed).
+        New = mailbox first job created_at within the last 24 hours.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      responses:
+        '200':
+          description: Dashboard alert sections
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AutosyncDashboardAlertsResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auto-sync/job/services:
+    get:
+      tags:
+        - Auto Sync
+      summary: List All Autosync Services
+      description: |
+        Returns all supported autosync services with per-method job counts (Services Update page).
+        Services with no jobs for the user return zero counts. Use filter.method on GET /auto-sync/job for Configure modal job listing.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      responses:
+        '200':
+          description: Connected services with per-method job counts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AutosyncServicesResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /auto-sync/job:
     get:
       tags:
         - Auto Sync
       summary: List All Jobs
-      description: Get all automatic sync jobs for the authenticated user
-      security:
-        - bearerAuth: []
+      description: |
+        Get automatic sync jobs for the authenticated user.
+        Optional filter query param (URL-encoded JSON) supports method for service-specific listing,
+        e.g. filter={"method":"gmail"} for Configure Gmail modal.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - name: filter
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            URL-encoded JSON filter. Fields: name, method, syncType, active, status, messageStatus, interval.
+            Example for Gmail only: {"method":"gmail"}
       responses:
         '200':
-          description: List of all jobs
+          description: List of jobs
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  message:
-                    type: string
-                  data:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/CronJob'
+                $ref: '#/components/schemas/AutosyncJobListResponse'
+        '400':
+          description: Invalid filter parameter
         '401':
           description: Unauthorized
           content:
@@ -242,8 +602,8 @@ paths:
     put:
       tags:
         - Auto Sync
-      summary: Update Job
-      description: Update an existing automatic sync job
+      summary: Update Job Active State
+      description: Update active flag for a single job. Schedule changes use PUT /auto-sync/policy/{policy_id}. Credential updates use PUT /auto-sync/job/project.
       security:
         - bearerAuth: []
       parameters:
@@ -258,7 +618,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/JobUpdateRequest'
+              $ref: '#/components/schemas/JobActiveUpdateRequest'
       responses:
         '200':
           description: Job updated successfully
@@ -342,7 +702,7 @@ paths:
       tags:
         - Auto Sync
       summary: Get Interval Configuration
-      description: Get available interval configuration options
+      description: Returns all schedule options (3h, 12h, daily, weekly, monthly) and valid on values per interval
       security:
         - bearerAuth: []
       responses:
@@ -353,18 +713,276 @@ paths:
               schema:
                 type: object
                 properties:
-                  monthly:
-                    type: array
-                    items:
-                      type: string
-                  weekly:
-                    type: array
-                    items:
-                      type: string
-                  daily:
-                    type: array
-                    items:
-                      type: string
+                  message:
+                    type: string
+                    example: Interval Values
+                  data:
+                    type: object
+                    additionalProperties:
+                      type: array
+                      items:
+                        type: string
+
+  /auto-sync/job/project:
+    put:
+      tags:
+        - Auto Sync
+      summary: Update Connected Account (Project)
+      description: Update credential tokens, bulk schedule for all linked jobs, or bulk active state
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectUpdateRequest'
+      responses:
+        '200':
+          description: Project updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectUpdateResponse'
+
+  /auto-sync/policy/merge/preview:
+    get:
+      tags:
+        - Auto Sync Policy
+      summary: Preview Mergeable Duplicate Policies
+      description: |
+        Read-only preview of duplicate policy groups for the authenticated user.
+        Policies are grouped when they share the same schedule (interval + on + retention).
+        Merge via POST /auto-sync/policy/merge with policy_id values from policies[] and a new policy name.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      responses:
+        '200':
+          description: Merge preview (may be empty when no duplicates exist)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyMergePreviewResponse'
+
+  /auto-sync/policy/merge:
+    post:
+      tags:
+        - Auto Sync Policy
+      summary: Merge Selected Duplicate Policies
+      description: |
+        Merges one duplicate policy group into a newly created named policy.
+        All policies in the duplicate set must be included. All jobs move to the new policy; source policies are removed.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyMergeExecuteRequest'
+      responses:
+        '200':
+          description: Merge completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyMergeExecuteResponse'
+        '400':
+          description: Invalid or incomplete policy_ids set
+        '404':
+          description: Policy not found for user
+        '409':
+          description: Policy name already exists for user
+
+  /auto-sync/policy:
+    get:
+      tags:
+        - Auto Sync Policy
+      summary: List Policies For User
+      description: |
+        Returns all named policies for the authenticated user, including policies with zero linked jobs.
+        Each row includes schedule, linked_job_count, and unique services[].
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      responses:
+        '200':
+          description: Policy list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyListResponse'
+    post:
+      tags:
+        - Auto Sync Policy
+      summary: Create Policy
+      description: |
+        Creates a named policy (unique per user). Optionally rebinds job_ids (split / create-and-assign).
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyCreateRequest'
+      responses:
+        '200':
+          description: Policy created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyCreateResponse'
+        '409':
+          description: Policy name already exists for user
+
+  /auto-sync/policy/options:
+    get:
+      tags:
+        - Auto Sync Policy
+      summary: List Policy Options
+      description: Returns policy_id and name for all user policies (move picker).
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      responses:
+        '200':
+          description: Policy options
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyOptionsResponse'
+
+  /auto-sync/policy/available-assignments:
+    get:
+      tags:
+        - Auto Sync Policy
+      summary: Available Assignments For Add Email Modal
+      description: |
+        Step 1 (no email param): emails[] with here_count / other_count for all user jobs.
+        Step 2 (email param set): services[] for the selected mailbox.
+        policy_id query is badge context only — does not filter loaded jobs.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - name: policy_id
+          in: query
+          required: true
+          schema:
+            type: integer
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: email
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Available assignments
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/PolicyAvailableEmailsResponse'
+                  - $ref: '#/components/schemas/PolicyAvailableServicesResponse'
+
+  /auto-sync/policy/move:
+    post:
+      tags:
+        - Auto Sync Policy
+      summary: Move Assignments To Policy
+      description: Rebinds job_ids to target_policy_id without changing target schedule.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyMoveRequest'
+      responses:
+        '200':
+          description: Assignments moved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyMoveResponse'
+
+  /auto-sync/policy/{policy_id}:
+    get:
+      tags:
+        - Auto Sync Policy
+      summary: Get Policy By ID
+      description: Manage page — policy summary plus linked_jobs (optional search filters assignments only).
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - name: policy_id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: search
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Policy details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyDetailResponse'
+    put:
+      tags:
+        - Auto Sync Policy
+      summary: Update Policy Schedule And Retention
+      description: |
+        Global save — updates interval, on, and retention for all jobs linked to this policy.
+        Split and move use POST /auto-sync/policy and POST /auto-sync/policy/move.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - name: policy_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyUpdateRequest'
+      responses:
+        '200':
+          description: Policy updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyUpdateResponse'
+    delete:
+      tags:
+        - Auto Sync Policy
+      summary: Delete Policy
+      description: |
+        Deletes a policy only when it has zero linked jobs.
+        Move all assignments to another policy first (POST /auto-sync/policy/move).
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - name: policy_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Policy deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyDeleteResponse'
+        '404':
+          description: Policy not found for user
+        '409':
+          description: Policy still has linked jobs
 
   /auto-sync/task/{job_id}:
     post:
@@ -536,6 +1154,57 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/DriveFile'
+
+  /google/drive-flat-files:
+    get:
+      tags:
+        - Google Drive
+      summary: List Flat Non-Folder Files
+      description: Flat paginated list of non-folder files across My Drive and Shared Drives. No recursion or path building.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: nextPageToken
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: page_token
+          in: query
+          required: false
+          deprecated: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Flat non-folder file page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  files:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        mime_type: { type: string }
+                        parents:
+                          type: array
+                          items: { type: string }
+                        modified_time: { type: string }
+                        size: { type: integer }
+                        md5_checksum: { type: string }
+                        version: { type: integer }
+                        drive_id: { type: string }
+                  nextPageToken:
+                    type: string
+                  next_page_token:
+                    type: string
+                  page_size:
+                    type: integer
 
   /google/drive-get-file/{ID}:
     get:
@@ -844,6 +1513,221 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/PhotoItem'
+
+  /google/contacts/list:
+    get:
+      tags:
+        - Google Contacts
+      summary: List Contacts
+      description: Paginated list of Google contacts via People API connections.list. Includes synced flag for cron ID-based objects.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: nextPageToken
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: pageToken
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: page_token
+          in: query
+          required: false
+          deprecated: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Contacts page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  contacts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        phones:
+                          type: array
+                          items: { type: string }
+                        emails:
+                          type: array
+                          items: { type: string }
+                        organizations:
+                          type: array
+                          items: { type: string }
+                        synced: { type: boolean }
+                  nextPageToken: { type: string }
+                  next_page_token: { type: string }
+
+  /google/satellite-to-contacts:
+    post:
+      tags:
+        - Google Contacts
+      summary: Restore Contacts from Satellite
+      description: |
+        Restores up to 10 contacts from vault to Google Contacts.
+        Request body is a JSON array of base64-encoded satellite object keys
+        (e.g. user@gmail.com/contacts/{id}.json). Requires Google contacts write scope on the access token.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+              description: Base64-encoded object keys in google-contacts bucket
+      responses:
+        '200':
+          description: Restore completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestoreKeysResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /google/calendar/list:
+    get:
+      tags:
+        - Google Calendar
+      summary: List Calendars
+      description: Lists Google calendars (calendarList). Append-only backup; cancelled events on Google do not remove vault copies.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Calendar list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FlatCalendarsResponse'
+
+  /google/calendar/events/{calendarId}:
+    get:
+      tags:
+        - Google Calendar
+      summary: List Calendar Events
+      description: Paginated events.list for one calendar (baseline pageToken or incremental syncToken). Includes synced flag from synced_objects.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: calendarId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: nextPageToken
+          in: query
+          schema:
+            type: string
+        - name: pageToken
+          in: query
+          schema:
+            type: string
+        - name: page_token
+          in: query
+          deprecated: true
+          schema:
+            type: string
+        - name: syncToken
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Events page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FlatCalendarEventsResponse'
+
+  /google/satellite-to-calendar:
+    post:
+      tags:
+        - Google Calendar
+      summary: Restore Calendar Events from Satellite
+      description: |
+        Restores up to 10 calendar events from vault to Google Calendar.
+        Request body is a JSON array of base64-encoded object keys
+        (e.g. user@gmail.com/calendar/events/{calendarId}/{eventId}.json).
+        Creates new events (new Google IDs). Requires calendar write scope on the access token.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+      responses:
+        '200':
+          description: Restore completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestoreKeysResponse'
+
+  /google/photos-flat-media:
+    get:
+      tags:
+        - Google Photos
+      summary: List Flat Library Media
+      description: Flat paginated list of all library media items (no album). Includes synced flag for cron ID-based objects.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: nextPageToken
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: page_token
+          in: query
+          required: false
+          deprecated: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Flat media item page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mediaItems:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        filename: { type: string }
+                        mime_type: { type: string }
+                        creation_time: { type: string }
+                        base_url: { type: string }
+                        product_url: { type: string }
+                        width: { type: string }
+                        height: { type: string }
+                        synced: { type: boolean }
+                  nextPageToken: { type: string }
+                  next_page_token: { type: string }
 
   /google/photos-list-all:
     get:
@@ -2079,7 +2963,532 @@ paths:
                   # TYPE http_requests_total counter
                   http_requests_total{method="GET",endpoint="/api/health"} 100
 
+  # Restore All Endpoints (Satellite BFF — token_key auth, aligned with /auto-sync)
+  /restore/workspaces:
+    get:
+      tags:
+        - Restore
+      summary: Workspace domain tabs or paginated mailbox list
+      description: |
+        Authenticated via token_key only — user_id is resolved from Satellite session and
+        admin credentials are looked up internally (no project_id or credential_id from UI).
+
+        Without domain — returns connected workspace domain names for UI tabs.
+        With domain — returns paginated mailbox emails from Google Admin SDK for that domain.
+        Supports search, limit, and offset. Optional login_id excludes one mailbox.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - in: query
+          name: domain
+          required: false
+          schema:
+            type: string
+          description: Workspace domain tab; when set, returns paginated mailboxes for that domain
+        - in: query
+          name: search
+          required: false
+          schema:
+            type: string
+          description: Filter mailboxes by email substring (only when domain is set)
+        - in: query
+          name: login_id
+          required: false
+          schema:
+            type: string
+          description: Optional mailbox to exclude (only when domain is set)
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            default: 20
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Workspace tabs or mailbox list
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      workspaces:
+                        type: array
+                        items:
+                          type: string
+                        description: Connected workspace domain names (one UI tab each)
+                  - type: object
+                    properties:
+                      mailboxes:
+                        type: array
+                        items:
+                          type: string
+                      pagination:
+                        $ref: '#/components/schemas/RestoreListPagination'
+        '422':
+          description: Admin reconnect required before listing from Google
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: admin Google reconnect required to list workspace mailboxes
+        '404':
+          description: No connected admin_workspace credential for the requested domain
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: workspace not found
+        '502':
+          description: Google Admin SDK directory list failed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: failed to list workspace mailboxes from Google
+
+  /restore/credentials:
+    get:
+      tags:
+        - Restore
+      summary: List personal Google accounts for restore
+      description: |
+        Authenticated via token_key only — credentials are loaded by user_id from DB
+        (no project_id). Workspace domains use GET /restore/workspaces.
+        Supports search, limit, and offset. Optional login_id excludes one mailbox.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - in: query
+          name: login_id
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: search
+          required: false
+          schema:
+            type: string
+          description: Filter personal accounts by email substring
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            default: 20
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Personal credential list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  credentials:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        email:
+                          type: string
+                        has_backup:
+                          type: boolean
+                        needs_google_reconnect:
+                          type: boolean
+                  pagination:
+                    $ref: '#/components/schemas/RestoreListPagination'
+        '401':
+          description: Missing or invalid token_key
+
+  /restore/prepare:
+    get:
+      tags:
+        - Restore
+      summary: Pre-flight restore readiness
+      description: |
+        Checks StorX grant (internal refresh if missing), OAuth write scopes or Workspace DWD
+        impersonation on the target mailbox, backup data count, and live API probe before
+        POST /restore/all. Optional target_email (≠ login_id) selects migration write mailbox.
+        Workspace targets attempt DWD when domain is non-consumer and SA is configured; probe
+        failure returns delegation_setup for Admin Console setup, or falls back to OAuth when
+        the target has a connected credential. Personal / consumer targets use OAuth.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - in: query
+          name: project_id
+          required: true
+          schema:
+            type: string
+          description: Storj/Satellite project id (same as autosync policy UI)
+        - in: query
+          name: login_id
+          required: true
+          schema:
+            type: string
+          description: Source backup mailbox (StorX prefix)
+        - in: query
+          name: service
+          required: true
+          schema:
+            type: string
+            enum: [gmail, drive, photos, calendar, contacts]
+        - in: query
+          name: target_email
+          required: false
+          schema:
+            type: string
+          description: Google account to restore into (migration). Picked from GET /restore/credentials (personal) or GET /restore/workspaces?domain=... (workspace). Omit or same as login_id for in-place restore.
+      responses:
+        '200':
+          description: Readiness result (ready true or false with reason)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ready:
+                    type: boolean
+                  reason:
+                    type: string
+                  auth_mode:
+                    type: string
+                    enum: [oauth, dwd]
+                  account_type:
+                    type: string
+                  service:
+                    type: string
+                  project_id:
+                    type: string
+                  login_id:
+                    type: string
+                  backup_item_count:
+                    type: integer
+                  missing_permissions:
+                    type: array
+                    items:
+                      type: object
+                  delegation_setup:
+                    type: object
+                    description: client_id + scopes map (gmail, drive, calendar, contacts, photos) for Admin Console DWD
+                  required_dwd_scopes:
+                    type: array
+                    items:
+                      type: string
+                    description: All restore scope URLs the Workspace admin must authorize together
+                  reconnect_hint:
+                    type: string
+                  target_email:
+                    type: string
+                    description: Target Google account email (derived from credential_id when migration)
+                  credential_id:
+                    type: integer
+                    description: Credential to reconnect (target write cred for migration)
+                  migration:
+                    type: boolean
+        '401':
+          description: Missing or invalid token_key
+
+  /backup-restore/logs:
+    get:
+      tags:
+        - Backup & Restore Logs
+      summary: List backup and restore activity logs
+      description: |
+        Unified activity feed for the dashboard widget. Returns latest backup (autosync) job
+        snapshots and restore job entries in one merged timeline sorted by most recent activity.
+        Each log row has exactly five fields — type, subject, method, message, message_status.
+        `limit` applies to the merged list (e.g. limit=10 returns up to 10 total rows, not 10 per type).
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - in: query
+          name: types
+          schema:
+            type: string
+            default: backup,restore
+          description: Comma-separated — backup, restore (default both)
+        - in: query
+          name: search
+          schema:
+            type: string
+          description: Partial match on subject or message
+        - in: query
+          name: method
+          schema:
+            type: string
+          description: Exact service method (gmail, google_drive, …)
+        - in: query
+          name: message_status
+          schema:
+            type: string
+            enum: [info, warning, error]
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 10
+            maximum: 100
+          description: Rows per page (default 10, max 100)
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Backup and restore logs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BackupRestoreLogsResponse'
+        '400':
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /restore/live:
+    get:
+      tags:
+        - Restore
+      summary: Get active restore jobs
+      description: |
+        Poll in-progress restore-all jobs for the authenticated user, with progress counters
+        and running/retrying batch tasks. Same usage pattern as GET /auto-sync/live.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      responses:
+        '200':
+          description: List of active restore jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Active Restore Jobs List
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LiveRestoreJob'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /restore/jobs:
+    get:
+      tags:
+        - Restore
+      summary: List restore jobs
+      description: Recent restore jobs for the user (all statuses). Optional query limit (default 20). No secrets in response.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Job list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  data:
+                    type: array
+                    items:
+                      type: object
+
+  /restore/all:
+    post:
+      tags:
+        - Restore
+      summary: Start restore-all job
+      description: |
+        Queue an async restore job for one Google service and account.
+        Credentials (StorX + Google refresh) are resolved from google_backup_credentials by project_id.
+        Re-runs the same checks as GET /restore/prepare. Satellite must send token_key only (no ACCESS_TOKEN headers).
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                service:
+                  type: string
+                  enum: [gmail, drive, photos, calendar, contacts]
+                  example: gmail
+                project_id:
+                  type: string
+                  description: Storj/Satellite project id
+                login_id:
+                  type: string
+                  example: user@gmail.com
+                target_email:
+                  type: string
+                  description: Migration write mailbox (optional). From personal picker or workspace domain list. Omit for in-place restore.
+              required:
+                - service
+                - project_id
+                - login_id
+      responses:
+        '202':
+          description: Job queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id:
+                    type: integer
+                  status:
+                    type: string
+                  message:
+                    type: string
+        '409':
+          description: Active restore already in progress for user+service+login_id
+        '400':
+          description: Invalid request
+        '422':
+          description: Not ready (same body as GET /restore/prepare when ready is false)
+        '401':
+          description: Missing or invalid token_key
+
+  /restore/job/{job_id}:
+    get:
+      tags:
+        - Restore
+      summary: Get restore job progress
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - in: path
+          name: job_id
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Job status and counters
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id:
+                    type: integer
+                  status:
+                    type: string
+                  service:
+                    type: string
+                  login_id:
+                    type: string
+                  total:
+                    type: integer
+                  processed:
+                    type: integer
+                  failed:
+                    type: integer
+                  cursor_id:
+                    type: integer
+        '404':
+          description: Job not found
+
+  /restore/job/{job_id}/cancel:
+    post:
+      tags:
+        - Restore
+      summary: Cancel restore job
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - in: path
+          name: job_id
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Job cancelled
+        '400':
+          description: Job already finished
+
+  /restore/job/{job_id}/dead-items:
+    get:
+      tags:
+        - Restore
+      summary: List failed object keys (DLQ)
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - in: path
+          name: job_id
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Dead letter items for the job
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        object_key:
+                          type: string
+                        reason:
+                          type: string
+                        error_code:
+                          type: string
+
 components:
+  parameters:
+    tokenKeyHeader:
+      name: token_key
+      in: header
+      required: true
+      schema:
+        type: string
+      description: Satellite session token (_tokenKey). Required for /auto-sync/*, /autosync/*, and /restore/* (Satellite BFF).
+
   securitySchemes:
     bearerAuth:
       type: http
@@ -2115,6 +3524,52 @@ components:
           type: string
           example: "Error description"
 
+    BackupRestoreLogEntry:
+      type: object
+      required:
+        - type
+        - subject
+        - method
+        - message
+        - message_status
+      properties:
+        type:
+          type: string
+          enum: [backup, restore]
+          description: backup = autosync job; restore = restore job
+        subject:
+          type: string
+          description: Mailbox email or account name (backup) or login_id (restore)
+        method:
+          type: string
+          example: gmail
+        message:
+          type: string
+          example: Automatic backup completed successfully
+        message_status:
+          type: string
+          enum: [info, warning, error]
+
+    BackupRestoreLogsResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: Backup and restore logs
+        logs:
+          type: array
+          items:
+            $ref: '#/components/schemas/BackupRestoreLogEntry'
+        pagination:
+          type: object
+          properties:
+            limit:
+              type: integer
+            offset:
+              type: integer
+            total_count:
+              type: integer
+
     # Auto Sync Schemas
     ActiveJob:
       type: object
@@ -2138,6 +3593,80 @@ components:
           type: string
           format: date-time
 
+    RestoreListPagination:
+      type: object
+      properties:
+        limit:
+          type: integer
+          example: 20
+        offset:
+          type: integer
+          example: 0
+        page:
+          type: integer
+          example: 1
+        total_pages:
+          type: integer
+          example: 3
+        total_count:
+          type: integer
+          example: 42
+
+    LiveRestoreJob:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 42
+        service:
+          type: string
+          example: gmail
+        method:
+          type: string
+          example: gmail
+        login_id:
+          type: string
+          example: user@gmail.com
+        status:
+          type: string
+          enum: [running]
+          example: running
+        message:
+          type: string
+        message_status:
+          type: string
+        total:
+          type: integer
+        processed:
+          type: integer
+        failed:
+          type: integer
+        cursor_id:
+          type: integer
+        tasks_total:
+          type: integer
+        tasks_completed:
+          type: integer
+        tasks_failed:
+          type: integer
+        progress_percent:
+          type: number
+          format: float
+          example: 24.5
+        tasks:
+          type: array
+          items:
+            type: object
+            properties:
+              start_time:
+                type: string
+                format: date-time
+              status:
+                type: string
+                enum: [running, retrying]
+              batch_index:
+                type: integer
+
     CronJob:
       type: object
       properties:
@@ -2156,6 +3685,9 @@ components:
         on:
           type: string
           example: "12am"
+        policy_id:
+          type: integer
+          example: 10
         active:
           type: boolean
           example: true
@@ -2165,6 +3697,394 @@ components:
         updated_at:
           type: string
           format: date-time
+
+    UsersGroupsDomainsResponse:
+      type: object
+      properties:
+        domains:
+          type: array
+          items:
+            type: string
+          example: ["acme.com", "gmail.com"]
+
+    UsersGroupsEntityServiceView:
+      type: object
+      properties:
+        method:
+          type: string
+          enum: [gmail, google_drive, google_photos, google_contacts, google_calendar]
+        connected:
+          type: boolean
+        job_id:
+          type: integer
+          description: Present when connected is true.
+        active:
+          type: boolean
+          description: Present when connected is true.
+        last_backup_at:
+          type: string
+          format: date-time
+          nullable: true
+        next_backup_at:
+          type: string
+          format: date-time
+          nullable: true
+        policy_id:
+          type: integer
+        policy_name:
+          type: string
+          description: Present when connected is true and the job has a linked policy.
+        interval:
+          type: string
+        on:
+          type: string
+        retention_type:
+          type: string
+
+    UsersGroupsBulkActiveRequest:
+      type: object
+      required:
+        - job_ids
+        - active
+      properties:
+        job_ids:
+          type: array
+          items:
+            type: integer
+          example: [12, 13, 14]
+        active:
+          type: boolean
+          example: false
+
+    UsersGroupsBulkActiveSuccessItem:
+      type: object
+      properties:
+        job_id:
+          type: integer
+        method:
+          type: string
+        email:
+          type: string
+        active:
+          type: boolean
+
+    UsersGroupsBulkActiveFailureItem:
+      type: object
+      properties:
+        job_id:
+          type: integer
+        email:
+          type: string
+        method:
+          type: string
+        error:
+          type: string
+
+    UsersGroupsBulkActiveResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: jobs updated
+        active:
+          type: boolean
+        success:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsersGroupsBulkActiveSuccessItem'
+        failed:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsersGroupsBulkActiveFailureItem'
+
+    UsersGroupsMailboxHeader:
+      type: object
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+        account_type:
+          type: string
+          enum: [corporate, individual]
+
+    UsersGroupsMailboxOverviewService:
+      type: object
+      properties:
+        job_id:
+          type: integer
+        method:
+          type: string
+        active:
+          type: boolean
+        last_backup_at:
+          type: string
+          format: date-time
+        next_backup_at:
+          type: string
+          format: date-time
+
+    UsersGroupsMailboxOverviewResponse:
+      allOf:
+        - $ref: '#/components/schemas/UsersGroupsMailboxHeader'
+        - type: object
+          properties:
+            services:
+              type: array
+              items:
+                $ref: '#/components/schemas/UsersGroupsMailboxOverviewService'
+
+    UsersGroupsMailboxServicesItem:
+      type: object
+      properties:
+        method:
+          type: string
+        connected:
+          type: boolean
+        job_id:
+          type: integer
+
+    UsersGroupsMailboxServicesResponse:
+      allOf:
+        - $ref: '#/components/schemas/UsersGroupsMailboxHeader'
+        - type: object
+          properties:
+            services:
+              type: array
+              items:
+                $ref: '#/components/schemas/UsersGroupsMailboxServicesItem'
+
+    UsersGroupsMailboxScheduleItem:
+      type: object
+      properties:
+        job_id:
+          type: integer
+        method:
+          type: string
+        policy_id:
+          type: integer
+        interval:
+          type: string
+        on:
+          type: string
+        retention_type:
+          type: string
+          enum: [never, 30_days, 1_year, 7_years]
+
+    UsersGroupsMailboxScheduleResponse:
+      allOf:
+        - $ref: '#/components/schemas/UsersGroupsMailboxHeader'
+        - type: object
+          properties:
+            schedules:
+              type: array
+              items:
+                $ref: '#/components/schemas/UsersGroupsMailboxScheduleItem'
+
+    UsersGroupsMailboxCredentialView:
+      type: object
+      properties:
+        credential_id:
+          type: integer
+        email:
+          type: string
+          description: OAuth holder email
+        needs_reconnect_google_auth:
+          type: boolean
+
+    UsersGroupsMailboxCredentialsResponse:
+      allOf:
+        - $ref: '#/components/schemas/UsersGroupsMailboxHeader'
+        - type: object
+          properties:
+            credential:
+              $ref: '#/components/schemas/UsersGroupsMailboxCredentialView'
+
+    UsersGroupsEntityView:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Display name derived from email (local part before @)
+        email:
+          type: string
+        account_type:
+          type: string
+          enum: [corporate, individual]
+          description: |
+            corporate = Google Workspace (admin OAuth holder or delegated domain mailbox).
+            individual = personal Gmail / legacy standalone OAuth.
+        credential_status:
+          type: string
+          enum: [healthy, re_auth_required]
+          description: |
+            healthy when Google refresh_token and StorX access grant are present (credential or resolved job tokens).
+            re_auth_required when either token is missing — UI should prompt reconnect.
+        credential:
+          $ref: '#/components/schemas/UsersGroupsMailboxCredentialView'
+        org_unit_path:
+          type: string
+          description: |
+            Google Workspace Organizational Unit path from Admin Directory, stored on the job at create
+            (e.g. /Sales). Empty for individual Gmail and for jobs created before OU capture.
+        services:
+          type: array
+          description: Always five rows (gmail, drive, photos, calendar, contacts) in stable order.
+          items:
+            $ref: '#/components/schemas/UsersGroupsEntityServiceView'
+
+    UsersGroupsPaginationView:
+      type: object
+      properties:
+        limit:
+          type: integer
+        offset:
+          type: integer
+        page:
+          type: integer
+          description: Current page derived from offset and limit
+        total_pages:
+          type: integer
+        total_count:
+          type: integer
+
+    UsersGroupsListResponse:
+      type: object
+      properties:
+        entities:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsersGroupsEntityView'
+        pagination:
+          $ref: '#/components/schemas/UsersGroupsPaginationView'
+        org_units:
+          type: array
+          items:
+            type: string
+          description: Unique Workspace OU paths among the filtered mailbox set (for the Org Units dropdown). Empty when none stored.
+
+    ServiceJobCountView:
+      type: object
+      properties:
+        method:
+          type: string
+          enum: [gmail, google_drive, google_photos, google_contacts, google_calendar]
+        total_jobs:
+          type: integer
+        active_jobs:
+          type: integer
+        deactive_jobs:
+          type: integer
+
+    AutosyncServicesResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        services:
+          type: array
+          items:
+            $ref: '#/components/schemas/ServiceJobCountView'
+
+    AutoSyncStatsResponse:
+      type: object
+      description: Satellite dashboard sync summary (GET /autosync/stats).
+      properties:
+        connected_accounts:
+          type: integer
+          description: Distinct mailbox emails with at least one non-placeholder backup job.
+        connected_accounts_growth_this_week:
+          type: integer
+          description: Mailboxes whose first backup job was created in the last 7 days.
+        last_sync_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Latest last_run across user autosync jobs.
+        last_sync_items_synced:
+          type: integer
+          format: int64
+          description: Total synced_objects for the user (all time).
+
+    AutosyncDashboardServiceView:
+      type: object
+      properties:
+        job_id:
+          type: integer
+        method:
+          type: string
+          enum: [gmail, google_drive, google_photos, google_contacts, google_calendar]
+        connected:
+          type: boolean
+        active:
+          type: boolean
+          nullable: true
+
+    AutosyncDashboardCredentialView:
+      type: object
+      properties:
+        credential_id:
+          type: integer
+        needs_reconnect_google_auth:
+          type: boolean
+
+    AutosyncDashboardMailboxView:
+      type: object
+      description: One mailbox row; services[] lists all Google backup jobs for that email.
+      properties:
+        email:
+          type: string
+        account_type:
+          type: string
+          enum: [corporate, individual]
+        credential_status:
+          type: string
+          enum: [healthy, re_auth_required]
+        connected_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Earliest job created_at for this mailbox.
+        credential:
+          $ref: '#/components/schemas/AutosyncDashboardCredentialView'
+        services:
+          type: array
+          items:
+            $ref: '#/components/schemas/AutosyncDashboardServiceView'
+
+    AutosyncDashboardAlertSection:
+      type: object
+      properties:
+        count:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AutosyncDashboardMailboxView'
+
+    AutosyncDashboardAlertsResponse:
+      type: object
+      description: Satellite dashboard alert cards (GET /autosync/dashboard-alerts).
+      properties:
+        re_auth_required:
+          $ref: '#/components/schemas/AutosyncDashboardAlertSection'
+        paused_backups:
+          $ref: '#/components/schemas/AutosyncDashboardAlertSection'
+        new_connected_accounts_24h:
+          $ref: '#/components/schemas/AutosyncDashboardAlertSection'
+
+    AutosyncJobListResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        success:
+          type: array
+          items:
+            $ref: '#/components/schemas/CronJob'
+        failed:
+          type: array
+          items: {}
 
     JobCreateRequest:
       type: object
@@ -2180,9 +4100,6 @@ components:
           items:
             type: string
           example: ["email1@example.com", "email2@example.com"]
-        code:
-          type: string
-          example: "oauth_code"
         refresh_token:
           type: string
           example: "refresh_token"
@@ -2200,9 +4117,6 @@ components:
         on:
           type: string
           example: "Monday"
-        code:
-          type: string
-          example: "oauth_code"
         refresh_token:
           type: string
           example: "refresh_token"
@@ -2214,6 +4128,488 @@ components:
         active:
           type: boolean
           example: true
+
+    JobActiveUpdateRequest:
+      type: object
+      properties:
+        active:
+          type: boolean
+          example: true
+      required:
+        - active
+
+    PolicyUpdateRequest:
+      type: object
+      properties:
+        interval:
+          type: string
+          example: "daily"
+        on:
+          type: string
+          example: "12am"
+        retention_type:
+          type: string
+          enum: [never, 30_days, 1_year, 7_years]
+          example: "1_year"
+      required:
+        - interval
+        - on
+
+    PolicyCreateRequest:
+      type: object
+      required:
+        - name
+        - interval
+        - retention_type
+      properties:
+        name:
+          type: string
+        interval:
+          type: string
+        on:
+          type: string
+        retention_type:
+          type: string
+        job_ids:
+          type: array
+          items:
+            type: integer
+
+    PolicyCreateResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        policy:
+          $ref: '#/components/schemas/PolicyManageSummaryView'
+        moved_jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyLinkedJobView'
+
+    PolicyMoveRequest:
+      type: object
+      required:
+        - target_policy_id
+        - job_ids
+      properties:
+        target_policy_id:
+          type: integer
+        job_ids:
+          type: array
+          items:
+            type: integer
+
+    PolicyMoveResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        target_policy_id:
+          type: integer
+        moved_jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyLinkedJobView'
+
+    PolicyOptionsResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        policies:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyOption'
+
+    PolicyOption:
+      type: object
+      properties:
+        policy_id:
+          type: integer
+        name:
+          type: string
+
+    PolicyAvailableEmailsResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        emails:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyAvailableEmailView'
+
+    PolicyAvailableEmailView:
+      type: object
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+        here_count:
+          type: integer
+        other_count:
+          type: integer
+
+    PolicyAvailableServicesResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        name:
+          type: string
+        email:
+          type: string
+        services:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyAvailableServiceView'
+
+    PolicyAvailableServiceView:
+      type: object
+      properties:
+        job_id:
+          type: integer
+        method:
+          type: string
+        service_label:
+          type: string
+        assignment:
+          type: string
+          enum: [here, other]
+        current_policy_id:
+          type: integer
+        current_policy_name:
+          type: string
+        can_add:
+          type: boolean
+
+    PolicyManageSummaryView:
+      type: object
+      properties:
+        policy_id:
+          type: integer
+        name:
+          type: string
+        interval:
+          type: string
+        on:
+          type: string
+        retention_type:
+          type: string
+        is_expired:
+          type: boolean
+        assignment_count:
+          type: integer
+        unique_email_count:
+          type: integer
+
+    PolicyMergeExecuteRequest:
+      type: object
+      required:
+        - policy_ids
+        - name
+      properties:
+        policy_ids:
+          type: array
+          minItems: 2
+          items:
+            type: integer
+          description: All policy IDs in one duplicate group (from merge preview).
+        name:
+          type: string
+          description: Name for the newly created merged policy.
+
+    PolicyScheduleView:
+      type: object
+      properties:
+        interval:
+          type: string
+        on:
+          type: string
+        retention_type:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        is_expired:
+          type: boolean
+
+    PolicyMergePreviewPolicyView:
+      type: object
+      properties:
+        policy_id:
+          type: integer
+        name:
+          type: string
+        linked_job_count:
+          type: integer
+        services:
+          type: array
+          items:
+            type: string
+
+    PolicyMergePreviewGroup:
+      type: object
+      properties:
+        schedule:
+          $ref: '#/components/schemas/PolicyScheduleView'
+          description: Shared schedule that groups these policies as duplicates.
+        policies:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyMergePreviewPolicyView'
+        total_jobs:
+          type: integer
+          description: Jobs that will move to the new merged policy.
+
+    PolicyMergePreviewResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        summary:
+          type: object
+          properties:
+            mergeable_group_count:
+              type: integer
+            policy_count:
+              type: integer
+            total_jobs:
+              type: integer
+        groups:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyMergePreviewGroup'
+
+    PolicyMergeExecuteResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        policy:
+          $ref: '#/components/schemas/PolicyListItemView'
+        removed_policy_ids:
+          type: array
+          items:
+            type: integer
+        source_policy_ids:
+          type: array
+          items:
+            type: integer
+        jobs_moved:
+          type: integer
+
+    PolicyListItemView:
+      allOf:
+        - $ref: '#/components/schemas/PolicyListRowPolicyView'
+      description: Shared policy row (detail/update/merge). Reconnect flags are on account only.
+
+    PolicyLinkedJobView:
+      type: object
+      properties:
+        job_id:
+          type: integer
+        name:
+          type: string
+        email:
+          type: string
+        method:
+          type: string
+
+    PolicyDetailResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        policy:
+          $ref: '#/components/schemas/PolicyManageSummaryView'
+        linked_jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyLinkedJobView'
+
+    PolicyUpdateResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        policy:
+          $ref: '#/components/schemas/PolicyManageSummaryView'
+
+    PolicyDeleteResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        policy_id:
+          type: integer
+
+    PolicyDeleteConflictResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        error:
+          type: string
+        linked_job_count:
+          type: integer
+
+    PolicyDetailView:
+      type: object
+      properties:
+        policy_id:
+          type: integer
+        credential_id:
+          type: integer
+        job_id:
+          type: integer
+        interval:
+          type: string
+        on:
+          type: string
+        retention_type:
+          type: string
+        is_expired:
+          type: boolean
+        email:
+          type: string
+        method:
+          type: string
+        active:
+          type: boolean
+        sync_type:
+          type: string
+
+    ConnectedAccountView:
+      type: object
+      properties:
+        project_id:
+          type: string
+          description: Storj project id for PUT /auto-sync/job/project reconnect save.
+        google_email:
+          type: string
+          description: OAuth holder email (admin for admin_workspace).
+        oauth_holder_email:
+          type: string
+          description: Same as google_email; use as google_email in project PUT body.
+        credential_id:
+          type: integer
+        storj_project_id:
+          type: string
+        account_type:
+          type: string
+          enum: [personal, employee_workspace, admin_workspace]
+        needs_google_reconnect:
+          type: boolean
+          description: True when no refresh_token on credential or any linked job (resolved).
+        needs_storx_reconnect:
+          type: boolean
+          description: True when no storx_token on credential or any linked job (resolved).
+        reconnect_scope:
+          type: string
+          example: credential
+
+    AutosyncJobItemView:
+      type: object
+      properties:
+        ID:
+          type: integer
+        policy_id:
+          type: integer
+        email:
+          type: string
+        method:
+          type: string
+        interval:
+          type: string
+        on:
+          type: string
+        active:
+          type: boolean
+
+    ProjectUpdateRequest:
+      type: object
+      properties:
+        project_id:
+          type: string
+        google_email:
+          type: string
+        refresh_token:
+          type: string
+        storx_token:
+          type: string
+        interval:
+          type: string
+        on:
+          type: string
+        active:
+          type: boolean
+
+    ProjectUpdateResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        account:
+          $ref: '#/components/schemas/ConnectedAccountView'
+        success:
+          type: array
+          items:
+            $ref: '#/components/schemas/AutosyncJobItemView'
+        failed:
+          type: array
+          items:
+            type: object
+
+    PolicyEnvelopeResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        success:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyDetailView'
+        failed:
+          type: array
+          items:
+            type: object
+
+    PolicyListRowPolicyView:
+      type: object
+      description: Named policy row on GET /auto-sync/policy.
+      properties:
+        policy_id:
+          type: integer
+        name:
+          type: string
+        interval:
+          type: string
+        on:
+          type: string
+        retention_type:
+          type: string
+        is_expired:
+          type: boolean
+        linked_job_count:
+          type: integer
+        services:
+          type: array
+          items:
+            type: string
+
+    PolicyListResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        policies:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyListRowPolicyView'
 
     DatabaseConnection:
       type: object
@@ -2338,6 +4734,74 @@ components:
         cover_photo_base_url:
           type: string
           example: "https://lh3.googleusercontent.com/..."
+
+    FlatCalendar:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "primary"
+        summary:
+          type: string
+          example: "Personal"
+        timezone:
+          type: string
+          example: "Asia/Kolkata"
+        primary:
+          type: boolean
+
+    FlatCalendarsResponse:
+      type: object
+      properties:
+        calendars:
+          type: array
+          items:
+            $ref: '#/components/schemas/FlatCalendar'
+
+    FlatCalendarEvent:
+      type: object
+      properties:
+        id:
+          type: string
+        summary:
+          type: string
+        status:
+          type: string
+        etag:
+          type: string
+        updated:
+          type: string
+        synced:
+          type: boolean
+          description: True if backed up to vault (append-only; cancellations on Google do not remove backup)
+
+    FlatCalendarEventsResponse:
+      type: object
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/FlatCalendarEvent'
+        nextPageToken:
+          type: string
+        nextSyncToken:
+          type: string
+        next_page_token:
+          type: string
+
+    RestoreKeysResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        processed_keys:
+          type: array
+          items:
+            type: string
+        failed_keys:
+          type: array
+          items:
+            type: string
 
     PhotoItem:
       type: object
@@ -2612,9 +5076,6 @@ components:
           items:
             type: string
           example: ["email1@example.com", "email2@example.com"]
-        code:
-          type: string
-          example: "oauth_code"
         refresh_token:
           type: string
           example: "refresh_token"

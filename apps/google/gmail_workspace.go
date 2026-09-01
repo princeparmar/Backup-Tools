@@ -25,12 +25,21 @@ type WorkspaceGmailSession struct {
 	APIUser string
 }
 
+// workspaceDelegationScopes — DWD scope URLs per Google backup product (Admin Console paste).
+var workspaceDelegationScopes = map[string]string{
+	"gmail":    "https://www.googleapis.com/auth/gmail.readonly",
+	"drive":    "https://www.googleapis.com/auth/drive.readonly",
+	"contacts": "https://www.googleapis.com/auth/contacts.readonly",
+	"calendar": "https://www.googleapis.com/auth/calendar.readonly",
+	"photos":   "https://www.googleapis.com/auth/photoslibrary.readonly",
+}
+
 // WorkspaceDelegationSetup contains the details an admin needs to configure DWD.
 type WorkspaceDelegationSetup struct {
-	ClientID         string   `json:"client_id"`
-	RequiredScopes   []string `json:"required_scopes"`
-	AdminConsolePath string   `json:"admin_console_path"`
-	AdminConsoleURL  string   `json:"admin_console_url"`
+	ClientID         string            `json:"client_id"`
+	Scopes           map[string]string `json:"scopes"`
+	AdminConsolePath string            `json:"admin_console_path"`
+	AdminConsoleURL  string            `json:"admin_console_url"`
 }
 
 var (
@@ -52,9 +61,13 @@ func GetWorkspaceDelegationSetup() (*WorkspaceDelegationSetup, error) {
 	if err != nil {
 		return nil, err
 	}
+	scopes := make(map[string]string, len(workspaceDelegationScopes))
+	for k, v := range workspaceDelegationScopes {
+		scopes[k] = v
+	}
 	return &WorkspaceDelegationSetup{
 		ClientID:         clientID,
-		RequiredScopes:   []string{gmail.GmailReadonlyScope},
+		Scopes:           scopes,
 		AdminConsolePath: "Security → Access and Data Controls → API controls → Domain-wide delegation",
 		AdminConsoleURL:  "https://admin.google.com/",
 	}, nil
@@ -151,14 +164,18 @@ func resolveDelegationSubject(mailbox, oauthAccountEmail string) (string, error)
 
 // delegationSubjectAllowed is false for consumer @gmail.com unless GMAIL_DELEGATION_ALLOW_GMAIL_COM=true.
 func delegationSubjectAllowed(email string) bool {
+	if !isConsumerGmailAddress(email) {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(utils.GetEnvWithKey("GMAIL_DELEGATION_ALLOW_GMAIL_COM")), "true")
+}
+
+func isConsumerGmailAddress(email string) bool {
 	e := strings.ToLower(strings.TrimSpace(email))
 	if e == "" || !strings.Contains(e, "@") {
 		return false
 	}
-	if strings.HasSuffix(e, "@gmail.com") || strings.HasSuffix(e, "@googlemail.com") {
-		return strings.EqualFold(strings.TrimSpace(utils.GetEnvWithKey("GMAIL_DELEGATION_ALLOW_GMAIL_COM")), "true")
-	}
-	return true
+	return strings.HasSuffix(e, "@gmail.com") || strings.HasSuffix(e, "@googlemail.com")
 }
 
 // GmailJobUsesDelegationWithoutOAuth is true when backup can skip OAuth refresh and use only domain-wide delegation.
@@ -213,6 +230,9 @@ func NewWorkspaceGmailSession(ctx context.Context, oauthAccessToken, oauthAccoun
 		}
 		return &WorkspaceGmailSession{Client: c, APIUser: apiUser}, nil
 	default:
+		if isConsumerGmailAddress(mailbox) {
+			return nil, fmt.Errorf("gmail backup for %q requires reconnecting the same Google account in your dashboard (personal Gmail does not support Workspace delegation)", mailbox)
+		}
 		c, err := NewGmailClientWithServiceAccountDelegation(ctx, mailbox)
 		if err != nil {
 			return nil, fmt.Errorf("delegated gmail access failed for %q (check domain-wide delegation + scopes): %w", mailbox, err)

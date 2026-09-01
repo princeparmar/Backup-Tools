@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +44,7 @@ type GoogleAuthResponse struct {
 	Email         string `json:"email"`
 	EmailVerified string `json:"email_verified"`
 	ExpiresIn     string `json:"expires_in"`
+	Scope         string `json:"scope"`
 	Error         string `json:"error"`
 }
 
@@ -464,17 +466,52 @@ func CheckUserAdminStatusWithToken(ctx context.Context, refreshToken, userEmail 
 	return IsUserAdmin(ctx, accessToken, userEmail)
 }
 
+// DomainUser is one Workspace directory mailbox from Admin SDK Directory users.list.
+type DomainUser struct {
+	Email       string `json:"email"`
+	OrgUnitPath string `json:"org_unit_path"`
+	Role        string `json:"role"`
+	IsAdmin     bool   `json:"is_admin"`
+}
+
+// DomainOrgUnit is a Workspace Organizational Unit with its mailboxes.
+type DomainOrgUnit struct {
+	Name        string       `json:"name"`
+	OrgUnitPath string       `json:"org_unit_path"`
+	UserCount   int          `json:"user_count"`
+	Users       []DomainUser `json:"users"`
+}
+
 // ListAllDomainUsers returns primary emails of non-suspended users in the domain (Admin SDK).
-// Pagination uses max 500 per page. accessToken must have admin.directory.user.readonly.
 func ListAllDomainUsers(ctx context.Context, accessToken, domain string) ([]string, error) {
+	users, err := ListAllDomainUsersDetailed(ctx, accessToken, domain)
+	if err != nil {
+		return nil, err
+	}
+	emails := make([]string, 0, len(users))
+	for _, u := range users {
+		if u.Email != "" {
+			emails = append(emails, u.Email)
+		}
+	}
+	return emails, nil
+}
+
+// ListAllDomainUsersDetailed returns non-suspended domain users with OU path and admin flags.
+// Pagination uses max 500 per page. accessToken must have admin.directory.user.readonly.
+func ListAllDomainUsersDetailed(ctx context.Context, accessToken, domain string) ([]DomainUser, error) {
 	svc, err := newAdminDirectoryService(ctx, accessToken)
 	if err != nil {
 		return nil, fmt.Errorf("admin directory service: %w", err)
 	}
-	var emails []string
+	var users []DomainUser
 	pageToken := ""
 	for {
-		call := svc.Users.List().Domain(strings.TrimSpace(domain)).MaxResults(500).OrderBy("email")
+		call := svc.Users.List().
+			Domain(strings.TrimSpace(domain)).
+			MaxResults(500).
+			OrderBy("email").
+			Fields("nextPageToken,users(primaryEmail,orgUnitPath,isAdmin,isDelegatedAdmin,suspended)")
 		if pageToken != "" {
 			call = call.PageToken(pageToken)
 		}
@@ -483,19 +520,87 @@ func ListAllDomainUsers(ctx context.Context, accessToken, domain string) ([]stri
 			return nil, fmt.Errorf("users.list: %w", err)
 		}
 		for _, u := range r.Users {
-			if u.Suspended {
+			if u == nil || u.Suspended || strings.TrimSpace(u.PrimaryEmail) == "" {
 				continue
 			}
-			if u.PrimaryEmail != "" {
-				emails = append(emails, u.PrimaryEmail)
-			}
+			users = append(users, DomainUser{
+				Email:       strings.TrimSpace(u.PrimaryEmail),
+				OrgUnitPath: NormalizeOrgUnitPath(u.OrgUnitPath),
+				IsAdmin:     u.IsAdmin || u.IsDelegatedAdmin,
+			})
 		}
 		pageToken = r.NextPageToken
 		if pageToken == "" {
 			break
 		}
 	}
-	return emails, nil
+	return users, nil
+}
+
+// NormalizeOrgUnitPath returns a Workspace OU path; empty values become "/".
+func NormalizeOrgUnitPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		return "/" + path
+	}
+	return path
+}
+
+// OrgUnitDisplayName is the last segment of an OU path ("/Sales" → "Sales").
+func OrgUnitDisplayName(path string) string {
+	path = NormalizeOrgUnitPath(path)
+	if path == "/" {
+		return "/"
+	}
+	path = strings.TrimSuffix(path, "/")
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		name := strings.TrimSpace(path[i+1:])
+		if name != "" {
+			return name
+		}
+	}
+	return path
+}
+
+// DomainUserRole is "admin" when the Directory user is a super or delegated admin.
+func DomainUserRole(u DomainUser) string {
+	if u.IsAdmin {
+		return "admin"
+	}
+	return "user"
+}
+
+// GroupDomainUsersByOrgUnit groups directory users by orgUnitPath, sorted by path then email.
+func GroupDomainUsersByOrgUnit(users []DomainUser) []DomainOrgUnit {
+	order := make([]string, 0)
+	byPath := make(map[string][]DomainUser)
+	for _, u := range users {
+		path := NormalizeOrgUnitPath(u.OrgUnitPath)
+		u.OrgUnitPath = path
+		u.Role = DomainUserRole(u)
+		if _, ok := byPath[path]; !ok {
+			order = append(order, path)
+		}
+		byPath[path] = append(byPath[path], u)
+	}
+	sort.Strings(order)
+	out := make([]DomainOrgUnit, 0, len(order))
+	for _, path := range order {
+		members := byPath[path]
+		sort.Slice(members, func(i, j int) bool {
+			return strings.ToLower(members[i].Email) < strings.ToLower(members[j].Email)
+		})
+		out = append(out, DomainOrgUnit{
+			Name:        OrgUnitDisplayName(path),
+			OrgUnitPath: path,
+			UserCount:   len(members),
+			Users:       members,
+		})
+	}
+	return out
 }
 
 // ListAllDomainUsersWithToken resolves access token from refresh token then lists domain users.
@@ -505,6 +610,15 @@ func ListAllDomainUsersWithToken(ctx context.Context, refreshToken, domain strin
 		return nil, fmt.Errorf("refresh token: %w", err)
 	}
 	return ListAllDomainUsers(ctx, accessToken, domain)
+}
+
+// ListAllDomainUsersDetailedWithToken resolves access token from refresh token then lists domain users with OU paths.
+func ListAllDomainUsersDetailedWithToken(ctx context.Context, refreshToken, domain string) ([]DomainUser, error) {
+	accessToken, err := AuthTokenUsingRefreshToken(refreshToken)
+	if err != nil {
+		return nil, fmt.Errorf("refresh token: %w", err)
+	}
+	return ListAllDomainUsersDetailed(ctx, accessToken, domain)
 }
 
 // ExtractDomainFromEmail returns the domain part of an email (e.g. "user@company.com" -> "company.com").
