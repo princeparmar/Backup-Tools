@@ -38,8 +38,9 @@ func gmailMailboxPathAndOAuthHolder(job *repo.CronJobListingDB, hasRefreshToken 
 	if strings.EqualFold(mailboxForSession, "me") && strings.Contains(path, "@") {
 		mailboxForSession = strings.TrimSpace(path)
 	}
-	oauthAccountEmail = repo.GmailConnectedAccountEmail(job)
-	if oauthAccountEmail == "" && hasRefreshToken {
+	// DISABLED(parent_id): repo.GmailConnectedAccountEmail(job) — use ResolvedOAuthHolderEmail in Run().
+	_ = hasRefreshToken
+	if oauthAccountEmail == "" {
 		if mailboxForSession != "" && !strings.EqualFold(mailboxForSession, "me") {
 			oauthAccountEmail = mailboxForSession
 		} else if strings.Contains(path, "@") {
@@ -60,9 +61,9 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 		return err
 	}
 
-	storxToken := input.Database.CronJobRepo.GmailResolvedStorxToken(input.Job)
+	storxToken := input.Database.CronJobRepo.ResolvedStorxToken(input.Job)
 	if strings.TrimSpace(storxToken) == "" {
-		return fmt.Errorf("storx access grant not found for this job (set storx_token on the admin mailbox job for corporate backups)")
+		return fmt.Errorf("storx access grant not found for this job (set storx_token on the shared credential or admin mailbox job)")
 	}
 
 	// Process webhook events using the same resolved access grant (non-blocking).
@@ -75,7 +76,8 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 	}(storxToken)
 
 	refreshToken := input.Database.CronJobRepo.GmailResolvedRefreshToken(input.Job)
-	mailboxForSession, pathPrefix, oauthAccountEmail := gmailMailboxPathAndOAuthHolder(input.Job, refreshToken != "")
+	mailboxForSession, pathPrefix, _ := gmailMailboxPathAndOAuthHolder(input.Job, refreshToken != "")
+	oauthAccountEmail := input.Database.CronJobRepo.ResolvedOAuthHolderEmail(input.Job)
 
 	// JWT and requires DWD; without DWD you get unauthorized_client despite a valid admin refresh token.
 	delegationOnly := refreshToken == "" && google.GmailJobUsesDelegationWithoutOAuth(mailboxForSession, oauthAccountEmail)
@@ -101,7 +103,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 	gmailClient := gmailSession.Client
 	gmailAPIUser := gmailSession.APIUser
 
-	err = handler.UploadObjectAndSync(context.Background(), input.Database, storxToken, satellite.ReserveBucket_Gmail, pathPrefix+"/.file_placeholder", nil, input.Job.UserID)
+	err = handler.UploadObjectAndSync(context.Background(), input.Database, storxToken, satellite.ReserveBucket_Gmail, pathPrefix+"/.file_placeholder", nil, input.Job.UserID, input.StorxRecovery)
 	if err != nil {
 		return err
 	}
@@ -110,7 +112,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 	// This is much faster and avoids unnecessary API calls to Satellite
 	// Uses common function that ensures bucket exists and queries database
 	prefix := pathPrefix + "/"
-	emailListFromBucket, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Database, storxToken, satellite.ReserveBucket_Gmail, prefix, input.Job.UserID, "google", "gmail")
+	emailListFromBucket, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Database, storxToken, satellite.ReserveBucket_Gmail, prefix, input.Job.UserID, "google", "gmail", input.StorxRecovery)
 	if err != nil {
 		return fmt.Errorf("failed to get synced objects: %w", err)
 	}
@@ -144,9 +146,8 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 				continue
 			}
 
-			messagePath := pathPrefix + "/" + utils.GenerateTitleFromGmailMessage(message)
-			_, synced := emailListFromBucket[messagePath]
-			if synced {
+			messagePath := google.GmailObjectKey(pathPrefix, message)
+			if google.IsGmailMessageSynced(emailListFromBucket, pathPrefix, message) {
 				continue
 			}
 
@@ -156,7 +157,9 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 			}
 
 			syncedData = true
-			err = handler.UploadObjectAndSync(context.TODO(), input.Database, storxToken, "gmail", messagePath, b, input.Job.UserID)
+			// Legacy direct upload (all payloads in memory):
+			// err = handler.UploadObjectAndSync(context.TODO(), input.Database, storxToken, "gmail", messagePath, b, input.Job.UserID, input.StorxRecovery)
+			err = handler.UploadBufferedObjectAndSync(context.TODO(), input.Database, storxToken, "gmail", messagePath, b, input.Job.UserID, input.StorxRecovery)
 			if err != nil {
 				return err
 			}

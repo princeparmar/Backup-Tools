@@ -20,6 +20,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
+	"github.com/StorX2-0/Backup-Tools/restore"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 
 	"github.com/google/uuid"
@@ -350,15 +351,7 @@ func HandleListPhotosInAlbum(c echo.Context) error {
 	safeAlbumTitle = strings.ReplaceAll(safeAlbumTitle, "|", "-")
 
 	for _, v := range paginatedResponse.MediaItems {
-		// Check sync status - scheduled processor uses photoID_filename format, direct upload uses filename
-		// Format 1: Direct upload - email/filename
-		syncPath1 := userDetails.Email + "/" + v.Filename
-		// Format 2: Scheduled processor (Standalone) - email/photoID_filename
-		syncPath2 := fmt.Sprintf("%s/%s_%s", userDetails.Email, v.ID, v.Filename)
-		// Format 3: Scheduled processor (Album) - email/AlbumID_AlbumTitle/PhotoID_Filename
-		syncPath3 := fmt.Sprintf("%s/%s_%s/%s_%s", userDetails.Email, albm.ID, safeAlbumTitle, v.ID, v.Filename)
-
-		synced := syncedMap[syncPath1] || syncedMap[syncPath2] || syncedMap[syncPath3]
+		synced := google.IsPhotosMediaItemSynced(syncedMap, userDetails.Email, v.ID, v.Filename, albm.ID, safeAlbumTitle)
 
 		photosRespJSON = append(photosRespJSON, &AllPhotosJSON{
 			Name:         v.Filename,
@@ -382,6 +375,70 @@ func HandleListPhotosInAlbum(c echo.Context) error {
 		"limit":         paginatedResponse.Limit,
 		"totalItems":    paginatedResponse.TotalItems,
 	})
+}
+
+// HandleFlatPhotosMedia lists flat library media items with pagination (cron ID-based synced checks).
+func HandleFlatPhotosMedia(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "access token not found",
+		})
+	}
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+
+	go func() {
+		processCtx := context.Background()
+		if processErr := ProcessWebhookEvents(processCtx, database, accesGrant, 100); processErr != nil {
+			logger.Warn(processCtx, "Failed to process webhook events from listing route", logger.ErrorField(processErr))
+		}
+	}()
+
+	pageToken := strings.TrimSpace(c.QueryParam("nextPageToken"))
+	if pageToken == "" {
+		pageToken = strings.TrimSpace(c.QueryParam("page_token"))
+	}
+
+	resp, err := google.ListAllMediaItemsFlat(c, pageToken)
+	if err != nil {
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{"error": "token expired"})
+		}
+		return c.JSON(http.StatusForbidden, map[string]interface{}{"error": err.Error()})
+	}
+
+	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
+	if err != nil || strings.TrimSpace(userDetails.Email) == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "failed to get user email",
+		})
+	}
+
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"error": "authentication failed"})
+	}
+
+	syncedObjects, err := database.SyncedObjectRepo.GetSyncedObjectsByUserAndBucket(userID, satellite.ReserveBucket_Photos, "google", "photos")
+	if err != nil {
+		logger.Warn(ctx, "Failed to get synced objects from database", logger.ErrorField(err))
+		syncedObjects = []repo.SyncedObject{}
+	}
+	syncedMap := make(map[string]bool, len(syncedObjects))
+	for _, obj := range syncedObjects {
+		syncedMap[obj.ObjectKey] = true
+	}
+
+	for i := range resp.MediaItems {
+		item := &resp.MediaItems[i]
+		item.Synced = google.IsPhotosMediaItemSynced(syncedMap, userDetails.Email, item.ID, item.Filename, "", "")
+	}
+
+	return c.JSON(http.StatusOK, resp)
 }
 
 type AllPhotosJSON struct {
@@ -789,6 +846,43 @@ func HandleSendListFilesFromGooglePhotosToSatellite(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]interface{}{"message": "all photos from album were successfully uploaded from Google Photos to Satellite"})
 }
 
+type photosRestoreMeta struct {
+	MediaItemID   string `json:"media_item_id"`
+	Filename      string `json:"filename"`
+	DataObjectKey string `json:"data_object_key"`
+}
+
+// parsePhotosIDBasedRestoreKeys returns data/meta keys when key is cron ID-based layout.
+func parsePhotosIDBasedRestoreKeys(key string) (dataKey, metaKey string, ok bool) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", "", false
+	}
+	const metaMarker = "/meta/"
+	const dataMarker = "/data/"
+	if idx := strings.Index(key, metaMarker); idx >= 0 && strings.HasSuffix(key, ".json") {
+		id := strings.TrimSuffix(key[idx+len(metaMarker):], ".json")
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return "", "", false
+		}
+		return "", key, true
+	}
+	if idx := strings.Index(key, dataMarker); idx >= 0 {
+		segment := strings.TrimSpace(key[idx+len(dataMarker):])
+		if segment == "" || strings.Contains(segment, "/") {
+			return "", "", false
+		}
+		id := google.MediaItemIDFromPhotosObjectSegment(segment)
+		if id == "" {
+			id = segment
+		}
+		prefix := strings.TrimSpace(key[:idx])
+		return key, google.PhotosIDBasedMetaKey(prefix, id, ""), true
+	}
+	return "", "", false
+}
+
 // parseGooglePhotosKey extracts albumID, albumTitle and filename from a Satellite key
 func parseGooglePhotosKey(key string) (albumID, albumTitle, filename string) {
 	if key == "" {
@@ -814,10 +908,6 @@ func parseGooglePhotosKey(key string) (albumID, albumTitle, filename string) {
 			albumID = albumFolder[:idx]
 			albumTitle = albumFolder[idx+1:]
 		}
-		fmt.Println("Album ID: ", albumID)
-		fmt.Println("Album Title: ", albumTitle)
-		fmt.Println("Filename: ", filename)
-
 	case 2:
 		// email/PhotoID_Filename (standalone)
 		filename = parts[1]
@@ -838,8 +928,9 @@ func parseGooglePhotosKey(key string) (albumID, albumTitle, filename string) {
 	return
 }
 
-// RestorePhotosFromSatellite restores photos from Satellite to Google Photos
-func (s *PhotosService) RestorePhotosFromSatellite(ctx context.Context, keys []string) (*DownloadResult, error) {
+// RestorePhotosFromSatellite restores photos from Satellite to Google Photos.
+// storx grant is resolved from DB via sess (not ACCESS_TOKEN header).
+func (s *PhotosService) RestorePhotosFromSatellite(ctx context.Context, sess *restore.StorxGrantSession, keys []string) (*DownloadResult, error) {
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(5)
 
@@ -860,21 +951,33 @@ func (s *PhotosService) RestorePhotosFromSatellite(ctx context.Context, keys []s
 			default:
 			}
 
-			// a. Download from Satellite
-			data, err := satellite.DownloadObject(ctx, s.accessGrant, satellite.ReserveBucket_Photos, key)
-			if err != nil {
-				logger.Error(ctx, "failed to download photo from satellite", logger.ErrorField(err), logger.String("key", key))
-				failedIDs.Add(key)
-				return nil
+			// a. Download payload — ID-based restore (cron autosync) takes priority over legacy path keys.
+			var (
+				albumID    string
+				albumTitle string
+				filename   string
+				data       []byte
+			)
+			if dataKey, metaKey, idBased := parsePhotosIDBasedRestoreKeys(key); idBased {
+				var restoreErr error
+				data, filename, restoreErr = restore.DownloadPhotosIDBasedPayloadWithSession(ctx, sess, key, dataKey, metaKey)
+				if restoreErr != nil {
+					logger.Error(ctx, "failed ID-based photos restore", logger.ErrorField(restoreErr), logger.String("key", key))
+					failedIDs.Add(key)
+					return nil
+				}
+			} else {
+				var downloadErr error
+				data, downloadErr = sess.DownloadObject(ctx, satellite.ReserveBucket_Photos, key)
+				if downloadErr != nil {
+					logger.Error(ctx, "failed to download photo from satellite", logger.ErrorField(downloadErr), logger.String("key", key))
+					failedIDs.Add(key)
+					return nil
+				}
+				albumID, albumTitle, filename = parseGooglePhotosKey(key)
 			}
 
-			// b. Parse key
-			albumID, albumTitle, filename := parseGooglePhotosKey(key)
-			fmt.Println("Album ID: ", albumID)
-			fmt.Println("Album Title: ", albumTitle)
-			fmt.Println("Filename: ", filename)
-
-			// c. Save to unique temp file to avoid concurrent collision
+			// b. Save to unique temp file to avoid concurrent collision
 			tempDir := filepath.Join("./cache", utils.CreateUserTempCacheFolder(), uuid.NewString())
 			if err := os.MkdirAll(tempDir, 0755); err != nil {
 				failedIDs.Add(key)
@@ -882,7 +985,10 @@ func (s *PhotosService) RestorePhotosFromSatellite(ctx context.Context, keys []s
 			}
 			defer os.RemoveAll(tempDir)
 
-			tempPath := filepath.Join(tempDir, filename)
+			if strings.TrimSpace(filename) == "" {
+				filename = "restored_photo"
+			}
+			tempPath := filepath.Join(tempDir, filepath.Base(filename))
 			if err := os.WriteFile(tempPath, data, 0644); err != nil {
 				failedIDs.Add(key)
 				return nil
@@ -929,15 +1035,12 @@ func (s *PhotosService) RestorePhotosFromSatellite(ctx context.Context, keys []s
 					cacheMu.Unlock()
 				}
 				targetAlbumID = alb.ID
-				fmt.Println("Album ID22: ", targetAlbumID)
-				fmt.Println("temp path: ", tempPath)
 			}
 
 			// e. Upload to Google Photos (empty targetAlbumID = Library upload)
-			_, err = s.client.UploadFileToAlbum(ctx, targetAlbumID, tempPath)
-			if err != nil {
+			if _, uploadErr := s.client.UploadFileToAlbum(ctx, targetAlbumID, tempPath); uploadErr != nil {
 				logger.Error(ctx, "failed to upload photo to Google Photos",
-					logger.ErrorField(err),
+					logger.ErrorField(uploadErr),
 					logger.String("album", albumTitle),
 					logger.String("key", key))
 				failedIDs.Add(key)
@@ -960,6 +1063,32 @@ func (s *PhotosService) RestorePhotosFromSatellite(ctx context.Context, keys []s
 	}, nil
 }
 
+func downloadPhotosIDBasedRestorePayload(ctx context.Context, accessGrant, triggerKey, dataKey, metaKey string) ([]byte, string, error) {
+	dataKey = strings.TrimSpace(dataKey)
+	metaKey = strings.TrimSpace(metaKey)
+	filename := ""
+	if metaKey != "" {
+		metaBytes, err := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Photos, metaKey)
+		if err == nil {
+			var meta photosRestoreMeta
+			if json.Unmarshal(metaBytes, &meta) == nil {
+				filename = strings.TrimSpace(meta.Filename)
+				if dataKey == "" {
+					dataKey = strings.TrimSpace(meta.DataObjectKey)
+				}
+			}
+		}
+	}
+	if dataKey == "" {
+		return nil, "", fmt.Errorf("missing data object key for %s", triggerKey)
+	}
+	body, err := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Photos, dataKey)
+	if err != nil {
+		return nil, "", err
+	}
+	return body, filename, nil
+}
+
 // HandleGooglePhotosRestore - restores photos from Satellite to Google Photos.
 // It recreates albums if they don't exist based on the path structure.
 func HandleGooglePhotosRestore(c echo.Context) error {
@@ -967,15 +1096,7 @@ func HandleGooglePhotosRestore(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	// 1. Get Access Grant
-	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accessGrant == "" {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "access token not found",
-		})
-	}
-
-	// 2. Parse and Decode Keys (Paths)
+	// 1. Parse and Decode Keys (Paths)
 	allKeys, err := validateAndProcessRequestIDs(c)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
@@ -983,14 +1104,19 @@ func HandleGooglePhotosRestore(c echo.Context) error {
 		})
 	}
 
-	// 3. Get user details for email
+	// 2. Get user details for email
 	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
 	if err != nil {
 		logger.Warn(ctx, "failed to get user email for restore", logger.ErrorField(err))
 		userDetails = &google.GoogleAuthResponse{} // Continue with empty email if needed
 	}
 
-	// 4. Create GPhotos Client
+	storxSess, err := resolveManualRestoreStorx(c, "google_photos", userDetails.Email)
+	if err != nil {
+		return err
+	}
+
+	// 3. Create GPhotos Client
 	client, err := google.NewGPhotosClient(c)
 	fmt.Println("client", client)
 	if err != nil {
@@ -1024,9 +1150,9 @@ func HandleGooglePhotosRestore(c echo.Context) error {
 	}
 	satellite.SendNotificationAsync(ctx, userID, "Google Photos Restore Started", fmt.Sprintf("Restore of %d photos for %s has started", len(allKeys), userDetails.Email), &priority, startData, nil)
 
-	// 5. Create Photos Service and Restore
-	photosService := NewPhotosService(client, accessGrant, userDetails.Email)
-	result, err := photosService.RestorePhotosFromSatellite(ctx, allKeys)
+	// 4. Create Photos Service and Restore (storx from DB via storxSess)
+	photosService := NewPhotosService(client, "", userDetails.Email)
+	result, err := photosService.RestorePhotosFromSatellite(ctx, storxSess, allKeys)
 	if err != nil {
 		// Send failure notification
 		failPriority := "high"

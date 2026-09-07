@@ -3,6 +3,7 @@ package repo
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/gorm"
@@ -38,6 +39,11 @@ type TaskListingDB struct {
 
 	// LastHeartBeat will be the time when the task was last heartbeat
 	LastHeartBeat *time.Time `json:"last_heart_beat"`
+
+	// Trigger distinguishes scheduled interval backups from user-initiated on-demand runs.
+	// scheduled (default): updates job last_run for interval scheduling.
+	// on_demand: does not affect interval last_run.
+	Trigger string `json:"trigger" gorm:"default:scheduled"`
 }
 
 // TaskRepository handles all database operations for tasks
@@ -216,6 +222,46 @@ func (r *TaskRepository) CreateTaskForCronJob(cronJobID uint) (*TaskListingDB, e
 	}
 
 	return &data, nil
+}
+
+// CreateOnDemandTaskForCronJob queues a user-initiated backup without affecting interval scheduling.
+func (r *TaskRepository) CreateOnDemandTaskForCronJob(cronJobID uint) (*TaskListingDB, error) {
+	tx := r.db.Begin()
+
+	data := TaskListingDB{
+		CronJobID: cronJobID,
+		Status:    TaskStatusPushed,
+		Trigger:   TaskTriggerOnDemand,
+	}
+
+	res := tx.Create(&data)
+	if res != nil && res.Error != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("error creating on-demand task for cron job: %v", res.Error)
+	}
+
+	updates := map[string]interface{}{
+		"status": JobStatusInQueue,
+		"hidden": false,
+	}
+	if err := tx.Model(&CronJobListingDB{}).Where("id = ?", cronJobID).Updates(updates).Error; err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("error updating cron job status: %v", err)
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return nil, fmt.Errorf("error committing transaction: %v", err)
+	}
+
+	return &data, nil
+}
+
+// IsOnDemandTask reports whether a task was user-triggered (not interval-scheduled).
+func IsOnDemandTask(task *TaskListingDB) bool {
+	if task == nil {
+		return false
+	}
+	return strings.TrimSpace(task.Trigger) == TaskTriggerOnDemand
 }
 
 // UpdateTaskByID updates a task by its ID

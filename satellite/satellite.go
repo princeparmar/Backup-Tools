@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
@@ -19,12 +21,53 @@ import (
 	"storj.io/uplink"
 )
 
+var satelliteHTTPClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:        32,
+		MaxIdleConnsPerHost: 8,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
+type accountCacheEntry struct {
+	userID    string
+	expiresAt time.Time
+}
+
+var accountUserIDCache sync.Map
+
+func cachedAccountUserID(tokenKey string) (string, bool) {
+	if v, ok := accountUserIDCache.Load(tokenKey); ok {
+		e := v.(accountCacheEntry)
+		if time.Now().Before(e.expiresAt) {
+			return e.userID, true
+		}
+		accountUserIDCache.Delete(tokenKey)
+	}
+	return "", false
+}
+
+func storeAccountUserID(tokenKey, userID string) {
+	accountUserIDCache.Store(tokenKey, accountCacheEntry{
+		userID:    userID,
+		expiresAt: time.Now().Add(2 * time.Minute),
+	})
+}
+
 const (
 	ReserveBucket_Gmail      = "gmail"
 	ReserveBucket_Outlook    = "outlook"
 	ReserveBucket_Drive      = "google-drive"
 	ReserveBucket_Cloud      = "google-cloud"
 	ReserveBucket_Photos     = "google-photos"
+	ReserveBucket_Contacts   = "google-contacts"
+	ReserveBucket_Calendar   = "google-calendar"
 	ReserveBucket_Dropbox    = "dropbox"
 	ReserveBucket_S3         = "aws-s3"
 	ReserveBucket_Github     = "github"
@@ -103,14 +146,17 @@ func GetUploader(ctx context.Context, accessGrant, bucketName, objectKey string)
 
 // UploadObject uploads data to satellite storage
 func UploadObject(ctx context.Context, accessGrant, bucketName, objectKey string, data []byte) error {
+	return UploadObjectFromReader(ctx, accessGrant, bucketName, objectKey, bytes.NewReader(data))
+}
 
+// UploadObjectFromReader streams content to satellite storage without loading the full object into memory.
+func UploadObjectFromReader(ctx context.Context, accessGrant, bucketName, objectKey string, r io.Reader) error {
 	upload, err := GetUploader(ctx, accessGrant, bucketName, objectKey)
 	if err != nil {
 		return err
 	}
 
-	buf := bytes.NewBuffer(data)
-	_, err = io.Copy(upload, buf)
+	_, err = io.Copy(upload, r)
 	if err != nil {
 		_ = upload.Abort()
 		return fmt.Errorf("upload data: %w", err)
@@ -124,36 +170,44 @@ func UploadObject(ctx context.Context, accessGrant, bucketName, objectKey string
 	return nil
 }
 
-// DownloadObject downloads data from satellite storage
-func DownloadObject(ctx context.Context, accessGrant, bucketName, objectKey string) ([]byte, error) {
+// DownloadObjectTo streams an object from satellite storage into w.
+func DownloadObjectTo(ctx context.Context, accessGrant, bucketName, objectKey string, w io.Writer) error {
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
-		return nil, fmt.Errorf("parse access grant: %w", err)
+		return fmt.Errorf("parse access grant: %w", err)
 	}
 
 	project, err := uplink.OpenProject(ctx, access)
 	if err != nil {
-		return nil, fmt.Errorf("open project: %w", err)
+		return fmt.Errorf("open project: %w", err)
 	}
 	defer project.Close()
 
 	_, err = project.EnsureBucket(ctx, bucketName)
 	if err != nil {
-		return nil, fmt.Errorf("ensure bucket: %w", err)
+		return fmt.Errorf("ensure bucket: %w", err)
 	}
 
 	download, err := project.DownloadObject(ctx, bucketName, objectKey, nil)
 	if err != nil {
-		return nil, fmt.Errorf("open object: %w", err)
+		return fmt.Errorf("open object: %w", err)
 	}
 	defer download.Close()
 
-	receivedContents, err := io.ReadAll(download)
-	if err != nil {
-		return nil, fmt.Errorf("read data: %w", err)
+	if _, err := io.Copy(w, download); err != nil {
+		return fmt.Errorf("read data: %w", err)
 	}
 
-	return receivedContents, nil
+	return nil
+}
+
+// DownloadObject downloads data from satellite storage
+func DownloadObject(ctx context.Context, accessGrant, bucketName, objectKey string) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := DownloadObjectTo(ctx, accessGrant, bucketName, objectKey, &buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // ListObjects lists all objects in a bucket
@@ -272,12 +326,18 @@ func DeleteObject(ctx context.Context, accessGrant, bucketName, objectKey string
 	return nil
 }
 
-// GetUserdetails retrieves user details from satellite service
+// GetUserdetails retrieves user details from satellite service (cached by token_key).
 func GetUserdetails(c echo.Context) (string, error) {
-	tokenKey := c.Request().Header.Get("token_key")
-	url := StorxSatelliteService + "/api/v0/auth/account"
+	tokenKey := strings.TrimSpace(c.Request().Header.Get("token_key"))
+	if tokenKey == "" {
+		return "", fmt.Errorf("token_key header is required")
+	}
+	if userID, ok := cachedAccountUserID(tokenKey); ok {
+		return userID, nil
+	}
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	url := StorxSatelliteService + "/api/v0/auth/account"
+	req, err := http.NewRequestWithContext(c.Request().Context(), http.MethodGet, url, nil)
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
@@ -285,8 +345,7 @@ func GetUserdetails(c echo.Context) (string, error) {
 	req.Header.Set("accept", "application/json")
 	req.Header.Set("cookie", "_tokenKey="+tokenKey)
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	res, err := client.Do(req)
+	res, err := satelliteHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("send request: %w", err)
 	}
@@ -309,8 +368,13 @@ func GetUserdetails(c echo.Context) (string, error) {
 	if response.Error != "" {
 		return "", fmt.Errorf("api error: %s", response.Error)
 	}
+	userID := strings.TrimSpace(response.ID)
+	if userID == "" {
+		return "", fmt.Errorf("empty account id")
+	}
 
-	return response.ID, nil
+	storeAccountUserID(tokenKey, userID)
+	return userID, nil
 }
 
 // GetProjectIDFromAccessGrant extracts project_id from access grant
@@ -366,6 +430,149 @@ func GetProjectIDFromAccessGrant(ctx context.Context, accessGrant string) (strin
 	}
 
 	return response.ProjectID, nil
+}
+
+// RefreshStorxToken requests a new uplink access grant from Satellite (Backup-Tools internal route).
+func RefreshStorxToken(ctx context.Context, userID, projectID, email string) (string, error) {
+	userID = strings.TrimSpace(userID)
+	projectID = strings.TrimSpace(projectID)
+	email = strings.TrimSpace(email)
+	if userID == "" || projectID == "" {
+		return "", fmt.Errorf("user_id and project_id are required for storx token refresh")
+	}
+	if StorxSatelliteService == "" {
+		return "", fmt.Errorf("STORX_SATELLITE_SERVICE not set")
+	}
+	apiKey := utils.GetEnvWithKey("BACKUP_TOOLS_API_KEY")
+	if apiKey == "" {
+		return "", fmt.Errorf("BACKUP_TOOLS_API_KEY not set")
+	}
+
+	payload := struct {
+		UserID    string `json:"user_id"`
+		ProjectID string `json:"project_id"`
+		Email     string `json:"email,omitempty"`
+	}{
+		UserID:    userID,
+		ProjectID: projectID,
+		Email:     email,
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal refresh payload: %w", err)
+	}
+
+	url := strings.TrimSuffix(StorxSatelliteService, "/") + "/api/v0/internal/storx-token/refresh"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return "", fmt.Errorf("create refresh request: %w", err)
+	}
+	req.Header.Set("accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("X-User-Id", userID)
+	if email != "" {
+		req.Header.Set("X-User-Email", email)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	res, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("storx refresh request: %w", err)
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return "", fmt.Errorf("read storx refresh response: %w", err)
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return "", fmt.Errorf("storx refresh status %d: %s", res.StatusCode, string(body))
+	}
+
+	var response struct {
+		AccessGrant string `json:"access_grant"`
+		ProjectID   string `json:"project_id"`
+		Error       string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", fmt.Errorf("parse storx refresh response: %w", err)
+	}
+	if response.Error != "" {
+		return "", fmt.Errorf("storx refresh: %s", response.Error)
+	}
+	grant := strings.TrimSpace(response.AccessGrant)
+	if grant == "" {
+		return "", fmt.Errorf("storx refresh returned empty access_grant")
+	}
+	return grant, nil
+}
+
+// ClearGoogleRefreshToken tells Satellite to clear the stored Google OAuth refresh token for a user + mailbox email.
+func ClearGoogleRefreshToken(ctx context.Context, userID, email string) error {
+	userID = strings.TrimSpace(userID)
+	email = strings.TrimSpace(email)
+	if userID == "" || email == "" {
+		return fmt.Errorf("user_id and email are required to clear google refresh token")
+	}
+	if StorxSatelliteService == "" {
+		return fmt.Errorf("STORX_SATELLITE_SERVICE not set")
+	}
+	apiKey := utils.GetEnvWithKey("BACKUP_TOOLS_API_KEY")
+	if apiKey == "" {
+		return fmt.Errorf("BACKUP_TOOLS_API_KEY not set")
+	}
+
+	payload := struct {
+		UserID string `json:"user_id"`
+		Email  string `json:"email"`
+	}{
+		UserID: userID,
+		Email:  email,
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal clear google token payload: %w", err)
+	}
+
+	url := strings.TrimSuffix(StorxSatelliteService, "/") + "/api/v0/internal/google-token/clear"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return fmt.Errorf("create clear google token request: %w", err)
+	}
+	req.Header.Set("accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("X-User-Id", userID)
+	req.Header.Set("X-User-Email", email)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	res, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("clear google token request: %w", err)
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return fmt.Errorf("read clear google token response: %w", err)
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return fmt.Errorf("clear google token status %d: %s", res.StatusCode, string(body))
+	}
+
+	var response struct {
+		Error string `json:"error"`
+	}
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &response); err != nil {
+			return fmt.Errorf("parse clear google token response: %w", err)
+		}
+	}
+	if response.Error != "" {
+		return fmt.Errorf("clear google token: %s", response.Error)
+	}
+	return nil
 }
 
 // createJWTToken creates a JWT token for email notifications

@@ -36,6 +36,7 @@ func main() {
 
 	// Start background jobs
 	crons.NewAutosyncManager(store).Start()
+	crons.NewRestoreManager(store).Start()
 	handler.StartWebhookEventCleanupLoop(ctx, store)
 
 	// Start server

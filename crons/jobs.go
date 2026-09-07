@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/db"
+	"github.com/StorX2-0/Backup-Tools/handler"
 	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
@@ -23,6 +24,7 @@ type ProcessorInput struct {
 	Job           *repo.CronJobListingDB
 	HeartBeatFunc func() error
 	Database      *db.PostgresDb
+	StorxRecovery *handler.StorxRecovery
 }
 
 type Processor interface {
@@ -30,9 +32,13 @@ type Processor interface {
 }
 
 var processorMap = map[string]Processor{
-	"gmail":         NewGmailProcessor(),
-	"outlook":       NewOutlookProcessor(),
-	"psql_database": NewPsqlDatabaseProcessor(),
+	"gmail":           NewGmailProcessor(),
+	"outlook":         NewOutlookProcessor(),
+	"psql_database":   NewPsqlDatabaseProcessor(),
+	"google_drive":    NewGoogleDriveProcessor(),
+	"google_photos":   NewGooglePhotosProcessor(),
+	"google_contacts": NewGoogleContactsProcessor(),
+	"google_calendar": NewGoogleCalendarProcessor(),
 }
 
 type AutosyncManager struct {
@@ -52,7 +58,9 @@ func createCronContext(operation string) context.Context {
 }
 
 func (a *AutosyncManager) Start() {
-	c := cron.New()
+	// Skip a new process_tasks tick while the previous tick is still running a backup.
+	// One autosync run at a time; queued tasks (pushed) wait until the loop finishes.
+	c := cron.New(cron.WithChain(cron.DelayIfStillRunning(cron.DefaultLogger)))
 
 	// Create tasks for pending jobs
 	c.AddFunc("@every 1m", func() {
@@ -268,6 +276,20 @@ func (a *AutosyncManager) processTask(ctx context.Context, task *repo.TaskListin
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
+	if a.store.AccountLifecycleRepo != nil {
+		pending, pendErr := a.store.AccountLifecycleRepo.IsPendingDelete(job.UserID)
+		if pendErr != nil {
+			return pendErr
+		}
+		if pending {
+			logger.Info(ctx, "Skipping task; account pending deletion",
+				logger.String("user_id", job.UserID),
+				logger.Int("job_id", int(job.ID)),
+			)
+			return nil
+		}
+	}
+
 	processor, ok := processorMap[job.Method]
 	if !ok {
 		return fmt.Errorf("processor for method '%s' not found", job.Method)
@@ -278,41 +300,58 @@ func (a *AutosyncManager) processTask(ctx context.Context, task *repo.TaskListin
 		logger.String("method", job.Method),
 	)
 
-	// Record job execution start
-
-	err = processor.Run(ProcessorInput{
-		InputData: job.InputData,
-		Job:       job,
-		Task:      task,
-		Database:  a.store,
-		HeartBeatFunc: func() error {
-			// Check if task is still running
-			currentTask, err := a.store.TaskRepo.GetTaskByID(task.ID)
-			if err != nil {
-				return fmt.Errorf("failed to get task status: %w", err)
+	recovery := handler.NewStorxRecovery(a.store, job)
+	if strings.TrimSpace(a.store.CronJobRepo.ResolvedStorxToken(job)) == "" {
+		if _, continueOK, preErr := recovery.OnStorxError(ctx, handler.ErrStorxGrantMissing); preErr != nil || !continueOK {
+			if preErr != nil {
+				return preErr
 			}
+			return handler.ErrStorxGrantMissing
+		}
+	}
 
+	input := ProcessorInput{
+		InputData:     job.InputData,
+		Job:           job,
+		Task:          task,
+		Database:      a.store,
+		StorxRecovery: recovery,
+		HeartBeatFunc: func() error {
+			currentTask, hbErr := a.store.TaskRepo.GetTaskByID(task.ID)
+			if hbErr != nil {
+				return fmt.Errorf("failed to get task status: %w", hbErr)
+			}
 			if currentTask.Status != repo.TaskStatusRunning {
 				return fmt.Errorf("task status changed to '%s', stopping execution", currentTask.Status)
 			}
-
-			// Update heartbeat
-			if err := a.store.TaskRepo.UpdateHeartBeatForTask(task.ID); err != nil {
-				return fmt.Errorf("failed to update heartbeat: %w", err)
+			if hbErr := a.store.TaskRepo.UpdateHeartBeatForTask(task.ID); hbErr != nil {
+				return fmt.Errorf("failed to update heartbeat: %w", hbErr)
 			}
-
 			return nil
 		},
-	})
-
-	// Record completion status
-	if err != nil {
-		// Error handling
-	} else {
-		// Success handling
 	}
 
-	return err
+	uplinkRecoveries := 0
+	for {
+		err = processor.Run(input)
+		if err == nil {
+			return nil
+		}
+		if !handler.IsStorxUplinkError(err) {
+			return err
+		}
+		uplinkRecoveries++
+		if uplinkRecoveries > handler.MaxStorxUplinkRecoveriesPerRun() {
+			return err
+		}
+		_, continueOK, recErr := recovery.OnStorxError(ctx, err)
+		if recErr != nil {
+			return recErr
+		}
+		if !continueOK {
+			return err
+		}
+	}
 }
 
 func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.CronJobListingDB, processErr error) error {
@@ -322,17 +361,28 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 
 	// Initialize default values for success case
 	task.Status = repo.TaskStatusSuccess
-	task.Message = "Automatic backup completed successfully"
+	onDemand := repo.IsOnDemandTask(task)
+	if onDemand {
+		task.Message = "On-demand backup completed successfully"
+	} else {
+		task.Message = "Automatic backup completed successfully"
+	}
 
 	if task.StartTime != nil {
 		task.Execution = uint64(time.Since(*task.StartTime).Seconds())
 	}
 
 	if job != nil {
-		job.Message = "Automatic backup completed successfully"
+		if onDemand {
+			job.Message = "On-demand backup completed successfully"
+		} else {
+			job.Message = "Automatic backup completed successfully"
+		}
 		job.MessageStatus = repo.JobMessageStatusInfo
-		now := time.Now()
-		job.LastRun = &now
+		if !onDemand {
+			now := time.Now()
+			job.LastRun = &now
+		}
 	}
 
 	// Handle error case
@@ -342,13 +392,23 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 
 		// Record task failure
 		if job != nil {
-			job.Message = "Last task execution failed"
+			if onDemand {
+				job.Message = "On-demand backup failed"
+				task.Message = processErr.Error()
+			} else {
+				job.Message = "Last task execution failed"
+			}
 			job.MessageStatus = repo.JobMessageStatusError
-			now := time.Now()
-			job.LastRun = &now
+			if !onDemand {
+				now := time.Now()
+				job.LastRun = &now
+			}
 
 			a.handleErrorScenarios(processErr, job, task)
-			emailOverride := applyIntervalFailurePeriod(job, task)
+			emailOverride := ""
+			if !onDemand {
+				emailOverride = applyIntervalFailurePeriod(job, task)
+			}
 			emailMessage := a.determineErrorMessage(processErr, job, task)
 			if emailOverride != "" {
 				emailMessage = emailOverride
@@ -409,21 +469,29 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 		updateMap := map[string]interface{}{
 			"message":          job.Message,
 			"message_status":   job.MessageStatus,
-			"last_run":         job.LastRun,
 			"storx_token":      job.StorxToken,
 			"active":           job.Active,
 			"auto_deactivated": job.AutoDeactivated,
+		}
+		if !repo.IsOnDemandTask(task) {
+			updateMap["last_run"] = job.LastRun
 		}
 		if job.InputData != nil {
 			updateMap["input_data"] = job.InputData
 		}
 
-		// Update cron job status based on task status
-		switch task.Status {
-		case repo.TaskStatusSuccess:
-			updateMap["status"] = repo.JobStatusSuccess
-		case repo.TaskStatusFailed:
-			updateMap["status"] = repo.JobStatusFailed
+		// Update cron job status based on task status (StorX credential deactivation preserves success).
+		if handler.IsStorxSatelliteRefreshError(processErr) || handler.IsStorxStorageLimitError(processErr) {
+			if job.Status != repo.JobStatusSuccess {
+				updateMap["status"] = repo.JobStatusCancelled
+			}
+		} else {
+			switch task.Status {
+			case repo.TaskStatusSuccess:
+				updateMap["status"] = repo.JobStatusSuccess
+			case repo.TaskStatusFailed:
+				updateMap["status"] = repo.JobStatusFailed
+			}
 		}
 
 		// Use cron-specific update function to safely handle one-time jobs
@@ -469,10 +537,10 @@ func (a *AutosyncManager) gmailStorxMissing(job *repo.CronJobListingDB) bool {
 	if job == nil {
 		return true
 	}
-	if job.Method != "gmail" {
-		return strings.TrimSpace(job.StorxToken) == ""
+	if repo.IsGoogleMediaOrGmailMethod(job.Method) {
+		return strings.TrimSpace(a.store.CronJobRepo.ResolvedStorxToken(job)) == ""
 	}
-	return strings.TrimSpace(a.store.CronJobRepo.GmailResolvedStorxToken(job)) == ""
+	return strings.TrimSpace(job.StorxToken) == ""
 }
 
 func (a *AutosyncManager) clearStorxOnUplinkFailure(job *repo.CronJobListingDB) {
@@ -494,18 +562,82 @@ func gmailRefreshOrTokenExchangeFailure(job *repo.CronJobListingDB, errMsg strin
 		strings.Contains(e, "error parsing response json")
 }
 
+func isPersonalGmailCronJob(job *repo.CronJobListingDB) bool {
+	if job == nil || job.Method != "gmail" {
+		return false
+	}
+	email := strings.TrimSpace(job.Name)
+	if job.InputData != nil && job.InputData.Json() != nil {
+		if s, ok := (*job.InputData.Json())["email"].(string); ok && strings.TrimSpace(s) != "" {
+			email = strings.TrimSpace(s)
+		}
+	}
+	e := strings.ToLower(email)
+	return strings.HasSuffix(e, "@gmail.com") || strings.HasSuffix(e, "@googlemail.com")
+}
+
+func isGmailOAuthOrDelegationFailure(errMsg string) bool {
+	e := strings.ToLower(errMsg)
+	return strings.Contains(e, "unauthorized_client") ||
+		(strings.Contains(e, "oauth2:") && strings.Contains(e, "cannot fetch token")) ||
+		strings.Contains(e, "delegated gmail access failed") ||
+		strings.Contains(e, "domain-wide delegation") ||
+		strings.Contains(e, "reconnecting the same google account")
+}
+
+func (a *AutosyncManager) deactivatePersonalGmailAuth(job *repo.CronJobListingDB, task *repo.TaskListingDB) {
+	if err := a.store.CronJobRepo.DeactivateJobsForCredentialOrLegacyGoogleAuth(job, cronJobPersonalGoogleAuthDeactivate); err != nil {
+		logger.Warn(context.Background(), "Failed to deactivate jobs after personal Gmail auth failure",
+			logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
+	}
+	repo.StripGmailRefreshTokenFromCronJobInputData(job)
+	job.Active = false
+	job.AutoDeactivated = true
+	job.Message = cronJobPersonalGoogleAuthDeactivate
+	task.Message = cronTaskPersonalGoogleAuthDeactivated
+}
+
+func (a *AutosyncManager) deactivateAllJobsForStorageLimit(job *repo.CronJobListingDB, task *repo.TaskListingDB) {
+	if job == nil {
+		return
+	}
+	if err := a.store.CronJobRepo.DeactivateAllActiveJobsForUser(job.UserID, cronJobStorxStorageLimitFinal); err != nil {
+		logger.Warn(context.Background(), "Failed to deactivate jobs after storage limit exceeded",
+			logger.String("user_id", job.UserID),
+			logger.Int("job_id", int(job.ID)),
+			logger.ErrorField(err))
+	}
+	job.Active = false
+	job.AutoDeactivated = true
+	job.Message = cronJobStorxStorageLimitFinal
+	if task != nil {
+		task.Message = cronTaskStorxStorageLimitDeactivated
+		task.RetryCount = repo.MaxRetryCount
+	}
+}
+
 func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.CronJobListingDB, task *repo.TaskListingDB) string {
 	errMsg := processErr.Error()
 	errLower := strings.ToLower(errMsg)
 
 	switch {
-	case a.gmailStorxMissing(job):
-		return cronEmailStorxInsufficient
+	case handler.IsStorxStorageLimitError(processErr):
+		return cronEmailStorxStorageLimitFinal
 
-	case job != nil && job.Method == "gmail" &&
-		(strings.Contains(errLower, "unauthorized_client") ||
-			strings.Contains(errLower, "oauth2:") && strings.Contains(errLower, "cannot fetch token")):
-		// OAuth2 token endpoint failure: do not retry — one shot then final guidance.
+	case handler.IsStorxSatelliteRefreshError(processErr):
+		return cronEmailStorxSatelliteRefreshFinal
+
+	case handler.IsStorxRefreshFailedError(processErr):
+		return cronEmailStorxRefreshRetry
+
+	case handler.IsStorxUplinkError(processErr):
+		return cronEmailStorxRefreshRetry
+
+	case job != nil && job.Method == "gmail" && isPersonalGmailCronJob(job) &&
+		(isGmailOAuthOrDelegationFailure(errMsg) || gmailRefreshOrTokenExchangeFailure(job, errMsg)):
+		return cronEmailGoogleAuthFinal
+
+	case job != nil && job.Method == "gmail" && isGmailOAuthOrDelegationFailure(errMsg):
 		return cronEmailDelegationFinal
 
 	case job != nil && job.Method == "gmail" &&
@@ -531,16 +663,13 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.Cron
 		}
 		return cronEmailOutlookAuthRetry(task.RetryCount)
 
-	case strings.Contains(errMsg, "uplink: permission") || strings.Contains(errMsg, "uplink: invalid access"):
-		return cronEmailStorxUplinkFinal
-
 	case strings.Contains(errMsg, "could not create bucket") ||
 		strings.Contains(errMsg, "tcp connector failed") ||
 		strings.Contains(errMsg, "connection attempt failed"):
 		return cronEmailNetworkFinal
 
 	default:
-		return cronEmailGenericRetry(task.RetryCount)
+		return cronEmailGenericRetry(task.RetryCount, processErr)
 	}
 }
 
@@ -549,24 +678,26 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 	errLower := strings.ToLower(errMsg)
 
 	switch {
-	case a.gmailStorxMissing(job):
-		if job.Method == "gmail" {
-			if err := a.store.CronJobRepo.DeactivateGmailWorkspaceTreeForStorxFailure(job, cronJobStorxInsufficientShort); err != nil {
-				logger.Warn(context.Background(), "Failed to deactivate Gmail workspace tree after missing StorX",
-					logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
-			}
-			job.StorxToken = ""
-			job.StorjProjectID = ""
-		}
-		job.Active = false
-		job.AutoDeactivated = true
-		job.Message = cronJobStorxInsufficientShort
-		task.Message = cronTaskStorxInsufficientDeactivated
+	case handler.IsStorxStorageLimitError(processErr):
+		a.deactivateAllJobsForStorageLimit(job, task)
 
-	case job != nil && job.Method == "gmail" &&
-		(strings.Contains(errLower, "unauthorized_client") ||
-			strings.Contains(errLower, "oauth2:") && strings.Contains(errLower, "cannot fetch token")):
-		// OAuth2 token endpoint failure: deactivate immediately (no per-task retry messaging).
+	case handler.IsStorxSatelliteRefreshError(processErr):
+		job.Message = cronJobStorxSatelliteRefreshFinal
+		task.Message = cronTaskStorxSatelliteRefreshFinal
+
+	case handler.IsStorxRefreshFailedError(processErr):
+		job.Message = "StorX refresh failed; automatic backup will retry"
+		task.Message = processErr.Error()
+
+	case handler.IsStorxUplinkError(processErr) || a.gmailStorxMissing(job):
+		job.Message = "StorX access issue; refresh attempted during backup"
+		task.Message = processErr.Error()
+
+	case job != nil && job.Method == "gmail" && isPersonalGmailCronJob(job) &&
+		(isGmailOAuthOrDelegationFailure(errMsg) || gmailRefreshOrTokenExchangeFailure(job, errMsg)):
+		a.deactivatePersonalGmailAuth(job, task)
+
+	case job != nil && job.Method == "gmail" && isGmailOAuthOrDelegationFailure(errMsg):
 		job.Active = false
 		job.AutoDeactivated = true
 		job.Message = cronJobDelegationFinal
@@ -575,8 +706,8 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 	case job != nil && job.Method == "gmail" &&
 		(strings.Contains(errLower, "access_token_scope_insufficient") ||
 			strings.Contains(errLower, "insufficient authentication scopes")):
-		if err := a.store.CronJobRepo.DeactivateGmailWorkspaceTreeForGoogleAuthFailure(job, cronJobGoogleInsufficientScope); err != nil {
-			logger.Warn(context.Background(), "Failed to deactivate Gmail workspace tree after insufficient Gmail scopes",
+		if err := a.store.CronJobRepo.DeactivateJobsForCredentialOrLegacyGoogleAuth(job, cronJobGoogleInsufficientScope); err != nil {
+			logger.Warn(context.Background(), "Failed to deactivate jobs after insufficient Gmail scopes",
 				logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
 		}
 		repo.StripGmailRefreshTokenFromCronJobInputData(job)
@@ -590,9 +721,9 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		strings.Contains(errMsg, "refresh token not found"):
 		// gmailRefreshOrTokenExchangeFailure(job, errMsg):
 		if task.RetryCount == repo.MaxRetryCount-1 {
-			if job.Method == "gmail" {
-				if err := a.store.CronJobRepo.DeactivateGmailWorkspaceTreeForGoogleAuthFailure(job, cronJobGoogleAuthDeactivate); err != nil {
-					logger.Warn(context.Background(), "Failed to deactivate Gmail workspace tree after Google auth failure",
+			if repo.IsGoogleMediaOrGmailMethod(job.Method) {
+				if err := a.store.CronJobRepo.DeactivateJobsForCredentialOrLegacyGoogleAuth(job, cronJobGoogleAuthDeactivate); err != nil {
+					logger.Warn(context.Background(), "Failed to deactivate jobs after Google auth failure",
 						logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
 				}
 				repo.StripGmailRefreshTokenFromCronJobInputData(job)
@@ -629,22 +760,6 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 			task.Message = cronTaskOutlookAuthRetry(task.RetryCount)
 		}
 
-	case strings.Contains(errMsg, "uplink: permission") || strings.Contains(errMsg, "uplink: invalid access"):
-		if job.Method == "gmail" {
-			if err := a.store.CronJobRepo.DeactivateGmailWorkspaceTreeForStorxFailure(job, cronJobStorxInsufficientShort); err != nil {
-				logger.Warn(context.Background(), "Failed to deactivate Gmail workspace tree after StorX uplink failure",
-					logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
-			}
-			job.StorxToken = ""
-			job.StorjProjectID = ""
-		} else {
-			a.clearStorxOnUplinkFailure(job)
-		}
-		job.Active = false
-		job.AutoDeactivated = true
-		job.Message = cronJobStorxInsufficientShort
-		task.Message = cronTaskStorxInsufficientDeactivated
-
 	case strings.Contains(errMsg, "could not create bucket") ||
 		strings.Contains(errMsg, "tcp connector failed") ||
 		strings.Contains(errMsg, "connection attempt failed"):
@@ -652,7 +767,10 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 		task.Message = cronTaskNetworkDeactivated
 
 	default:
-		job.Message = cronJobGenericRetry(task.RetryCount)
-		task.Message = cronTaskGenericRetry(task.RetryCount)
+		job.Message = cronJobGenericRetry(task.RetryCount, processErr)
+		task.Message = cronTaskGenericRetry(task.RetryCount, processErr)
 	}
 }
+
+// Autosync processors: gmail, outlook, google_drive, google_photos, google_contacts, google_calendar.
+// processorMap dispatches by job.Method; CreateTaskForAllPendingJobs + ProcessTask are method-agnostic.

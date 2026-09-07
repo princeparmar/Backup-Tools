@@ -1,0 +1,188 @@
+package handler
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"strings"
+
+	google "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/db"
+	"github.com/StorX2-0/Backup-Tools/middleware"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
+	"github.com/StorX2-0/Backup-Tools/pkg/utils"
+	"github.com/StorX2-0/Backup-Tools/repo"
+	"github.com/StorX2-0/Backup-Tools/restore"
+	"github.com/StorX2-0/Backup-Tools/satellite"
+
+	"github.com/labstack/echo/v4"
+	"golang.org/x/sync/errgroup"
+)
+
+// HandleListContacts lists Google contacts with pagination (same logic as cron).
+func HandleListContacts(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	accesGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accesGrant == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "access token not found",
+		})
+	}
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+
+	go func() {
+		processCtx := context.Background()
+		if processErr := ProcessWebhookEvents(processCtx, database, accesGrant, 100); processErr != nil {
+			logger.Warn(processCtx, "Failed to process webhook events from contacts listing route", logger.ErrorField(processErr))
+		}
+	}()
+
+	pageToken := strings.TrimSpace(c.QueryParam("nextPageToken"))
+	if pageToken == "" {
+		pageToken = strings.TrimSpace(c.QueryParam("pageToken"))
+	}
+	if pageToken == "" {
+		pageToken = strings.TrimSpace(c.QueryParam("page_token"))
+	}
+
+	resp, err := google.ListAllContactsFlat(c, pageToken)
+	if err != nil {
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{"error": "token expired"})
+		}
+		return c.JSON(http.StatusForbidden, map[string]interface{}{"error": err.Error()})
+	}
+
+	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
+	if err != nil || strings.TrimSpace(userDetails.Email) == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "failed to get user email",
+		})
+	}
+
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"error": "authentication failed"})
+	}
+
+	syncedObjects, err := database.SyncedObjectRepo.GetSyncedObjectsByUserAndBucket(userID, satellite.ReserveBucket_Contacts, "google", "contacts")
+	if err != nil {
+		logger.Warn(ctx, "Failed to get synced objects from database", logger.ErrorField(err))
+		syncedObjects = []repo.SyncedObject{}
+	}
+	syncedMap := make(map[string]bool, len(syncedObjects))
+	for _, obj := range syncedObjects {
+		syncedMap[obj.ObjectKey] = true
+	}
+
+	for i := range resp.Contacts {
+		item := &resp.Contacts[i]
+		item.Synced = google.IsContactSynced(syncedMap, userDetails.Email, item.ID)
+	}
+
+	return c.JSON(http.StatusOK, resp)
+}
+
+// HandleGoogleContactsRestore downloads contacts from Satellite and creates them in Google Contacts.
+func HandleGoogleContactsRestore(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	allKeys, err := validateAndProcessRequestIDs(c)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
+	service, err := google.NewPeopleServiceFromContext(c)
+	if err != nil {
+		if err.Error() == "token error" {
+			return c.JSON(http.StatusUnauthorized, map[string]interface{}{"error": "token expired"})
+		}
+		return c.JSON(http.StatusForbidden, map[string]interface{}{"error": err.Error()})
+	}
+
+	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
+	if err != nil || strings.TrimSpace(userDetails.Email) == "" {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{
+			"error": "failed to get user email",
+		})
+	}
+
+	storxSess, err := resolveManualRestoreStorx(c, "google_contacts", userDetails.Email)
+	if err != nil {
+		return err
+	}
+
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"error": "authentication failed"})
+	}
+
+	priority := "normal"
+	startData := map[string]interface{}{
+		"event":      "google_contacts_restore_started",
+		"level":      2,
+		"login_id":   userDetails.Email,
+		"method":     "google_contacts",
+		"type":       "restore",
+		"timestamp":  "now",
+		"item_count": len(allKeys),
+	}
+	satellite.SendNotificationAsync(ctx, userID, "Google Contacts Restore Started", fmt.Sprintf("Restore of %d contacts for %s has started", len(allKeys), userDetails.Email), &priority, startData, nil)
+
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(10)
+	processedKeys, failedKeys := utils.NewLockedArray(), utils.NewLockedArray()
+
+	for _, key := range allKeys {
+		key := key
+		if !google.IsContactsRestoreObjectKey(key) {
+			failedKeys.Add(key)
+			continue
+		}
+		g.Go(func() error {
+			if restoreErr := restore.RestoreContactKeyWithSession(ctx, storxSess, service, key); restoreErr != nil {
+				logger.Warn(ctx, "Failed to restore contact", logger.String("key", key), logger.ErrorField(restoreErr))
+				failedKeys.Add(key)
+			} else {
+				processedKeys.Add(key)
+			}
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		failPriority := "high"
+		failData := map[string]interface{}{
+			"event": "google_contacts_restore_failed", "level": 4, "login_id": userDetails.Email,
+			"method": "google_contacts", "type": "restore", "timestamp": "now", "error": err.Error(),
+		}
+		satellite.SendNotificationAsync(context.Background(), userID, "Google Contacts Restore Failed", err.Error(), &failPriority, failData, nil)
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"error": err.Error(), "failed_keys": failedKeys.Get(), "processed_keys": processedKeys.Get(),
+		})
+	}
+
+	compPriority := "normal"
+	compData := map[string]interface{}{
+		"event": "google_contacts_restore_completed", "level": 2, "login_id": userDetails.Email,
+		"method": "google_contacts", "type": "restore", "timestamp": "now",
+		"processed_count": len(processedKeys.Get()), "failed_count": len(failedKeys.Get()),
+	}
+	satellite.SendNotificationAsync(ctx, userID, "Google Contacts Restore Completed",
+		fmt.Sprintf("Restore for %s completed. %d succeeded, %d failed", userDetails.Email, len(processedKeys.Get()), len(failedKeys.Get())),
+		&compPriority, compData, nil)
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"message":        "Google Contacts restore completed",
+		"processed_keys": processedKeys.Get(),
+		"failed_keys":    failedKeys.Get(),
+	})
+}

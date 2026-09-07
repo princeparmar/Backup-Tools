@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -14,6 +13,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
+	"github.com/StorX2-0/Backup-Tools/restore"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"golang.org/x/sync/errgroup"
 
@@ -31,6 +31,47 @@ func HandleGetGoogleDriveFileNames(c echo.Context) error {
 		return HandleGoogleDriveError(c, err, "retrieve file names from Google Drive")
 	}
 	return c.JSON(http.StatusOK, fileNames)
+}
+
+// HandleFlatGoogleDriveFiles lists non-folder files as a flat stream-friendly page.
+func HandleFlatGoogleDriveFiles(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil {
+		logger.Error(ctx, "Failed to get userID from Satellite service", logger.ErrorField(err))
+		return HandleGoogleDriveError(c, err, "authentication failed")
+	}
+
+	// Keep behavior consistent with existing listing routes:
+	// process webhook events opportunistically before listing.
+	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
+	if accessGrant != "" {
+		go func() {
+			processCtx := context.Background()
+			if processErr := ProcessWebhookEvents(processCtx, database, accessGrant, 100); processErr != nil {
+				logger.Warn(processCtx, "Failed to process webhook events from listing route",
+					logger.ErrorField(processErr))
+			}
+		}()
+	}
+
+	pageToken := strings.TrimSpace(c.QueryParam("nextPageToken"))
+	if pageToken == "" {
+		// Backward compatibility for earlier Drive flat listing clients.
+		pageToken = strings.TrimSpace(c.QueryParam("page_token"))
+	}
+
+	_ = userID // reserved for parity with other listing handlers and future user-scoped checks
+	resp, err := google.ListNonFolderFilesFlat(c, pageToken)
+	if err != nil {
+		return HandleGoogleDriveError(c, err, "retrieve flat non-folder files from Google Drive")
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 // Get all files names in a google drive root
@@ -758,11 +799,6 @@ func HandleGoogleDriveDownloadAndRestore(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	accessGrant := c.Request().Header.Get("ACCESS_TOKEN")
-	if accessGrant == "" {
-		return c.JSON(http.StatusForbidden, map[string]string{"error": "access token not found"})
-	}
-
 	allKeys, err := validateAndProcessRequestIDs(c)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -776,6 +812,11 @@ func HandleGoogleDriveDownloadAndRestore(c echo.Context) error {
 	userDetails, err := google.GetGoogleAccountDetailsFromContext(c)
 	if err != nil || userDetails.Email == "" {
 		return c.JSON(http.StatusForbidden, map[string]string{"error": "failed to get user email"})
+	}
+
+	storxSess, err := resolveManualRestoreStorx(c, "google_drive", userDetails.Email)
+	if err != nil {
+		return err
 	}
 
 	userID, err := satellite.GetUserdetails(c)
@@ -808,20 +849,7 @@ func HandleGoogleDriveDownloadAndRestore(c echo.Context) error {
 		}
 		key := key
 		g.Go(func() error {
-			data, err := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Drive, key)
-			if err != nil {
-				logger.Warn(ctx, "Failed to download object", logger.String("key", key), logger.ErrorField(err))
-				failedKeys.Add(key)
-				return nil
-			}
-
-			var backupItem google.DriveBackupItem
-			if err := json.Unmarshal(data, &backupItem); err != nil {
-				logger.Warn(ctx, "Failed to parse backup metadata", logger.String("key", key), logger.ErrorField(err))
-			}
-
-			metadataJSON, _ := json.Marshal(backupItem.Metadata)
-			if err := google.RestoreFromBackup(ctx, srv, userDetails.Email, metadataJSON, backupItem.Content); err != nil {
+			if err := restore.RestoreDriveKeyWithSession(ctx, storxSess, srv, userDetails.Email, key); err != nil {
 				logger.Warn(ctx, "Failed to restore item", logger.String("key", key), logger.ErrorField(err))
 				failedKeys.Add(key)
 			} else {
