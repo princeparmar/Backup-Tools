@@ -42,29 +42,34 @@ func runGoogleContactsAutosync(input ProcessorInput) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	accessToken, storx, err := googleMediaAutosyncPreflight(input)
+	auth, err := googleMediaAutosyncPreflight(input)
 	if err != nil {
 		return err
 	}
 
 	go func() {
 		processCtx := context.Background()
-		if processErr := handler.ProcessWebhookEvents(processCtx, input.Database, storx, 100); processErr != nil {
+		if processErr := handler.ProcessWebhookEvents(processCtx, input.Database, auth.Storx, 100); processErr != nil {
 			logger.Warn(processCtx, "Failed to process webhook events from auto-sync", logger.ErrorField(processErr))
 		}
 	}()
 
-	task := scheduledTaskShellFromCronJob(input.Job, accessToken, storx)
-	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Contacts, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
+	task := scheduledTaskShellFromCronJob(input.Job, auth.AccessToken, auth.Storx)
+	if err := handler.UploadObjectAndSync(ctx, input.Database, auth.Storx, satellite.ReserveBucket_Contacts, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
 		return fmt.Errorf("setup storage placeholder: %w", err)
 	}
 
-	service, err := google.NewPeopleServiceWithAccessToken(ctx, accessToken)
+	var service *people.Service
+	if auth.UseDWD {
+		service, err = google.NewPeopleServiceForBackupDWD(ctx, auth.Mailbox)
+	} else {
+		service, err = google.NewPeopleServiceWithAccessToken(ctx, auth.AccessToken)
+	}
 	if err != nil {
 		return err
 	}
 
-	syncedSet, err := loadContactsSyncedIDSet(ctx, input, task, storx)
+	syncedSet, err := loadContactsSyncedIDSet(ctx, input, task, auth.Storx)
 	if err != nil {
 		return err
 	}

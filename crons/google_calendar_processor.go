@@ -31,24 +31,29 @@ func runGoogleCalendarAutosync(input ProcessorInput) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	accessToken, storx, err := googleMediaAutosyncPreflight(input)
+	auth, err := googleMediaAutosyncPreflight(input)
 	if err != nil {
 		return err
 	}
 
 	go func() {
 		processCtx := context.Background()
-		if processErr := handler.ProcessWebhookEvents(processCtx, input.Database, storx, 100); processErr != nil {
+		if processErr := handler.ProcessWebhookEvents(processCtx, input.Database, auth.Storx, 100); processErr != nil {
 			logger.Warn(processCtx, "Failed to process webhook events from calendar auto-sync", logger.ErrorField(processErr))
 		}
 	}()
 
-	task := scheduledTaskShellFromCronJob(input.Job, accessToken, storx)
-	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Calendar, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
+	task := scheduledTaskShellFromCronJob(input.Job, auth.AccessToken, auth.Storx)
+	if err := handler.UploadObjectAndSync(ctx, input.Database, auth.Storx, satellite.ReserveBucket_Calendar, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
 		return fmt.Errorf("setup storage placeholder: %w", err)
 	}
 
-	service, err := google.NewCalendarServiceWithAccessToken(ctx, accessToken)
+	var service *calendar.Service
+	if auth.UseDWD {
+		service, err = google.NewCalendarServiceForBackupDWD(ctx, auth.Mailbox)
+	} else {
+		service, err = google.NewCalendarServiceWithAccessToken(ctx, auth.AccessToken)
+	}
 	if err != nil {
 		return err
 	}
@@ -65,7 +70,7 @@ func runGoogleCalendarAutosync(input ProcessorInput) error {
 		if err := input.HeartBeatFunc(); err != nil {
 			return err
 		}
-		if err := syncOneCalendar(ctx, input, task, service, storx, cal); err != nil {
+		if err := syncOneCalendar(ctx, input, task, service, auth.Storx, cal); err != nil {
 			return err
 		}
 	}

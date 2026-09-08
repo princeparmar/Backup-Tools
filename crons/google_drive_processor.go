@@ -57,26 +57,67 @@ func scheduledTaskShellFromCronJob(job *repo.CronJobListingDB, accessToken, stor
 	}
 }
 
-func googleMediaAutosyncPreflight(input ProcessorInput) (accessToken, storx string, err error) {
-	storx = strings.TrimSpace(input.Database.CronJobRepo.ResolvedStorxToken(input.Job))
-	if storx == "" {
-		return "", "", fmt.Errorf("storx_token is required on job (set via PUT /auto-sync/job/:id)")
+// googleMediaAuth is the result of media autosync auth for Drive/Contacts/Calendar/Photos.
+// Corporate employee jobs share the admin refresh token; UseDWD must be true so API reads
+// impersonate the employee mailbox instead of fetching admin data into employee vaults.
+type googleMediaAuth struct {
+	AccessToken string
+	Storx       string
+	Mailbox     string
+	UseDWD      bool
+}
+
+func googleMediaJobMailbox(job *repo.CronJobListingDB) string {
+	if job == nil {
+		return ""
 	}
+	if job.InputData != nil && job.InputData.Json() != nil {
+		if e, ok := (*job.InputData.Json())["email"].(string); ok && strings.TrimSpace(e) != "" {
+			return strings.TrimSpace(e)
+		}
+	}
+	return strings.TrimSpace(job.Name)
+}
+
+func googleMediaAutosyncPreflight(input ProcessorInput) (googleMediaAuth, error) {
+	var out googleMediaAuth
+	out.Storx = strings.TrimSpace(input.Database.CronJobRepo.ResolvedStorxToken(input.Job))
+	if out.Storx == "" {
+		return out, fmt.Errorf("storx_token is required on job (set via PUT /auto-sync/job/:id)")
+	}
+	out.Mailbox = googleMediaJobMailbox(input.Job)
+	oauthHolder := input.Database.CronJobRepo.ResolvedOAuthHolderEmail(input.Job)
+	out.UseDWD = google.MediaBackupNeedsDelegation(out.Mailbox, oauthHolder)
+
+	if out.UseDWD {
+		if !google.WorkspaceServiceAccountConfigured() {
+			return out, fmt.Errorf("corporate backup for mailbox %q needs domain-wide delegation (workspace service account not configured)", out.Mailbox)
+		}
+		if _, err := google.MediaBackupDelegationSubject(out.Mailbox, oauthHolder); err != nil {
+			return out, err
+		}
+		if err := input.HeartBeatFunc(); err != nil {
+			return out, err
+		}
+		return out, nil
+	}
+
 	rt := strings.TrimSpace(input.Database.CronJobRepo.ResolvedRefreshToken(input.Job))
 	if rt == "" {
-		return "", "", fmt.Errorf("refresh token not found in job input_data")
+		return out, fmt.Errorf("refresh token not found in job input_data")
 	}
-	accessToken, err = google.AuthTokenUsingRefreshToken(rt)
+	accessToken, err := google.AuthTokenUsingRefreshToken(rt)
 	if err != nil {
-		return "", "", fmt.Errorf("error while generating auth token: %w", err)
+		return out, fmt.Errorf("error while generating auth token: %w", err)
 	}
 	if strings.TrimSpace(accessToken) == "" {
-		return "", "", fmt.Errorf("error while generating auth token: empty access token")
+		return out, fmt.Errorf("error while generating auth token: empty access token")
 	}
+	out.AccessToken = accessToken
 	if err := input.HeartBeatFunc(); err != nil {
-		return "", "", err
+		return out, err
 	}
-	return accessToken, storx, nil
+	return out, nil
 }
 
 func runGoogleDriveAutosync(input ProcessorInput) error {
@@ -84,24 +125,29 @@ func runGoogleDriveAutosync(input ProcessorInput) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	accessToken, storx, err := googleMediaAutosyncPreflight(input)
+	auth, err := googleMediaAutosyncPreflight(input)
 	if err != nil {
 		return err
 	}
 
 	go func() {
 		processCtx := context.Background()
-		if processErr := handler.ProcessWebhookEvents(processCtx, input.Database, storx, 100); processErr != nil {
+		if processErr := handler.ProcessWebhookEvents(processCtx, input.Database, auth.Storx, 100); processErr != nil {
 			logger.Warn(processCtx, "Failed to process webhook events from auto-sync", logger.ErrorField(processErr))
 		}
 	}()
 
-	task := scheduledTaskShellFromCronJob(input.Job, accessToken, storx)
-	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Drive, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
+	task := scheduledTaskShellFromCronJob(input.Job, auth.AccessToken, auth.Storx)
+	if err := handler.UploadObjectAndSync(ctx, input.Database, auth.Storx, satellite.ReserveBucket_Drive, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
 		return fmt.Errorf("setup storage placeholder: %w", err)
 	}
 
-	service, err := createDriveServiceWithAccessToken(ctx, accessToken)
+	var service *drive.Service
+	if auth.UseDWD {
+		service, err = google.GetDriveServiceForBackupDWD(ctx, auth.Mailbox)
+	} else {
+		service, err = createDriveServiceWithAccessToken(ctx, auth.AccessToken)
+	}
 	if err != nil {
 		return err
 	}

@@ -8,18 +8,23 @@ import (
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/repo"
+	"google.golang.org/api/googleapi"
 )
 
 const (
-	googleRetryMaxAttempts     = 5
-	googleRetryBackoffCap      = 15 * time.Second
-	restoreTaskRetryBackoffCap = 15 * time.Minute
+	googleRetryMaxAttempts       = 5
+	googleRetryBackoffCap        = 15 * time.Second
+	googleRateLimitMaxAttempts   = 8
+	googleRateLimitBackoffCap    = 60 * time.Second
+	restoreTaskRetryBackoffCap   = 15 * time.Minute
 )
 
 // RetryGoogle runs fn with exponential backoff on retryable Google / network errors.
+// Rate-limit (429 / quota) errors get more attempts and a longer backoff cap.
 func RetryGoogle(ctx context.Context, fn func() error) error {
 	var lastErr error
-	for attempt := 0; attempt < googleRetryMaxAttempts; attempt++ {
+	maxAttempts := googleRetryMaxAttempts
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -30,22 +35,29 @@ func RetryGoogle(ctx context.Context, fn func() error) error {
 		if !isRetryableGoogleError(lastErr) {
 			return lastErr
 		}
-		if attempt == googleRetryMaxAttempts-1 {
+		if isGoogleRateLimitError(lastErr) {
+			maxAttempts = googleRateLimitMaxAttempts
+		}
+		if attempt == maxAttempts-1 {
 			break
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(googleRetryDelay(attempt)):
+		case <-time.After(googleRetryDelay(attempt, isGoogleRateLimitError(lastErr))):
 		}
 	}
 	return lastErr
 }
 
-func googleRetryDelay(attempt int) time.Duration {
+func googleRetryDelay(attempt int, rateLimited bool) time.Duration {
+	capDelay := googleRetryBackoffCap
+	if rateLimited {
+		capDelay = googleRateLimitBackoffCap
+	}
 	base := time.Second << attempt
-	if base > googleRetryBackoffCap {
-		base = googleRetryBackoffCap
+	if base > capDelay {
+		base = capDelay
 	}
 	return jitterDuration(base)
 }
@@ -65,15 +77,33 @@ func isRetryableGoogleError(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
-	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "429") {
+	if isGoogleRateLimitError(err) {
 		return true
 	}
+	msg := strings.ToLower(err.Error())
 	if isGoogleServerError(msg) || strings.Contains(msg, "timeout") {
 		return true
 	}
 	if strings.Contains(msg, "403") {
 		return isQuotaOrRateLimitMessage(msg)
+	}
+	return isQuotaOrRateLimitMessage(msg)
+}
+
+func isGoogleRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *googleapi.Error
+	if errors.As(err, &apiErr) && apiErr != nil && apiErr.Code == 429 {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "429") {
+		return true
+	}
+	if strings.Contains(msg, "403") && isQuotaOrRateLimitMessage(msg) {
+		return true
 	}
 	return isQuotaOrRateLimitMessage(msg)
 }
@@ -97,6 +127,22 @@ func isQuotaOrRateLimitMessage(msg string) bool {
 func ErrorCodeFromErr(err error) string {
 	if err == nil {
 		return ""
+	}
+	var apiErr *googleapi.Error
+	if errors.As(err, &apiErr) && apiErr != nil {
+		switch apiErr.Code {
+		case 429:
+			return "429"
+		case 403:
+			if isQuotaOrRateLimitMessage(strings.ToLower(apiErr.Message)) || isQuotaOrRateLimitMessage(strings.ToLower(apiErr.Error())) {
+				return "403_quota"
+			}
+			return "403"
+		case 404:
+			return "404"
+		case 401:
+			return "401"
+		}
 	}
 	msg := strings.ToLower(err.Error())
 	switch {

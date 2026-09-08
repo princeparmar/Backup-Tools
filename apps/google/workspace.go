@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -13,8 +14,11 @@ import (
 
 	"golang.org/x/oauth2/google"
 	"golang.org/x/oauth2/jwt"
+	"google.golang.org/api/calendar/v3"
+	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/gmail/v1"
 	"google.golang.org/api/option"
+	people "google.golang.org/api/people/v1"
 )
 
 // WorkspaceGmailSession is a Gmail API client plus the userId to pass to users.* calls.
@@ -239,4 +243,103 @@ func NewWorkspaceGmailSession(ctx context.Context, oauthAccessToken, oauthAccoun
 		}
 		return &WorkspaceGmailSession{Client: c, APIUser: "me"}, nil
 	}
+}
+
+// jwtHTTPClientForBackupDelegation builds an HTTP client that impersonates subjectEmail
+// with a Workspace backup (readonly) scope from workspaceDelegationScopes.
+func jwtHTTPClientForBackupDelegation(ctx context.Context, subjectEmail, product string) (*http.Client, error) {
+	subjectEmail = strings.TrimSpace(subjectEmail)
+	if subjectEmail == "" || strings.EqualFold(subjectEmail, "me") {
+		return nil, fmt.Errorf("service account delegation requires a target user email")
+	}
+	scope := strings.TrimSpace(workspaceDelegationScopes[strings.ToLower(strings.TrimSpace(product))])
+	if scope == "" {
+		return nil, fmt.Errorf("unsupported backup delegation product %q", product)
+	}
+	keyJSON, err := loadWorkspaceServiceAccountJSON()
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := google.JWTConfigFromJSON(keyJSON, scope)
+	if err != nil {
+		return nil, fmt.Errorf("jwt config for backup %s: %w", product, err)
+	}
+	cfg.Subject = subjectEmail
+	client := cfg.Client(ctx)
+	client.Timeout = 30 * time.Second
+	return client, nil
+}
+
+// MediaBackupNeedsDelegation is true when the job mailbox is not the OAuth holder
+// (corporate employee job sharing the admin credential).
+func MediaBackupNeedsDelegation(mailbox, oauthHolderEmail string) bool {
+	mailbox = strings.TrimSpace(mailbox)
+	oauthHolderEmail = strings.TrimSpace(oauthHolderEmail)
+	if mailbox == "" || strings.EqualFold(mailbox, "me") {
+		return false
+	}
+	if oauthHolderEmail == "" {
+		return false
+	}
+	return !strings.EqualFold(mailbox, oauthHolderEmail)
+}
+
+// MediaBackupDelegationSubject returns the Workspace user to impersonate for media backup.
+func MediaBackupDelegationSubject(mailbox, oauthHolderEmail string) (string, error) {
+	subject, err := resolveDelegationSubject(mailbox, oauthHolderEmail)
+	if err != nil {
+		return "", err
+	}
+	if !delegationSubjectAllowed(subject) {
+		return "", fmt.Errorf("media backup for %q needs the same Google account reconnect, or set GMAIL_DELEGATION_ALLOW_GMAIL_COM=true for @gmail.com Workspace", subject)
+	}
+	return subject, nil
+}
+
+// GetDriveServiceForBackupDWD impersonates subject with drive.readonly.
+func GetDriveServiceForBackupDWD(ctx context.Context, subjectEmail string) (*drive.Service, error) {
+	client, err := jwtHTTPClientForBackupDelegation(ctx, subjectEmail, "drive")
+	if err != nil {
+		return nil, err
+	}
+	svc, err := drive.NewService(ctx, option.WithHTTPClient(client))
+	if err != nil {
+		return nil, fmt.Errorf("drive backup DWD service for %q: %w", subjectEmail, err)
+	}
+	return svc, nil
+}
+
+// NewCalendarServiceForBackupDWD impersonates subject with calendar.readonly.
+func NewCalendarServiceForBackupDWD(ctx context.Context, subjectEmail string) (*calendar.Service, error) {
+	client, err := jwtHTTPClientForBackupDelegation(ctx, subjectEmail, "calendar")
+	if err != nil {
+		return nil, err
+	}
+	svc, err := calendar.NewService(ctx, option.WithHTTPClient(client))
+	if err != nil {
+		return nil, fmt.Errorf("calendar backup DWD service for %q: %w", subjectEmail, err)
+	}
+	return svc, nil
+}
+
+// NewPeopleServiceForBackupDWD impersonates subject with contacts.readonly.
+func NewPeopleServiceForBackupDWD(ctx context.Context, subjectEmail string) (*people.Service, error) {
+	client, err := jwtHTTPClientForBackupDelegation(ctx, subjectEmail, "contacts")
+	if err != nil {
+		return nil, err
+	}
+	svc, err := people.NewService(ctx, option.WithHTTPClient(client))
+	if err != nil {
+		return nil, fmt.Errorf("contacts backup DWD service for %q: %w", subjectEmail, err)
+	}
+	return svc, nil
+}
+
+// NewGPhotosClientForBackupDWD impersonates subject with photoslibrary.readonly.
+func NewGPhotosClientForBackupDWD(ctx context.Context, subjectEmail string) (*GPotosClient, error) {
+	client, err := jwtHTTPClientForBackupDelegation(ctx, subjectEmail, "photos")
+	if err != nil {
+		return nil, err
+	}
+	return newGPotosClientFromHTTPClient(client)
 }

@@ -43,12 +43,12 @@ var serviceConfigs = map[string]ServiceConfig{
 	"gmail": {
 		Method: "gmail", Bucket: satellite.ReserveBucket_Gmail,
 		Source: "google", ObjectType: "gmail",
-		BatchSize: 50, MaxConcurrency: 10, VaultConcurrency: 10, RateLimitPerSec: 20,
+		BatchSize: 25, MaxConcurrency: 2, VaultConcurrency: 2, RateLimitPerSec: 2,
 	},
 	"google_drive": {
 		Method: "google_drive", Bucket: satellite.ReserveBucket_Drive,
 		Source: "google", ObjectType: "drive",
-		BatchSize: 25, MaxConcurrency: 10, VaultConcurrency: 5, RateLimitPerSec: 20,
+		BatchSize: 25, MaxConcurrency: 3, VaultConcurrency: 3, RateLimitPerSec: 5,
 	},
 	"google_photos": {
 		Method: "google_photos", Bucket: satellite.ReserveBucket_Photos,
@@ -58,12 +58,12 @@ var serviceConfigs = map[string]ServiceConfig{
 	"google_calendar": {
 		Method: "google_calendar", Bucket: satellite.ReserveBucket_Calendar,
 		Source: "google", ObjectType: "calendar",
-		BatchSize: 100, MaxConcurrency: 20, VaultConcurrency: 20, RateLimitPerSec: 40,
+		BatchSize: 50, MaxConcurrency: 5, VaultConcurrency: 5, RateLimitPerSec: 8,
 	},
 	"google_contacts": {
 		Method: "google_contacts", Bucket: satellite.ReserveBucket_Contacts,
 		Source: "google", ObjectType: "contacts",
-		BatchSize: 100, MaxConcurrency: 20, VaultConcurrency: 20, RateLimitPerSec: 40,
+		BatchSize: 50, MaxConcurrency: 5, VaultConcurrency: 5, RateLimitPerSec: 8,
 	},
 }
 
