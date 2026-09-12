@@ -55,6 +55,12 @@ type RestoreJobListingDB struct {
 	Message       string `json:"message" gorm:"type:varchar(512)"`
 	MessageStatus string `json:"message_status" gorm:"column:message_status;not null;default:info"`
 
+	// FailureCode is BANDWIDTH_QUOTA / STORAGE_QUOTA for UI CTAs.
+	FailureCode    string `json:"failure_code,omitempty" gorm:"column:failure_code;type:varchar(64);default:''"`
+	EstimateBytes  int64  `json:"estimate_bytes,omitempty" gorm:"column:estimate_bytes;default:0"`
+	RemainingBytes int64  `json:"remaining_bytes,omitempty" gorm:"column:remaining_bytes;default:0"`
+	QuotaKind      string `json:"quota_kind,omitempty" gorm:"column:quota_kind;type:varchar(32);default:''"`
+
 	CancelledAt   *time.Time `json:"cancelled_at,omitempty"`
 	LastHeartBeat *time.Time `json:"last_heart_beat,omitempty"`
 }

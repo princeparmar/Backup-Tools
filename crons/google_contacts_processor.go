@@ -55,9 +55,6 @@ func runGoogleContactsAutosync(input ProcessorInput) error {
 	}()
 
 	task := scheduledTaskShellFromCronJob(input.Job, auth.AccessToken, auth.Storx)
-	if err := handler.UploadObjectAndSync(ctx, input.Database, auth.Storx, satellite.ReserveBucket_Contacts, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
-		return fmt.Errorf("setup storage placeholder: %w", err)
-	}
 
 	var service *people.Service
 	if auth.UseDWD {
@@ -67,6 +64,13 @@ func runGoogleContactsAutosync(input ProcessorInput) error {
 	}
 	if err != nil {
 		return err
+	}
+	if err := estimateAndEnforceContacts(ctx, input, service); err != nil {
+		return err
+	}
+
+	if err := handler.UploadObjectAndSync(ctx, input.Database, auth.Storx, satellite.ReserveBucket_Contacts, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
+		return mapUploadErr("google_contacts", fmt.Errorf("setup storage placeholder: %w", err))
 	}
 
 	syncedSet, err := loadContactsSyncedIDSet(ctx, input, task, auth.Storx)
@@ -164,6 +168,9 @@ func processContactsPage(ctx context.Context, input ProcessorInput, task *repo.S
 		}
 		newFound = true
 		if err := retrySyncContactByID(ctx, input, task, items[i]); err != nil {
+			if shouldAbortOnItemError(err) {
+				return false, wrapStorageAbort("google_contacts", err)
+			}
 			logger.Warn(ctx, "Contacts sync failed", logger.String("contact_id", id), logger.ErrorField(err))
 			continue
 		}

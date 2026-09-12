@@ -86,6 +86,7 @@ func StartServer(db *db.PostgresDb, address string) {
 
 	job := autoSync.Group("/job")
 	job.GET("/services", handler.HandleAutomaticSyncServicesForUser)
+	job.POST("/services-quota-check", handler.HandleAutomaticSyncServicesQuotaPrecheck)
 	job.GET("/", handler.HandleAutomaticSyncListForUser)
 	job.POST("", handler.HandleAutomaticSyncCreate)
 	job.GET("/interval", handler.HandleIntervalOnConfig)
@@ -109,6 +110,7 @@ func StartServer(db *db.PostgresDb, address string) {
 
 	task := autoSync.Group("/task")
 	task.POST("/:job_id/backup-now", handler.HandleAutomaticSyncBackupNow)
+	task.POST("/:job_id/quota-check", handler.HandleAutomaticSyncQuotaCheck)
 	task.POST("/:job_id", handler.HandleAutomaticSyncCreateTask)
 	task.GET("/:job_id", handler.HandleAutomaticSyncTaskList)
 

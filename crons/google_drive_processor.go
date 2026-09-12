@@ -15,6 +15,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
+	"github.com/StorX2-0/Backup-Tools/pkg/quota"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"golang.org/x/oauth2"
@@ -27,6 +28,63 @@ type googleDriveProcessor struct{}
 
 func NewGoogleDriveProcessor() *googleDriveProcessor {
 	return &googleDriveProcessor{}
+}
+
+// driveQuotaSession caches CyberLS remaining storage for per-file skip decisions.
+type driveQuotaSession struct {
+	remaining    int64
+	ok           bool // false = usage-limits unavailable → do not skip (Layer-2 still enforces)
+	synced       int
+	skippedQuota int
+	skippedBytes int64
+}
+
+func newDriveQuotaSession(ctx context.Context, input ProcessorInput) *driveQuotaSession {
+	s := &driveQuotaSession{}
+	usage, err := quota.FetchUsageLimits(ctx, input.Database, input.Job)
+	if err != nil {
+		logger.Warn(ctx, "drive per-file quota: usage-limits unavailable; not skipping files", logger.ErrorField(err))
+		return s
+	}
+	s.remaining = usage.RemainingStorage()
+	s.ok = true
+	logger.Info(ctx, "drive per-file quota session started",
+		logger.Int64("remaining_bytes", s.remaining),
+		logger.Int64("storage_used", usage.StorageUsed),
+		logger.Int64("storage_limit", usage.StorageLimit),
+	)
+	return s
+}
+
+// shouldSkipFile returns true when fileBytes exceeds remaining CyberLS storage.
+func (s *driveQuotaSession) shouldSkipFile(fileBytes int64) bool {
+	if s == nil || !s.ok || fileBytes <= 0 {
+		return false
+	}
+	return !quota.FileFitsStorage(fileBytes, s.remaining)
+}
+
+func (s *driveQuotaSession) recordQuotaSkip(fileBytes int64) {
+	if s == nil {
+		return
+	}
+	s.skippedQuota++
+	if fileBytes > 0 {
+		s.skippedBytes += fileBytes
+	}
+}
+
+func (s *driveQuotaSession) accountUpload(fileBytes int64) {
+	if s == nil || !s.ok || fileBytes <= 0 {
+		return
+	}
+	need := quota.RequiredBytes(fileBytes)
+	if need > s.remaining {
+		s.remaining = 0
+		return
+	}
+	s.remaining -= need
+	s.synced++
 }
 
 func (p *googleDriveProcessor) Run(input ProcessorInput) error {
@@ -137,10 +195,8 @@ func runGoogleDriveAutosync(input ProcessorInput) error {
 		}
 	}()
 
+	// Also move Drive placeholder after precheck
 	task := scheduledTaskShellFromCronJob(input.Job, auth.AccessToken, auth.Storx)
-	if err := handler.UploadObjectAndSync(ctx, input.Database, auth.Storx, satellite.ReserveBucket_Drive, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
-		return fmt.Errorf("setup storage placeholder: %w", err)
-	}
 
 	var service *drive.Service
 	if auth.UseDWD {
@@ -151,21 +207,31 @@ func runGoogleDriveAutosync(input ProcessorInput) error {
 	if err != nil {
 		return err
 	}
+	// Drive autosync: per-file size vs CyberLS remaining (skip oversized files).
+	// Full Drive about.storageQuota estimate is used by Backup Now / handler quota-check APIs only.
+	quotaSess := newDriveQuotaSession(ctx, input)
+
+	if err := handler.UploadObjectAndSync(ctx, input.Database, auth.Storx, satellite.ReserveBucket_Drive, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
+		return mapUploadErr("google_drive", fmt.Errorf("setup storage placeholder: %w", err))
+	}
 	// First run = baseline from flat listing, later runs = changes API.
 	if input.Job.TaskMemory.DrivePageToken == nil || strings.TrimSpace(*input.Job.TaskMemory.DrivePageToken) == "" {
-		newToken, syncErr := runDriveBaselineSync(ctx, input, task, service)
+		newToken, syncErr := runDriveBaselineSync(ctx, input, task, service, quotaSess)
 		if syncErr != nil {
 			return syncErr
 		}
 		input.Job.TaskMemory.DrivePageToken = &newToken
 		input.Job.TaskMemory.DriveBaselineDone = true
 	} else {
-		newToken, syncErr := runDriveIncrementalSync(ctx, input, task, service, strings.TrimSpace(*input.Job.TaskMemory.DrivePageToken))
+		newToken, syncErr := runDriveIncrementalSync(ctx, input, task, service, strings.TrimSpace(*input.Job.TaskMemory.DrivePageToken), quotaSess)
 		if syncErr != nil {
 			return syncErr
 		}
 		input.Job.TaskMemory.DrivePageToken = &newToken
 		input.Job.TaskMemory.DriveBaselineDone = true
+	}
+	if quotaSess != nil && quotaSess.skippedQuota > 0 {
+		ApplyDriveStorageSkipMessage(input, quotaSess.synced, quotaSess.skippedQuota, quotaSess.skippedBytes, quotaSess.remaining)
 	}
 	return input.Database.CronJobRepo.UpdateCronJobFieldsForCron(input.Job.ID, map[string]interface{}{
 		"task_memory": input.Job.TaskMemory,
@@ -190,7 +256,7 @@ func createDriveServiceWithAccessToken(ctx context.Context, accessToken string) 
 	return svc, nil
 }
 
-func runDriveBaselineSync(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service) (string, error) {
+func runDriveBaselineSync(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, quotaSess *driveQuotaSession) (string, error) {
 	startTok, err := service.Changes.GetStartPageToken().SupportsAllDrives(true).Do()
 	if err != nil {
 		return "", fmt.Errorf("drive start page token: %w", err)
@@ -206,7 +272,10 @@ func runDriveBaselineSync(ctx context.Context, input ProcessorInput, task *repo.
 			return "", err
 		}
 		for i := range page.Files {
-			if err := retrySyncDriveFileByID(ctx, input, task, service, page.Files[i].ID, nil, shortcutTargetCache); err != nil {
+			if err := retrySyncDriveFileByID(ctx, input, task, service, page.Files[i].ID, nil, shortcutTargetCache, quotaSess); err != nil {
+				if shouldAbortOnItemError(err) {
+					return "", wrapStorageAbort("google_drive", err)
+				}
 				logger.Warn(ctx, "Drive baseline file sync failed", logger.String("file_id", page.Files[i].ID), logger.ErrorField(err))
 			}
 		}
@@ -218,7 +287,7 @@ func runDriveBaselineSync(ctx context.Context, input ProcessorInput, task *repo.
 	return strings.TrimSpace(startTok.StartPageToken), nil
 }
 
-func runDriveIncrementalSync(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, pageToken string) (string, error) {
+func runDriveIncrementalSync(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, pageToken string, quotaSess *driveQuotaSession) (string, error) {
 	currentPageToken := pageToken
 	newStartToken := pageToken
 	shortcutTargetCache := make(map[string]*drive.File)
@@ -242,11 +311,17 @@ func runDriveIncrementalSync(ctx context.Context, input ProcessorInput, task *re
 			}
 			if change.Removed {
 				if err := writeDriveRemovedMetadata(ctx, input, task, change.FileId); err != nil {
+					if shouldAbortOnItemError(err) {
+						return "", wrapStorageAbort("google_drive", err)
+					}
 					logger.Warn(ctx, "drive removed metadata update failed", logger.String("file_id", change.FileId), logger.ErrorField(err))
 				}
 				continue
 			}
-			if err := retrySyncDriveFileByID(ctx, input, task, service, change.FileId, change.File, shortcutTargetCache); err != nil {
+			if err := retrySyncDriveFileByID(ctx, input, task, service, change.FileId, change.File, shortcutTargetCache, quotaSess); err != nil {
+				if shouldAbortOnItemError(err) {
+					return "", wrapStorageAbort("google_drive", err)
+				}
 				logger.Warn(ctx, "drive incremental file sync failed", logger.String("file_id", change.FileId), logger.ErrorField(err))
 			}
 		}
@@ -261,7 +336,7 @@ func runDriveIncrementalSync(ctx context.Context, input ProcessorInput, task *re
 	return newStartToken, nil
 }
 
-func syncDriveFileByID(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, fileID string, preloaded *drive.File, shortcutTargetCache map[string]*drive.File) error {
+func syncDriveFileByID(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, fileID string, preloaded *drive.File, shortcutTargetCache map[string]*drive.File, quotaSess *driveQuotaSession) error {
 	file := preloaded
 	var err error
 	if file == nil || strings.TrimSpace(file.Id) == "" || strings.TrimSpace(file.MimeType) == "" || strings.TrimSpace(file.Name) == "" || strings.TrimSpace(file.ModifiedTime) == "" {
@@ -321,17 +396,18 @@ func syncDriveFileByID(ctx context.Context, input ProcessorInput, task *repo.Sch
 		return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, metaKey, b, task.UserID, input.StorxRecovery)
 	}
 
-	// Legacy path (files <= 10MB): download full content into memory, then upload.
-	// content, exportMime, err := downloadDriveFileContent(service, file)
-	// if err != nil {
-	// 	return err
-	// }
-	// if exportMime != "" {
-	// 	meta.ExportMimeType = exportMime
-	// }
-	// if err := handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, dataKey, content, task.UserID, input.StorxRecovery); err != nil {
-	// 	return err
-	// }
+	// Per-file CyberLS gate: skip content upload when file size > remaining.
+	if quotaSess != nil && quotaSess.shouldSkipFile(file.Size) {
+		quotaSess.recordQuotaSkip(file.Size)
+		logger.Warn(ctx, "drive file skipped: size exceeds remaining CyberLS storage",
+			logger.String("file_id", file.Id),
+			logger.String("name", file.Name),
+			logger.Int64("file_bytes", file.Size),
+			logger.Int64("required_bytes", quota.RequiredBytes(file.Size)),
+			logger.Int64("remaining_bytes", quotaSess.remaining),
+		)
+		return nil
+	}
 
 	var exportMime string
 	if handler.ShouldUseStreamingUpload(file.Size, file.MimeType) {
@@ -356,19 +432,21 @@ func syncDriveFileByID(ctx context.Context, input ProcessorInput, task *repo.Sch
 		if exportMime != "" {
 			meta.ExportMimeType = exportMime
 		}
-		// if err := handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, dataKey, content, task.UserID, input.StorxRecovery); err != nil {
 		if err := handler.UploadBufferedObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, dataKey, content, task.UserID, input.StorxRecovery); err != nil {
 			return err
 		}
+	}
+	if quotaSess != nil {
+		quotaSess.accountUpload(file.Size)
 	}
 	b, _ := json.Marshal(meta)
 	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, metaKey, b, task.UserID, input.StorxRecovery)
 }
 
-func retrySyncDriveFileByID(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, fileID string, preloaded *drive.File, shortcutTargetCache map[string]*drive.File) error {
+func retrySyncDriveFileByID(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, fileID string, preloaded *drive.File, shortcutTargetCache map[string]*drive.File, quotaSess *driveQuotaSession) error {
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		if err := syncDriveFileByID(ctx, input, task, service, fileID, preloaded, shortcutTargetCache); err != nil {
+		if err := syncDriveFileByID(ctx, input, task, service, fileID, preloaded, shortcutTargetCache, quotaSess); err != nil {
 			lastErr = err
 			logger.Warn(ctx, "drive sync attempt failed", logger.String("file_id", fileID), logger.Int("attempt", attempt), logger.ErrorField(err))
 			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)

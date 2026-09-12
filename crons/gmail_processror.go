@@ -103,9 +103,15 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 	gmailClient := gmailSession.Client
 	gmailAPIUser := gmailSession.APIUser
 
+	if gmailClient != nil && gmailClient.Service != nil {
+		if err := estimateAndEnforceGmail(ctx, input, gmailClient.Service, gmailAPIUser); err != nil {
+			return err
+		}
+	}
+
 	err = handler.UploadObjectAndSync(context.Background(), input.Database, storxToken, satellite.ReserveBucket_Gmail, pathPrefix+"/.file_placeholder", nil, input.Job.UserID, input.StorxRecovery)
 	if err != nil {
-		return err
+		return mapUploadErr("gmail", err)
 	}
 
 	// Get synced objects from database instead of listing from Satellite (OPTIMIZATION)
@@ -161,7 +167,7 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 			// err = handler.UploadObjectAndSync(context.TODO(), input.Database, storxToken, "gmail", messagePath, b, input.Job.UserID, input.StorxRecovery)
 			err = handler.UploadBufferedObjectAndSync(context.TODO(), input.Database, storxToken, "gmail", messagePath, b, input.Job.UserID, input.StorxRecovery)
 			if err != nil {
-				return err
+				return mapUploadErr("gmail", err)
 			}
 
 			input.Job.TaskMemory.GmailSyncCount++

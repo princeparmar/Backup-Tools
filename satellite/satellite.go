@@ -508,6 +508,93 @@ func RefreshStorxToken(ctx context.Context, userID, projectID, email string) (st
 	return grant, nil
 }
 
+// ProjectUsageLimits is the Redis-backed usage snapshot from Satellite.
+type ProjectUsageLimits struct {
+	StorageLimit   int64 `json:"storageLimit"`
+	StorageUsed    int64 `json:"storageUsed"`
+	BandwidthLimit int64 `json:"bandwidthLimit"`
+	BandwidthUsed  int64 `json:"bandwidthUsed"`
+	ObjectCount    int64 `json:"objectCount"`
+	SegmentCount   int64 `json:"segmentCount"`
+}
+
+// GetProjectUsageLimits fetches storage/bandwidth used+limit for Backup-Tools pre-checks.
+// Uses POST /api/v0/internal/project-usage-limits (X-API-Key). Does not write Redis.
+func GetProjectUsageLimits(ctx context.Context, userID, projectID string) (*ProjectUsageLimits, error) {
+	userID = strings.TrimSpace(userID)
+	projectID = strings.TrimSpace(projectID)
+	if userID == "" || projectID == "" {
+		return nil, fmt.Errorf("user_id and project_id are required for usage-limits")
+	}
+	if StorxSatelliteService == "" {
+		return nil, fmt.Errorf("STORX_SATELLITE_SERVICE not set")
+	}
+	apiKey := utils.GetEnvWithKey("BACKUP_TOOLS_API_KEY")
+	if apiKey == "" {
+		return nil, fmt.Errorf("BACKUP_TOOLS_API_KEY not set")
+	}
+
+	payload := struct {
+		UserID    string `json:"user_id"`
+		ProjectID string `json:"project_id"`
+	}{
+		UserID:    userID,
+		ProjectID: projectID,
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal usage-limits payload: %w", err)
+	}
+
+	url := strings.TrimSuffix(StorxSatelliteService, "/") + "/api/v0/internal/project-usage-limits"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return nil, fmt.Errorf("create usage-limits request: %w", err)
+	}
+	req.Header.Set("accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("X-User-Id", userID)
+
+	res, err := satelliteHTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("usage-limits request: %w", err)
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read usage-limits response: %w", err)
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return nil, fmt.Errorf("usage-limits status %d: %s", res.StatusCode, string(body))
+	}
+
+	var response struct {
+		StorageLimit   int64  `json:"storageLimit"`
+		StorageUsed    int64  `json:"storageUsed"`
+		BandwidthLimit int64  `json:"bandwidthLimit"`
+		BandwidthUsed  int64  `json:"bandwidthUsed"`
+		ObjectCount    int64  `json:"objectCount"`
+		SegmentCount   int64  `json:"segmentCount"`
+		Error          string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, fmt.Errorf("parse usage-limits response: %w", err)
+	}
+	if response.Error != "" {
+		return nil, fmt.Errorf("usage-limits: %s", response.Error)
+	}
+	return &ProjectUsageLimits{
+		StorageLimit:   response.StorageLimit,
+		StorageUsed:    response.StorageUsed,
+		BandwidthLimit: response.BandwidthLimit,
+		BandwidthUsed:  response.BandwidthUsed,
+		ObjectCount:    response.ObjectCount,
+		SegmentCount:   response.SegmentCount,
+	}, nil
+}
+
 // ClearGoogleRefreshToken tells Satellite to clear the stored Google OAuth refresh token for a user + mailbox email.
 func ClearGoogleRefreshToken(ctx context.Context, userID, email string) error {
 	userID = strings.TrimSpace(userID)

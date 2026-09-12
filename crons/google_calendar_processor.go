@@ -44,9 +44,6 @@ func runGoogleCalendarAutosync(input ProcessorInput) error {
 	}()
 
 	task := scheduledTaskShellFromCronJob(input.Job, auth.AccessToken, auth.Storx)
-	if err := handler.UploadObjectAndSync(ctx, input.Database, auth.Storx, satellite.ReserveBucket_Calendar, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
-		return fmt.Errorf("setup storage placeholder: %w", err)
-	}
 
 	var service *calendar.Service
 	if auth.UseDWD {
@@ -56,6 +53,13 @@ func runGoogleCalendarAutosync(input ProcessorInput) error {
 	}
 	if err != nil {
 		return err
+	}
+	if err := estimateAndEnforceCalendar(ctx, input, service); err != nil {
+		return err
+	}
+
+	if err := handler.UploadObjectAndSync(ctx, input.Database, auth.Storx, satellite.ReserveBucket_Calendar, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
+		return mapUploadErr("google_calendar", fmt.Errorf("setup storage placeholder: %w", err))
 	}
 
 	calendars, err := google.ListCalendarsWithService(service)
@@ -205,6 +209,9 @@ func processCalendarEventsPage(ctx context.Context, input ProcessorInput, task *
 			continue
 		}
 		if err := retrySyncCalendarEvent(ctx, input, task, calendarID, calendarSummary, ev); err != nil {
+			if shouldAbortOnItemError(err) {
+				return wrapStorageAbort("google_calendar", err)
+			}
 			logger.Warn(ctx, "calendar event sync failed",
 				logger.String("calendar_id", calendarID),
 				logger.String("event_id", ev.Id),

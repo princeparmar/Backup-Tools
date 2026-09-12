@@ -166,6 +166,13 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 		return failJob(ctx, store, job, err)
 	}
 
+	// Bandwidth gate once at restore start (not on retry batches).
+	if retryTask == nil && job.CursorID == 0 && job.ProcessedCount == 0 {
+		if bwErr := EnforceRestoreBandwidthPrecheck(ctx, store, job, deps.AccessGrant); bwErr != nil {
+			return failJob(ctx, store, job, bwErr)
+		}
+	}
+
 	if err := proc.Setup(ctx, deps); err != nil {
 		return failJob(ctx, store, job, err)
 	}

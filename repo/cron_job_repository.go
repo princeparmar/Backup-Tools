@@ -100,6 +100,15 @@ type CronJobListingDB struct {
 	FailurePeriods uint `json:"failure_periods" gorm:"column:failure_periods;default:0"`
 	// StorxRefreshFailures counts consecutive Satellite storx refresh failures; reset on successful refresh.
 	StorxRefreshFailures uint `json:"storx_refresh_failures" gorm:"column:storx_refresh_failures;default:0"`
+
+	// FailureCode is STORAGE_QUOTA / BANDWIDTH_QUOTA (or empty) for UI CTAs.
+	FailureCode string `json:"failure_code,omitempty" gorm:"column:failure_code;type:varchar(64);default:''"`
+	// EstimateBytes is the last pre-check estimate (bytes) when a quota failure was recorded.
+	EstimateBytes int64 `json:"estimate_bytes,omitempty" gorm:"column:estimate_bytes;default:0"`
+	// RemainingBytes is remaining quota at the last quota failure.
+	RemainingBytes int64 `json:"remaining_bytes,omitempty" gorm:"column:remaining_bytes;default:0"`
+	// QuotaKind is "storage" or "bandwidth" when FailureCode is set.
+	QuotaKind string `json:"quota_kind,omitempty" gorm:"column:quota_kind;type:varchar(32);default:''"`
 }
 
 // TaskMemory represents the memory state of a task
