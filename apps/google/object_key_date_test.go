@@ -135,7 +135,8 @@ func TestGmailObjectKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	msg := &gmail.Message{
-		Id:           "mid1",
+		Id:           "mid1abcdefghij",
+		ThreadId:     "mid1abcdefghij",
 		InternalDate: ts.UnixMilli(),
 		Payload: &gmail.MessagePart{
 			Headers: []*gmail.MessagePartHeader{
@@ -145,7 +146,7 @@ func TestGmailObjectKey(t *testing.T) {
 		},
 	}
 	got := GmailObjectKey("user@gmail.com", msg)
-	want := "user@gmail.com/_/2026/07/21/a@b.com - Hi - mid1.gmail"
+	want := "user@gmail.com/_/2026/07/21/a@b.com - Hi - mid1abcdefghij - mid1abcdefghij.gmail"
 	if got != want {
 		t.Fatalf("GmailObjectKey() = %q, want %q", got, want)
 	}

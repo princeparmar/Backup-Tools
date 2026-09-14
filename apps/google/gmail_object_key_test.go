@@ -41,7 +41,8 @@ func TestGmailObjectKeyLabeled(t *testing.T) {
 		t.Fatal(err)
 	}
 	msg := &gmail.Message{
-		Id:           "mid1",
+		Id:           "mid1abcdefghij",
+		ThreadId:     "tid9abcdefghij",
 		InternalDate: ts.UnixMilli(),
 		LabelIds:     []string{"STARRED", "INBOX", "IMPORTANT", "UNREAD"},
 		Payload: &gmail.MessagePart{
@@ -52,7 +53,7 @@ func TestGmailObjectKeyLabeled(t *testing.T) {
 		},
 	}
 	got := GmailObjectKey("user@gmail.com", msg)
-	want := "user@gmail.com/IMPORTANT^INBOX^STARRED/2026/07/21/a@b.com - Hi - mid1.gmail"
+	want := "user@gmail.com/IMPORTANT^INBOX^STARRED/2026/07/21/a@b.com - Hi - tid9abcdefghij - mid1abcdefghij.gmail"
 	if got != want {
 		t.Fatalf("GmailObjectKey() = %q, want %q", got, want)
 	}
@@ -61,13 +62,19 @@ func TestGmailObjectKeyLabeled(t *testing.T) {
 	if GmailObjectKey("user@gmail.com", msg) != want {
 		t.Fatal("label order must not change key")
 	}
+	p, ok := ParseGmailObjectKey(got)
+	if !ok || p.MessageID != "mid1abcdefghij" || p.ThreadID != "tid9abcdefghij" {
+		t.Fatalf("parse threaded key: %+v ok=%v", p, ok)
+	}
 }
-
 func TestParseGmailObjectKeyAndHasLabel(t *testing.T) {
 	labeled := "user@gmail.com/IMPORTANT^INBOX^STARRED/2026/07/21/a@b.com - Hi - mid1.gmail"
 	p, ok := ParseGmailObjectKey(labeled)
 	if !ok || p.Legacy || p.MessageID != "mid1" || p.Email != "user@gmail.com" {
 		t.Fatalf("parse labeled: %+v ok=%v", p, ok)
+	}
+	if p.ThreadID != "" {
+		t.Fatalf("old key should have empty thread id, got %q", p.ThreadID)
 	}
 	if !ObjectKeyHasGmailLabel(labeled, "INBOX") {
 		t.Fatal("expected INBOX")

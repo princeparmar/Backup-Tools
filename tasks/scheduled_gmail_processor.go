@@ -109,8 +109,8 @@ func (g *GmailProcessor) processEmails(input ScheduledTaskProcessorInput, client
 			return err
 		}
 
-		// Get the full gmail.Message (same as direct upload) to ensure consistent filename generation
-		message, err := client.Service.Users.Messages.Get("me", emailID).Format("full").Do()
+		// Full message + inlined attachment bytes (same as handler GetMessageDirect / autosync cron).
+		message, err := client.GetMessageDirect(emailID)
 		if err != nil {
 			failedEmails, failedCount = g.trackFailure(emailID, err, failedEmails, failedCount, input)
 			continue

@@ -3,6 +3,7 @@ package crons
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
+	"google.golang.org/api/gmail/v1"
 	"google.golang.org/api/googleapi"
 )
 
@@ -133,62 +135,31 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 		input.Job.TaskMemory.GmailNextToken = new(string)
 	}
 
-		const gmailAllMailPageSize int64 = 100
+	const gmailAllMailPageSize int64 = 100
+
+	syncOne := func(message *gmail.Message) error {
+		return gmailSyncOneMessage(ctx, input, storxToken, pathPrefix, emailListFromBucket, message)
+	}
+
+	// Run category catch-up FIRST every job tick so Purchases/Social/etc. appear in the
+	// vault immediately — do not wait for the full all-mail crawl to finish.
+	if err := gmailRunCategoryCatchUp(ctx, input, gmailClient, gmailAPIUser, gmailAllMailPageSize, syncOne); err != nil {
+		return err
+	}
 
 	for {
-		res, err := gmailListMessagesWithBackoff(gmailClient, gmailAPIUser, *input.Job.TaskMemory.GmailNextToken, gmailAllMailPageSize)
+		res, err := gmailListMessagesWithBackoff(gmailClient, gmailAPIUser, *input.Job.TaskMemory.GmailNextToken, "", gmailAllMailPageSize)
 		if err != nil {
 			return err
 		}
 
 		for _, message := range res.Messages {
-			err := input.HeartBeatFunc()
-			if err != nil {
+			if err := input.HeartBeatFunc(); err != nil {
 				return err
 			}
-			if message == nil || strings.TrimSpace(message.Id) == "" {
-				continue
-			}
-
-			expectedKey := google.GmailObjectKey(pathPrefix, message)
-			existingKey := google.FindExistingGmailKeyByMessageID(emailListFromBucket, pathPrefix, message.Id)
-
-			b, err := json.Marshal(message)
-			if err != nil {
+			if err := syncOne(message); err != nil {
 				return err
 			}
-
-			if existingKey == expectedKey {
-				// Same key: refresh drafts in place; skip unchanged mail.
-				isDraft := false
-				for _, id := range message.LabelIds {
-					if id == "DRAFT" {
-						isDraft = true
-						break
-					}
-				}
-				if !isDraft {
-					continue
-				}
-			}
-
-			if err := handler.UploadBufferedObjectAndSync(context.TODO(), input.Database, storxToken, satellite.ReserveBucket_Gmail, expectedKey, b, input.Job.UserID, input.StorxRecovery); err != nil {
-				return mapUploadErr("gmail", err)
-			}
-			emailListFromBucket[expectedKey] = true
-			if existingKey != "" && existingKey != expectedKey {
-				if delErr := satellite.DeleteObject(context.TODO(), storxToken, satellite.ReserveBucket_Gmail, existingKey); delErr != nil {
-					logger.Warn(ctx, "gmail rekey: failed to delete old object",
-						logger.String("old_key", existingKey),
-						logger.String("new_key", expectedKey),
-						logger.ErrorField(delErr),
-					)
-				} else {
-					_ = input.Database.SyncedObjectRepo.DeleteSyncedObject(satellite.ReserveBucket_Gmail, existingKey)
-					delete(emailListFromBucket, existingKey)
-				}
-			}
-			input.Job.TaskMemory.GmailSyncCount++
 		}
 
 		// Persist next page token only after this page finished successfully.
@@ -197,14 +168,126 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 			break
 		}
 	}
+
 	return nil
 }
 
-func gmailListMessagesWithBackoff(client *google.GmailClient, apiUser, pageToken string, pageSize int64) (*google.MessagesResponse, error) {
+func gmailRunCategoryCatchUp(
+	ctx context.Context,
+	input ProcessorInput,
+	gmailClient *google.GmailClient,
+	gmailAPIUser string,
+	pageSize int64,
+	syncOne func(*gmail.Message) error,
+) error {
+	for _, label := range gmailCategoryCatchUpLabels {
+		if err := input.HeartBeatFunc(); err != nil {
+			return err
+		}
+		pageToken := ""
+		for {
+			res, err := gmailListMessagesWithBackoff(gmailClient, gmailAPIUser, pageToken, label, pageSize)
+			if err != nil {
+				// CATEGORY_PURCHASES (and similar) are search tabs on some accounts and are not
+				// valid labelIds — never fail the whole Gmail job for that.
+				if gmailInvalidLabelErr(err) {
+					logger.Warn(ctx, "gmail category catch-up skipped invalid label",
+						logger.String("label", label),
+						logger.ErrorField(err),
+					)
+					break
+				}
+				return fmt.Errorf("gmail category catch-up %s: %w", label, err)
+			}
+			for _, message := range res.Messages {
+				if err := input.HeartBeatFunc(); err != nil {
+					return err
+				}
+				if err := syncOne(message); err != nil {
+					return err
+				}
+			}
+			pageToken = res.NextPageToken
+			if pageToken == "" {
+				break
+			}
+		}
+		logger.Info(ctx, "gmail category catch-up finished",
+			logger.String("label", label),
+			logger.Int("sync_count", int(input.Job.TaskMemory.GmailSyncCount)),
+		)
+	}
+	return nil
+}
+
+// gmailCategoryCatchUpLabels are listed again so sidebar category tabs cannot miss mail.
+// Note: CATEGORY_PURCHASES is omitted — many mailboxes have no such labelId (Gmail uses
+// category:purchases search only); listing it returns 400 Invalid label.
+var gmailCategoryCatchUpLabels = []string{
+	"CATEGORY_PERSONAL",
+	"CATEGORY_PROMOTIONS",
+	"CATEGORY_SOCIAL",
+	"CATEGORY_UPDATES",
+	"CATEGORY_FORUMS",
+}
+
+func gmailSyncOneMessage(
+	ctx context.Context,
+	input ProcessorInput,
+	storxToken, pathPrefix string,
+	emailListFromBucket map[string]bool,
+	message *gmail.Message,
+) error {
+	if message == nil || strings.TrimSpace(message.Id) == "" {
+		return nil
+	}
+
+	expectedKey := google.GmailObjectKey(pathPrefix, message)
+	existingKey := google.FindExistingGmailKeyByMessageID(emailListFromBucket, pathPrefix, message.Id)
+
+	b, err := json.Marshal(message)
+	if err != nil {
+		return err
+	}
+
+	if existingKey == expectedKey {
+		isDraft := false
+		for _, id := range message.LabelIds {
+			if id == "DRAFT" {
+				isDraft = true
+				break
+			}
+		}
+		if !isDraft {
+			return nil
+		}
+	}
+
+	if err := handler.UploadBufferedObjectAndSync(context.TODO(), input.Database, storxToken, satellite.ReserveBucket_Gmail, expectedKey, b, input.Job.UserID, input.StorxRecovery); err != nil {
+		return mapUploadErr("gmail", err)
+	}
+	emailListFromBucket[expectedKey] = true
+	if existingKey != "" && existingKey != expectedKey {
+		if delErr := satellite.DeleteObject(context.TODO(), storxToken, satellite.ReserveBucket_Gmail, existingKey); delErr != nil {
+			logger.Warn(ctx, "gmail rekey: failed to delete old object",
+				logger.String("old_key", existingKey),
+				logger.String("new_key", expectedKey),
+				logger.ErrorField(delErr),
+			)
+		} else {
+			_ = input.Database.SyncedObjectRepo.DeleteSyncedObject(satellite.ReserveBucket_Gmail, existingKey)
+			delete(emailListFromBucket, existingKey)
+		}
+	}
+	input.Job.TaskMemory.GmailSyncCount++
+	return nil
+}
+
+func gmailListMessagesWithBackoff(client *google.GmailClient, apiUser, pageToken, label string, pageSize int64) (*google.MessagesResponse, error) {
 	var lastErr error
 	backoff := 500 * time.Millisecond
 	for attempt := 0; attempt < 5; attempt++ {
-		res, err := client.GetUserMessagesWithUserID(apiUser, pageToken, "", pageSize, nil)
+		res, err := client.GetUserMessagesWithUserID(apiUser, pageToken, label, pageSize, nil)
 		if err == nil {
 			return res, nil
 		}
@@ -240,9 +323,28 @@ func gmailListRetryable(err error) bool {
 		strings.Contains(msg, "rate limit")
 }
 
+// gmailInvalidLabelErr is true for Gmail 400 "Invalid label: …" (labelId does not exist on mailbox).
+func gmailInvalidLabelErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *googleapi.Error
+	if asGoogleAPIError(err, &apiErr) && apiErr != nil && apiErr.Code == 400 {
+		msg := strings.ToLower(apiErr.Message)
+		return strings.Contains(msg, "invalid label") || strings.Contains(msg, "invalidargument")
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "invalid label")
+}
+
 func asGoogleAPIError(err error, out **googleapi.Error) bool {
 	if err == nil {
 		return false
+	}
+	var apiErr *googleapi.Error
+	if errors.As(err, &apiErr) {
+		*out = apiErr
+		return true
 	}
 	if e, ok := err.(*googleapi.Error); ok {
 		*out = e

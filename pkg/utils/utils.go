@@ -97,20 +97,33 @@ func GetEnvWithKey(key string) string {
 func GenerateTitleFromGmailMessage(msg *gmail.Message) string {
 	var from, subject string
 
-	for _, v := range msg.Payload.Headers {
-		switch v.Name {
-		case "From":
-			if res, ok := GetStringBetween(v.Value, "\u003c", "\u003e"); ok {
-				from = res
-			} else {
-				from = v.Value
+	if msg != nil && msg.Payload != nil {
+		for _, v := range msg.Payload.Headers {
+			switch v.Name {
+			case "From":
+				if res, ok := GetStringBetween(v.Value, "\u003c", "\u003e"); ok {
+					from = res
+				} else {
+					from = v.Value
+				}
+			case "Subject":
+				subject = v.Value
 			}
-		case "Subject":
-			subject = v.Value
 		}
 	}
 
-	title := fmt.Sprintf("%s - %s - %s.gmail", from, subject, msg.Id)
+	msgID := ""
+	threadID := ""
+	if msg != nil {
+		msgID = strings.TrimSpace(msg.Id)
+		threadID = strings.TrimSpace(msg.ThreadId)
+	}
+	if threadID == "" {
+		threadID = msgID
+	}
+
+	// from - subject - threadId - messageId  (threadId enables Gmail-like conversation grouping in the vault UI)
+	title := fmt.Sprintf("%s - %s - %s - %s.gmail", from, subject, threadID, msgID)
 	return strings.ReplaceAll(title, "/", "_")
 }
 
