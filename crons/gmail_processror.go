@@ -141,11 +141,8 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 		return gmailSyncOneMessage(ctx, input, storxToken, pathPrefix, emailListFromBucket, message)
 	}
 
-	// Run category catch-up FIRST every job tick so Purchases/Social/etc. appear in the
-	// vault immediately — do not wait for the full all-mail crawl to finish.
-	if err := gmailRunCategoryCatchUp(ctx, input, gmailClient, gmailAPIUser, gmailAllMailPageSize, syncOne); err != nil {
-		return err
-	}
+	// All-mail crawl already includes every category. Do NOT re-list CATEGORY_* first —
+	// that doubled Gmail API cost (list+get+attachments) and hit per-user query quota.
 
 	for {
 		res, err := gmailListMessagesWithBackoff(gmailClient, gmailAPIUser, *input.Job.TaskMemory.GmailNextToken, "", gmailAllMailPageSize)
@@ -170,65 +167,6 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 	}
 
 	return nil
-}
-
-func gmailRunCategoryCatchUp(
-	ctx context.Context,
-	input ProcessorInput,
-	gmailClient *google.GmailClient,
-	gmailAPIUser string,
-	pageSize int64,
-	syncOne func(*gmail.Message) error,
-) error {
-	for _, label := range gmailCategoryCatchUpLabels {
-		if err := input.HeartBeatFunc(); err != nil {
-			return err
-		}
-		pageToken := ""
-		for {
-			res, err := gmailListMessagesWithBackoff(gmailClient, gmailAPIUser, pageToken, label, pageSize)
-			if err != nil {
-				// CATEGORY_PURCHASES (and similar) are search tabs on some accounts and are not
-				// valid labelIds — never fail the whole Gmail job for that.
-				if gmailInvalidLabelErr(err) {
-					logger.Warn(ctx, "gmail category catch-up skipped invalid label",
-						logger.String("label", label),
-						logger.ErrorField(err),
-					)
-					break
-				}
-				return fmt.Errorf("gmail category catch-up %s: %w", label, err)
-			}
-			for _, message := range res.Messages {
-				if err := input.HeartBeatFunc(); err != nil {
-					return err
-				}
-				if err := syncOne(message); err != nil {
-					return err
-				}
-			}
-			pageToken = res.NextPageToken
-			if pageToken == "" {
-				break
-			}
-		}
-		logger.Info(ctx, "gmail category catch-up finished",
-			logger.String("label", label),
-			logger.Int("sync_count", int(input.Job.TaskMemory.GmailSyncCount)),
-		)
-	}
-	return nil
-}
-
-// gmailCategoryCatchUpLabels are listed again so sidebar category tabs cannot miss mail.
-// Note: CATEGORY_PURCHASES is omitted — many mailboxes have no such labelId (Gmail uses
-// category:purchases search only); listing it returns 400 Invalid label.
-var gmailCategoryCatchUpLabels = []string{
-	"CATEGORY_PERSONAL",
-	"CATEGORY_PROMOTIONS",
-	"CATEGORY_SOCIAL",
-	"CATEGORY_UPDATES",
-	"CATEGORY_FORUMS",
 }
 
 func gmailSyncOneMessage(
@@ -321,20 +259,6 @@ func gmailListRetryable(err error) bool {
 	return strings.Contains(msg, "429") ||
 		strings.Contains(msg, "ratelimitexceeded") ||
 		strings.Contains(msg, "rate limit")
-}
-
-// gmailInvalidLabelErr is true for Gmail 400 "Invalid label: …" (labelId does not exist on mailbox).
-func gmailInvalidLabelErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	var apiErr *googleapi.Error
-	if asGoogleAPIError(err, &apiErr) && apiErr != nil && apiErr.Code == 400 {
-		msg := strings.ToLower(apiErr.Message)
-		return strings.Contains(msg, "invalid label") || strings.Contains(msg, "invalidargument")
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "invalid label")
 }
 
 func asGoogleAPIError(err error, out **googleapi.Error) bool {
