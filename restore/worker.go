@@ -241,6 +241,12 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 		return err
 	}
 
+	// Advance past the full page (including rows dropped as Gmail message-id dupes).
+	pageEndID := rows[len(rows)-1].ID
+	if job.Method == "gmail" {
+		rows = DedupeGmailRestoreRows(rows)
+	}
+
 	expectedCursor := job.CursorID
 	batchResult, storxErr := runBatchWithStorxRecovery(ctx, deps, proc, rows)
 	if storxErr != nil {
@@ -288,6 +294,9 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 	newCursor := expectedCursor
 	if batchResult.LastObjectID > 0 {
 		newCursor = batchResult.LastObjectID
+	}
+	if pageEndID > newCursor {
+		newCursor = pageEndID
 	}
 
 	advanced, err := store.RestoreJobRepo.AdvanceRestoreJobCursor(

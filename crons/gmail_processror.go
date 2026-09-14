@@ -5,14 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/handler"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
-	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
+	"google.golang.org/api/googleapi"
 )
 
 type gmailProcessor struct{}
@@ -132,63 +133,120 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 		input.Job.TaskMemory.GmailNextToken = new(string)
 	}
 
-	emptyLoopCount := 0
+		const gmailAllMailPageSize int64 = 100
 
 	for {
-		res, err := gmailClient.GetUserMessagesWithUserID(gmailAPIUser, *input.Job.TaskMemory.GmailNextToken, "CATEGORY_PERSONAL", 500, nil)
+		res, err := gmailListMessagesWithBackoff(gmailClient, gmailAPIUser, *input.Job.TaskMemory.GmailNextToken, gmailAllMailPageSize)
 		if err != nil {
 			return err
 		}
 
-		syncedData := false
 		for _, message := range res.Messages {
 			err := input.HeartBeatFunc()
 			if err != nil {
 				return err
 			}
-
-			if !utils.Contains(message.LabelIds, "CATEGORY_PERSONAL") {
-				// only sync personal emails
+			if message == nil || strings.TrimSpace(message.Id) == "" {
 				continue
 			}
 
-			messagePath := google.GmailObjectKey(pathPrefix, message)
-			if google.IsGmailMessageSynced(emailListFromBucket, pathPrefix, message) {
-				continue
-			}
+			expectedKey := google.GmailObjectKey(pathPrefix, message)
+			existingKey := google.FindExistingGmailKeyByMessageID(emailListFromBucket, pathPrefix, message.Id)
 
 			b, err := json.Marshal(message)
 			if err != nil {
 				return err
 			}
 
-			syncedData = true
-			// Legacy direct upload (all payloads in memory):
-			// err = handler.UploadObjectAndSync(context.TODO(), input.Database, storxToken, "gmail", messagePath, b, input.Job.UserID, input.StorxRecovery)
-			err = handler.UploadBufferedObjectAndSync(context.TODO(), input.Database, storxToken, "gmail", messagePath, b, input.Job.UserID, input.StorxRecovery)
-			if err != nil {
-				return mapUploadErr("gmail", err)
+			if existingKey == expectedKey {
+				// Same key: refresh drafts in place; skip unchanged mail.
+				isDraft := false
+				for _, id := range message.LabelIds {
+					if id == "DRAFT" {
+						isDraft = true
+						break
+					}
+				}
+				if !isDraft {
+					continue
+				}
 			}
 
+			if err := handler.UploadBufferedObjectAndSync(context.TODO(), input.Database, storxToken, satellite.ReserveBucket_Gmail, expectedKey, b, input.Job.UserID, input.StorxRecovery); err != nil {
+				return mapUploadErr("gmail", err)
+			}
+			emailListFromBucket[expectedKey] = true
+			if existingKey != "" && existingKey != expectedKey {
+				if delErr := satellite.DeleteObject(context.TODO(), storxToken, satellite.ReserveBucket_Gmail, existingKey); delErr != nil {
+					logger.Warn(ctx, "gmail rekey: failed to delete old object",
+						logger.String("old_key", existingKey),
+						logger.String("new_key", expectedKey),
+						logger.ErrorField(delErr),
+					)
+				} else {
+					_ = input.Database.SyncedObjectRepo.DeleteSyncedObject(satellite.ReserveBucket_Gmail, existingKey)
+					delete(emailListFromBucket, existingKey)
+				}
+			}
 			input.Job.TaskMemory.GmailSyncCount++
-			emptyLoopCount = 0
 		}
 
-		if !syncedData {
-			// if we don't get any new data, we can break
-			emptyLoopCount++
-		}
-
-		if emptyLoopCount > 20 {
-			// repeated empty pages — stop pagination
-			*input.Job.TaskMemory.GmailNextToken = ""
-			break
-		}
-
+		// Persist next page token only after this page finished successfully.
 		*input.Job.TaskMemory.GmailNextToken = res.NextPageToken
 		if *input.Job.TaskMemory.GmailNextToken == "" {
 			break
 		}
 	}
 	return nil
+}
+
+func gmailListMessagesWithBackoff(client *google.GmailClient, apiUser, pageToken string, pageSize int64) (*google.MessagesResponse, error) {
+	var lastErr error
+	backoff := 500 * time.Millisecond
+	for attempt := 0; attempt < 5; attempt++ {
+		res, err := client.GetUserMessagesWithUserID(apiUser, pageToken, "", pageSize, nil)
+		if err == nil {
+			return res, nil
+		}
+		lastErr = err
+		if !gmailListRetryable(err) {
+			return nil, err
+		}
+		time.Sleep(backoff)
+		if backoff < 8*time.Second {
+			backoff *= 2
+		}
+	}
+	return nil, lastErr
+}
+
+func gmailListRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *googleapi.Error
+	if ok := asGoogleAPIError(err, &apiErr); ok && apiErr != nil {
+		if apiErr.Code == 429 || apiErr.Code >= 500 {
+			return true
+		}
+		if apiErr.Code == 403 {
+			msg := strings.ToLower(apiErr.Message)
+			return strings.Contains(msg, "ratelimit") || strings.Contains(msg, "rate limit") || strings.Contains(msg, "quota")
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "429") ||
+		strings.Contains(msg, "ratelimitexceeded") ||
+		strings.Contains(msg, "rate limit")
+}
+
+func asGoogleAPIError(err error, out **googleapi.Error) bool {
+	if err == nil {
+		return false
+	}
+	if e, ok := err.(*googleapi.Error); ok {
+		*out = e
+		return true
+	}
+	return false
 }

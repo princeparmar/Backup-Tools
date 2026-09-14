@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
 )
@@ -52,6 +53,9 @@ func (g *gmailProcessor) Config() ServiceConfig {
 }
 func (g *gmailProcessor) ShouldRestoreKey(key string) bool { return !ShouldSkipObjectKey(key) }
 func (g *gmailProcessor) Setup(ctx context.Context, deps *RestoreDeps) error {
+	if deps.SeenGmailMessageIDs == nil {
+		deps.SeenGmailMessageIDs = &sync.Map{}
+	}
 	if deps.AuthMode == RestoreAuthModeDWD {
 		client, err := google.NewGmailClientWithServiceAccountDelegationForRestore(ctx, deps.GoogleWriteEmail())
 		if err != nil {
@@ -71,7 +75,7 @@ func (g *gmailProcessor) Setup(ctx context.Context, deps *RestoreDeps) error {
 	return nil
 }
 func (g *gmailProcessor) RestoreKey(ctx context.Context, deps *RestoreDeps, objectKey string) error {
-	return RestoreGmailKey(ctx, deps.AccessGrant, deps.GmailClient, objectKey)
+	return RestoreGmailKeyDeduped(ctx, deps.AccessGrant, deps.GmailClient, objectKey, deps.SeenGmailMessageIDs)
 }
 func (g *gmailProcessor) Cleanup(ctx context.Context, deps *RestoreDeps) error { return nil }
 

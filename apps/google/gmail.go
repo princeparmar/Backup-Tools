@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"mime/quotedprintable"
+	"sort"
 	"strings"
 	"sync"
 
@@ -69,19 +70,194 @@ type Attachment struct {
 	Data     []byte
 }
 
-// GmailObjectKey returns {email}/{yyyy}/{mm}/{dd}/{from} - {subject} - {messageId}.gmail
-// using message internalDate via ObjectKeyDatePathFromUnixMilli (same date helper as other Google services).
+// gmailLabelsKeySeparator joins label IDs in the object-key labelsSegment (not a Gmail id charset char).
+const gmailLabelsKeySeparator = "^"
+
+var gmailLabelsDroppedFromKey = map[string]struct{}{
+	"UNREAD": {},
+	"CHAT":   {},
+}
+
+// sanitizeGmailLabelIDForKey replaces path-unsafe or separator chars in a label id.
+func sanitizeGmailLabelIDForKey(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	id = strings.ReplaceAll(id, "/", "_")
+	id = strings.ReplaceAll(id, gmailLabelsKeySeparator, "_")
+	return id
+}
+
+// GmailBackupLabelsForKey returns label ids kept in the object key (sorted, deduped, sanitized).
+// Drops UNREAD/CHAT; keeps system + user labels. Empty after filter → nil (caller uses "_").
+func GmailBackupLabelsForKey(labelIDs []string) []string {
+	seen := make(map[string]struct{}, len(labelIDs))
+	out := make([]string, 0, len(labelIDs))
+	for _, raw := range labelIDs {
+		id := sanitizeGmailLabelIDForKey(raw)
+		if id == "" {
+			continue
+		}
+		if _, drop := gmailLabelsDroppedFromKey[id]; drop {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// GmailLabelsSegment joins labels for the key path component, or "_" if none.
+func GmailLabelsSegment(labelIDs []string) string {
+	labels := GmailBackupLabelsForKey(labelIDs)
+	if len(labels) == 0 {
+		return "_"
+	}
+	return strings.Join(labels, gmailLabelsKeySeparator)
+}
+
+// GmailObjectKey returns:
+//
+//	{email}/{labelsSegment}/{yyyy}/{mm}/{dd}/{from} - {subject} - {messageId}.gmail
+//
+// labelsSegment is ^-joined label ids (see GmailLabelsSegment). Legacy flat keys omit labelsSegment.
 func GmailObjectKey(email string, msg *gmail.Message) string {
 	email = strings.TrimSpace(email)
 	title := utils.GenerateTitleFromGmailMessage(msg)
 	ms := int64(0)
+	var labelIDs []string
 	if msg != nil {
 		ms = msg.InternalDate
+		labelIDs = msg.LabelIds
 	}
-	return email + "/" + ObjectKeyDatePathFromUnixMilli(ms) + "/" + title
+	seg := GmailLabelsSegment(labelIDs)
+	return email + "/" + seg + "/" + ObjectKeyDatePathFromUnixMilli(ms) + "/" + title
 }
 
-// IsGmailMessageSynced reports whether a message exists under a dated Gmail object key.
+// ParsedGmailObjectKey is the result of ParseGmailObjectKey.
+type ParsedGmailObjectKey struct {
+	Email     string
+	Labels    []string
+	MessageID string
+	Legacy    bool // true when key has no labelsSegment (flat date path)
+}
+
+// ParseGmailObjectKey parses labeled or legacy Gmail object keys.
+func ParseGmailObjectKey(key string) (ParsedGmailObjectKey, bool) {
+	key = strings.TrimSpace(key)
+	if key == "" || !strings.HasSuffix(key, ".gmail") {
+		return ParsedGmailObjectKey{}, false
+	}
+	parts := strings.Split(key, "/")
+	if len(parts) < 5 {
+		return ParsedGmailObjectKey{}, false
+	}
+	email := parts[0]
+	file := parts[len(parts)-1]
+	msgID := ""
+	if i := strings.LastIndex(file, " - "); i >= 0 {
+		rest := file[i+3:]
+		msgID = strings.TrimSuffix(rest, ".gmail")
+	}
+	if msgID == "" {
+		return ParsedGmailObjectKey{}, false
+	}
+
+	// Labeled: email / labelsSegment / yyyy / mm / dd / file  (len >= 6)
+	// Legacy:  email / yyyy / mm / dd / file                   (len == 5)
+	if len(parts) >= 6 {
+		yyyy, mm, dd := parts[len(parts)-4], parts[len(parts)-3], parts[len(parts)-2]
+		if looksLikeYear(yyyy) && looksLikeMonthDay(mm) && looksLikeMonthDay(dd) {
+			seg := parts[1]
+			var labels []string
+			if seg != "_" && seg != "" {
+				labels = strings.Split(seg, gmailLabelsKeySeparator)
+			}
+			return ParsedGmailObjectKey{Email: email, Labels: labels, MessageID: msgID, Legacy: false}, true
+		}
+	}
+	if len(parts) == 5 {
+		yyyy, mm, dd := parts[1], parts[2], parts[3]
+		if looksLikeYear(yyyy) && looksLikeMonthDay(mm) && looksLikeMonthDay(dd) {
+			return ParsedGmailObjectKey{Email: email, Labels: nil, MessageID: msgID, Legacy: true}, true
+		}
+	}
+	// Fallback: treat as labeled if we have email/seg/…/file
+	if len(parts) >= 6 {
+		seg := parts[1]
+		var labels []string
+		if seg != "_" && seg != "" {
+			labels = strings.Split(seg, gmailLabelsKeySeparator)
+		}
+		return ParsedGmailObjectKey{Email: email, Labels: labels, MessageID: msgID, Legacy: false}, true
+	}
+	return ParsedGmailObjectKey{}, false
+}
+
+func looksLikeYear(s string) bool {
+	if len(s) != 4 {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func looksLikeMonthDay(s string) bool {
+	if len(s) != 2 {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// ObjectKeyHasGmailLabel reports whether the key's labelsSegment contains an exact label token.
+// Legacy keys (no segment) never match a specific label.
+func ObjectKeyHasGmailLabel(key, labelID string) bool {
+	labelID = sanitizeGmailLabelIDForKey(labelID)
+	if labelID == "" {
+		return false
+	}
+	parsed, ok := ParseGmailObjectKey(key)
+	if !ok || parsed.Legacy {
+		return false
+	}
+	for _, l := range parsed.Labels {
+		if l == labelID {
+			return true
+		}
+	}
+	return false
+}
+
+// FindExistingGmailKeyByMessageID returns any synced key under email ending with " - {id}.gmail".
+func FindExistingGmailKeyByMessageID(syncedMap map[string]bool, email, messageID string) string {
+	if syncedMap == nil || strings.TrimSpace(messageID) == "" {
+		return ""
+	}
+	suffix := " - " + messageID + ".gmail"
+	prefix := strings.TrimSpace(email) + "/"
+	for key := range syncedMap {
+		if strings.HasPrefix(key, prefix) && strings.HasSuffix(key, suffix) {
+			return key
+		}
+	}
+	return ""
+}
+
+// IsGmailMessageSynced reports whether a message exists under any dated Gmail object key for its id.
 func IsGmailMessageSynced(syncedMap map[string]bool, email string, msg *gmail.Message) bool {
 	if syncedMap == nil || msg == nil {
 		return false
@@ -89,14 +265,7 @@ func IsGmailMessageSynced(syncedMap map[string]bool, email string, msg *gmail.Me
 	if syncedMap[GmailObjectKey(email, msg)] {
 		return true
 	}
-	suffix := " - " + msg.Id + ".gmail"
-	prefix := strings.TrimSpace(email) + "/"
-	for key := range syncedMap {
-		if strings.HasPrefix(key, prefix) && strings.HasSuffix(key, suffix) {
-			return true
-		}
-	}
-	return false
+	return FindExistingGmailKeyByMessageID(syncedMap, email, msg.Id) != ""
 }
 
 func NewGmailClient(c echo.Context) (*GmailClient, error) {
@@ -466,6 +635,8 @@ func (client *GmailClient) GetUserMessagesWithUserID(userID, nextPageToken, labe
 		userID = "me"
 	}
 	req := client.Users.Messages.List(userID).MaxResults(num)
+	// All-mail backup: include Spam + Trash (API default excludes them).
+	req.IncludeSpamTrash(true)
 	if nextPageToken != "" {
 		req.PageToken(nextPageToken)
 	}
@@ -484,10 +655,17 @@ func (client *GmailClient) GetUserMessagesWithUserID(userID, nextPageToken, labe
 	}
 
 	messages := make([]*gmail.Message, 0, len(res.Messages))
+	var getErrs int
 	for _, msg := range res.Messages {
-		if message, err := client.Users.Messages.Get(userID, msg.Id).Do(); err == nil {
-			messages = append(messages, message)
+		message, getErr := client.Users.Messages.Get(userID, msg.Id).Do()
+		if getErr != nil {
+			getErrs++
+			continue
 		}
+		messages = append(messages, message)
+	}
+	if len(res.Messages) > 0 && len(messages) == 0 {
+		return nil, fmt.Errorf("gmail messages.get failed for all %d ids on page (last page had %d get errors)", len(res.Messages), getErrs)
 	}
 
 	return &MessagesResponse{

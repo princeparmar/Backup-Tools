@@ -145,7 +145,7 @@ func TestGmailObjectKey(t *testing.T) {
 		},
 	}
 	got := GmailObjectKey("user@gmail.com", msg)
-	want := "user@gmail.com/2026/07/21/a@b.com - Hi - mid1.gmail"
+	want := "user@gmail.com/_/2026/07/21/a@b.com - Hi - mid1.gmail"
 	if got != want {
 		t.Fatalf("GmailObjectKey() = %q, want %q", got, want)
 	}

@@ -10,7 +10,6 @@ import (
 	"github.com/StorX2-0/Backup-Tools/handler"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
-	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"google.golang.org/api/gmail/v1"
@@ -117,9 +116,9 @@ func (g *GmailProcessor) processEmails(input ScheduledTaskProcessorInput, client
 			continue
 		}
 
-		// Use the same filename format as direct uploads for consistency
-		messagePath := input.Task.LoginId + "/" + utils.GenerateTitleFromGmailMessage(message)
-		if _, exists := existingEmails[messagePath]; exists {
+		// Use the same GmailObjectKey as autosync / direct upload (labelsSegment + date path).
+		messagePath := google.GmailObjectKey(input.Task.LoginId, message)
+		if google.FindExistingGmailKeyByMessageID(existingEmails, input.Task.LoginId, message.Id) != "" {
 			moveEmailToStatus(&input.Memory, emailID, "pending", "skipped: already exists in storage")
 			successCount++
 			continue

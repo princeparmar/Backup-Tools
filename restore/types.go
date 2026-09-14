@@ -104,6 +104,9 @@ type RestoreDeps struct {
 	PhotosAlbumCache map[string]*albums.Album
 	photosAlbumMu    sync.Mutex
 
+	// SeenGmailMessageIDs dedupes restore-all when legacy + labeled keys share JSON message.Id.
+	SeenGmailMessageIDs *sync.Map
+
 	googleLimiter *rate.Limiter
 	vaultSem      chan struct{}
 
