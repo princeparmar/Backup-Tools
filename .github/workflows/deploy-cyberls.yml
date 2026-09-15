@@ -11,11 +11,14 @@ env:
   BUILD_DIR: 'D:\deployment'
   DEPLOY_DIR: 'D:\bin'
   SERVICE_NAME: 'backuptools'
+  # Keep module/build caches off runner _temp (that path gets wiped mid-job / across runners).
+  GOMODCACHE: 'D:\go-pkg\mod'
+  GOCACHE: 'D:\go-pkg\cache'
 
 jobs:
   deploy:
     runs-on: [self-hosted, Windows, X64, cyberls]
-    timeout-minutes: 10
+    timeout-minutes: 25
     
     steps:
       - name: Checkout code
@@ -35,11 +38,23 @@ jobs:
           }
 
       - name: Pre-download dependencies
+        shell: powershell
         run: |
+          New-Item -ItemType Directory -Path $env:GOMODCACHE -Force | Out-Null
+          New-Item -ItemType Directory -Path $env:GOCACHE -Force | Out-Null
+          Write-Host "GOMODCACHE=$env:GOMODCACHE"
           Write-Host "Pre-downloading dependencies..."
           go mod download
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "go mod download failed; clearing module cache and retrying..."
+            go clean -modcache
+            New-Item -ItemType Directory -Path $env:GOMODCACHE -Force | Out-Null
+            go mod download
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
           
       - name: Fast build application
+        shell: powershell
         run: |
           # Ensure build directory exists
           if (!(Test-Path "${{ env.BUILD_DIR }}")) {
@@ -48,6 +63,7 @@ jobs:
           
           $buildStart = Get-Date
           Write-Host "Building with optimizations..."
+          Write-Host "GOMODCACHE=$env:GOMODCACHE"
           
           # Use Go build optimizations
           $env:GOFLAGS = "-buildvcs=false"
@@ -55,6 +71,14 @@ jobs:
           $buildPath = Join-Path "${{ env.BUILD_DIR }}" "${{ env.APP_NAME }}"
           
           go build -ldflags="-s -w -X main.buildTime=$buildTime" -trimpath -o $buildPath ./cmd
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Build failed (often corrupt mod cache); clearing and retrying once..."
+            go clean -modcache
+            New-Item -ItemType Directory -Path $env:GOMODCACHE -Force | Out-Null
+            go mod download
+            go build -ldflags="-s -w -X main.buildTime=$buildTime" -trimpath -o $buildPath ./cmd
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
           
           $buildDuration = (Get-Date) - $buildStart
           if (Test-Path $buildPath) {
