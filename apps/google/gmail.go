@@ -475,7 +475,7 @@ func (client *GmailClient) updateAttachment(userID, msgID string, part *gmail.Me
 	}
 
 	if part.Body != nil && part.Body.AttachmentId != "" {
-		p, err := client.GetAttachment(userID, msgID, part.Body.AttachmentId)
+		p, err := client.getAttachmentWithRetry(userID, msgID, part.Body.AttachmentId)
 		if err != nil {
 			return err
 		}
@@ -628,6 +628,26 @@ func (client *GmailClient) GetAttachment(userID, msgID, attachmentID string) (*g
 	return msg, nil
 }
 
+func (client *GmailClient) getAttachmentWithRetry(userID, msgID, attachmentID string) (*gmail.MessagePartBody, error) {
+	var lastErr error
+	backoff := 200 * time.Millisecond
+	for attempt := 0; attempt < 4; attempt++ {
+		body, err := client.GetAttachment(userID, msgID, attachmentID)
+		if err == nil {
+			return body, nil
+		}
+		lastErr = err
+		if !gmailGetRetryable(err) {
+			return nil, err
+		}
+		time.Sleep(backoff)
+		if backoff < 4*time.Second {
+			backoff *= 2
+		}
+	}
+	return nil, lastErr
+}
+
 // buildGmailQuery constructs a Gmail search query string from filter parameters
 func (filter *GmailFilter) buildGmailQuery() string {
 	var queryParts []string
@@ -708,11 +728,38 @@ func (client *GmailClient) GetUserMessagesWithUserID(userID, nextPageToken, labe
 		}
 		message, getErr := client.getMessageWithRetry(userID, msg.Id)
 		if getErr != nil {
+			if gmailMessageGone(getErr) {
+				// Deleted / permanently unavailable — do not block the page.
+				continue
+			}
 			failedIDs = append(failedIDs, msg.Id)
 			continue
 		}
 		messages = append(messages, message)
 	}
+
+	// Retry only transient failures (usually quota mid-page) without re-fetching successes.
+	pageBackoff := 500 * time.Millisecond
+	for round := 0; round < 3 && len(failedIDs) > 0; round++ {
+		time.Sleep(pageBackoff)
+		if pageBackoff < 8*time.Second {
+			pageBackoff *= 2
+		}
+		stillFailed := make([]string, 0, len(failedIDs))
+		for _, id := range failedIDs {
+			message, getErr := client.getMessageWithRetry(userID, id)
+			if getErr != nil {
+				if gmailMessageGone(getErr) {
+					continue
+				}
+				stillFailed = append(stillFailed, id)
+				continue
+			}
+			messages = append(messages, message)
+		}
+		failedIDs = stillFailed
+	}
+
 	// Never advance past a page with missing bodies — those IDs would be skipped forever.
 	if len(failedIDs) > 0 {
 		return nil, fmt.Errorf("gmail messages.get failed for %d/%d ids on page (e.g. %s): refetch page before continuing",
@@ -762,7 +809,21 @@ func gmailGetRetryable(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "429") ||
 		strings.Contains(msg, "ratelimitexceeded") ||
-		strings.Contains(msg, "rate limit")
+		strings.Contains(msg, "rate limit") ||
+		strings.Contains(msg, "quota")
+}
+
+// gmailMessageGone is true when the message can never be fetched (deleted, etc.).
+func gmailMessageGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	if e, ok := err.(*googleapi.Error); ok && e != nil {
+		return e.Code == 404 || e.Code == 410
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, " 404 ") || strings.Contains(msg, "notfound") ||
+		strings.Contains(msg, "\"code\":404") || strings.Contains(msg, " 410 ")
 }
 
 // GetUserMessagesControlled is a convenience wrapper for the current user ("me"). Preserved for backward compatibility.
