@@ -2,7 +2,7 @@ package crons
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,8 +21,15 @@ import (
 	"golang.org/x/oauth2"
 	oauth2google "golang.org/x/oauth2/google"
 	"google.golang.org/api/drive/v3"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
+
+// errDriveAbusiveSkipped means Google refused the download as malware/spam even after AcknowledgeAbuse.
+var errDriveAbusiveSkipped = errors.New("drive file skipped: cannot download abusive file")
+
+// errDriveNonExportable means a Google Apps type with no Drive files.export mapping (e.g. project).
+var errDriveNonExportable = errors.New("drive file has no exportable content")
 
 type googleDriveProcessor struct{}
 
@@ -214,22 +221,116 @@ func runGoogleDriveAutosync(input ProcessorInput) error {
 	if err := handler.UploadObjectAndSync(ctx, input.Database, auth.Storx, satellite.ReserveBucket_Drive, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
 		return mapUploadErr("google_drive", fmt.Errorf("setup storage placeholder: %w", err))
 	}
-	// First run = baseline from flat listing, later runs = changes API.
-	if input.Job.TaskMemory.DrivePageToken == nil || strings.TrimSpace(*input.Job.TaskMemory.DrivePageToken) == "" {
-		newToken, syncErr := runDriveBaselineSync(ctx, input, task, service, quotaSess)
-		if syncErr != nil {
-			return syncErr
+
+	if input.Job.TaskMemory.DriveSharedDrives == nil {
+		input.Job.TaskMemory.DriveSharedDrives = make(map[string]repo.DriveSharedDriveState)
+	}
+	// Migrate legacy single DrivePageToken into DriveUserPageToken once.
+	if (input.Job.TaskMemory.DriveUserPageToken == nil || strings.TrimSpace(*input.Job.TaskMemory.DriveUserPageToken) == "") &&
+		input.Job.TaskMemory.DrivePageToken != nil && strings.TrimSpace(*input.Job.TaskMemory.DrivePageToken) != "" {
+		tok := strings.TrimSpace(*input.Job.TaskMemory.DrivePageToken)
+		input.Job.TaskMemory.DriveUserPageToken = &tok
+	}
+
+	synced, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Database, auth.Storx, satellite.ReserveBucket_Drive, "", task.UserID, "google", "drive", input.StorxRecovery)
+	if err != nil {
+		logger.Warn(ctx, "drive synced map load failed; continuing with empty map", logger.ErrorField(err))
+		synced = map[string]bool{}
+	}
+	parentCache := make(map[string][]string)
+	shortcutTargetCache := make(map[string]*drive.File)
+
+	needUserBaseline := input.Job.TaskMemory.DriveUserPageToken == nil || strings.TrimSpace(*input.Job.TaskMemory.DriveUserPageToken) == ""
+	if needUserBaseline || !input.Job.TaskMemory.DriveBaselineDone {
+		if err := runDriveTreeBaseline(ctx, input, task, service, synced, parentCache, shortcutTargetCache, quotaSess); err != nil {
+			return err
 		}
-		input.Job.TaskMemory.DrivePageToken = &newToken
+		userTok, err := service.Changes.GetStartPageToken().SupportsAllDrives(true).Do()
+		if err != nil {
+			return fmt.Errorf("drive user start page token: %w", err)
+		}
+		tok := strings.TrimSpace(userTok.StartPageToken)
+		input.Job.TaskMemory.DriveUserPageToken = &tok
+		input.Job.TaskMemory.DrivePageToken = &tok
 		input.Job.TaskMemory.DriveBaselineDone = true
 	} else {
-		newToken, syncErr := runDriveIncrementalSync(ctx, input, task, service, strings.TrimSpace(*input.Job.TaskMemory.DrivePageToken), quotaSess)
-		if syncErr != nil {
-			return syncErr
+		newTok, err := runDriveUserIncremental(ctx, input, task, service, strings.TrimSpace(*input.Job.TaskMemory.DriveUserPageToken), synced, parentCache, shortcutTargetCache, quotaSess)
+		if err != nil {
+			return err
 		}
-		input.Job.TaskMemory.DrivePageToken = &newToken
-		input.Job.TaskMemory.DriveBaselineDone = true
+		input.Job.TaskMemory.DriveUserPageToken = &newTok
+		input.Job.TaskMemory.DrivePageToken = &newTok
 	}
+
+	// Trash is excluded from trashed=false lists — sync BIN every run so vault Trash stays populated
+	// (including jobs that finished baseline before trash support existed).
+	if err := runDriveTrashSync(ctx, input, task, service, synced, parentCache, shortcutTargetCache, quotaSess); err != nil {
+		if shouldAbortOnItemError(err) {
+			return wrapStorageAbort("google_drive", err)
+		}
+		logger.Warn(ctx, "drive trash sync failed", logger.ErrorField(err))
+	}
+
+	// Per Shared Drive baseline + incremental.
+	drivePage := ""
+	for {
+		drives, next, err := google.ListSharedDrivesPage(service, drivePage)
+		if err != nil {
+			logger.Warn(ctx, "list shared drives failed", logger.ErrorField(err))
+			break
+		}
+		for _, d := range drives {
+			if d == nil || strings.TrimSpace(d.Id) == "" {
+				continue
+			}
+			driveID := strings.TrimSpace(d.Id)
+			if markerKey := google.BuildDriveSharedDriveMarkerKey(task.LoginId, driveID, d.Name); markerKey != "" && !synced[markerKey] {
+				meta := map[string]string{
+					google.DriveMetaOriginalName: strings.TrimSpace(d.Name),
+					google.DriveMetaGoogleFileID: driveID,
+				}
+				if err := handler.UploadObjectWithMetadataAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, markerKey, nil, meta, task.UserID, input.StorxRecovery); err != nil {
+					logger.Warn(ctx, "shared drive name marker upload failed", logger.String("drive_id", driveID), logger.ErrorField(err))
+				} else {
+					synced[markerKey] = true
+				}
+			}
+			state := input.Job.TaskMemory.DriveSharedDrives[driveID]
+			if !state.BaselineDone || strings.TrimSpace(state.PageToken) == "" {
+				if err := runDriveSharedDriveBaseline(ctx, input, task, service, driveID, synced, parentCache, shortcutTargetCache, quotaSess); err != nil {
+					if shouldAbortOnItemError(err) {
+						return wrapStorageAbort("google_drive", err)
+					}
+					logger.Warn(ctx, "shared drive baseline failed", logger.String("drive_id", driveID), logger.ErrorField(err))
+					continue
+				}
+				st, err := service.Changes.GetStartPageToken().SupportsAllDrives(true).DriveId(driveID).Do()
+				if err != nil {
+					logger.Warn(ctx, "shared drive start token failed", logger.String("drive_id", driveID), logger.ErrorField(err))
+					continue
+				}
+				state.BaselineDone = true
+				state.PageToken = strings.TrimSpace(st.StartPageToken)
+				input.Job.TaskMemory.DriveSharedDrives[driveID] = state
+			} else {
+				newTok, err := runDriveSharedDriveIncremental(ctx, input, task, service, driveID, state.PageToken, synced, parentCache, shortcutTargetCache, quotaSess)
+				if err != nil {
+					if shouldAbortOnItemError(err) {
+						return wrapStorageAbort("google_drive", err)
+					}
+					logger.Warn(ctx, "shared drive incremental failed", logger.String("drive_id", driveID), logger.ErrorField(err))
+					continue
+				}
+				state.PageToken = newTok
+				input.Job.TaskMemory.DriveSharedDrives[driveID] = state
+			}
+		}
+		if strings.TrimSpace(next) == "" {
+			break
+		}
+		drivePage = next
+	}
+
 	if quotaSess != nil && quotaSess.skippedQuota > 0 {
 		ApplyDriveStorageSkipMessage(input, quotaSess.synced, quotaSess.skippedQuota, quotaSess.skippedBytes, quotaSess.remaining)
 	}
@@ -256,52 +357,83 @@ func createDriveServiceWithAccessToken(ctx context.Context, accessToken string) 
 	return svc, nil
 }
 
-func runDriveBaselineSync(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, quotaSess *driveQuotaSession) (string, error) {
-	startTok, err := service.Changes.GetStartPageToken().SupportsAllDrives(true).Do()
-	if err != nil {
-		return "", fmt.Errorf("drive start page token: %w", err)
+func runDriveTreeBaseline(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, synced map[string]bool, parentCache map[string][]string, shortcutTargetCache map[string]*drive.File, quotaSess *driveQuotaSession) error {
+	// My Drive (user corpus, include folders, exclude trash).
+	if err := driveListAndSync(ctx, input, task, service, "trashed=false", "user", "", google.DriveSectionMyDrive, synced, parentCache, shortcutTargetCache, quotaSess); err != nil {
+		return err
 	}
-	shortcutTargetCache := make(map[string]*drive.File)
+	// Shared with me discovery.
+	if err := driveListAndSync(ctx, input, task, service, "sharedWithMe=true and trashed=false", "user", "", google.DriveSectionSharedWithMe, synced, parentCache, shortcutTargetCache, quotaSess); err != nil {
+		return err
+	}
+	return nil
+}
+
+func runDriveTrashSync(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, synced map[string]bool, parentCache map[string][]string, shortcutTargetCache map[string]*drive.File, quotaSess *driveQuotaSession) error {
+	return driveListAndSync(ctx, input, task, service, "trashed=true", "user", "", google.DriveSectionBin, synced, parentCache, shortcutTargetCache, quotaSess)
+}
+
+func runDriveSharedDriveBaseline(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, driveID string, synced map[string]bool, parentCache map[string][]string, shortcutTargetCache map[string]*drive.File, quotaSess *driveQuotaSession) error {
+	section := google.DriveSharedDriveSection(driveID)
+	if err := driveListAndSync(ctx, input, task, service, "trashed=false", "drive", driveID, section, synced, parentCache, shortcutTargetCache, quotaSess); err != nil {
+		return err
+	}
+	return driveListAndSync(ctx, input, task, service, "trashed=true", "drive", driveID, google.DriveSectionBin, synced, parentCache, shortcutTargetCache, quotaSess)
+}
+
+func driveListAndSync(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, query, corpora, driveID, section string, synced map[string]bool, parentCache map[string][]string, shortcutTargetCache map[string]*drive.File, quotaSess *driveQuotaSession) error {
 	pageToken := ""
 	for {
 		if err := input.HeartBeatFunc(); err != nil {
-			return "", err
+			return err
 		}
-		page, err := google.ListNonFolderFilesFlatWithService(service, pageToken)
+		files, next, err := google.ListDriveFilesPage(service, query, pageToken, corpora, driveID)
 		if err != nil {
-			return "", err
+			return err
 		}
-		for i := range page.Files {
-			if err := retrySyncDriveFileByID(ctx, input, task, service, page.Files[i].ID, nil, shortcutTargetCache, quotaSess); err != nil {
+		for _, f := range files {
+			if f == nil || strings.TrimSpace(f.Id) == "" {
+				continue
+			}
+			if err := retrySyncDriveTreeItem(ctx, input, task, service, f, section, synced, parentCache, shortcutTargetCache, quotaSess); err != nil {
 				if shouldAbortOnItemError(err) {
-					return "", wrapStorageAbort("google_drive", err)
+					return wrapStorageAbort("google_drive", err)
 				}
-				logger.Warn(ctx, "Drive baseline file sync failed", logger.String("file_id", page.Files[i].ID), logger.ErrorField(err))
+				logger.Warn(ctx, "drive sync item failed", logger.String("file_id", f.Id), logger.String("section", section), logger.ErrorField(err))
 			}
 		}
-		if strings.TrimSpace(page.NextPageToken) == "" {
-			break
+		if strings.TrimSpace(next) == "" {
+			return nil
 		}
-		pageToken = page.NextPageToken
+		pageToken = next
 	}
-	return strings.TrimSpace(startTok.StartPageToken), nil
 }
 
-func runDriveIncrementalSync(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, pageToken string, quotaSess *driveQuotaSession) (string, error) {
-	currentPageToken := pageToken
-	newStartToken := pageToken
-	shortcutTargetCache := make(map[string]*drive.File)
+func runDriveUserIncremental(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, pageToken string, synced map[string]bool, parentCache map[string][]string, shortcutTargetCache map[string]*drive.File, quotaSess *driveQuotaSession) (string, error) {
+	return runDriveChangesLoop(ctx, input, task, service, pageToken, "", synced, parentCache, shortcutTargetCache, quotaSess)
+}
+
+func runDriveSharedDriveIncremental(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, driveID, pageToken string, synced map[string]bool, parentCache map[string][]string, shortcutTargetCache map[string]*drive.File, quotaSess *driveQuotaSession) (string, error) {
+	return runDriveChangesLoop(ctx, input, task, service, pageToken, driveID, synced, parentCache, shortcutTargetCache, quotaSess)
+}
+
+func runDriveChangesLoop(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, pageToken, driveID string, synced map[string]bool, parentCache map[string][]string, shortcutTargetCache map[string]*drive.File, quotaSess *driveQuotaSession) (string, error) {
+	current := pageToken
+	newStart := pageToken
 	for {
 		if err := input.HeartBeatFunc(); err != nil {
 			return "", err
 		}
-		ch, err := service.Changes.List(currentPageToken).
+		call := service.Changes.List(current).
 			SupportsAllDrives(true).
 			IncludeItemsFromAllDrives(true).
 			IncludeRemoved(true).
 			PageSize(1000).
-			Fields("nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,size,parents,createdTime,modifiedTime,version,md5Checksum,permissions,driveId,starred,trashed,shortcutDetails(targetId,targetMimeType)))").
-			Do()
+			Fields("nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,size,parents,createdTime,modifiedTime,version,md5Checksum,permissions,driveId,starred,trashed,shortcutDetails(targetId,targetMimeType),owners(emailAddress)))")
+		if strings.TrimSpace(driveID) != "" {
+			call = call.DriveId(strings.TrimSpace(driveID))
+		}
+		ch, err := call.Do()
 		if err != nil {
 			return "", fmt.Errorf("drive changes list: %w", err)
 		}
@@ -310,145 +442,181 @@ func runDriveIncrementalSync(ctx context.Context, input ProcessorInput, task *re
 				continue
 			}
 			if change.Removed {
-				if err := writeDriveRemovedMetadata(ctx, input, task, change.FileId); err != nil {
+				if err := writeDriveRemovedTreeAlias(ctx, input, task, change.FileId, synced); err != nil {
 					if shouldAbortOnItemError(err) {
 						return "", wrapStorageAbort("google_drive", err)
 					}
-					logger.Warn(ctx, "drive removed metadata update failed", logger.String("file_id", change.FileId), logger.ErrorField(err))
+					logger.Warn(ctx, "drive removed rekey failed", logger.String("file_id", change.FileId), logger.ErrorField(err))
 				}
 				continue
 			}
-			if err := retrySyncDriveFileByID(ctx, input, task, service, change.FileId, change.File, shortcutTargetCache, quotaSess); err != nil {
+			section := classifyDriveSection(change.File, driveID, task.LoginId)
+			item := change.File
+			if item == nil || strings.TrimSpace(item.Id) == "" {
+				got, gerr := service.Files.Get(change.FileId).Fields("id,name,mimeType,size,parents,createdTime,modifiedTime,version,md5Checksum,permissions,driveId,starred,trashed,shortcutDetails(targetId),owners(emailAddress)").SupportsAllDrives(true).Do()
+				if gerr != nil {
+					logger.Warn(ctx, "drive change get failed", logger.String("file_id", change.FileId), logger.ErrorField(gerr))
+					continue
+				}
+				item = got
+				section = classifyDriveSection(item, driveID, task.LoginId)
+			}
+			if err := retrySyncDriveTreeItem(ctx, input, task, service, item, section, synced, parentCache, shortcutTargetCache, quotaSess); err != nil {
 				if shouldAbortOnItemError(err) {
 					return "", wrapStorageAbort("google_drive", err)
 				}
-				logger.Warn(ctx, "drive incremental file sync failed", logger.String("file_id", change.FileId), logger.ErrorField(err))
+				logger.Warn(ctx, "drive incremental sync failed", logger.String("file_id", change.FileId), logger.ErrorField(err))
 			}
 		}
 		if strings.TrimSpace(ch.NextPageToken) == "" {
 			if strings.TrimSpace(ch.NewStartPageToken) != "" {
-				newStartToken = strings.TrimSpace(ch.NewStartPageToken)
+				newStart = strings.TrimSpace(ch.NewStartPageToken)
 			}
-			break
+			return newStart, nil
 		}
-		currentPageToken = strings.TrimSpace(ch.NextPageToken)
+		current = strings.TrimSpace(ch.NextPageToken)
 	}
-	return newStartToken, nil
 }
 
-func syncDriveFileByID(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, fileID string, preloaded *drive.File, shortcutTargetCache map[string]*drive.File, quotaSess *driveQuotaSession) error {
-	file := preloaded
-	var err error
-	if file == nil || strings.TrimSpace(file.Id) == "" || strings.TrimSpace(file.MimeType) == "" || strings.TrimSpace(file.Name) == "" || strings.TrimSpace(file.ModifiedTime) == "" {
-		file, err = service.Files.Get(fileID).Fields("id,name,mimeType,size,parents,createdTime,modifiedTime,version,md5Checksum,permissions,driveId,starred,trashed,shortcutDetails(targetId)").SupportsAllDrives(true).Do()
-		if err != nil {
-			return fmt.Errorf("get file metadata: %w", err)
-		}
+func classifyDriveSection(file *drive.File, changesDriveID, mailbox string) string {
+	if file != nil && file.Trashed {
+		return google.DriveSectionBin
 	}
-	// Resolve shortcut target to keep stable keying by target file ID.
-	if file.MimeType == "application/vnd.google-apps.shortcut" && file.ShortcutDetails != nil && strings.TrimSpace(file.ShortcutDetails.TargetId) != "" {
-		targetID := strings.TrimSpace(file.ShortcutDetails.TargetId)
-		if cached, ok := shortcutTargetCache[targetID]; ok {
-			file = cached
-		} else {
-			file, err = service.Files.Get(targetID).Fields("id,name,mimeType,size,parents,createdTime,modifiedTime,version,md5Checksum,permissions,driveId,starred,trashed").SupportsAllDrives(true).Do()
-			if err != nil {
-				return fmt.Errorf("resolve shortcut target: %w", err)
-			}
-			shortcutTargetCache[targetID] = file
-		}
+	if file != nil && strings.TrimSpace(file.DriveId) != "" {
+		return google.DriveSharedDriveSection(file.DriveId)
 	}
-	displayName := google.DriveBackupDisplayName(file.Name, file.MimeType)
-	createdTime := strings.TrimSpace(file.CreatedTime)
-	metaKey := google.DriveIDBasedMetaKey(task.LoginId, file.Id, displayName, createdTime)
-	dataKey := google.DriveIDBasedDataKey(task.LoginId, file.Id, displayName, createdTime)
-	meta := google.DriveCronBackupMeta{
-		FileID:        file.Id,
-		Name:          file.Name,
-		MimeType:      file.MimeType,
-		Parents:       file.Parents,
-		CreatedTime:   createdTime,
-		ModifiedTime:  file.ModifiedTime,
-		Version:       file.Version,
-		Md5Checksum:   file.Md5Checksum,
-		DriveID:       file.DriveId,
-		LocationType:  map[bool]string{true: "SHARED_DRIVE", false: "MY_DRIVE"}[file.DriveId != ""],
-		Starred:       file.Starred,
-		Trashed:       file.Trashed,
-		IsFolder:      file.MimeType == "application/vnd.google-apps.folder",
-		DataObjectKey: dataKey,
-		UpdatedAt:     time.Now().UTC().Format(time.RFC3339),
+	if strings.TrimSpace(changesDriveID) != "" {
+		return google.DriveSharedDriveSection(changesDriveID)
 	}
-	for _, p := range file.Permissions {
-		meta.Permissions = append(meta.Permissions, google.DrivePermission{Type: p.Type, Role: p.Role, EmailAddress: p.EmailAddress})
+	if file != nil && !driveFileOwnedByMailbox(file, mailbox) {
+		return google.DriveSectionSharedWithMe
 	}
-	// File-only architecture: skip parent-folder traversal/metadata writes to avoid extra API calls.
-	if meta.IsFolder {
-		return nil
-	}
-
-	metaChangedOnly, err := shouldSkipDriveContentUpload(ctx, task, task.LoginId, file.Id, displayName, createdTime, meta)
-	if err != nil {
-		logger.Warn(ctx, "drive metadata compare failed; continuing with full upload", logger.String("file_id", file.Id), logger.ErrorField(err))
-	}
-	if metaChangedOnly {
-		b, _ := json.Marshal(meta)
-		return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, metaKey, b, task.UserID, input.StorxRecovery)
-	}
-
-	// Per-file CyberLS gate: skip content upload when file size > remaining.
-	if quotaSess != nil && quotaSess.shouldSkipFile(file.Size) {
-		quotaSess.recordQuotaSkip(file.Size)
-		logger.Warn(ctx, "drive file skipped: size exceeds remaining CyberLS storage",
-			logger.String("file_id", file.Id),
-			logger.String("name", file.Name),
-			logger.Int64("file_bytes", file.Size),
-			logger.Int64("required_bytes", quota.RequiredBytes(file.Size)),
-			logger.Int64("remaining_bytes", quotaSess.remaining),
-		)
-		return nil
-	}
-
-	var exportMime string
-	if handler.ShouldUseStreamingUpload(file.Size, file.MimeType) {
-		resp, mime, err := openDriveFileDownload(service, file)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		exportMime = mime
-		if exportMime != "" {
-			meta.ExportMimeType = exportMime
-		}
-		if err := handler.UploadObjectStreamAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, dataKey, resp.Body, task.UserID, input.StorxRecovery); err != nil {
-			return err
-		}
-	} else {
-		content, mime, err := downloadDriveFileContent(service, file)
-		if err != nil {
-			return err
-		}
-		exportMime = mime
-		if exportMime != "" {
-			meta.ExportMimeType = exportMime
-		}
-		if err := handler.UploadBufferedObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, dataKey, content, task.UserID, input.StorxRecovery); err != nil {
-			return err
-		}
-	}
-	if quotaSess != nil {
-		quotaSess.accountUpload(file.Size)
-	}
-	b, _ := json.Marshal(meta)
-	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, metaKey, b, task.UserID, input.StorxRecovery)
+	return google.DriveSectionMyDrive
 }
 
-func retrySyncDriveFileByID(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, fileID string, preloaded *drive.File, shortcutTargetCache map[string]*drive.File, quotaSess *driveQuotaSession) error {
+func driveFileOwnedByMailbox(file *drive.File, mailbox string) bool {
+	mailbox = strings.ToLower(strings.TrimSpace(mailbox))
+	if file == nil || mailbox == "" {
+		return true
+	}
+	if len(file.Owners) == 0 {
+		// Ownership unknown — assume owned (My Drive list). SWM tree walks keep
+		// SHARED_WITH_ME via resolveDriveSyncSection regardless.
+		return true
+	}
+	for _, o := range file.Owners {
+		if o != nil && strings.ToLower(strings.TrimSpace(o.EmailAddress)) == mailbox {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveDriveSyncSection(file *drive.File, forcedSection, mailbox string) string {
+	hintDriveID := ""
+	if strings.HasPrefix(forcedSection, google.DriveSectionSharedDrivePrefix) {
+		hintDriveID = strings.TrimPrefix(forcedSection, google.DriveSectionSharedDrivePrefix)
+	}
+	if file != nil && file.Trashed {
+		return google.DriveSectionBin
+	}
+	if forcedSection == google.DriveSectionBin {
+		return google.DriveSectionBin
+	}
+	classified := classifyDriveSection(file, hintDriveID, mailbox)
+	// Walking a Shared-with-me tree: keep SWM unless this is clearly a Shared Drive item.
+	if forcedSection == google.DriveSectionSharedWithMe {
+		if strings.HasPrefix(classified, google.DriveSectionSharedDrivePrefix) {
+			return classified
+		}
+		return google.DriveSectionSharedWithMe
+	}
+	// Shared Drive baseline/incremental: keep the drive section when classify lacks driveId.
+	if strings.HasPrefix(forcedSection, google.DriveSectionSharedDrivePrefix) {
+		if strings.HasPrefix(classified, google.DriveSectionSharedDrivePrefix) {
+			return classified
+		}
+		return forcedSection
+	}
+	// My Drive / empty: always reclassify so shared roots land in SHARED_WITH_ME.
+	return classified
+}
+
+func isAbusiveDownloadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errDriveAbusiveSkipped) {
+		return true
+	}
+	var gerr *googleapi.Error
+	if errors.As(err, &gerr) {
+		for _, e := range gerr.Errors {
+			if e.Reason == "cannotDownloadAbusiveFile" {
+				return true
+			}
+		}
+	}
+	return strings.Contains(err.Error(), "cannotDownloadAbusiveFile")
+}
+
+func isNonExportableDriveError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errDriveNonExportable) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "unsupported export mime") ||
+		strings.Contains(msg, "shortcut has no downloadable body")
+}
+
+// driveExportMimeForGoogleApps returns the Drive export MIME for Workspace types that support files.export.
+func driveExportMimeForGoogleApps(mimeType string) (exportMime string, ok bool) {
+	switch mimeType {
+	case "application/vnd.google-apps.document":
+		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document", true
+	case "application/vnd.google-apps.spreadsheet":
+		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", true
+	case "application/vnd.google-apps.presentation":
+		return "application/vnd.openxmlformats-officedocument.presentationml.presentation", true
+	case "application/vnd.google-apps.drawing":
+		return "image/png", true
+	case "application/vnd.google-apps.script":
+		return "application/vnd.google-apps.script+json", true
+	case "application/vnd.google-apps.site":
+		return "text/plain", true
+	default:
+		// project, form, map, jam, fusiontable, shortcut, folder, …
+		return "", false
+	}
+}
+
+func retrySyncDriveTreeItem(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, preloaded *drive.File, section string, synced map[string]bool, parentCache map[string][]string, shortcutTargetCache map[string]*drive.File, quotaSess *driveQuotaSession) error {
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		if err := syncDriveFileByID(ctx, input, task, service, fileID, preloaded, shortcutTargetCache, quotaSess); err != nil {
+		if err := syncDriveTreeItem(ctx, input, task, service, preloaded, section, synced, parentCache, shortcutTargetCache, quotaSess); err != nil {
+			if isAbusiveDownloadError(err) {
+				logger.Warn(ctx, "drive file skipped: marked abusive by Google",
+					logger.String("file_id", preloadedID(preloaded)),
+					logger.ErrorField(err),
+				)
+				return nil
+			}
+			if isNonExportableDriveError(err) {
+				logger.Warn(ctx, "drive file skipped: no exportable content",
+					logger.String("file_id", preloadedID(preloaded)),
+					logger.ErrorField(err),
+				)
+				return nil
+			}
 			lastErr = err
-			logger.Warn(ctx, "drive sync attempt failed", logger.String("file_id", fileID), logger.Int("attempt", attempt), logger.ErrorField(err))
+			logger.Warn(ctx, "drive tree sync attempt failed",
+				logger.String("file_id", preloadedID(preloaded)),
+				logger.Int("attempt", attempt),
+				logger.ErrorField(err),
+			)
 			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
 			continue
 		}
@@ -457,35 +625,270 @@ func retrySyncDriveFileByID(ctx context.Context, input ProcessorInput, task *rep
 	return lastErr
 }
 
-func shouldSkipDriveContentUpload(ctx context.Context, task *repo.ScheduledTasks, loginID, fileID, displayName, createdTime string, next google.DriveCronBackupMeta) (bool, error) {
-	oldBytes, err := downloadDriveCronMetaBytes(ctx, task, loginID, fileID, displayName, createdTime)
-	if err != nil {
-		// Missing previous metadata/object is expected on first sync.
-		return false, nil
+func preloadedID(f *drive.File) string {
+	if f == nil {
+		return ""
 	}
-	var prev google.DriveCronBackupMeta
-	if err := json.Unmarshal(oldBytes, &prev); err != nil {
-		return false, err
-	}
-	if prev.RemovedFromDrive || next.RemovedFromDrive {
-		return false, nil
-	}
-	if strings.TrimSpace(prev.DataObjectKey) == "" {
-		return false, nil
-	}
-	// Content-change heuristic: version/mtime/checksum differences require re-download.
-	contentSame := prev.Version == next.Version &&
-		strings.TrimSpace(prev.ModifiedTime) == strings.TrimSpace(next.ModifiedTime) &&
-		strings.TrimSpace(prev.Md5Checksum) == strings.TrimSpace(next.Md5Checksum)
-	return contentSame, nil
+	return f.Id
 }
 
-func downloadDriveCronMetaBytes(ctx context.Context, task *repo.ScheduledTasks, loginID, fileID, displayName, createdTime string) ([]byte, error) {
-	if strings.TrimSpace(displayName) == "" {
-		return nil, fmt.Errorf("missing display name for drive meta key")
+func syncDriveTreeItem(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, preloaded *drive.File, section string, synced map[string]bool, parentCache map[string][]string, shortcutTargetCache map[string]*drive.File, quotaSess *driveQuotaSession) error {
+	file := preloaded
+	var err error
+	if file == nil || strings.TrimSpace(file.Id) == "" || strings.TrimSpace(file.MimeType) == "" || strings.TrimSpace(file.Name) == "" {
+		return fmt.Errorf("missing drive file payload")
 	}
-	key := google.DriveIDBasedMetaKey(loginID, fileID, displayName, createdTime)
-	return satellite.DownloadObject(ctx, task.StorxToken, satellite.ReserveBucket_Drive, key)
+	if strings.TrimSpace(file.ModifiedTime) == "" {
+		file, err = service.Files.Get(file.Id).Fields("id,name,mimeType,size,parents,createdTime,modifiedTime,version,md5Checksum,permissions,driveId,starred,trashed,shortcutDetails(targetId),owners(emailAddress)").SupportsAllDrives(true).Do()
+		if err != nil {
+			return fmt.Errorf("get file metadata: %w", err)
+		}
+	}
+
+	isFolder := file.MimeType == "application/vnd.google-apps.folder"
+	shortcutTarget := ""
+	if file.MimeType == "application/vnd.google-apps.shortcut" && file.ShortcutDetails != nil {
+		shortcutTarget = strings.TrimSpace(file.ShortcutDetails.TargetId)
+	}
+
+	section = resolveDriveSyncSection(file, section, task.LoginId)
+
+	parentID := google.DriveParentID(file.Parents)
+	var parentIDs []string
+	// Trash is a flat view (matches Google Drive Trash); skip parent nesting.
+	if section != google.DriveSectionBin {
+		excludeRoot := strings.TrimSpace(file.DriveId)
+		parentIDs, err = google.BuildDriveParentIDChain(ctx, service, parentID, parentCache, excludeRoot)
+		if err != nil {
+			logger.Warn(ctx, "drive parent chain failed; using immediate parent only", logger.String("file_id", file.Id), logger.ErrorField(err))
+			if parentID != "" && parentID != "root" {
+				rootID := google.ResolveMyDriveRootID(service, parentCache)
+				if parentID != rootID && parentID != excludeRoot {
+					parentIDs = []string{parentID}
+				}
+			}
+		}
+	}
+
+	sections := []string{section}
+	if file.Starred && section != google.DriveSectionBin {
+		sections = append(sections, google.DriveSectionStarred)
+	}
+
+	// Ensure every parent folder has a named .folder__ placeholder (avoids ID-only rows in Vault).
+	if err := ensureDriveParentFolderPlaceholders(ctx, input, task, service, sections, parentIDs, synced); err != nil {
+		logger.Warn(ctx, "drive parent folder placeholders failed", logger.String("file_id", file.Id), logger.ErrorField(err))
+	}
+
+	logicalKey := google.BuildDriveObjectKey(task.LoginId, sections, parentIDs, file.Id, file.Name, file.MimeType, isFolder, shortcutTarget)
+
+	// 1A: Shared with me and content already exists under another mailbox key for this CyberLS user.
+	if section == google.DriveSectionSharedWithMe && !isFolder {
+		if existing := google.FindSyncedDriveKeyByFileID(synced, file.Id); existing != "" {
+			ep, ok := google.ParseDriveObjectKey(existing)
+			if ok && !ep.IsFolder {
+				if existing == logicalKey {
+					return nil
+				}
+				// Alias to existing physical (cross-mailbox or same-mailbox other section).
+				meta := driveCustomMeta(file, "", shortcutTarget, existing, true)
+				if err := handler.UploadObjectWithMetadataAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, logicalKey, nil, meta, task.UserID, input.StorxRecovery); err != nil {
+					return err
+				}
+				synced[logicalKey] = true
+				return nil
+			}
+		}
+	}
+
+	if isFolder {
+		meta := driveCustomMeta(file, "", "", "", false)
+		meta[google.DriveMetaIsFolder] = "true"
+		if err := handler.UploadObjectWithMetadataAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, logicalKey, nil, meta, task.UserID, input.StorxRecovery); err != nil {
+			return err
+		}
+		synced[logicalKey] = true
+		// sharedWithMe=true only returns top-level shares — recurse into shared folders.
+		if section == google.DriveSectionSharedWithMe {
+			childQ := fmt.Sprintf("'%s' in parents and trashed=false", file.Id)
+			if err := driveListAndSync(ctx, input, task, service, childQ, "allDrives", "", google.DriveSectionSharedWithMe, synced, parentCache, shortcutTargetCache, quotaSess); err != nil {
+				if shouldAbortOnItemError(err) {
+					return err
+				}
+				logger.Warn(ctx, "drive shared-folder children sync failed",
+					logger.String("folder_id", file.Id),
+					logger.String("name", file.Name),
+					logger.ErrorField(err),
+				)
+			}
+		}
+		return nil
+	}
+
+	// Rekey: same mailbox fileId at different path → delete old after successful write.
+	oldKey := google.FindSyncedDriveKeyByFileID(filterSyncedByEmail(synced, task.LoginId), file.Id)
+
+	// Skip content if version/md5 unchanged and key unchanged.
+	if oldKey == logicalKey {
+		if unchanged, _ := driveContentUnchanged(ctx, task.StorxToken, logicalKey, file); unchanged {
+			return nil
+		}
+	}
+
+	if quotaSess != nil && quotaSess.shouldSkipFile(file.Size) {
+		quotaSess.recordQuotaSkip(file.Size)
+		logger.Warn(ctx, "drive file skipped: size exceeds remaining CyberLS storage",
+			logger.String("file_id", file.Id),
+			logger.String("name", file.Name),
+			logger.Int64("file_bytes", file.Size),
+			logger.Int64("remaining_bytes", quotaSess.remaining),
+		)
+		return nil
+	}
+
+	exportMime := ""
+	meta := driveCustomMeta(file, "", shortcutTarget, "", false)
+	if handler.ShouldUseStreamingUpload(file.Size, file.MimeType) {
+		resp, mime, err := openDriveFileDownload(service, file)
+		if err != nil {
+			if shortcutTarget != "" || isNonExportableDriveError(err) {
+				if shortcutTarget != "" {
+					meta[google.DriveMetaShortcutTargetID] = shortcutTarget
+				}
+				logger.Warn(ctx, "drive file stored as metadata placeholder (no exportable bytes)",
+					logger.String("file_id", file.Id),
+					logger.String("name", file.Name),
+					logger.String("mime", file.MimeType),
+					logger.ErrorField(err),
+				)
+				if err := handler.UploadObjectWithMetadataAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, logicalKey, nil, meta, task.UserID, input.StorxRecovery); err != nil {
+					return err
+				}
+				synced[logicalKey] = true
+				return nil
+			}
+			return err
+		}
+		defer resp.Body.Close()
+		exportMime = mime
+		if exportMime != "" {
+			meta[google.DriveMetaBackupMimeType] = exportMime
+		}
+		if err := handler.UploadObjectStreamWithMetadataAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, logicalKey, resp.Body, meta, task.UserID, input.StorxRecovery); err != nil {
+			return err
+		}
+	} else {
+		content, mime, err := downloadDriveFileContent(service, file)
+		if err != nil {
+			if shortcutTarget != "" || isNonExportableDriveError(err) {
+				if shortcutTarget != "" {
+					meta[google.DriveMetaShortcutTargetID] = shortcutTarget
+				}
+				logger.Warn(ctx, "drive file stored as metadata placeholder (no exportable bytes)",
+					logger.String("file_id", file.Id),
+					logger.String("name", file.Name),
+					logger.String("mime", file.MimeType),
+					logger.ErrorField(err),
+				)
+				if err := handler.UploadObjectWithMetadataAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, logicalKey, nil, meta, task.UserID, input.StorxRecovery); err != nil {
+					return err
+				}
+				synced[logicalKey] = true
+				return nil
+			}
+			return err
+		}
+		exportMime = mime
+		if exportMime != "" {
+			meta[google.DriveMetaBackupMimeType] = exportMime
+		}
+		if err := handler.UploadObjectWithMetadataAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, logicalKey, content, meta, task.UserID, input.StorxRecovery); err != nil {
+			return err
+		}
+	}
+	if quotaSess != nil {
+		quotaSess.accountUpload(file.Size)
+	}
+	synced[logicalKey] = true
+
+	if oldKey != "" && oldKey != logicalKey {
+		_ = satellite.DeleteObject(ctx, task.StorxToken, satellite.ReserveBucket_Drive, oldKey)
+		_ = input.Database.SyncedObjectRepo.DeleteSyncedObject(satellite.ReserveBucket_Drive, oldKey)
+		delete(synced, oldKey)
+	}
+
+	// Optionally try to backup shortcut target if reachable and not present.
+	if shortcutTarget != "" {
+		if google.FindSyncedDriveKeyByFileID(synced, shortcutTarget) == "" {
+			tf, err := service.Files.Get(shortcutTarget).Fields("id,name,mimeType,size,parents,createdTime,modifiedTime,version,md5Checksum,driveId,starred,trashed,owners(emailAddress)").SupportsAllDrives(true).Do()
+			if err == nil && tf != nil {
+				shortcutTargetCache[shortcutTarget] = tf
+				tsec := classifyDriveSection(tf, "", task.LoginId)
+				_ = syncDriveTreeItem(ctx, input, task, service, tf, tsec, synced, parentCache, shortcutTargetCache, quotaSess)
+			}
+		}
+	}
+	return nil
+}
+
+func filterSyncedByEmail(synced map[string]bool, email string) map[string]bool {
+	email = strings.TrimSpace(email)
+	out := make(map[string]bool)
+	prefix := email + "/"
+	for k, v := range synced {
+		if v && strings.HasPrefix(k, prefix) {
+			out[k] = true
+		}
+	}
+	return out
+}
+
+func driveCustomMeta(file *drive.File, backupMime, shortcutTarget, physicalKey string, isAlias bool) map[string]string {
+	meta := map[string]string{
+		google.DriveMetaGoogleFileID:   strings.TrimSpace(file.Id),
+		google.DriveMetaGoogleMimeType: strings.TrimSpace(file.MimeType),
+		google.DriveMetaOriginalName:   strings.TrimSpace(file.Name),
+	}
+	if file.Version != 0 {
+		meta[google.DriveMetaVersion] = fmt.Sprintf("%d", file.Version)
+	}
+	if strings.TrimSpace(file.Md5Checksum) != "" {
+		meta[google.DriveMetaMD5Checksum] = strings.TrimSpace(file.Md5Checksum)
+	}
+	if strings.TrimSpace(backupMime) != "" {
+		meta[google.DriveMetaBackupMimeType] = strings.TrimSpace(backupMime)
+	}
+	if strings.TrimSpace(shortcutTarget) != "" {
+		meta[google.DriveMetaShortcutTargetID] = strings.TrimSpace(shortcutTarget)
+	}
+	if strings.TrimSpace(physicalKey) != "" {
+		meta[google.DriveMetaPhysicalObjectKey] = strings.TrimSpace(physicalKey)
+	}
+	if isAlias {
+		meta[google.DriveMetaIsAlias] = "true"
+	}
+	if file.Starred {
+		meta[google.DriveMetaStarred] = "true"
+	}
+	return meta
+}
+
+func driveContentUnchanged(ctx context.Context, accessGrant, objectKey string, file *drive.File) (bool, error) {
+	obj, err := satellite.StatObject(ctx, accessGrant, satellite.ReserveBucket_Drive, objectKey)
+	if err != nil || obj == nil {
+		return false, err
+	}
+	if obj.Custom == nil {
+		return false, nil
+	}
+	if v := strings.TrimSpace(obj.Custom[google.DriveMetaVersion]); v != "" && file.Version != 0 {
+		if v == fmt.Sprintf("%d", file.Version) {
+			if md5 := strings.TrimSpace(file.Md5Checksum); md5 == "" || strings.TrimSpace(obj.Custom[google.DriveMetaMD5Checksum]) == md5 {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func downloadDriveFileContent(service *drive.Service, file *drive.File) ([]byte, string, error) {
@@ -506,22 +909,24 @@ func openDriveFileDownload(service *drive.Service, file *drive.File) (*http.Resp
 	var err error
 	exportMime := ""
 	if strings.HasPrefix(file.MimeType, "application/vnd.google-apps") {
-		switch file.MimeType {
-		case "application/vnd.google-apps.document":
-			exportMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-		case "application/vnd.google-apps.spreadsheet":
-			exportMime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-		case "application/vnd.google-apps.presentation":
-			exportMime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-		default:
-			exportMime = ""
+		if file.MimeType == "application/vnd.google-apps.shortcut" {
+			return nil, "", errDriveNonExportable
 		}
-		if exportMime == "" {
-			return nil, "", fmt.Errorf("unsupported export mime for %s", file.MimeType)
+		var ok bool
+		exportMime, ok = driveExportMimeForGoogleApps(file.MimeType)
+		if !ok || exportMime == "" {
+			return nil, "", fmt.Errorf("%w: %s", errDriveNonExportable, file.MimeType)
 		}
 		resp, err = service.Files.Export(file.Id, exportMime).Download()
 	} else {
-		resp, err = service.Files.Get(file.Id).Download()
+		resp, err = service.Files.Get(file.Id).SupportsAllDrives(true).Download()
+		if err != nil && isAbusiveDownloadError(err) {
+			// User-authorized backup: acknowledge Google's malware/spam flag and retry once.
+			resp, err = service.Files.Get(file.Id).SupportsAllDrives(true).AcknowledgeAbuse(true).Download()
+			if err != nil && isAbusiveDownloadError(err) {
+				return nil, "", errDriveAbusiveSkipped
+			}
+		}
 	}
 	if err != nil {
 		return nil, "", err
@@ -529,52 +934,90 @@ func openDriveFileDownload(service *drive.Service, file *drive.File) (*http.Resp
 	return resp, exportMime, nil
 }
 
-// Legacy implementation kept for reference (replaced by openDriveFileDownload + stream/direct branch).
-// func downloadDriveFileContent(service *drive.Service, file *drive.File) ([]byte, string, error) {
-// 	var resp *http.Response
-// 	var err error
-// 	exportMime := ""
-// 	if strings.HasPrefix(file.MimeType, "application/vnd.google-apps") {
-// 		switch file.MimeType {
-// 		case "application/vnd.google-apps.document":
-// 			exportMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-// 		case "application/vnd.google-apps.spreadsheet":
-// 			exportMime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-// 		case "application/vnd.google-apps.presentation":
-// 			exportMime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-// 		default:
-// 			exportMime = ""
-// 		}
-// 		if exportMime == "" {
-// 			return nil, "", fmt.Errorf("unsupported export mime for %s", file.MimeType)
-// 		}
-// 		resp, err = service.Files.Export(file.Id, exportMime).Download()
-// 	} else {
-// 		resp, err = service.Files.Get(file.Id).Download()
-// 	}
-// 	if err != nil {
-// 		return nil, "", err
-// 	}
-// 	defer resp.Body.Close()
-// 	body, err := io.ReadAll(resp.Body)
-// 	if err != nil {
-// 		return nil, "", err
-// 	}
-// 	return body, exportMime, nil
-// }
-
-func writeDriveRemovedMetadata(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, fileID string) error {
-	displayName := fileID
-	createdTime := ""
-	metaKey := google.DriveIDBasedMetaKey(task.LoginId, fileID, displayName, createdTime)
-	meta := google.DriveCronBackupMeta{
-		FileID:           fileID,
-		CreatedTime:      createdTime,
-		RemovedFromDrive: true,
-		Trashed:          true,
-		DeletedAt:        time.Now().UTC().Format(time.RFC3339),
-		UpdatedAt:        time.Now().UTC().Format(time.RFC3339),
+func ensureDriveParentFolderPlaceholders(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, sections, parentIDs []string, synced map[string]bool) error {
+	if len(parentIDs) == 0 {
+		return nil
 	}
-	b, _ := json.Marshal(meta)
-	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, metaKey, b, task.UserID, input.StorxRecovery)
+	for i, folderID := range parentIDs {
+		folderID = strings.TrimSpace(folderID)
+		if folderID == "" || folderID == "root" {
+			continue
+		}
+		if existing := google.FindSyncedDriveFolderKeyByID(filterSyncedByEmail(synced, task.LoginId), folderID); existing != "" {
+			continue
+		}
+		name := folderID
+		f, err := service.Files.Get(folderID).Fields("id,name,mimeType,starred,trashed").SupportsAllDrives(true).Do()
+		if err != nil {
+			logger.Warn(ctx, "drive parent folder get failed", logger.String("folder_id", folderID), logger.ErrorField(err))
+		} else if f != nil && strings.TrimSpace(f.Name) != "" {
+			name = strings.TrimSpace(f.Name)
+		}
+		parentsOfFolder := append([]string{}, parentIDs[:i]...)
+		folderSections := append([]string{}, sections...)
+		// Folders inherit STARRED only when the folder itself is starred.
+		if f != nil && f.Starred {
+			folderSections = append(folderSections, google.DriveSectionStarred)
+		} else {
+			// Strip STARRED from parent placeholders of a starred *file*.
+			cleaned := folderSections[:0]
+			for _, s := range folderSections {
+				if s != google.DriveSectionStarred {
+					cleaned = append(cleaned, s)
+				}
+			}
+			folderSections = cleaned
+		}
+		key := google.BuildDriveObjectKey(task.LoginId, folderSections, parentsOfFolder, folderID, name, "application/vnd.google-apps.folder", true, "")
+		if synced[key] {
+			continue
+		}
+		meta := map[string]string{
+			google.DriveMetaGoogleFileID: folderID,
+			google.DriveMetaOriginalName: name,
+			google.DriveMetaIsFolder:     "true",
+			google.DriveMetaGoogleMimeType: "application/vnd.google-apps.folder",
+		}
+		if f != nil && f.Starred {
+			meta[google.DriveMetaStarred] = "true"
+		}
+		if err := handler.UploadObjectWithMetadataAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, key, nil, meta, task.UserID, input.StorxRecovery); err != nil {
+			return err
+		}
+		synced[key] = true
+	}
+	return nil
 }
+
+func writeDriveRemovedTreeAlias(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, fileID string, synced map[string]bool) error {
+	oldKey := google.FindSyncedDriveKeyByFileID(filterSyncedByEmail(synced, task.LoginId), fileID)
+	name := fileID
+	if oldKey != "" {
+		if p, ok := google.ParseDriveObjectKey(oldKey); ok {
+			if p.Name != "" {
+				name = p.Name
+			}
+		}
+	}
+	// Flat BIN key (no parent nesting) so Trash tab lists items at root.
+	logicalKey := google.BuildDriveObjectKey(task.LoginId, []string{google.DriveSectionBin}, nil, fileID, name, "application/octet-stream", false, "")
+	meta := map[string]string{
+		google.DriveMetaGoogleFileID: fileID,
+		google.DriveMetaOriginalName: name,
+		google.DriveMetaIsAlias:      "true",
+	}
+	if oldKey != "" && oldKey != logicalKey {
+		meta[google.DriveMetaPhysicalObjectKey] = oldKey
+	}
+	if err := handler.UploadObjectWithMetadataAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, logicalKey, nil, meta, task.UserID, input.StorxRecovery); err != nil {
+		return err
+	}
+	synced[logicalKey] = true
+	if oldKey != "" && oldKey != logicalKey {
+		if p, ok := google.ParseDriveObjectKey(oldKey); ok && strings.EqualFold(p.Email, task.LoginId) {
+			_ = p
+		}
+	}
+	return nil
+}
+

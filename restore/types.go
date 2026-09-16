@@ -104,6 +104,10 @@ type RestoreDeps struct {
 	PhotosAlbumCache map[string]*albums.Album
 	photosAlbumMu    sync.Mutex
 
+	// DriveFolderNames caches Google folder ID → display name for one restore job (loaded once).
+	DriveFolderNames     map[string]string
+	driveFolderNamesOnce sync.Once
+
 	// SeenGmailMessageIDs dedupes restore-all when legacy + labeled keys share JSON message.Id.
 	SeenGmailMessageIDs *sync.Map
 

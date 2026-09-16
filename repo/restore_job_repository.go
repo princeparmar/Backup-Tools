@@ -263,17 +263,35 @@ func (r *RestoreJobRepository) ClaimNextRunningJob() (*RestoreJobListingDB, erro
 }
 
 func (r *RestoreJobRepository) AdvanceRestoreJobCursor(jobID, expectedCursor, newCursor uint, batchOK, batchFail uint) (bool, error) {
+	// Progress counts are bumped per-item for live UI; this only advances the page cursor.
+	_ = batchOK
+	_ = batchFail
 	res := r.db.Model(&RestoreJobListingDB{}).
 		Where("id = ? AND cursor_id = ?", jobID, expectedCursor).
 		Updates(map[string]interface{}{
-			"cursor_id":       newCursor,
-			"processed_count": gormdb.Expr("processed_count + ?", batchOK),
-			"failed_count":    gormdb.Expr("failed_count + ?", batchFail),
+			"cursor_id": newCursor,
 		})
 	if res.Error != nil {
 		return false, fmt.Errorf("advance restore cursor: %w", res.Error)
 	}
 	return res.RowsAffected > 0, nil
+}
+
+// BumpRestoreProgress increments processed/failed for live polling mid-batch.
+func (r *RestoreJobRepository) BumpRestoreProgress(jobID uint, ok, fail uint) error {
+	if ok == 0 && fail == 0 {
+		return nil
+	}
+	updates := map[string]interface{}{
+		"last_heart_beat": time.Now(),
+	}
+	if ok > 0 {
+		updates["processed_count"] = gormdb.Expr("processed_count + ?", ok)
+	}
+	if fail > 0 {
+		updates["failed_count"] = gormdb.Expr("failed_count + ?", fail)
+	}
+	return r.db.Model(&RestoreJobListingDB{}).Where("id = ?", jobID).Updates(updates).Error
 }
 
 func (r *RestoreJobRepository) UpdateJob(id uint, updates map[string]interface{}) error {

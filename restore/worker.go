@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/db"
@@ -18,6 +19,10 @@ import (
 var (
 	ErrJobCancelled = errors.New("restore job cancelled")
 	ErrJobTerminal  = errors.New("restore job already finished")
+
+	// Single-flight across HTTP kick + cron so two ProcessRestoreJobs cannot
+	// claim/run the same job concurrently (that left live progress stuck at 0%).
+	restoreWorkerMu sync.Mutex
 )
 
 func logJobFields(jobID int, method, loginID string) []logger.Field {
@@ -34,33 +39,28 @@ func isInactiveRestoreJobErr(err error) bool {
 
 // ProcessRestoreJobs runs batches for retry, running, and queued jobs until none are claimable.
 func ProcessRestoreJobs(ctx context.Context, store *db.PostgresDb) error {
-	logger.Info(ctx, "Processing restore jobs")
+	if !restoreWorkerMu.TryLock() {
+		return nil
+	}
+	defer restoreWorkerMu.Unlock()
 
 	stale := time.Now().Add(-10 * time.Minute)
 	_ = store.RestoreJobRepo.MissedHeartbeatForJobs(stale)
 
-	processedBatches := 0
-	errorCount := 0
-
 	for {
 		if err := processRetryTask(ctx, store); err != nil && !errors.Is(err, gormdb.ErrRecordNotFound) && !isInactiveRestoreJobErr(err) {
 			logger.Warn(ctx, "Restore retry task failed", logger.ErrorField(err))
-			errorCount++
 		} else if err == nil {
-			processedBatches++
 			continue
 		}
 
 		job, err := store.RestoreJobRepo.ClaimNextRunningJob()
 		if err == nil {
-			logger.Info(ctx, "Claimed running restore job for next batch", logJobFields(int(job.ID), job.Method, job.LoginID)...)
 			if err := processJobBatches(ctx, store, job, nil); err != nil && !isInactiveRestoreJobErr(err) {
 				logger.Error(ctx, "Restore job batch failed",
 					append(logJobFields(int(job.ID), job.Method, job.LoginID), logger.ErrorField(err))...)
-				errorCount++
 				return err
 			}
-			processedBatches++
 			continue
 		}
 		if !errors.Is(err, gormdb.ErrRecordNotFound) {
@@ -71,27 +71,16 @@ func ProcessRestoreJobs(ctx context.Context, store *db.PostgresDb) error {
 		job, err = store.RestoreJobRepo.ClaimNextQueuedJob()
 		if err != nil {
 			if errors.Is(err, gormdb.ErrRecordNotFound) {
-				if processedBatches == 0 {
-					logger.Info(ctx, "No restore jobs to process")
-				} else {
-					logger.Info(ctx, "Restore job processing completed",
-						logger.Int("batches", processedBatches),
-						logger.Int("errors", errorCount))
-				}
 				return nil
 			}
 			logger.Error(ctx, "Failed to claim queued restore job", logger.ErrorField(err))
 			return err
 		}
-		logger.Info(ctx, "Claimed queued restore job",
-			append(logJobFields(int(job.ID), job.Method, job.LoginID), logger.String("status", job.Status))...)
 		if err := processJobBatches(ctx, store, job, nil); err != nil && !isInactiveRestoreJobErr(err) {
 			logger.Error(ctx, "Restore job batch failed",
 				append(logJobFields(int(job.ID), job.Method, job.LoginID), logger.ErrorField(err))...)
-			errorCount++
 			return err
 		}
-		processedBatches++
 	}
 }
 
@@ -143,12 +132,6 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 		return err
 	}
 
-	logger.Info(ctx, "Processing restore job batch",
-		logger.Int("job_id", int(job.ID)),
-		logger.String("method", job.Method),
-		logger.String("login_id", job.LoginID),
-		logger.Int("cursor_id", int(job.CursorID)))
-
 	if retryTask == nil && job.CursorID == 0 && job.ProcessedCount == 0 {
 		notifyRestoreStarted(ctx, job)
 	}
@@ -178,9 +161,6 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 	}
 	defer proc.Cleanup(ctx, deps)
 
-	batchStarted := time.Now()
-	deps.touchJobHeartbeat()
-
 	cfg := deps.Config
 	prefix := strings.TrimSuffix(job.LoginID, "/") + "/"
 
@@ -193,92 +173,87 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 		}
 	}
 
-	var rows []repo.SyncedObject
-	if retryTask != nil && retryTask.CursorEndID > retryTask.CursorStartID {
-		rows, err = store.SyncedObjectRepo.GetSyncedObjectsInIDRange(
-			job.UserID, cfg.Bucket, cfg.Source, cfg.ObjectType, retryTask.CursorStartID, retryTask.CursorEndID)
-	} else {
-		rows, err = store.SyncedObjectRepo.GetSyncedObjectKeysPage(
-			job.UserID, cfg.Bucket, cfg.Source, cfg.ObjectType, prefix, job.CursorID, cfg.BatchSize)
-	}
-	if err != nil {
-		return failJob(ctx, store, job, err)
-	}
-
-	if len(rows) == 0 {
-		return tryFinalizeJob(ctx, store, job)
-	}
-
-	var batchTask *repo.RestoreTaskListingDB
-	if retryTask != nil {
-		batchTask = retryTask
-	} else {
-		batchIdx, _ := store.RestoreJobRepo.CountBatchesForJob(job.ID)
-		now := time.Now()
-		batchTask = &repo.RestoreTaskListingDB{
-			RestoreJobID:  job.ID,
-			Status:        repo.RestoreTaskStatusRunning,
-			BatchIndex:    batchIdx,
-			CursorStartID: job.CursorID,
-			StartedAt:     &now,
-		}
-		if err := store.RestoreTaskRepo.Create(batchTask); err != nil {
+	for {
+		if err := checkJobContinuable(store, job.ID); err != nil {
+			if isInactiveRestoreJobErr(err) {
+				return nil
+			}
 			return err
 		}
-	}
 
-	batchTaskID := batchTask.ID
-	batchCursorEnd := job.CursorID
-	if retryTask != nil {
-		batchCursorEnd = retryTask.CursorStartID
-	}
+		deps.touchJobHeartbeat()
 
-	if err := checkJobContinuable(store, job.ID); err != nil {
-		failOpenBatchTask(store, batchTaskID, batchCursorEnd)
-		if isInactiveRestoreJobErr(err) {
-			return nil
+
+		var rows []repo.SyncedObject
+		if retryTask != nil && retryTask.CursorEndID > retryTask.CursorStartID {
+			rows, err = store.SyncedObjectRepo.GetSyncedObjectsInIDRange(
+				job.UserID, cfg.Bucket, cfg.Source, cfg.ObjectType, retryTask.CursorStartID, retryTask.CursorEndID)
+		} else {
+			rows, err = store.SyncedObjectRepo.GetSyncedObjectKeysPage(
+				job.UserID, cfg.Bucket, cfg.Source, cfg.ObjectType, prefix, job.CursorID, cfg.BatchSize)
 		}
-		return err
-	}
+		if err != nil {
+			return failJob(ctx, store, job, err)
+		}
 
-	// Advance past the full page (including rows dropped as Gmail message-id dupes).
-	pageEndID := rows[len(rows)-1].ID
-	if job.Method == "gmail" {
-		rows = DedupeGmailRestoreRows(rows)
-	}
+		if len(rows) == 0 {
+			return tryFinalizeJob(ctx, store, job)
+		}
 
-	expectedCursor := job.CursorID
-	batchResult, storxErr := runBatchWithStorxRecovery(ctx, deps, proc, rows)
-	if storxErr != nil {
-		if isInactiveRestoreJobErr(storxErr) {
+		var batchTask *repo.RestoreTaskListingDB
+		if retryTask != nil {
+			batchTask = retryTask
+		} else {
+			batchIdx, _ := store.RestoreJobRepo.CountBatchesForJob(job.ID)
+			now := time.Now()
+			batchTask = &repo.RestoreTaskListingDB{
+				RestoreJobID:  job.ID,
+				Status:        repo.RestoreTaskStatusRunning,
+				BatchIndex:    batchIdx,
+				CursorStartID: job.CursorID,
+				StartedAt:     &now,
+			}
+			if err := store.RestoreTaskRepo.Create(batchTask); err != nil {
+				return err
+			}
+		}
+
+		batchTaskID := batchTask.ID
+		batchCursorEnd := job.CursorID
+		if retryTask != nil {
+			batchCursorEnd = retryTask.CursorStartID
+		}
+
+		if err := checkJobContinuable(store, job.ID); err != nil {
 			failOpenBatchTask(store, batchTaskID, batchCursorEnd)
-			return nil
-		}
-		if err := handleStorxBatchError(ctx, store, job, batchTask, batchCursorEnd, storxErr); err != nil {
+			if isInactiveRestoreJobErr(err) {
+				return nil
+			}
 			return err
 		}
-		return nil
-	}
 
-	if shouldOAuth401Retry(deps, batchResult) {
-		logger.Warn(ctx, "Restore batch hit OAuth 401, refreshing Google token",
-			logger.Int("job_id", int(job.ID)),
-			logger.Int("task_id", int(batchTask.ID)))
-		if err := deps.RefreshGoogleAccessToken(ctx); err != nil {
-			logger.Warn(ctx, "Restore OAuth token refresh failed",
-				logger.Int("job_id", int(job.ID)),
-				logger.ErrorField(err))
-			failOpenBatchTask(store, batchTaskID, batchCursorEnd)
-			return failJob(ctx, store, job, err)
+		// Advance past the full page (including rows dropped as Gmail message-id dupes).
+		pageEndID := rows[len(rows)-1].ID
+		pageRowCount := len(rows)
+		if job.Method == "gmail" {
+			rows = DedupeGmailRestoreRows(rows)
 		}
-		if err := proc.Setup(ctx, deps); err != nil {
-			logger.Warn(ctx, "Restore processor setup failed after token refresh",
-				logger.Int("job_id", int(job.ID)),
-				logger.ErrorField(err))
-			failOpenBatchTask(store, batchTaskID, batchCursorEnd)
-			return failJob(ctx, store, job, err)
+
+		restorable := 0
+		for _, row := range rows {
+			if proc.ShouldRestoreKey(row.ObjectKey) {
+				restorable++
+			}
 		}
-		batchResult, storxErr = runBatchWithStorxRecovery(ctx, deps, proc, rows)
+		// Inventory-only keys (.file_placeholder, .shared_drive__, …) are not restored —
+		// shrink total so live progress / partial status reflect real work.
+		if skipped := pageRowCount - restorable; skipped > 0 && job.TotalCount >= uint(skipped) {
+			job.TotalCount -= uint(skipped)
+			_ = store.RestoreJobRepo.UpdateJob(job.ID, map[string]interface{}{"total_count": job.TotalCount})
+		}
+
+		expectedCursor := job.CursorID
+		batchResult, storxErr := runBatchWithStorxRecovery(ctx, deps, proc, rows)
 		if storxErr != nil {
 			if isInactiveRestoreJobErr(storxErr) {
 				failOpenBatchTask(store, batchTaskID, batchCursorEnd)
@@ -289,60 +264,81 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 			}
 			return nil
 		}
+
+		if shouldOAuth401Retry(deps, batchResult) {
+			logger.Warn(ctx, "Restore batch hit OAuth 401, refreshing Google token",
+				logger.Int("job_id", int(job.ID)),
+				logger.Int("task_id", int(batchTask.ID)))
+			if err := deps.RefreshGoogleAccessToken(ctx); err != nil {
+				logger.Warn(ctx, "Restore OAuth token refresh failed",
+					logger.Int("job_id", int(job.ID)),
+					logger.ErrorField(err))
+				failOpenBatchTask(store, batchTaskID, batchCursorEnd)
+				return failJob(ctx, store, job, err)
+			}
+			if err := proc.Setup(ctx, deps); err != nil {
+				logger.Warn(ctx, "Restore processor setup failed after token refresh",
+					logger.Int("job_id", int(job.ID)),
+					logger.ErrorField(err))
+				failOpenBatchTask(store, batchTaskID, batchCursorEnd)
+				return failJob(ctx, store, job, err)
+			}
+			batchResult, storxErr = runBatchWithStorxRecovery(ctx, deps, proc, rows)
+			if storxErr != nil {
+				if isInactiveRestoreJobErr(storxErr) {
+					failOpenBatchTask(store, batchTaskID, batchCursorEnd)
+					return nil
+				}
+				if err := handleStorxBatchError(ctx, store, job, batchTask, batchCursorEnd, storxErr); err != nil {
+					return err
+				}
+				return nil
+			}
+		}
+
+		newCursor := expectedCursor
+		if batchResult.LastObjectID > 0 {
+			newCursor = batchResult.LastObjectID
+		}
+		if pageEndID > newCursor {
+			newCursor = pageEndID
+		}
+
+		advanced, err := store.RestoreJobRepo.AdvanceRestoreJobCursor(
+			job.ID, expectedCursor, newCursor, batchResult.Processed, batchResult.Failed)
+		if err != nil {
+			return err
+		}
+		if !advanced && retryTask == nil {
+			logger.Warn(ctx, "restore cursor CAS lost — another worker may have advanced",
+				logger.Int("job_id", int(job.ID)))
+			persistBatchTaskEnd(store, batchTask.ID, newCursor, map[string]interface{}{
+				"status":      repo.RestoreTaskStatusCancelled,
+				"finished_at": time.Now(),
+			})
+			return nil
+		}
+
+		_ = store.RestoreJobRepo.UpdateHeartBeat(job.ID)
+
+		batchTask.CursorEndID = newCursor
+		finishBatch(ctx, store, job, batchTask, batchResult, newCursor)
+
+		recordBatchItems(job.Method, batchResult.Processed, batchResult.Failed)
+		maybeNotifyProgress(ctx, job)
+
+		job.CursorID = newCursor
+		job.ProcessedCount += batchResult.Processed
+		job.FailedCount += batchResult.Failed
+
+		// Retry tasks cover a fixed ID range — one pass only.
+		if retryTask != nil {
+			return nil
+		}
+		if !shouldFetchAnotherBatch(pageRowCount, cfg.BatchSize) {
+			return tryFinalizeJob(ctx, store, job)
+		}
 	}
-
-	newCursor := expectedCursor
-	if batchResult.LastObjectID > 0 {
-		newCursor = batchResult.LastObjectID
-	}
-	if pageEndID > newCursor {
-		newCursor = pageEndID
-	}
-
-	advanced, err := store.RestoreJobRepo.AdvanceRestoreJobCursor(
-		job.ID, expectedCursor, newCursor, batchResult.Processed, batchResult.Failed)
-	if err != nil {
-		return err
-	}
-	if !advanced && retryTask == nil {
-		logger.Warn(ctx, "restore cursor CAS lost — another worker may have advanced",
-			logger.Int("job_id", int(job.ID)))
-		persistBatchTaskEnd(store, batchTask.ID, newCursor, map[string]interface{}{
-			"status":      repo.RestoreTaskStatusCancelled,
-			"finished_at": time.Now(),
-		})
-		return nil
-	}
-
-	_ = store.RestoreJobRepo.UpdateHeartBeat(job.ID)
-
-	batchTask.CursorEndID = newCursor
-	finishBatch(ctx, store, job, batchTask, batchResult, newCursor)
-
-	logger.Info(ctx, "Restore batch completed",
-		logger.Int("job_id", int(job.ID)),
-		logger.Int("task_id", int(batchTask.ID)),
-		logger.String("method", job.Method),
-		logger.String("login_id", job.LoginID),
-		logger.Int("batch_processed", int(batchResult.Processed)),
-		logger.Int("batch_failed", int(batchResult.Failed)),
-		logger.Int("cursor_end_id", int(newCursor)),
-		logger.Int("job_processed", int(job.ProcessedCount+batchResult.Processed)),
-		logger.Int("job_total", int(job.TotalCount)),
-		logger.Int64("batch_duration_ms", time.Since(batchStarted).Milliseconds()),
-		logger.Float64("batch_items_per_sec", batchItemsPerSec(batchResult.Processed+batchResult.Failed, time.Since(batchStarted))))
-
-	recordBatchItems(job.Method, batchResult.Processed, batchResult.Failed)
-	maybeNotifyProgress(ctx, job)
-
-	job.CursorID = newCursor
-	job.ProcessedCount += batchResult.Processed
-	job.FailedCount += batchResult.Failed
-
-	if !shouldFetchAnotherBatch(len(rows), cfg.BatchSize) {
-		return tryFinalizeJob(ctx, store, job)
-	}
-	return nil
 }
 
 func shouldOAuth401Retry(deps *RestoreDeps, result BatchResult) bool {
@@ -506,11 +502,6 @@ func finishBatch(ctx context.Context, store *db.PostgresDb, job *repo.RestoreJob
 	}
 	markTaskSuccess(store, batchTask.ID, cursorEndID)
 	if batchResult.Failed > 0 {
-		logger.Warn(ctx, "Restore batch completed with item failures",
-			logger.Int("job_id", int(job.ID)),
-			logger.Int("task_id", int(batchTask.ID)),
-			logger.Int("processed", int(batchResult.Processed)),
-			logger.Int("failed", int(batchResult.Failed)))
 		writeDLQ(ctx, store, job, batchResult.FailedKeys)
 	}
 }

@@ -123,8 +123,27 @@ func UploadObjectAndSync(
 	userID string,
 	recovery ...*StorxRecovery,
 ) error {
+	return UploadObjectWithMetadataAndSync(ctx, database, accessGrant, bucketName, objectKey, data, nil, userID, recovery...)
+}
+
+// UploadObjectWithMetadataAndSync uploads bytes with optional StorX custom metadata, then tracks synced_objects.
+func UploadObjectWithMetadataAndSync(
+	ctx context.Context,
+	database *db.PostgresDb,
+	accessGrant, bucketName, objectKey string,
+	data []byte,
+	meta map[string]string,
+	userID string,
+	recovery ...*StorxRecovery,
+) error {
 	r := storxRecoveryFrom(recovery...)
-	if err := satellite.UploadObject(ctx, accessGrant, bucketName, objectKey, data); err != nil {
+	var err error
+	if len(meta) > 0 {
+		err = satellite.UploadObjectWithMetadata(ctx, accessGrant, bucketName, objectKey, data, meta)
+	} else {
+		err = satellite.UploadObject(ctx, accessGrant, bucketName, objectKey, data)
+	}
+	if err != nil {
 		uploadErr := fmt.Errorf("failed to upload object to Satellite: %w", err)
 		logger.Error(ctx, "Failed to upload object to Satellite",
 			logger.String("bucket", bucketName),
@@ -139,27 +158,21 @@ func UploadObjectAndSync(
 				}
 				return uploadErr
 			}
-			return UploadObjectAndSync(ctx, database, grant, bucketName, objectKey, data, userID, r)
+			return UploadObjectWithMetadataAndSync(ctx, database, grant, bucketName, objectKey, data, meta, userID, r)
 		}
 		return uploadErr
 	}
 
-	// Step 2: Derive source and type from bucket name
 	source := deriveSource(bucketName)
 	objectType := deriveType(bucketName)
-
-	// Step 3: Update synced_objects table (non-blocking - log but don't fail)
 	if err := database.SyncedObjectRepo.CreateSyncedObject(userID, bucketName, objectKey, source, objectType); err != nil {
 		logger.Error(ctx, "Failed to create synced object entry after successful upload",
 			logger.String("bucket", bucketName),
 			logger.String("object_key", objectKey),
 			logger.ErrorField(err),
 		)
-		// Note: Object is already uploaded to Satellite, but database tracking failed
-		// This is logged but we don't fail the entire operation
 		return nil
 	}
-
 	return nil
 }
 

@@ -61,8 +61,21 @@ func UploadObjectStreamAndSync(
 	userID string,
 	recovery ...*StorxRecovery,
 ) error {
+	return UploadObjectStreamWithMetadataAndSync(ctx, database, accessGrant, bucketName, objectKey, body, nil, userID, recovery...)
+}
+
+// UploadObjectStreamWithMetadataAndSync streams content with optional custom metadata.
+func UploadObjectStreamWithMetadataAndSync(
+	ctx context.Context,
+	database *db.PostgresDb,
+	accessGrant, bucketName, objectKey string,
+	body io.Reader,
+	meta map[string]string,
+	userID string,
+	recovery ...*StorxRecovery,
+) error {
 	rec := storxRecoveryFrom(recovery...)
-	if err := satellite.UploadObjectFromReader(ctx, accessGrant, bucketName, objectKey, body); err != nil {
+	if err := satellite.UploadObjectFromReaderWithMetadata(ctx, accessGrant, bucketName, objectKey, body, meta); err != nil {
 		uploadErr := fmt.Errorf("failed to upload object to Satellite: %w", err)
 		logger.Error(ctx, "Failed to stream object to Satellite",
 			logger.String("bucket", bucketName),
@@ -77,22 +90,19 @@ func UploadObjectStreamAndSync(
 				}
 				return uploadErr
 			}
-			return UploadObjectStreamAndSync(ctx, database, grant, bucketName, objectKey, body, userID, rec)
+			return UploadObjectStreamWithMetadataAndSync(ctx, database, grant, bucketName, objectKey, body, meta, userID, rec)
 		}
 		return uploadErr
 	}
 
 	source := deriveSource(bucketName)
 	objectType := deriveType(bucketName)
-
 	if err := database.SyncedObjectRepo.CreateSyncedObject(userID, bucketName, objectKey, source, objectType); err != nil {
 		logger.Error(ctx, "Failed to create synced object entry after successful stream upload",
 			logger.String("bucket", bucketName),
 			logger.String("object_key", objectKey),
 			logger.ErrorField(err),
 		)
-		return nil
 	}
-
 	return nil
 }

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -498,6 +499,16 @@ func HandleRestoreAll(c echo.Context) error {
 		logger.String("service", req.Service),
 		logger.String("login_id", req.LoginID),
 		logger.String("method", job.Method))
+
+	// Kick the worker immediately so restore does not wait for the next cron tick.
+	go func() {
+		bg := context.Background()
+		if err := restore.ProcessRestoreJobs(bg, database); err != nil {
+			logger.Warn(bg, "Immediate restore worker run failed",
+				logger.Int("job_id", int(job.ID)),
+				logger.ErrorField(err))
+		}
+	}()
 
 	return c.JSON(http.StatusAccepted, map[string]interface{}{
 		"job_id":        job.ID,

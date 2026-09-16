@@ -272,7 +272,7 @@ func evaluateCredentialOAuthReadiness(ctx context.Context, out *ReadinessResult,
 		out.Reason = ReadinessReasonMissingPermissions
 		out.GrantedScopes = []string{}
 		out.MissingPermissions = oauthMissingList(service, required)
-		out.ReconnectHint = "Use dashboard Google reconnect (auto-sync) to grant missing OAuth scopes"
+		out.ReconnectHint = "Use Restore Grant Access (writes refresh token to Backup-Tools). Auto-sync reconnect alone only grants readonly scopes."
 		out.Message = restoreReadinessMissingScopes
 		return out, nil
 	}
@@ -282,7 +282,7 @@ func evaluateCredentialOAuthReadiness(ctx context.Context, out *ReadinessResult,
 		out.Ready = false
 		out.Reason = ReadinessReasonTokenRefreshFailed
 		out.Message = restoreReadinessRefreshInvalid
-		out.ReconnectHint = "Use dashboard Google reconnect (auto-sync) to grant missing OAuth scopes"
+		out.ReconnectHint = "Use Restore Grant Access (writes refresh token to Backup-Tools). Auto-sync reconnect alone only grants readonly scopes."
 		return out, nil
 	}
 
@@ -291,7 +291,7 @@ func evaluateCredentialOAuthReadiness(ctx context.Context, out *ReadinessResult,
 		out.Ready = false
 		out.Reason = ReadinessReasonTokenRefreshFailed
 		out.Message = restoreReadinessTokenValidation
-		out.ReconnectHint = "Use dashboard Google reconnect (auto-sync) to grant missing OAuth scopes"
+		out.ReconnectHint = "Use Restore Grant Access (writes refresh token to Backup-Tools). Auto-sync reconnect alone only grants readonly scopes."
 		return out, nil
 	}
 
@@ -302,7 +302,7 @@ func evaluateCredentialOAuthReadiness(ctx context.Context, out *ReadinessResult,
 		out.Reason = ReadinessReasonMissingPermissions
 		out.GrantedScopes = strings.Fields(details.Scope)
 		out.MissingPermissions = oauthMissingList(service, missing)
-		out.ReconnectHint = "Use dashboard Google reconnect (auto-sync) to grant missing OAuth scopes"
+		out.ReconnectHint = "Use Restore Grant Access (writes refresh token to Backup-Tools). Auto-sync reconnect alone only grants readonly scopes."
 		out.Message = restoreReadinessMissingScopes
 		return out, nil
 	}
@@ -410,7 +410,7 @@ func evaluateOAuthReadiness(ctx context.Context, store *db.PostgresDb, out *Read
 		out.Ready = false
 		out.Reason = ReadinessReasonTokenRefreshFailed
 		out.Message = restoreReadinessRefreshMissing
-		out.ReconnectHint = "Use dashboard Google reconnect (PUT /auto-sync/job) to grant tokens"
+		out.ReconnectHint = "Use Restore Grant Access (writes refresh token to Backup-Tools). Auto-sync reconnect alone only grants readonly scopes."
 		return out, nil
 	}
 
@@ -419,7 +419,7 @@ func evaluateOAuthReadiness(ctx context.Context, store *db.PostgresDb, out *Read
 		out.Ready = false
 		out.Reason = ReadinessReasonTokenRefreshFailed
 		out.Message = restoreReadinessRefreshInvalid
-		out.ReconnectHint = "Use dashboard Google reconnect (PUT /auto-sync/job) with full scopes"
+		out.ReconnectHint = "Use Restore Grant Access (writes refresh token to Backup-Tools). Auto-sync reconnect alone only grants readonly scopes."
 		return out, nil
 	}
 
@@ -428,6 +428,7 @@ func evaluateOAuthReadiness(ctx context.Context, store *db.PostgresDb, out *Read
 		out.Ready = false
 		out.Reason = ReadinessReasonTokenRefreshFailed
 		out.Message = restoreReadinessTokenValidation
+		out.ReconnectHint = "Use Restore Grant Access (writes refresh token to Backup-Tools). Auto-sync reconnect alone only grants readonly scopes."
 		return out, nil
 	}
 
@@ -438,7 +439,7 @@ func evaluateOAuthReadiness(ctx context.Context, store *db.PostgresDb, out *Read
 		out.Reason = ReadinessReasonMissingPermissions
 		out.GrantedScopes = strings.Fields(details.Scope)
 		out.MissingPermissions = oauthMissingList(service, missing)
-		out.ReconnectHint = "Use dashboard Google reconnect (auto-sync) to grant missing OAuth scopes"
+		out.ReconnectHint = "Use Restore Grant Access (writes refresh token to Backup-Tools). Auto-sync reconnect alone only grants readonly scopes."
 		out.Message = restoreReadinessMissingScopes
 		return out, nil
 	}

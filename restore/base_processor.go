@@ -2,6 +2,7 @@ package restore
 
 import (
 	"context"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,31 @@ func (d *RestoreDeps) touchJobHeartbeat() {
 	_ = d.Store.RestoreJobRepo.UpdateHeartBeat(d.Job.ID)
 }
 
+// bumpLiveProgress writes processed/failed so GET /restore/live moves mid-batch.
+func (d *RestoreDeps) bumpLiveProgress(ok, fail uint) {
+	if d == nil || d.Store == nil || d.Job == nil || d.Store.RestoreJobRepo == nil {
+		return
+	}
+	if ok == 0 && fail == 0 {
+		return
+	}
+	_ = d.Store.RestoreJobRepo.BumpRestoreProgress(d.Job.ID, ok, fail)
+}
+
+func restoreProgressLabel(objectKey string) string {
+	base := path.Base(strings.TrimSpace(objectKey))
+	if i := strings.Index(base, "$"); i >= 0 && i+1 < len(base) {
+		return base[i+1:]
+	}
+	if strings.HasPrefix(base, ".folder__") {
+		return strings.TrimPrefix(base, ".folder__")
+	}
+	if i := strings.LastIndex(base, "_"); i > 0 && i+1 < len(base) {
+		return base[i+1:]
+	}
+	return base
+}
+
 // RunBatch restores a page of synced objects with centralized backpressure.
 func RunBatch(ctx context.Context, deps *RestoreDeps, proc Processor, rows []repo.SyncedObject) BatchResult {
 	result := BatchResult{}
@@ -38,6 +64,25 @@ func RunBatch(ctx context.Context, deps *RestoreDeps, proc Processor, rows []rep
 	g.SetLimit(deps.Config.MaxConcurrency)
 
 	var mu sync.Mutex
+
+	// Keep heartbeat fresh while items run so another worker cannot reclaim this job mid-batch.
+	stopHB := make(chan struct{})
+	go func() {
+		t := time.NewTicker(10 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-stopHB:
+				return
+			case <-gctx.Done():
+				return
+			case <-t.C:
+				deps.touchJobHeartbeat()
+			}
+		}
+	}()
+	defer close(stopHB)
+
 	recordFailure := func(objectKey string, err error) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -47,15 +92,7 @@ func RunBatch(ctx context.Context, deps *RestoreDeps, proc Processor, rows []rep
 			Reason:    err.Error(),
 			ErrorCode: ErrorCodeFromErr(err),
 		})
-		if deps != nil && deps.Job != nil {
-			logger.Warn(ctx, "Restore item failed",
-				logger.Int("job_id", int(deps.Job.ID)),
-				logger.String("method", deps.Job.Method),
-				logger.String("login_id", deps.Job.LoginID),
-				logger.String("object_key", objectKey),
-				logger.String("error_code", ErrorCodeFromErr(err)),
-				logger.ErrorField(err))
-		}
+		deps.bumpLiveProgress(0, 1)
 	}
 
 	for _, row := range rows {
@@ -64,7 +101,12 @@ func RunBatch(ctx context.Context, deps *RestoreDeps, proc Processor, rows []rep
 			continue
 		}
 		g.Go(func() error {
-			started := time.Now()
+			if deps.Store != nil && deps.Job != nil {
+				if err := checkJobContinuable(deps.Store, deps.Job.ID); err != nil {
+					recordFailure(row.ObjectKey, err)
+					return nil
+				}
+			}
 			if err := deps.waitRate(gctx); err != nil {
 				recordFailure(row.ObjectKey, err)
 				return nil
@@ -80,14 +122,13 @@ func RunBatch(ctx context.Context, deps *RestoreDeps, proc Processor, rows []rep
 			mu.Lock()
 			result.Processed++
 			mu.Unlock()
+			deps.bumpLiveProgress(1, 0)
 			deps.touchJobHeartbeat()
-			if deps.Job != nil {
-				logger.Info(ctx, "Restore item completed",
+			if deps != nil && deps.Job != nil {
+				logger.Info(ctx, "Restored file",
 					logger.Int("job_id", int(deps.Job.ID)),
-					logger.String("method", deps.Job.Method),
-					logger.String("login_id", deps.Job.LoginID),
-					logger.String("object_key", row.ObjectKey),
-					logger.Int64("duration_ms", time.Since(started).Milliseconds()))
+					logger.String("file", restoreProgressLabel(row.ObjectKey)),
+					logger.String("object_key", row.ObjectKey))
 			}
 			return nil
 		})

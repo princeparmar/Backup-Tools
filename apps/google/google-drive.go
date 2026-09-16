@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -152,6 +154,148 @@ func ListNonFolderFilesFlatWithService(srv *drive.Service, pageToken string) (*F
 		NextPageTokenLegacy: resp.NextPageToken,
 		PageSize:            int64(len(resp.Files)),
 	}, nil
+}
+
+// ListDriveFilesPage lists one page of Drive files for a corpus query (includes folders when query allows).
+func ListDriveFilesPage(srv *drive.Service, query, pageToken, corpora, driveID string) ([]*drive.File, string, error) {
+	call := srv.Files.List().
+		Q(query).
+		PageSize(1000).
+		SupportsAllDrives(true).
+		IncludeItemsFromAllDrives(true).
+		Fields("nextPageToken, files(id,name,mimeType,parents,createdTime,modifiedTime,size,md5Checksum,version,driveId,starred,trashed,shortcutDetails(targetId,targetMimeType),owners(emailAddress))")
+	if strings.TrimSpace(pageToken) != "" {
+		call = call.PageToken(strings.TrimSpace(pageToken))
+	}
+	corpora = strings.TrimSpace(corpora)
+	driveID = strings.TrimSpace(driveID)
+	if corpora == "drive" && driveID != "" {
+		call = call.Corpora("drive").DriveId(driveID)
+	} else if corpora == "allDrives" {
+		call = call.Corpora("allDrives")
+	} else if corpora == "user" {
+		call = call.Corpora("user")
+	}
+	resp, err := call.Do()
+	if err != nil {
+		return nil, "", err
+	}
+	return resp.Files, resp.NextPageToken, nil
+}
+
+// ListSharedDrivesPage lists Shared Drives visible to the authenticated user.
+func ListSharedDrivesPage(srv *drive.Service, pageToken string) ([]*drive.Drive, string, error) {
+	call := srv.Drives.List().PageSize(100)
+	if strings.TrimSpace(pageToken) != "" {
+		call = call.PageToken(strings.TrimSpace(pageToken))
+	}
+	resp, err := call.Do()
+	if err != nil {
+		return nil, "", err
+	}
+	return resp.Drives, resp.NextPageToken, nil
+}
+
+// BuildDriveParentIDChain walks parents[0] up to root, returning IDs from root→immediate parent.
+// Excludes the My Drive root folder ID (the real ID behind "root") and any extraExclude IDs
+// (e.g. Shared Drive id, which is also that drive's root folder id).
+func BuildDriveParentIDChain(ctx context.Context, srv *drive.Service, parentID string, cache map[string][]string, extraExclude ...string) ([]string, error) {
+	_ = ctx
+	parentID = strings.TrimSpace(parentID)
+	if parentID == "" || parentID == "root" {
+		return nil, nil
+	}
+	rootID := ResolveMyDriveRootID(srv, cache)
+	exclude := map[string]struct{}{"root": {}, "": {}}
+	if rootID != "" {
+		exclude[rootID] = struct{}{}
+	}
+	for _, e := range extraExclude {
+		e = strings.TrimSpace(e)
+		if e != "" {
+			exclude[e] = struct{}{}
+		}
+	}
+	if _, skip := exclude[parentID]; skip {
+		return nil, nil
+	}
+	cacheKey := parentID
+	if len(extraExclude) > 0 {
+		cacheKey = parentID + "|" + strings.Join(extraExclude, ",")
+	}
+	if cache != nil {
+		if cached, ok := cache[cacheKey]; ok {
+			return append([]string{}, cached...), nil
+		}
+	}
+	var chain []string
+	seen := map[string]struct{}{}
+	current := parentID
+	for current != "" {
+		if _, skip := exclude[current]; skip {
+			break
+		}
+		if _, ok := seen[current]; ok {
+			break
+		}
+		seen[current] = struct{}{}
+		chain = append([]string{current}, chain...)
+		f, err := srv.Files.Get(current).Fields("id,parents").SupportsAllDrives(true).Do()
+		if err != nil {
+			return nil, err
+		}
+		current = DriveParentID(f.Parents)
+	}
+	if cache != nil {
+		cache[cacheKey] = append([]string{}, chain...)
+	}
+	return chain, nil
+}
+
+// ResolveMyDriveRootID returns the real folder id for "root" (cached in parentCache under a reserved key).
+func ResolveMyDriveRootID(srv *drive.Service, cache map[string][]string) string {
+	if cache != nil {
+		if v, ok := cache[driveMyDriveRootCacheKey]; ok && len(v) > 0 {
+			return v[0]
+		}
+	}
+	if srv == nil {
+		return ""
+	}
+	f, err := srv.Files.Get("root").Fields("id").SupportsAllDrives(true).Do()
+	if err != nil || f == nil || strings.TrimSpace(f.Id) == "" {
+		return ""
+	}
+	id := strings.TrimSpace(f.Id)
+	if cache != nil {
+		cache[driveMyDriveRootCacheKey] = []string{id}
+	}
+	return id
+}
+
+// DriveSharedDriveMarkerLeaf returns .shared_drive__{sanitizedName}.
+func DriveSharedDriveMarkerLeaf(name string) string {
+	return driveSharedDriveLeafPrefix + SanitizeDrivePathSegment(DriveBackupDisplayName(name, "application/vnd.google-apps.folder"))
+}
+
+// BuildDriveSharedDriveMarkerKey stores the Shared Drive display name under its section.
+func BuildDriveSharedDriveMarkerKey(email, driveID, name string) string {
+	email = strings.TrimSpace(email)
+	sec := DriveSharedDriveSection(driveID)
+	if email == "" || sec == "" {
+		return ""
+	}
+	return strings.Join([]string{email, sec, DriveSharedDriveMarkerLeaf(name)}, "/")
+}
+
+// DriveSharedDriveNameFromMarkerLeaf extracts the name from .shared_drive__Name.
+func DriveSharedDriveNameFromMarkerLeaf(leaf string) string {
+	return strings.TrimPrefix(path.Base(leaf), driveSharedDriveLeafPrefix)
+}
+
+// IsDriveSharedDriveMarkerKey reports Shared Drive name markers.
+func IsDriveSharedDriveMarkerKey(key string) bool {
+	return strings.HasPrefix(path.Base(strings.TrimSpace(key)), driveSharedDriveLeafPrefix)
 }
 
 // GetFileNames retrieves all file names and their IDs from Google Drive
@@ -1422,6 +1566,7 @@ type DriveFileMetadata struct {
 	Type         string            `json:"type"`
 	Name         string            `json:"name"`
 	MimeType     string            `json:"mime_type"`
+	FileID       string            `json:"file_id,omitempty"`
 	Parents      []string          `json:"parents"`
 	DriveID      string            `json:"drive_id"`
 	LocationType string            `json:"location_type"`
@@ -1541,9 +1686,29 @@ func (rc *RestoreContext) GetOrCreateFolder(ctx context.Context, folderPath, par
 	id, name = parseIDName(folderName)
 
 	if id != "" {
-		f, err := rc.Service.Files.Get(id).Fields("id, parents, trashed").Do()
+		getCall := rc.Service.Files.Get(id).Fields("id, parents, trashed")
+		if rc.DriveID != "" {
+			getCall = getCall.SupportsAllDrives(true)
+		}
+		f, err := getCall.Do()
 		if err == nil {
-			if !f.Trashed {
+			if f.Trashed {
+				fUpdate := &drive.File{Trashed: false}
+				fUpdate.ForceSendFields = []string{"Trashed"}
+				updateCall := rc.Service.Files.Update(f.Id, fUpdate).AddParents(parentID).RemoveParents("root")
+				if rc.DriveID != "" {
+					updateCall = updateCall.SupportsAllDrives(true)
+				}
+				if _, err := updateCall.Do(); err != nil {
+					logger.Warn(ctx, "restore google untrash folder by id failed",
+						logger.String("folder_id", f.Id),
+						logger.ErrorField(err))
+				} else {
+					rc.FolderCache[cacheKey] = f.Id
+					GlobalFolderCache.Store(cacheKey, f.Id)
+					return f.Id, nil
+				}
+			} else {
 				rc.FolderCache[cacheKey] = f.Id
 				GlobalFolderCache.Store(cacheKey, f.Id)
 				return f.Id, nil
@@ -1730,6 +1895,12 @@ func (rc *RestoreContext) restoreFileWithContent(ctx context.Context, metadata *
 
 	fileName := filepath.Base(metadata.Key)
 	id, name := parseIDName(fileName)
+	if strings.TrimSpace(metadata.FileID) != "" {
+		id = strings.TrimSpace(metadata.FileID)
+	}
+	if strings.TrimSpace(metadata.Name) != "" {
+		name = strings.TrimSpace(metadata.Name)
+	}
 
 	if id != "" {
 		getCall := rc.Service.Files.Get(id).Fields("id, name, trashed, owners(emailAddress)")
@@ -1992,6 +2163,363 @@ func IsDriveIDBasedMetaKey(key string) bool {
 func IsDriveIDBasedDataKey(key string) bool {
 	key = strings.TrimSpace(key)
 	return strings.Contains(key, "/data/") && !strings.HasSuffix(key, ".json")
+}
+
+// Drive section tokens (Vault tabs). Sorted when joined with ^.
+const (
+	DriveSectionMyDrive           = "MY_DRIVE"
+	DriveSectionSharedWithMe      = "SHARED_WITH_ME"
+	DriveSectionBin               = "BIN"
+	DriveSectionStarred           = "STARRED"
+	DriveSectionSharedDrivePrefix = "SHARED_DRIVE~"
+)
+
+const (
+	driveSectionsKeySeparator  = "^"
+	driveFolderLeafPrefix      = ".folder__"
+	driveSharedDriveLeafPrefix = ".shared_drive__"
+	driveShortcutToMarker      = "__to__"
+	driveFileIDNameSeparator   = "$"
+	driveMyDriveRootCacheKey   = "__mydrive_root__"
+
+	// Custom metadata keys on StorX objects (no separate meta/ JSON for new writes).
+	DriveMetaGoogleFileID      = "google-file-id"
+	DriveMetaGoogleMimeType    = "google-mime-type"
+	DriveMetaBackupMimeType    = "backup-mime-type"
+	DriveMetaVersion           = "version"
+	DriveMetaMD5Checksum       = "md5-checksum"
+	DriveMetaOriginalName      = "original-name"
+	DriveMetaShortcutTargetID  = "shortcut-target-id"
+	DriveMetaPhysicalObjectKey = "physical-object-key"
+	DriveMetaIsFolder          = "is-folder"
+	DriveMetaIsAlias           = "is-alias"
+	DriveMetaStarred           = "starred"
+)
+
+// DriveObjectKey is the parsed form of a tree-layout Drive vault key.
+type DriveObjectKey struct {
+	Email          string
+	Sections       []string
+	ParentIDs      []string
+	FileID         string
+	Name           string
+	IsFolder       bool
+	ShortcutTarget string // set when leaf is {id}__to__{target}${name}
+	RawKey         string
+}
+
+// DriveSharedDriveSection returns SHARED_DRIVE~{driveID}.
+func DriveSharedDriveSection(driveID string) string {
+	driveID = strings.TrimSpace(driveID)
+	if driveID == "" {
+		return ""
+	}
+	return DriveSectionSharedDrivePrefix + driveID
+}
+
+// CanonicalDriveSections sorts and dedupes section tokens.
+// BIN alone wins when present (exclusive trash view).
+func CanonicalDriveSections(sections []string) []string {
+	seen := make(map[string]struct{}, len(sections))
+	out := make([]string, 0, len(sections))
+	hasBin := false
+	for _, s := range sections {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if s == DriveSectionBin {
+			hasBin = true
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	if hasBin {
+		return []string{DriveSectionBin}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// DriveSectionsSegment joins canonical sections for the key path.
+func DriveSectionsSegment(sections []string) string {
+	c := CanonicalDriveSections(sections)
+	if len(c) == 0 {
+		return DriveSectionMyDrive
+	}
+	return strings.Join(c, driveSectionsKeySeparator)
+}
+
+// ObjectKeyHasDriveSection reports whether the key's sections segment contains token.
+func ObjectKeyHasDriveSection(key, section string) bool {
+	p, ok := ParseDriveObjectKey(key)
+	if !ok {
+		return false
+	}
+	section = strings.TrimSpace(section)
+	for _, s := range p.Sections {
+		if s == section {
+			return true
+		}
+	}
+	return false
+}
+
+// DriveFolderPlaceholderLeaf returns .folder__{sanitizedName}.
+func DriveFolderPlaceholderLeaf(folderID, name string) string {
+	_ = folderID
+	return driveFolderLeafPrefix + SanitizeDrivePathSegment(DriveBackupDisplayName(name, "application/vnd.google-apps.folder"))
+}
+
+// escapeDriveKeyPart doubles $ so the part can contain literal dollars.
+func escapeDriveKeyPart(s string) string {
+	return strings.ReplaceAll(s, "$", "$$")
+}
+
+// unescapeDriveKeyPart reverses $$ → $ for a single key part (no separator).
+func unescapeDriveKeyPart(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '$' && i+1 < len(s) && s[i+1] == '$' {
+			b.WriteByte('$')
+			i++
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// splitDriveLeaf splits {escapedFileID}${escapedName} with $$ = literal $.
+// Do not use strings.Split — scan so escaping stays reversible.
+func splitDriveLeaf(s string) (fileID, name string, ok bool) {
+	var left, right strings.Builder
+	cur := &left
+	sawSep := false
+	for i := 0; i < len(s); i++ {
+		if s[i] != '$' {
+			cur.WriteByte(s[i])
+			continue
+		}
+		// $$ = escaped literal $
+		if i+1 < len(s) && s[i+1] == '$' {
+			cur.WriteByte('$')
+			i++
+			continue
+		}
+		// Single $ = separator (exactly once)
+		if !sawSep {
+			sawSep = true
+			cur = &right
+			continue
+		}
+		return "", "", false
+	}
+	if !sawSep || left.Len() == 0 {
+		return "", "", false
+	}
+	return left.String(), right.String(), true
+}
+
+// DriveFileLeaf returns {escapedFileID}${escapedName} or shortcut {id}__to__{target}${name}.
+// $ is escaped as $$ so IDs/names may contain $ and _ safely.
+// Metadata google-file-id / original-name remain authoritative for restore.
+func DriveFileLeaf(fileID, name, mimeType, shortcutTargetID string) string {
+	fileID = SanitizeDrivePathSegment(strings.TrimSpace(fileID))
+	display := DriveBackupDisplayName(name, mimeType)
+	escID := escapeDriveKeyPart(fileID)
+	escName := escapeDriveKeyPart(display)
+	target := strings.TrimSpace(shortcutTargetID)
+	if target != "" {
+		escTarget := escapeDriveKeyPart(SanitizeDrivePathSegment(target))
+		return escID + driveShortcutToMarker + escTarget + driveFileIDNameSeparator + escName
+	}
+	return escID + driveFileIDNameSeparator + escName
+}
+
+// BuildDriveObjectKey builds:
+//
+//	{email}/{sections}/{parentId}/.../{escapedFileID}${escapedName}
+//	{email}/{sections}/{parentId}/.../{folderId}/.folder__{name}
+func BuildDriveObjectKey(email string, sections, parentIDs []string, fileID, name, mimeType string, isFolder bool, shortcutTargetID string) string {
+	email = strings.TrimSpace(email)
+	seg := DriveSectionsSegment(sections)
+	parts := []string{email, seg}
+	for _, id := range parentIDs {
+		id = strings.TrimSpace(id)
+		if id == "" || id == "root" {
+			continue
+		}
+		parts = append(parts, id)
+	}
+	fileID = strings.TrimSpace(fileID)
+	if isFolder {
+		parts = append(parts, fileID)
+		parts = append(parts, DriveFolderPlaceholderLeaf(fileID, name))
+	} else {
+		parts = append(parts, DriveFileLeaf(fileID, name, mimeType, shortcutTargetID))
+	}
+	return strings.Join(parts, "/")
+}
+
+// ParseDriveObjectKey parses tree-layout Drive keys (not legacy meta/data or path-name keys).
+func ParseDriveObjectKey(key string) (DriveObjectKey, bool) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return DriveObjectKey{}, false
+	}
+	// Exclude legacy cron layouts.
+	if IsDriveIDBasedMetaKey(key) || IsDriveIDBasedDataKey(key) {
+		return DriveObjectKey{}, false
+	}
+	if IsDriveSharedDriveMarkerKey(key) {
+		return DriveObjectKey{}, false
+	}
+	parts := strings.Split(key, "/")
+	if len(parts) < 3 {
+		return DriveObjectKey{}, false
+	}
+	email := parts[0]
+	if email == "" || !strings.Contains(email, "@") {
+		return DriveObjectKey{}, false
+	}
+	seg := parts[1]
+	var sections []string
+	if seg != "" {
+		sections = strings.Split(seg, driveSectionsKeySeparator)
+	}
+	sections = CanonicalDriveSections(sections)
+	leaf := parts[len(parts)-1]
+	mid := parts[2 : len(parts)-1]
+
+	out := DriveObjectKey{
+		Email:    email,
+		Sections: sections,
+		RawKey:   key,
+	}
+
+	if strings.HasPrefix(leaf, driveFolderLeafPrefix) {
+		if len(mid) == 0 {
+			return DriveObjectKey{}, false
+		}
+		out.IsFolder = true
+		out.FileID = mid[len(mid)-1]
+		out.ParentIDs = append([]string{}, mid[:len(mid)-1]...)
+		out.Name = strings.TrimPrefix(leaf, driveFolderLeafPrefix)
+		return out, out.FileID != ""
+	}
+
+	// File leaf: {escapedFileID}${escapedName} or {id}__to__{target}${name}
+	if i := strings.Index(leaf, driveShortcutToMarker); i > 0 {
+		out.FileID = unescapeDriveKeyPart(leaf[:i])
+		rest := leaf[i+len(driveShortcutToMarker):]
+		target, display, ok := splitDriveLeaf(rest)
+		if !ok {
+			return DriveObjectKey{}, false
+		}
+		out.ShortcutTarget = target
+		out.Name = display
+		out.ParentIDs = append([]string{}, mid...)
+		return out, out.FileID != "" && out.ShortcutTarget != ""
+	}
+
+	fileID, display, ok := splitDriveLeaf(leaf)
+	if !ok {
+		return DriveObjectKey{}, false
+	}
+	out.FileID = fileID
+	out.Name = display
+	out.ParentIDs = append([]string{}, mid...)
+	return out, true
+}
+
+// IsDriveTreeObjectKey reports keys handled by the new tree layout.
+func IsDriveTreeObjectKey(key string) bool {
+	_, ok := ParseDriveObjectKey(key)
+	return ok
+}
+
+// IsDriveFolderPlaceholderKey reports .folder__ leaves.
+func IsDriveFolderPlaceholderKey(key string) bool {
+	p, ok := ParseDriveObjectKey(key)
+	return ok && p.IsFolder
+}
+
+// DriveParentID returns parents[0] or empty (single-parent model).
+func DriveParentID(parents []string) string {
+	if len(parents) == 0 {
+		return ""
+	}
+	p := strings.TrimSpace(parents[0])
+	if p == "root" {
+		return ""
+	}
+	return p
+}
+
+// FindSyncedDriveKeyByFileID scans synced keys for an exact fileId match (never substring).
+func FindSyncedDriveKeyByFileID(synced map[string]bool, fileID string) string {
+	fileID = strings.TrimSpace(fileID)
+	if fileID == "" || synced == nil {
+		return ""
+	}
+	for key := range synced {
+		p, ok := ParseDriveObjectKey(key)
+		if !ok || p.IsFolder {
+			continue
+		}
+		if p.FileID == fileID {
+			return key
+		}
+	}
+	return ""
+}
+
+// FindSyncedDriveFolderKeyByID finds a folder placeholder for folderID.
+func FindSyncedDriveFolderKeyByID(synced map[string]bool, folderID string) string {
+	folderID = strings.TrimSpace(folderID)
+	if folderID == "" || synced == nil {
+		return ""
+	}
+	for key := range synced {
+		p, ok := ParseDriveObjectKey(key)
+		if !ok || !p.IsFolder {
+			continue
+		}
+		if p.FileID == folderID {
+			return key
+		}
+	}
+	return ""
+}
+
+// DriveObjectKeyDepth is the number of path segments after email/sections (for folder restore sort).
+func DriveObjectKeyDepth(key string) int {
+	p, ok := ParseDriveObjectKey(key)
+	if !ok {
+		return 0
+	}
+	n := len(p.ParentIDs)
+	if p.IsFolder {
+		n++
+	}
+	return n
+}
+
+// FormatDriveTreeKeyForLog is a short debug form.
+func FormatDriveTreeKeyForLog(p DriveObjectKey) string {
+	return fmt.Sprintf("%s sections=%v parents=%v file=%s folder=%v",
+		p.Email, p.Sections, p.ParentIDs, p.FileID, p.IsFolder)
+}
+
+// DriveFolderNameFromPlaceholderLeaf extracts name from .folder__Name.
+func DriveFolderNameFromPlaceholderLeaf(leaf string) string {
+	return strings.TrimPrefix(path.Base(leaf), driveFolderLeafPrefix)
 }
 
 // CronMetaToDriveFileMetadata maps cron meta JSON to restore metadata.

@@ -90,8 +90,12 @@ func (d *driveProcessor) ShouldRestoreKey(key string) bool {
 	if ShouldSkipObjectKey(key) {
 		return false
 	}
-	// Cron split layout: restore from meta only (data pulled via data_object_key).
+	// Legacy cron data blobs are pulled via meta / physical-object-key — never restore alone.
 	if google.IsDriveIDBasedDataKey(key) {
+		return false
+	}
+	// Shared-drive name markers are inventory only (no file bytes / no Google create).
+	if google.IsDriveSharedDriveMarkerKey(key) {
 		return false
 	}
 	return true
@@ -103,20 +107,23 @@ func (d *driveProcessor) Setup(ctx context.Context, deps *RestoreDeps) error {
 			return err
 		}
 		deps.DriveService = srv
-		return nil
+	} else {
+		if err := requireGoogleToken(deps); err != nil {
+			return err
+		}
+		srv, err := google.GetDriveServiceUsingToken(deps.GoogleToken)
+		if err != nil {
+			return err
+		}
+		deps.DriveService = srv
 	}
-	if err := requireGoogleToken(deps); err != nil {
-		return err
-	}
-	srv, err := google.GetDriveServiceUsingToken(deps.GoogleToken)
-	if err != nil {
-		return err
-	}
-	deps.DriveService = srv
+	// Warm folder-name cache once per job (RestoreKey used to reload the full SyncedObject list per file).
+	_ = loadDriveFolderNameMap(ctx, deps)
 	return nil
 }
 func (d *driveProcessor) RestoreKey(ctx context.Context, deps *RestoreDeps, objectKey string) error {
-	return RestoreDriveKey(ctx, deps.AccessGrant, deps.DriveService, deps.GoogleWriteEmail(), objectKey)
+	folderNames := loadDriveFolderNameMap(ctx, deps)
+	return RestoreDriveKeyWithFolderMap(ctx, deps.AccessGrant, deps.DriveService, deps.GoogleWriteEmail(), objectKey, folderNames)
 }
 func (d *driveProcessor) Cleanup(ctx context.Context, deps *RestoreDeps) error { return nil }
 

@@ -125,8 +125,13 @@ type TaskMemory struct {
 	DatabaseSyncComplete bool `json:"database_sync_complete"`
 
 	// Drive incremental sync state (ID-based autosync architecture)
-	DrivePageToken    *string `json:"drive_page_token,omitempty"`
+	DrivePageToken    *string `json:"drive_page_token,omitempty"` // legacy single token; migrated into DriveUserPageToken
 	DriveBaselineDone bool    `json:"drive_baseline_done,omitempty"`
+
+	// DriveUserPageToken is the USER change-log token (My Drive / shared-with-me).
+	DriveUserPageToken *string `json:"drive_user_page_token,omitempty"`
+	// DriveSharedDrives holds per-Shared-Drive baseline + change tokens.
+	DriveSharedDrives map[string]DriveSharedDriveState `json:"drive_shared_drives,omitempty"`
 
 	// Photos incremental sync state (ID-based autosync architecture)
 	PhotosBaselineDone bool `json:"photos_baseline_done,omitempty"`
@@ -142,6 +147,12 @@ type TaskMemory struct {
 type CalendarCalendarState struct {
 	BaselineDone bool   `json:"baseline_done,omitempty"`
 	SyncToken    string `json:"sync_token,omitempty"`
+}
+
+// DriveSharedDriveState holds baseline + change token for one Shared Drive.
+type DriveSharedDriveState struct {
+	BaselineDone bool   `json:"baseline_done,omitempty"`
+	PageToken    string `json:"page_token,omitempty"`
 }
 
 // Scan implements the sql.Scanner interface

@@ -3,6 +3,7 @@ package restore
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -112,7 +113,23 @@ func awaitStorxStream(errCh <-chan error, restoreErr error) error {
 	if restoreErr != nil {
 		return restoreErr
 	}
+	// Google restore often returns nil without reading (file exists / untrash).
+	// Closing the pipe then yields a closed-pipe write error from StorX — not a failure.
+	if isBenignClosedPipeErr(dlErr) {
+		return nil
+	}
 	return dlErr
+}
+
+func isBenignClosedPipeErr(err error) bool {
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, io.ErrClosedPipe) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "closed pipe")
 }
 
 // streamToFileRestoreAll writes a StorX object to disk via io.Copy (restore-all photos; avoids RAM).
@@ -139,12 +156,20 @@ func restoreDriveDataFromStorxStream(
 	userEmail, dataKey string,
 	metadataJSON []byte,
 ) error {
-	content, errCh := streamFromStorxRestoreAll(ctx, accessGrant, satellite.ReserveBucket_Drive, dataKey)
-	if pr, ok := content.(*io.PipeReader); ok {
-		defer pr.Close()
-	}
-	restoreErr := RetryGoogle(ctx, func() error {
-		return google.RestoreFromBackupReader(ctx, srv, userEmail, metadataJSON, content)
+	// Each RetryGoogle attempt needs a fresh pipe: restore may return without reading
+	// (file already exists) or fail mid-stream after consuming bytes.
+	return RetryGoogle(ctx, func() error {
+		content, errCh := streamFromStorxRestoreAll(ctx, accessGrant, satellite.ReserveBucket_Drive, dataKey)
+		pr, isPipe := content.(*io.PipeReader)
+		if isPipe {
+			defer pr.Close()
+		}
+		restoreErr := google.RestoreFromBackupReader(ctx, srv, userEmail, metadataJSON, content)
+		// Unblock the download goroutine BEFORE waiting on errCh. RestoreFile often
+		// returns nil without reading when the owned file already exists in Drive.
+		if isPipe {
+			_ = pr.Close()
+		}
+		return awaitStorxStream(errCh, restoreErr)
 	})
-	return awaitStorxStream(errCh, restoreErr)
 }

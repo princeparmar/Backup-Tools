@@ -151,23 +151,76 @@ func UploadObject(ctx context.Context, accessGrant, bucketName, objectKey string
 
 // UploadObjectFromReader streams content to satellite storage without loading the full object into memory.
 func UploadObjectFromReader(ctx context.Context, accessGrant, bucketName, objectKey string, r io.Reader) error {
-	upload, err := GetUploader(ctx, accessGrant, bucketName, objectKey)
+	return UploadObjectFromReaderWithMetadata(ctx, accessGrant, bucketName, objectKey, r, nil)
+}
+
+// UploadObjectWithMetadata uploads bytes and sets StorX custom metadata before commit.
+func UploadObjectWithMetadata(ctx context.Context, accessGrant, bucketName, objectKey string, data []byte, meta map[string]string) error {
+	return UploadObjectFromReaderWithMetadata(ctx, accessGrant, bucketName, objectKey, bytes.NewReader(data), meta)
+}
+
+// UploadObjectFromReaderWithMetadata streams content and optionally sets custom metadata before commit.
+func UploadObjectFromReaderWithMetadata(ctx context.Context, accessGrant, bucketName, objectKey string, r io.Reader, meta map[string]string) error {
+	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
-		return err
+		return fmt.Errorf("parse access grant: %w", err)
+	}
+	project, err := uplink.OpenProject(ctx, access)
+	if err != nil {
+		return fmt.Errorf("open project: %w", err)
+	}
+	defer project.Close()
+
+	if _, err = project.EnsureBucket(ctx, bucketName); err != nil {
+		if _, err = project.CreateBucket(ctx, bucketName); err != nil {
+			return fmt.Errorf("create bucket: %w", err)
+		}
 	}
 
-	_, err = io.Copy(upload, r)
+	upload, err := project.UploadObject(ctx, bucketName, objectKey, nil)
 	if err != nil {
+		return fmt.Errorf("initiate upload: %w", err)
+	}
+
+	if _, err = io.Copy(upload, r); err != nil {
 		_ = upload.Abort()
 		return fmt.Errorf("upload data: %w", err)
 	}
 
-	err = upload.Commit()
-	if err != nil {
-		return fmt.Errorf("commit object: %w", err)
+	if len(meta) > 0 {
+		if err = upload.SetCustomMetadata(ctx, uplink.CustomMetadata(meta)); err != nil {
+			_ = upload.Abort()
+			return fmt.Errorf("set custom metadata: %w", err)
+		}
 	}
 
+	if err = upload.Commit(); err != nil {
+		return fmt.Errorf("commit object: %w", err)
+	}
 	return nil
+}
+
+// StatObject returns object info including custom metadata (Custom map).
+func StatObject(ctx context.Context, accessGrant, bucketName, objectKey string) (*uplink.Object, error) {
+	access, err := uplink.ParseAccess(accessGrant)
+	if err != nil {
+		return nil, fmt.Errorf("parse access grant: %w", err)
+	}
+	project, err := uplink.OpenProject(ctx, access)
+	if err != nil {
+		return nil, fmt.Errorf("open project: %w", err)
+	}
+	defer project.Close()
+
+	if _, err = project.EnsureBucket(ctx, bucketName); err != nil {
+		return nil, fmt.Errorf("ensure bucket: %w", err)
+	}
+
+	obj, err := project.StatObject(ctx, bucketName, objectKey)
+	if err != nil {
+		return nil, fmt.Errorf("stat object: %w", err)
+	}
+	return obj, nil
 }
 
 // DownloadObjectTo streams an object from satellite storage into w.

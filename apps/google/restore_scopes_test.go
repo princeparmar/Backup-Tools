@@ -3,6 +3,7 @@ package google
 import (
 	"testing"
 
+	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/gmail/v1"
 )
 
@@ -35,17 +36,30 @@ func TestTokenInfoMissingScopes(t *testing.T) {
 		wantHas  string
 	}{
 		{
-			name:     "gmail full mail scope present",
-			granted:  gmail.MailGoogleComScope + " openid",
+			name:     "gmail insert present",
+			granted:  gmail.GmailInsertScope + " openid",
 			required: RestoreOAuthScopesForService("gmail"),
 			wantLen:  0,
 		},
 		{
-			name:     "readonly only missing mail",
+			name:     "readonly only missing insert",
 			granted:  gmail.GmailReadonlyScope,
 			required: RestoreOAuthScopesForService("gmail"),
 			wantLen:  1,
-			wantHas:  gmail.MailGoogleComScope,
+			wantHas:  gmail.GmailInsertScope,
+		},
+		{
+			name:     "drive.file present",
+			granted:  drive.DriveFileScope,
+			required: RestoreOAuthScopesForService("drive"),
+			wantLen:  0,
+		},
+		{
+			name:     "drive.readonly missing drive.file",
+			granted:  drive.DriveReadonlyScope,
+			required: RestoreOAuthScopesForService("drive"),
+			wantLen:  1,
+			wantHas:  drive.DriveFileScope,
 		},
 		{
 			name:     "empty granted",
@@ -77,10 +91,10 @@ func TestTokenInfoMissingScopes(t *testing.T) {
 	}
 }
 
-func TestRestoreOAuthScopesForService_gmailOnlyMailScope(t *testing.T) {
+func TestRestoreOAuthScopesForService_gmailInsert(t *testing.T) {
 	scopes := RestoreOAuthScopesForService("gmail")
-	if len(scopes) != 1 || scopes[0] != gmail.MailGoogleComScope {
-		t.Fatalf("gmail restore scopes = %v, want only %s", scopes, gmail.MailGoogleComScope)
+	if len(scopes) != 1 || scopes[0] != gmail.GmailInsertScope {
+		t.Fatalf("gmail restore scopes = %v, want only %s", scopes, gmail.GmailInsertScope)
 	}
 }
 
