@@ -448,6 +448,10 @@ func tryFinalizeJob(ctx context.Context, store *db.PostgresDb, job *repo.Restore
 		logger.Int("failed", int(job.FailedCount)),
 		logger.Int("total", int(job.TotalCount)))
 
+	if job.FailedCount > 0 {
+		logRestoreFailureSummary(ctx, store, job)
+	}
+
 	_ = store.RestoreJobRepo.UpdateJob(job.ID, map[string]interface{}{
 		"status":         status,
 		"message":        msg,
@@ -552,21 +556,42 @@ func writeDLQ(ctx context.Context, store *db.PostgresDb, job *repo.RestoreJobLis
 	if len(keys) == 0 {
 		return
 	}
-	logger.Warn(ctx, "Restore dead-letter items recorded",
-		logger.Int("job_id", int(job.ID)),
-		logger.Int("count", len(keys)))
-
 	for _, fk := range keys {
 		reason := fk.Reason
 		if len(reason) > 500 {
 			reason = reason[:500]
 		}
-		_ = store.RestoreJobRepo.CreateDeadItem(&repo.RestoreDeadItemDB{
+		if err := store.RestoreJobRepo.CreateDeadItem(&repo.RestoreDeadItemDB{
 			RestoreJobID: job.ID,
 			ObjectKey:    fk.ObjectKey,
+			Service:      job.Method,
 			Reason:       reason,
 			ErrorCode:    fk.ErrorCode,
-		})
+		}); err != nil {
+			logger.Warn(ctx, "Restore dead-letter insert failed",
+				logger.Int("job_id", int(job.ID)),
+				logger.String("object_key", fk.ObjectKey),
+				logger.ErrorField(err))
+		}
+	}
+}
+
+func logRestoreFailureSummary(ctx context.Context, store *db.PostgresDb, job *repo.RestoreJobListingDB) {
+	items, err := store.RestoreJobRepo.ListDeadItemsByJobID(job.ID, int(job.FailedCount)+50)
+	if err != nil {
+		logger.Warn(ctx, "Restore failure summary unavailable",
+			logger.Int("job_id", int(job.ID)),
+			logger.ErrorField(err))
+		return
+	}
+	for i, item := range items {
+		logger.Warn(ctx, "Restore failed which/why",
+			logger.Int("job_id", int(job.ID)),
+			logger.Int("failed_index", i+1),
+			logger.Int("failed_total", len(items)),
+			logger.String("file", restoreProgressLabel(item.ObjectKey)),
+			logger.String("object_key", item.ObjectKey),
+			logger.String("why", item.Reason))
 	}
 }
 

@@ -155,6 +155,8 @@ func flatContactFromPerson(person *people.Person) FlatContact {
 		name := person.Names[0]
 		if strings.TrimSpace(name.DisplayName) != "" {
 			out.Name = strings.TrimSpace(name.DisplayName)
+		} else if strings.TrimSpace(name.UnstructuredName) != "" {
+			out.Name = strings.TrimSpace(name.UnstructuredName)
 		} else {
 			out.Name = strings.TrimSpace(strings.TrimSpace(name.GivenName) + " " + strings.TrimSpace(name.FamilyName))
 		}
@@ -305,8 +307,9 @@ func RestoreContactFromBackup(ctx context.Context, service *people.Service, data
 
 func personFromContactsBackup(backup ContactsBackupObject) *people.Person {
 	person := &people.Person{}
+	// displayName is OUTPUT ONLY on createContact — use unstructuredName.
 	if name := strings.TrimSpace(backup.Name); name != "" {
-		person.Names = []*people.Name{{DisplayName: name}}
+		person.Names = []*people.Name{{UnstructuredName: name}}
 	}
 	for _, e := range backup.Emails {
 		if v := strings.TrimSpace(e); v != "" {

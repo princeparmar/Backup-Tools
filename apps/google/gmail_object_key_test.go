@@ -1,6 +1,7 @@
 package google
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -113,6 +114,33 @@ func TestFindExistingGmailKeyByMessageID(t *testing.T) {
 	}
 	if FindExistingGmailKeyByMessageID(m, "user@gmail.com", "missing") != "" {
 		t.Fatal("expected empty")
+	}
+}
+
+func TestGmailObjectKeyStripsCRLFInSubject(t *testing.T) {
+	ts, err := time.Parse(time.RFC3339, "2026-05-13T00:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := &gmail.Message{
+		Id:           "19e1ea6fd11a15db",
+		ThreadId:     "19e1ea6fd11a15db",
+		InternalDate: ts.UnixMilli(),
+		LabelIds:     []string{"CATEGORY_UPDATES", "INBOX"},
+		Payload: &gmail.MessagePart{
+			Headers: []*gmail.MessagePartHeader{
+				{Name: "From", Value: "no-reply@youtube.com"},
+				{Name: "Subject", Value: "Quarterly reminder about YouTube’s Terms\r\n"},
+			},
+		},
+	}
+	got := GmailObjectKey("billing@salestalker.com", msg)
+	if strings.ContainsAny(got, "\r\n") {
+		t.Fatalf("object key contains CR/LF: %q", got)
+	}
+	wantSuffix := " - 19e1ea6fd11a15db - 19e1ea6fd11a15db.gmail"
+	if !strings.HasSuffix(got, wantSuffix) {
+		t.Fatalf("got %q, want suffix %q", got, wantSuffix)
 	}
 }
 

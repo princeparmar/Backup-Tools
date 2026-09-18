@@ -122,6 +122,7 @@ type RestoreDeadItemDB struct {
 
 	RestoreJobID uint   `json:"restore_job_id" gorm:"index"`
 	ObjectKey    string `json:"object_key" gorm:"not null;type:varchar(1000)"`
+	Service      string `json:"service" gorm:"not null;type:text"`
 	ErrorCode    string `json:"error_code" gorm:"column:error_code;type:varchar(32)"`
 	Reason       string `json:"reason" gorm:"type:varchar(500)"`
 }

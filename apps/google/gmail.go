@@ -903,46 +903,103 @@ func (client *GmailClient) GetUserMessagesUsingWorkers(nextPageToken string, wor
 }
 
 func createRawMessage(gmailMsg *gmail.Message) (string, error) {
-	var rawMessage string
+	if gmailMsg == nil || gmailMsg.Payload == nil {
+		return "", fmt.Errorf("message payload is nil")
+	}
+	normalizeRFC822RootHeaders(gmailMsg.Payload)
 
-	err := createMessagePart(&rawMessage, gmailMsg.Payload)
-	if err != nil {
+	var rawMessage string
+	if err := createMessagePart(&rawMessage, gmailMsg.Payload); err != nil {
 		return "", err
 	}
 
-	// Base64 encode the entire message
-
 	raw := base64.URLEncoding.EncodeToString([]byte(rawMessage))
 	return raw, nil
+}
+
+// normalizeRFC822RootHeaders keeps a single From header first. YouTube-style
+// Subject values with embedded CR/LF can otherwise end the header block early.
+func normalizeRFC822RootHeaders(part *gmail.MessagePart) {
+	if part == nil {
+		return
+	}
+	var from *gmail.MessagePartHeader
+	out := make([]*gmail.MessagePartHeader, 0, len(part.Headers)+1)
+	for _, h := range part.Headers {
+		if h == nil {
+			continue
+		}
+		value := sanitizeRFC822HeaderValue(h.Value)
+		if strings.EqualFold(strings.TrimSpace(h.Name), "From") {
+			if from == nil && value != "" {
+				from = &gmail.MessagePartHeader{Name: "From", Value: value}
+			}
+			continue
+		}
+		out = append(out, &gmail.MessagePartHeader{Name: h.Name, Value: value})
+	}
+	if from == nil {
+		from = &gmail.MessagePartHeader{Name: "From", Value: "restored-message@localhost"}
+	}
+	part.Headers = append([]*gmail.MessagePartHeader{from}, out...)
+}
+
+func sanitizeRFC822HeaderValue(v string) string {
+	v = strings.ReplaceAll(v, "\r", " ")
+	v = strings.ReplaceAll(v, "\n", " ")
+	return strings.TrimSpace(strings.Join(strings.Fields(v), " "))
+}
+
+func decodeGmailBodyData(data string) ([]byte, error) {
+	data = strings.TrimSpace(data)
+	if data == "" {
+		return nil, nil
+	}
+	// Backup may store URL-safe or standard base64 (attachment path rewrites -/_ to +/).
+	for _, dec := range []func(string) ([]byte, error){
+		base64.URLEncoding.DecodeString,
+		base64.RawURLEncoding.DecodeString,
+		base64.StdEncoding.DecodeString,
+		base64.RawStdEncoding.DecodeString,
+	} {
+		if b, err := dec(data); err == nil {
+			return b, nil
+		}
+	}
+	return base64.URLEncoding.DecodeString(data)
 }
 
 func createMessagePart(rawMessage *string, part *gmail.MessagePart) error {
 	var boundary, contentTransferEncoding string
 
 	for _, header := range part.Headers {
-		*rawMessage += fmt.Sprintf("%s: %s\n", header.Name, header.Value)
+		if header == nil {
+			continue
+		}
+		value := sanitizeRFC822HeaderValue(header.Value)
+		*rawMessage += fmt.Sprintf("%s: %s\r\n", header.Name, value)
 
 		switch header.Name {
 		case "Content-Type":
-			if strings.Contains(header.Value, "boundary=") {
-				boundary = "--" + strings.Trim(strings.TrimSpace(strings.Split(header.Value, "boundary=")[1]), "\"")
+			if strings.Contains(value, "boundary=") {
+				boundary = "--" + strings.Trim(strings.TrimSpace(strings.Split(value, "boundary=")[1]), "\"")
 			}
 		case "Content-Transfer-Encoding":
-			contentTransferEncoding = header.Value
+			contentTransferEncoding = value
 		}
 	}
 
-	*rawMessage += "\n"
+	*rawMessage += "\r\n"
 
 	if part.Body != nil && part.Body.Data != "" {
-		data, err := base64.URLEncoding.DecodeString(part.Body.Data)
+		data, err := decodeGmailBodyData(part.Body.Data)
 		if err != nil {
-			return err
+			return fmt.Errorf("decode message body: %w", err)
 		}
 
-		switch contentTransferEncoding {
+		switch strings.ToLower(strings.TrimSpace(contentTransferEncoding)) {
 		case "base64":
-			*rawMessage += part.Body.Data
+			*rawMessage += base64.StdEncoding.EncodeToString(data)
 		case "quoted-printable":
 			var buf bytes.Buffer
 			writer := quotedprintable.NewWriter(&buf)
@@ -958,17 +1015,17 @@ func createMessagePart(rawMessage *string, part *gmail.MessagePart) error {
 		}
 	}
 
-	*rawMessage += "\n"
+	*rawMessage += "\r\n"
 
 	for _, subpart := range part.Parts {
-		*rawMessage += boundary + "\n"
+		*rawMessage += boundary + "\r\n"
 		if err := createMessagePart(rawMessage, subpart); err != nil {
 			return err
 		}
 	}
 
 	if boundary != "" {
-		*rawMessage += boundary + "--\n"
+		*rawMessage += boundary + "--\r\n"
 	}
 
 	return nil

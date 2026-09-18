@@ -124,7 +124,15 @@ func GenerateTitleFromGmailMessage(msg *gmail.Message) string {
 
 	// from - subject - threadId - messageId  (threadId enables Gmail-like conversation grouping in the vault UI)
 	title := fmt.Sprintf("%s - %s - %s - %s.gmail", from, subject, threadID, msgID)
-	return strings.ReplaceAll(title, "/", "_")
+	return sanitizeGmailObjectKeyTitle(title)
+}
+
+// sanitizeGmailObjectKeyTitle makes the leaf filename safe for Storj object keys.
+func sanitizeGmailObjectKeyTitle(title string) string {
+	title = strings.ReplaceAll(title, "/", "_")
+	title = strings.ReplaceAll(title, "\r", " ")
+	title = strings.ReplaceAll(title, "\n", " ")
+	return strings.Join(strings.Fields(title), " ")
 }
 
 type OutlookMinimalMessage struct {
