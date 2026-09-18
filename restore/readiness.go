@@ -362,15 +362,23 @@ func evaluateDWDReadiness(ctx context.Context, out *ReadinessResult, service, su
 		out.Message = err.Error()
 		return out, nil
 	}
+	// Only expose scopes for the service being prepared (e.g. gmail-only restore → gmail.insert).
+	scope := google.RestoreDWDScopeForService(service)
+	if scope != "" {
+		setup.Scopes = map[string]string{service: scope}
+		out.RequiredDWDScopes = []string{scope}
+	}
 	out.DelegationSetup = setup
-	out.RequiredDWDScopes = google.AllRestoreDWDScopeURLs()
 
 	if err := google.ProbeDWDRestore(ctx, service, subjectEmail); err != nil {
 		out.Ready = false
 		out.Reason = ReadinessReasonDWDNotConfigured
-		out.Message = restoreReadinessDWDNotConfigured
+		out.Message = fmt.Sprintf(restoreTplReadinessDWDNotConfigured, service)
 		out.MissingPermissions = dwdMissingList(service, err)
-		out.ReconnectHint = "Workspace admin must add all restore scopes for gmail, drive, calendar, contacts, and photos (OAuth reconnect does not apply to delegated mailboxes)"
+		out.ReconnectHint = fmt.Sprintf(
+			"Workspace admin must add the %s restore scope for client_id in delegation_setup (OAuth reconnect does not apply to delegated mailboxes)",
+			service,
+		)
 		return out, nil
 	}
 	out.Ready = true
@@ -379,26 +387,17 @@ func evaluateDWDReadiness(ctx context.Context, out *ReadinessResult, service, su
 
 func dwdMissingList(service string, probeErr error) []MissingPermission {
 	scope := google.RestoreDWDScopeForService(service)
-	desc := "Domain-wide delegation — authorize all restore scopes in Admin Console (see required_dwd_scopes)"
+	desc := fmt.Sprintf(
+		"Domain-wide delegation — authorize the %s restore scope in Admin Console (see required_dwd_scopes)",
+		service,
+	)
 	if probeErr != nil {
 		desc = desc + ": " + probeErr.Error()
 	}
-	perService := []MissingPermission{{
+	return []MissingPermission{{
 		Type: "dwd", Service: service, Scope: scope,
 		Description: desc,
 	}}
-	all := make([]MissingPermission, 0, len(google.RestoreDWDScopesMap())+1)
-	all = append(all, perService...)
-	for svc, sc := range google.RestoreDWDScopesMap() {
-		if svc == service {
-			continue
-		}
-		all = append(all, MissingPermission{
-			Type: "dwd", Service: svc, Scope: sc,
-			Description: "Also required in Admin Console for restore-all on other services",
-		})
-	}
-	return all
 }
 
 func evaluateOAuthReadiness(ctx context.Context, store *db.PostgresDb, out *ReadinessResult, service string, cronJob *repo.CronJobListingDB, cred *repo.GoogleBackupCredentialDB) (*ReadinessResult, error) {

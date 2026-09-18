@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"golang.org/x/oauth2/google"
+	"golang.org/x/oauth2/jwt"
 	"google.golang.org/api/calendar/v3"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/gmail/v1"
@@ -29,7 +30,7 @@ func GetWorkspaceRestoreDelegationSetup() (*WorkspaceDelegationSetup, error) {
 	}, nil
 }
 
-func jwtHTTPClientForRestoreDelegation(ctx context.Context, subjectEmail string, scopes ...string) (*http.Client, error) {
+func jwtConfigForRestoreDelegation(subjectEmail string, scopes ...string) (*jwt.Config, error) {
 	subjectEmail = strings.TrimSpace(subjectEmail)
 	if subjectEmail == "" || strings.EqualFold(subjectEmail, "me") {
 		return nil, fmt.Errorf("service account delegation requires a target user email")
@@ -46,9 +47,32 @@ func jwtHTTPClientForRestoreDelegation(ctx context.Context, subjectEmail string,
 		return nil, fmt.Errorf("jwt config for restore: %w", err)
 	}
 	cfg.Subject = subjectEmail
+	return cfg, nil
+}
+
+func jwtHTTPClientForRestoreDelegation(ctx context.Context, subjectEmail string, scopes ...string) (*http.Client, error) {
+	cfg, err := jwtConfigForRestoreDelegation(subjectEmail, scopes...)
+	if err != nil {
+		return nil, err
+	}
 	client := cfg.Client(ctx)
 	client.Timeout = 30 * time.Second
 	return client, nil
+}
+
+// probeRestoreDWDToken verifies Admin Console DWD by minting an access token for the restore write scope.
+// Do not call read APIs here — scopes like gmail.insert do not cover users.getProfile / drive.about.
+func probeRestoreDWDToken(ctx context.Context, subjectEmail, service string) error {
+	scope := RestoreDWDScopeForService(service)
+	if scope == "" {
+		return fmt.Errorf("unsupported service for DWD restore probe: %s", service)
+	}
+	cfg, err := jwtConfigForRestoreDelegation(subjectEmail, scope)
+	if err != nil {
+		return err
+	}
+	_, err = cfg.TokenSource(ctx).Token()
+	return err
 }
 
 // NewGmailClientWithServiceAccountDelegationForRestore impersonates subject with gmail.insert scope.
@@ -100,19 +124,13 @@ func NewGPhotosClientForRestoreDWD(ctx context.Context, subjectEmail string) (*G
 	return newGPotosClientFromHTTPClient(client)
 }
 
-// ProbeDWDRestore checks impersonation + restore scope for a service via a lightweight API call.
+// ProbeDWDRestore checks that the Workspace admin authorized the restore write scope for this service
+// (token mint via domain-wide delegation). Write-only scopes cannot call read probe APIs.
 func ProbeDWDRestore(ctx context.Context, service, loginID string) error {
-	switch strings.ToLower(strings.TrimSpace(service)) {
-	case "gmail":
-		return probeDWDGmail(ctx, loginID)
-	case "drive":
-		return probeDWDDrive(ctx, loginID)
-	case "calendar":
-		return probeDWDCalendar(ctx, loginID)
-	case "contacts":
-		return probeDWDContacts(ctx, loginID)
-	case "photos":
-		return probeDWDPhotos(ctx, loginID)
+	service = strings.ToLower(strings.TrimSpace(service))
+	switch service {
+	case "gmail", "drive", "calendar", "contacts", "photos":
+		return probeRestoreDWDToken(ctx, loginID, service)
 	default:
 		return fmt.Errorf("unsupported service for DWD restore probe: %s", service)
 	}
@@ -120,53 +138,5 @@ func ProbeDWDRestore(ctx context.Context, service, loginID string) error {
 
 // ProbeDWDGmailRestore is an alias for gmail DWD probe (backward compatible).
 func ProbeDWDGmailRestore(ctx context.Context, loginID string) error {
-	return probeDWDGmail(ctx, loginID)
-}
-
-func probeDWDGmail(ctx context.Context, loginID string) error {
-	client, err := NewGmailClientWithServiceAccountDelegationForRestore(ctx, loginID)
-	if err != nil {
-		return err
-	}
-	_, err = client.Users.GetProfile("me").Do()
-	return err
-}
-
-func probeDWDDrive(ctx context.Context, loginID string) error {
-	srv, err := GetDriveServiceForRestoreDWD(ctx, loginID)
-	if err != nil {
-		return err
-	}
-	_, err = srv.About.Get().Fields("user").Do()
-	return err
-}
-
-func probeDWDCalendar(ctx context.Context, loginID string) error {
-	srv, err := NewCalendarServiceForRestoreDWD(ctx, loginID)
-	if err != nil {
-		return err
-	}
-	_, err = srv.CalendarList.List().MaxResults(1).Do()
-	return err
-}
-
-func probeDWDContacts(ctx context.Context, loginID string) error {
-	srv, err := NewPeopleServiceForRestoreDWD(ctx, loginID)
-	if err != nil {
-		return err
-	}
-	_, err = srv.People.Connections.List("people/me").PageSize(1).PersonFields("names").Do()
-	return err
-}
-
-func probeDWDPhotos(ctx context.Context, loginID string) error {
-	client, err := NewGPhotosClientForRestoreDWD(ctx, loginID)
-	if err != nil {
-		return err
-	}
-	if client.Service == nil {
-		return fmt.Errorf("photos service unavailable")
-	}
-	_, err = client.Service.Albums.List().PageSize(1).Do()
-	return err
+	return ProbeDWDRestore(ctx, "gmail", loginID)
 }

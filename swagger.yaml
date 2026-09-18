@@ -3188,12 +3188,12 @@ paths:
                       type: object
                   delegation_setup:
                     type: object
-                    description: client_id + scopes map (gmail, drive, calendar, contacts, photos) for Admin Console DWD
+                    description: client_id + scopes map for the service being prepared (Admin Console DWD)
                   required_dwd_scopes:
                     type: array
                     items:
                       type: string
-                    description: All restore scope URLs the Workspace admin must authorize together
+                    description: Restore scope URL(s) for the service being prepared (e.g. gmail.insert only for gmail)
                   reconnect_hint:
                     type: string
                   target_email:
