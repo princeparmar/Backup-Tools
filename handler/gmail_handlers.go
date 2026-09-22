@@ -100,8 +100,8 @@ func (s *GmailService) UploadMessagesToSatellite(ctx context.Context, database *
 				messagePath := google.GmailObjectKey(s.userEmail, msg)
 
 				// Use helper function to upload and sync
-				// Source and Type are automatically derived from bucket name ("gmail" -> source: "google", type: "gmail")
-				err = UploadObjectAndSync(ctx, database, s.accessGrant, "gmail", messagePath, b, s.userEmail)
+				// Source and Type are automatically derived from bucket name ("cyberls-gmail" -> source: "google", type: "gmail")
+				err = UploadObjectAndSync(ctx, database, s.accessGrant, satellite.ReserveBucket_Gmail, messagePath, b, s.userEmail)
 				if err != nil {
 					logger.Info(ctx, "error uploading to satellite", logger.ErrorField(err))
 					failedIDs.Add(id)

@@ -47,16 +47,22 @@ const (
 
 var (
 	bucketToMethod = map[string]string{
-		"gmail":         "gmail",
-		"outlook":       "outlook",
-		"google-drive":  "google-drive",
-		"google-cloud":  "google-cloud",
-		"google-photos": "google-photos",
-		"dropbox":       "dropbox",
-		"aws-s3":        "aws-s3",
-		"github":        "github",
-		"shopify":       "shopify",
-		"quickbooks":    "quickbooks",
+		"gmail":             "gmail",
+		"cyberls-gmail":     "gmail",
+		"outlook":           "outlook",
+		"google-drive":      "google-drive",
+		"cyberls-drive":     "google-drive",
+		"google-cloud":      "google-cloud",
+		"google-photos":     "google-photos",
+		"google-contacts":   "google_contacts",
+		"cyberls-contacts":  "google_contacts",
+		"google-calendar":   "google_calendar",
+		"cyberls-calendar":  "google_calendar",
+		"dropbox":           "dropbox",
+		"aws-s3":            "aws-s3",
+		"github":            "github",
+		"shopify":           "shopify",
+		"quickbooks":        "quickbooks",
 	}
 )
 

@@ -61,6 +61,7 @@ func storeAccountUserID(tokenKey, userID string) {
 }
 
 const (
+	// Default (StorX / own-nodes) reserved bucket names — used by all non-S3 flows.
 	ReserveBucket_Gmail      = "gmail"
 	ReserveBucket_Outlook    = "outlook"
 	ReserveBucket_Drive      = "google-drive"
@@ -73,6 +74,12 @@ const (
 	ReserveBucket_Github     = "github"
 	ReserveBucket_Shopify    = "shopify"
 	RestoreBucket_Quickbooks = "quickbooks"
+
+	// External S3 (gateway) vault names — only used when storx_token is gateway_s3.
+	ExternalS3Bucket_Gmail    = "cyberls-gmail"
+	ExternalS3Bucket_Drive    = "cyberls-drive"
+	ExternalS3Bucket_Contacts = "cyberls-contacts"
+	ExternalS3Bucket_Calendar = "cyberls-calendar"
 )
 
 var StorxSatelliteService string
@@ -161,6 +168,11 @@ func UploadObjectWithMetadata(ctx context.Context, accessGrant, bucketName, obje
 
 // UploadObjectFromReaderWithMetadata streams content and optionally sets custom metadata before commit.
 func UploadObjectFromReaderWithMetadata(ctx context.Context, accessGrant, bucketName, objectKey string, r io.Reader, meta map[string]string) error {
+	bucketName = BucketForAccess(accessGrant, bucketName)
+	if tok, ok := ParseGatewayS3Token(accessGrant); ok {
+		return uploadViaGatewayS3(ctx, tok, bucketName, objectKey, r, meta)
+	}
+
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
 		return fmt.Errorf("parse access grant: %w", err)
@@ -202,6 +214,21 @@ func UploadObjectFromReaderWithMetadata(ctx context.Context, accessGrant, bucket
 
 // StatObject returns object info including custom metadata (Custom map).
 func StatObject(ctx context.Context, accessGrant, bucketName, objectKey string) (*uplink.Object, error) {
+	bucketName = BucketForAccess(accessGrant, bucketName)
+	if tok, ok := ParseGatewayS3Token(accessGrant); ok {
+		meta, size, err := headViaGatewayS3(ctx, tok, bucketName, objectKey)
+		if err != nil {
+			return nil, err
+		}
+		return &uplink.Object{
+			Key: objectKey,
+			System: uplink.SystemMetadata{
+				ContentLength: size,
+			},
+			Custom: uplink.CustomMetadata(meta),
+		}, nil
+	}
+
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
 		return nil, fmt.Errorf("parse access grant: %w", err)
@@ -225,6 +252,11 @@ func StatObject(ctx context.Context, accessGrant, bucketName, objectKey string) 
 
 // DownloadObjectTo streams an object from satellite storage into w.
 func DownloadObjectTo(ctx context.Context, accessGrant, bucketName, objectKey string, w io.Writer) error {
+	bucketName = BucketForAccess(accessGrant, bucketName)
+	if tok, ok := ParseGatewayS3Token(accessGrant); ok {
+		return downloadViaGatewayS3(ctx, tok, bucketName, objectKey, w)
+	}
+
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
 		return fmt.Errorf("parse access grant: %w", err)
@@ -270,6 +302,11 @@ func ListObjects(ctx context.Context, accessGrant, bucketName string) (map[strin
 
 // ListObjectsWithPrefix lists objects with a specific prefix
 func ListObjectsWithPrefix(ctx context.Context, accessGrant, bucketName, prefix string) (map[string]bool, error) {
+	bucketName = BucketForAccess(accessGrant, bucketName)
+	if tok, ok := ParseGatewayS3Token(accessGrant); ok {
+		return listViaGatewayS3(ctx, tok, bucketName, prefix)
+	}
+
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
 		return nil, fmt.Errorf("parse access grant: %w", err)
@@ -323,6 +360,23 @@ func ListObjectsRecursive(ctx context.Context, accessGrant, bucketName string) (
 
 // listObjectsWithOptions helper function for listing objects with options
 func listObjectsWithOptions(ctx context.Context, accessGrant, bucketName string, options *uplink.ListObjectsOptions) ([]uplink.Object, error) {
+	bucketName = BucketForAccess(accessGrant, bucketName)
+	if tok, ok := ParseGatewayS3Token(accessGrant); ok {
+		prefix := ""
+		if options != nil {
+			prefix = options.Prefix
+		}
+		keys, err := listViaGatewayS3(ctx, tok, bucketName, prefix)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]uplink.Object, 0, len(keys))
+		for k := range keys {
+			out = append(out, uplink.Object{Key: k})
+		}
+		return out, nil
+	}
+
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
 		return nil, fmt.Errorf("parse access grant: %w", err)
@@ -355,6 +409,7 @@ func listObjectsWithOptions(ctx context.Context, accessGrant, bucketName string,
 
 // DeleteObject deletes an object from satellite storage
 func DeleteObject(ctx context.Context, accessGrant, bucketName, objectKey string) error {
+	bucketName = BucketForAccess(accessGrant, bucketName)
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
 		return fmt.Errorf("parse access grant: %w", err)
@@ -432,6 +487,11 @@ func GetUserdetails(c echo.Context) (string, error) {
 
 // GetProjectIDFromAccessGrant extracts project_id from access grant
 func GetProjectIDFromAccessGrant(ctx context.Context, accessGrant string) (string, error) {
+	if _, ok := ParseGatewayS3Token(accessGrant); ok {
+		// Gateway S3 tokens are not StorX access grants — project_id comes from the job/credential.
+		return "", nil
+	}
+
 	if StorxSatelliteService == "" {
 		return "", nil
 	}

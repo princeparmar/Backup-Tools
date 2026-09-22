@@ -74,6 +74,7 @@ func UploadObjectStreamWithMetadataAndSync(
 	userID string,
 	recovery ...*StorxRecovery,
 ) error {
+	bucketName = satellite.BucketForAccess(accessGrant, bucketName)
 	rec := storxRecoveryFrom(recovery...)
 	if err := satellite.UploadObjectFromReaderWithMetadata(ctx, accessGrant, bucketName, objectKey, body, meta); err != nil {
 		uploadErr := fmt.Errorf("failed to upload object to Satellite: %w", err)

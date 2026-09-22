@@ -187,7 +187,7 @@ func HandleListAllFolderFilesByID(c echo.Context) error {
 // 	if accessGrant == "" {
 // 		return errors.New("error: access token not found")
 // 	}
-// 	err = satellite.UploadObject(context.Background(), accessGrant, "google-drive", folderName+"/.file_placeholder", nil)
+// 	err = satellite.UploadObject(context.Background(), accessGrant, satellite.ReserveBucket_Drive, folderName+"/.file_placeholder", nil)
 // 	if err != nil {
 // 		return HandleGoogleDriveError(c, err, "upload file to Google Drive")
 // 	}
@@ -207,7 +207,7 @@ func HandleListAllFolderFilesByID(c echo.Context) error {
 // 				return HandleGoogleDriveError(c, err, "upload file to Google Drive")
 // 			}
 // 		} else {
-// 			err = satellite.UploadObject(context.Background(), accessGrant, "google-drive", path.Join(folderName, name), data)
+// 			err = satellite.UploadObject(context.Background(), accessGrant, satellite.ReserveBucket_Drive, path.Join(folderName, name), data)
 // 			if err != nil {
 // 				return HandleGoogleDriveError(c, err, "upload file to Google Drive")
 // 			}
@@ -233,7 +233,7 @@ func HandleListAllFolderFilesByID(c echo.Context) error {
 // 			"error": "access token not found",
 // 		})
 // 	}
-// 	err = satellite.UploadObject(context.Background(), accesGrant, "google-drive", "shared with me/", nil)
+// 	err = satellite.UploadObject(context.Background(), accesGrant, satellite.ReserveBucket_Drive, "shared with me/", nil)
 // 	if err != nil {
 // 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 // 			"error": fmt.Sprintf("failed to upload file to Satellite: %v", err),
@@ -255,7 +255,7 @@ func HandleListAllFolderFilesByID(c echo.Context) error {
 
 // 				}
 
-// 				err = satellite.UploadObject(ctx, accesGrant, "google-drive", path.Join("shared with me", name), data)
+// 				err = satellite.UploadObject(ctx, accesGrant, satellite.ReserveBucket_Drive, path.Join("shared with me", name), data)
 // 				if err != nil {
 // 					failedIDs.Add(file.ID)
 // 					return nil
@@ -299,7 +299,7 @@ func HandleListAllFolderFilesByID(c echo.Context) error {
 // 			"error": "access token not found",
 // 		})
 // 	}
-// 	err = satellite.UploadObject(context.Background(), accesGrant, "google-drive", folderName+"/", nil)
+// 	err = satellite.UploadObject(context.Background(), accesGrant, satellite.ReserveBucket_Drive, folderName+"/", nil)
 // 	if err != nil {
 // 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 // 			"error": fmt.Sprintf("failed to upload file to Satellite: %v", err),
@@ -321,7 +321,7 @@ func HandleListAllFolderFilesByID(c echo.Context) error {
 
 // 				}
 
-// 				err = satellite.UploadObject(ctx, accesGrant, "google-drive", path.Join("shared with me", name), data)
+// 				err = satellite.UploadObject(ctx, accesGrant, satellite.ReserveBucket_Drive, path.Join("shared with me", name), data)
 // 				if err != nil {
 // 					failedIDs.Add(file.ID)
 // 					return nil
@@ -359,7 +359,7 @@ func HandleSatelliteDrive(c echo.Context) error {
 			"error": "access token not found",
 		})
 	}
-	o, err := satellite.ListObjects(context.Background(), accesGrant, "google-drive")
+	o, err := satellite.ListObjects(context.Background(), accesGrant, satellite.ReserveBucket_Drive)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"error": fmt.Sprintf("failed to get file list from Satellite: %v", err),
@@ -379,7 +379,7 @@ func HandleSatelliteDriveFolder(c echo.Context) error {
 			"error": "access token not found",
 		})
 	}
-	o, err := satellite.GetFilesInFolder(context.Background(), accesGrant, "google-drive", c.Param("name")+"/")
+	o, err := satellite.GetFilesInFolder(context.Background(), accesGrant, satellite.ReserveBucket_Drive, c.Param("name")+"/")
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"error": fmt.Sprintf("failed to get file list from Satellite: %v", err),
@@ -406,7 +406,7 @@ func HandleSatelliteDriveFolder(c echo.Context) error {
 // 			"error": "access token not found",
 // 		})
 // 	}
-// 	err = satellite.UploadObject(context.Background(), accesGrant, "google-drive", folderName+"/", nil)
+// 	err = satellite.UploadObject(context.Background(), accesGrant, satellite.ReserveBucket_Drive, folderName+"/", nil)
 // 	if err != nil {
 // 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 // 			"error": fmt.Sprintf("failed to upload file to Satellite: %v", err),
@@ -428,7 +428,7 @@ func HandleSatelliteDriveFolder(c echo.Context) error {
 
 // 				}
 
-// 				err = satellite.UploadObject(ctx, accesGrant, "google-drive", path.Join("shared with me", name), data)
+// 				err = satellite.UploadObject(ctx, accesGrant, satellite.ReserveBucket_Drive, path.Join("shared with me", name), data)
 // 				if err != nil {
 // 					failedIDs.Add(file.ID)
 // 					return nil
@@ -490,7 +490,7 @@ func HandleSendFileFromGoogleDriveToSatellite(c echo.Context) error {
 	// Create path with user email directory: userEmail/filename
 	drivePath := userDetails.Email + "/" + name
 
-	err = satellite.UploadObject(context.Background(), accesGrant, "google-drive", drivePath, data)
+	err = satellite.UploadObject(context.Background(), accesGrant, satellite.ReserveBucket_Drive, drivePath, data)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 			"error": fmt.Sprintf("failed to upload file to Satellite: %v", err),
@@ -542,7 +542,7 @@ func HandleSendFileFromGoogleDriveToSatellite(c echo.Context) error {
 // 		// If folder is empty, create an empty folder
 // 		sharedFolderPath := userDetails.Email + "/shared with me/"
 
-// 		err = satellite.UploadObject(ctx, accesGrant, "google-drive", sharedFolderPath, nil)
+// 		err = satellite.UploadObject(ctx, accesGrant, satellite.ReserveBucket_Drive, sharedFolderPath, nil)
 // 		if err != nil {
 // 			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
 // 				"error": fmt.Sprintf("failed to upload file to Satellite: %v", err),
@@ -563,7 +563,7 @@ func HandleSendFileFromGoogleDriveToSatellite(c echo.Context) error {
 // 					// Create path with user email directory: userEmail/shared with me/filename
 // 					drivePath := userDetails.Email + "/" + path.Join("shared with me", name)
 
-// 					err = satellite.UploadObject(ctx, accesGrant, "google-drive", drivePath, data)
+// 					err = satellite.UploadObject(ctx, accesGrant, satellite.ReserveBucket_Drive, drivePath, data)
 // 					if err != nil {
 // 						failedIDs.Add(file.ID)
 // 						return nil
@@ -594,7 +594,7 @@ func HandleSendFileFromGoogleDriveToSatellite(c echo.Context) error {
 // 				// Create path with user email directory: userEmail/filename
 // 				drivePath := userDetails.Email + "/" + name
 
-// 				err = satellite.UploadObject(ctx, accesGrant, "google-drive", drivePath, data)
+// 				err = satellite.UploadObject(ctx, accesGrant, satellite.ReserveBucket_Drive, drivePath, data)
 // 				if err != nil {
 // 					failedIDs.Add(file.ID)
 // 					return nil
@@ -718,7 +718,7 @@ func HandleSendFileFromSatelliteToGoogleDrive(c echo.Context) error {
 // 					// Use helper function to upload and sync to database
 // 					// Source and Type are automatically derived from bucket name (hardcoded)
 // 					// Source: "google", Type: "drive" (from bucket name "google-drive")
-// 					if err = UploadObjectAndSync(ctx, database, accessGrant, "google-drive", drivePath, data, userDetails.Email); err != nil {
+// 					if err = UploadObjectAndSync(ctx, database, accessGrant, satellite.ReserveBucket_Drive, drivePath, data, userDetails.Email); err != nil {
 // 						failedIDs.Add(id)
 // 						return nil
 // 					}

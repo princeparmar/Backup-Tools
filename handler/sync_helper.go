@@ -72,34 +72,37 @@ func MaxStorxUplinkRecoveriesPerRun() int {
 }
 
 // deriveSource derives source (provider) from bucket name
-// Currently only supports Google services: gmail, google-photos, google-drive
+// Currently only supports Google services: cyberls-gmail, cyberls-drive, google-photos, ...
 func deriveSource(bucketName string) string {
-	if bucketName == "gmail" || bucketName == "google-photos" || bucketName == "google-drive" || bucketName == "google-contacts" || bucketName == "google-calendar" {
+	if bucketName == "cyberls-gmail" || bucketName == "gmail" || bucketName == "cyberls-drive" || bucketName == "google-drive" || bucketName == "google-photos" || bucketName == "cyberls-contacts" || bucketName == "google-contacts" || bucketName == "cyberls-calendar" || bucketName == "google-calendar" {
 		return "google"
 	}
-	if strings.HasPrefix(bucketName, "google-") {
+	if strings.HasPrefix(bucketName, "google-") || strings.HasPrefix(bucketName, "cyberls-") {
 		return "google"
 	}
 	return bucketName
 }
 
 // deriveType derives type from bucket name
-// Currently only supports: gmail, google-photos, google-drive
+// Currently only supports: cyberls-gmail (legacy: gmail), cyberls-drive (legacy: google-drive), ...
 func deriveType(bucketName string) string {
 	switch bucketName {
-	case "gmail":
+	case "cyberls-gmail", "gmail":
 		return "gmail"
 	case "google-photos":
 		return "photos"
-	case "google-drive":
+	case "cyberls-drive", "google-drive":
 		return "drive"
-	case "google-contacts":
+	case "cyberls-contacts", "google-contacts":
 		return "contacts"
-	case "google-calendar":
+	case "cyberls-calendar", "google-calendar":
 		return "calendar"
 	default:
 		if strings.HasPrefix(bucketName, "google-") {
 			return strings.TrimPrefix(bucketName, "google-")
+		}
+		if strings.HasPrefix(bucketName, "cyberls-") {
+			return strings.TrimPrefix(bucketName, "cyberls-")
 		}
 		return bucketName
 	}
@@ -136,6 +139,7 @@ func UploadObjectWithMetadataAndSync(
 	userID string,
 	recovery ...*StorxRecovery,
 ) error {
+	bucketName = satellite.BucketForAccess(accessGrant, bucketName)
 	r := storxRecoveryFrom(recovery...)
 	var err error
 	if len(meta) > 0 {
@@ -185,7 +189,14 @@ func GetSyncedObjectsWithPrefix(
 	accessGrant, bucketName, prefix, userID, source, objectType string,
 	recovery ...*StorxRecovery,
 ) (map[string]bool, error) {
+	bucketName = satellite.BucketForAccess(accessGrant, bucketName)
 	r := storxRecoveryFrom(recovery...)
+
+	// External gateway S3 tokens are not uplink access grants — skip EnsureBucket.
+	if _, ok := satellite.ParseGatewayS3Token(accessGrant); ok {
+		return getSyncedObjectsFromDB(database, bucketName, prefix, userID, source, objectType)
+	}
+
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
 		parseErr := fmt.Errorf("parse access grant: %w", err)
@@ -240,17 +251,19 @@ func GetSyncedObjectsWithPrefix(
 		}
 	}
 
-	// Step 2: Get synced objects from database
+	return getSyncedObjectsFromDB(database, bucketName, prefix, userID, source, objectType)
+}
+
+func getSyncedObjectsFromDB(database *db.PostgresDb, bucketName, prefix, userID, source, objectType string) (map[string]bool, error) {
 	syncedObjects, err := database.SyncedObjectRepo.GetSyncedObjectsByUserAndBucket(userID, bucketName, source, objectType)
 	if err != nil {
-		logger.Warn(ctx, "Failed to get synced objects from database, returning empty map",
+		logger.Warn(context.Background(), "Failed to get synced objects from database, returning empty map",
 			logger.String("bucket", bucketName),
 			logger.String("user_id", userID),
 			logger.ErrorField(err))
 		return make(map[string]bool), nil
 	}
 
-	// Step 3: Build map with prefix filtering
 	objects := make(map[string]bool)
 	for _, obj := range syncedObjects {
 		if prefix == "" || strings.HasPrefix(obj.ObjectKey, prefix) {
