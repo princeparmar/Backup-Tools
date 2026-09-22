@@ -30,6 +30,8 @@ const (
 	usersGroupsCredentialReAuthRequired = "re_auth_required"
 	usersGroupsAccountCorporate         = "corporate"
 	usersGroupsAccountIndividual        = "individual"
+	usersGroupsStorageS3                = "s3"
+	usersGroupsStorageDefault           = "default"
 )
 
 var (
@@ -52,6 +54,11 @@ var (
 	validUsersGroupsCredentialStatuses = map[string]struct{}{
 		usersGroupsCredentialHealthy:        {},
 		usersGroupsCredentialReAuthRequired: {},
+	}
+
+	validUsersGroupsStorageDestinations = map[string]struct{}{
+		usersGroupsStorageS3:      {},
+		usersGroupsStorageDefault: {},
 	}
 )
 
@@ -91,13 +98,14 @@ type UsersGroupsPaginationView struct {
 
 // UsersGroupsEntityView is one mailbox row on GET /users-groups (list + side panel).
 type UsersGroupsEntityView struct {
-	Name             string                           `json:"name"`
-	Email            string                           `json:"email"`
-	AccountType      string                           `json:"account_type"`
-	OrgUnitPath      string                           `json:"org_unit_path,omitempty"`
-	CredentialStatus string                           `json:"credential_status"`
-	Credential       UsersGroupsMailboxCredentialView `json:"credential"`
-	Services         []UsersGroupsEntityServiceView   `json:"services"`
+	Name               string                           `json:"name"`
+	Email              string                           `json:"email"`
+	AccountType        string                           `json:"account_type"`
+	OrgUnitPath        string                           `json:"org_unit_path,omitempty"`
+	CredentialStatus   string                           `json:"credential_status"`
+	StorageDestination string                           `json:"storage_destination"` // s3 | default
+	Credential         UsersGroupsMailboxCredentialView `json:"credential"`
+	Services           []UsersGroupsEntityServiceView   `json:"services"`
 }
 
 // ---------------------------------------------------------------------------
@@ -589,14 +597,67 @@ func buildUsersGroupsEntities(
 		cred := credentialForEmailJobs(emailJobs, credByID)
 		needsGoogle, needsStorx := credentialReconnectFlagsFromJobs(cronRepo, cred, emailJobs)
 		out = append(out, UsersGroupsEntityView{
-			Name:             nameFromMailboxEmail(email),
-			Email:            email,
-			AccountType:      usersGroupsAccountType(email, cred),
-			OrgUnitPath:      mailboxOrgUnitPath(emailJobs),
-			CredentialStatus: usersGroupsCredentialStatus(needsGoogle, needsStorx),
-			Credential:       buildMailboxCredentialView(cronRepo, cred, emailJobs),
-			Services:         buildUsersGroupsEntityServices(emailJobs, policies),
+			Name:               nameFromMailboxEmail(email),
+			Email:              email,
+			AccountType:        usersGroupsAccountType(email, cred),
+			OrgUnitPath:        mailboxOrgUnitPath(emailJobs),
+			CredentialStatus:   usersGroupsCredentialStatus(needsGoogle, needsStorx),
+			StorageDestination: usersGroupsStorageDestination(cronRepo, emailJobs),
+			Credential:         buildMailboxCredentialView(cronRepo, cred, emailJobs),
+			Services:           buildUsersGroupsEntityServices(emailJobs, policies),
 		})
+	}
+	return out
+}
+
+func usersGroupsStorageDestination(cronRepo *repo.CronJobRepository, jobs []repo.CronJobListingDB) string {
+	for i := range jobs {
+		tok := ""
+		if cronRepo != nil {
+			tok = cronRepo.ResolvedStorxToken(&jobs[i])
+		} else {
+			tok = strings.TrimSpace(jobs[i].StorxToken)
+		}
+		if _, ok := satellite.ParseGatewayS3Token(tok); ok {
+			return usersGroupsStorageS3
+		}
+	}
+	return usersGroupsStorageDefault
+}
+
+func parseUsersGroupsStorageDestination(c echo.Context) (string, error) {
+	raw := strings.TrimSpace(c.QueryParam("storage_destination"))
+	if raw == "" {
+		// Alias used by some clients.
+		raw = strings.TrimSpace(c.QueryParam("storage"))
+	}
+	if raw == "" {
+		return "", nil
+	}
+	dest := strings.ToLower(raw)
+	switch dest {
+	case "all", "all_destinations":
+		return "", nil
+	case "external_s3", "gateway_s3":
+		dest = usersGroupsStorageS3
+	case "storx", "default_storx":
+		dest = usersGroupsStorageDefault
+	}
+	if _, ok := validUsersGroupsStorageDestinations[dest]; !ok {
+		return "", fmt.Errorf("storage_destination must be one of: s3, default")
+	}
+	return dest, nil
+}
+
+func filterUsersGroupsEntitiesByStorageDestination(entities []UsersGroupsEntityView, dest string) []UsersGroupsEntityView {
+	if dest == "" {
+		return entities
+	}
+	out := make([]UsersGroupsEntityView, 0, len(entities))
+	for i := range entities {
+		if entities[i].StorageDestination == dest {
+			out = append(out, entities[i])
+		}
 	}
 	return out
 }
@@ -1229,6 +1290,10 @@ func HandleAutosyncUsersGroupsList(c echo.Context) error {
 	if err != nil {
 		return usersGroupsBadRequest(c, "invalid credential_status filter", err)
 	}
+	storageDestination, err := parseUsersGroupsStorageDestination(c)
+	if err != nil {
+		return usersGroupsBadRequest(c, "invalid storage_destination filter", err)
+	}
 	activeFilter, err := parseUsersGroupsActive(c)
 	if err != nil {
 		return usersGroupsBadRequest(c, "invalid active filter", err)
@@ -1254,6 +1319,7 @@ func HandleAutosyncUsersGroupsList(c echo.Context) error {
 	allEntities = filterUsersGroupsEntitiesByActive(allEntities, jobs, activeFilter)
 	allEntities = filterUsersGroupsEntitiesByAccountType(allEntities, accountType)
 	allEntities = filterUsersGroupsEntitiesByCredentialStatus(allEntities, credentialStatus)
+	allEntities = filterUsersGroupsEntitiesByStorageDestination(allEntities, storageDestination)
 	allEntities = filterUsersGroupsEntitiesByOrgUnitPath(allEntities, parseUsersGroupsOrgUnitPath(c))
 	orgUnits := uniqueUsersGroupsOrgUnitPaths(allEntities)
 	entities, pagination := paginateUsersGroupsEntities(allEntities, limit, offset)
