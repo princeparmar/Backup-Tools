@@ -11,9 +11,14 @@ env:
   BUILD_DIR: 'D:\deployment'
   DEPLOY_DIR: 'D:\bin'
   SERVICE_NAME: 'backuptools'
-  # Keep module/build caches off runner _temp (that path gets wiped mid-job / across runners).
+  # Module + compile caches (dependencies / .a objects) — NOT the Go stdlib.
+  # Keep them off runner _temp: that path is wiped and has produced corrupt
+  # golang.org/toolchain downloads ("package context is not in std").
   GOMODCACHE: 'D:\go-pkg\mod'
   GOCACHE: 'D:\go-pkg\cache'
+  # Use the Go already installed on the CyberLS host. Do not auto-download
+  # golang.org/toolchain@… into GOMODCACHE (that is what broke the build).
+  GOTOOLCHAIN: 'local'
 
 jobs:
   deploy:
@@ -32,8 +37,17 @@ jobs:
         run: |
           $verOutput = go version
           Write-Host $verOutput
+          Write-Host "GOROOT=$(go env GOROOT)"
+          Write-Host "GOMODCACHE=$(go env GOMODCACHE)"
+          Write-Host "GOCACHE=$(go env GOCACHE)"
+          Write-Host "GOTOOLCHAIN=$(go env GOTOOLCHAIN)"
           if ($LASTEXITCODE -ne 0) {
             Write-Error "Go is not available on this runner. Install Go 1.24+ on the CyberLS host."
+            exit 1
+          }
+          # go.mod requires 1.24; with GOTOOLCHAIN=local the host must already match.
+          if ($verOutput -notmatch 'go1\.2[4-9]|go1\.[3-9]\d') {
+            Write-Error "Host Go is too old for this module (need 1.24+). Installed: $verOutput"
             exit 1
           }
 
@@ -64,6 +78,7 @@ jobs:
           $buildStart = Get-Date
           Write-Host "Building with optimizations..."
           Write-Host "GOMODCACHE=$env:GOMODCACHE"
+          Write-Host "GOROOT=$(go env GOROOT)"
           
           # Use Go build optimizations
           $env:GOFLAGS = "-buildvcs=false"
@@ -72,8 +87,20 @@ jobs:
           
           go build -ldflags="-s -w -X main.buildTime=$buildTime" -trimpath -o $buildPath ./cmd
           if ($LASTEXITCODE -ne 0) {
-            Write-Host "Build failed (often corrupt mod cache); clearing and retrying once..."
+            Write-Host "Build failed; clearing module cache (and any leftover toolchain dirs) then retrying once..."
             go clean -modcache
+            # Also drop known bad auto-toolchain paths from older runs / other runners
+            $badToolchains = @(
+              (Join-Path $env:GOMODCACHE 'golang.org'),
+              'D:\deployment\storx-runner\_work\_temp\go-mod-cache\golang.org',
+              'D:\deployment\backup-tool-runner\_work\_temp\go-mod-cache\golang.org'
+            )
+            foreach ($p in $badToolchains) {
+              if (Test-Path $p) {
+                Write-Host "Removing $p"
+                Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue
+              }
+            }
             New-Item -ItemType Directory -Path $env:GOMODCACHE -Force | Out-Null
             go mod download
             go build -ldflags="-s -w -X main.buildTime=$buildTime" -trimpath -o $buildPath ./cmd
