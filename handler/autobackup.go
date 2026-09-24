@@ -93,6 +93,8 @@ type GoogleBackupOnboardingRequest struct {
 	SatelliteUserID string            `json:"satellite_user_id"`
 	RefreshToken    string            `json:"refresh_token"`
 	StorxToken      string            `json:"storx_token,omitempty"`
+	// Active: when false, keep jobs inactive (Satellite own_nodes gate). When omitted/null, keep legacy behavior (activate if storx present).
+	Active          *bool             `json:"active,omitempty"`
 	Emails          []string          `json:"emails"`
 	EmailOrgUnits   map[string]string `json:"email_org_units,omitempty"`
 	PolicyID        *uint             `json:"policy_id,omitempty"`
@@ -1107,14 +1109,19 @@ func createGoogleJobsForServiceEmails(
 			failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: err.Error()})
 			continue
 		}
-		// Recurring jobs stay inactive unless storx was supplied at create (stored on credential).
-		if syncType != "one_time" && hasStorxTokenAtJobCreate(req, cred) {
-			if err := database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(true)); err != nil {
-				failed = append(failed, onboardingFailedResult{
-					Service: svc, Email: targetEmail,
-					Error: fmt.Sprintf("job %d created but activation failed: %v", cronJob.ID, err),
-				})
-				continue
+		// Recurring: activate only when storx is present AND caller did not force active=false
+		// (Satellite sets active=false when own_nodes mode has fewer than MinOwnNodes).
+		if syncType != "one_time" {
+			if shouldActivateOnboardingJob(req, cred) {
+				if err := database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(true)); err != nil {
+					failed = append(failed, onboardingFailedResult{
+						Service: svc, Email: targetEmail,
+						Error: fmt.Sprintf("job %d created but activation failed: %v", cronJob.ID, err),
+					})
+					continue
+				}
+			} else if isForcedInactiveOnboarding(req) {
+				_ = database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(false))
 			}
 		}
 		latestJob, _ := database.CronJobRepo.GetCronJobByID(cronJob.ID)
@@ -1127,7 +1134,9 @@ func createGoogleJobsForServiceEmails(
 			entry.PolicyID = policy.ID
 		}
 		if syncType == "one_time" {
-			if task, taskErr := database.TaskRepo.CreateTaskForCronJob(cronJob.ID); taskErr == nil {
+			if isForcedInactiveOnboarding(req) {
+				_ = database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(false))
+			} else if task, taskErr := database.TaskRepo.CreateTaskForCronJob(cronJob.ID); taskErr == nil {
 				entry.TaskID = task.ID
 			}
 		}
@@ -2465,6 +2474,19 @@ func hasStorxTokenAtJobCreate(req *GoogleBackupOnboardingRequest, cred *repo.Goo
 		return true
 	}
 	return cred != nil && strings.TrimSpace(cred.StorxToken) != ""
+}
+
+func isForcedInactiveOnboarding(req *GoogleBackupOnboardingRequest) bool {
+	return req != nil && req.Active != nil && !*req.Active
+}
+
+// shouldActivateOnboardingJob returns whether a newly created recurring job should become active.
+// Satellite may send active=false (own_nodes under MinOwnNodes); that always wins over storx_token.
+func shouldActivateOnboardingJob(req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB) bool {
+	if isForcedInactiveOnboarding(req) {
+		return false
+	}
+	return hasStorxTokenAtJobCreate(req, cred)
 }
 
 func activeStateUpdateFields(active bool) map[string]interface{} {

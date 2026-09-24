@@ -82,9 +82,11 @@ type UsersGroupsEntityServiceView struct {
 }
 
 // UsersGroupsBulkActiveRequest is PUT /users-groups/jobs/active.
+// When active=false and job_ids is empty, deactivates every active job for the user.
 type UsersGroupsBulkActiveRequest struct {
-	JobIDs []uint `json:"job_ids"`
-	Active *bool  `json:"active"`
+	JobIDs  []uint `json:"job_ids"`
+	Active  *bool  `json:"active"`
+	Message string `json:"message,omitempty"`
 }
 
 // UsersGroupsPaginationView is pagination metadata for GET /users-groups.
@@ -1235,6 +1237,8 @@ func bulkUpdateUsersGroupsJobsActive(
 }
 
 // HandleUsersGroupsJobsActive sets active true/false on multiple jobs (bulk pause/resume).
+// When active=false and job_ids is omitted/empty, deactivates all active jobs for the user
+// (used by Satellite own_nodes under-min gate — no new route).
 func HandleUsersGroupsJobsActive(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
@@ -1252,9 +1256,25 @@ func HandleUsersGroupsJobsActive(c echo.Context) error {
 	if req.Active == nil {
 		return usersGroupsBadRequest(c, "invalid request", fmt.Errorf("active is required"))
 	}
+
 	jobIDs := uniqueUints(req.JobIDs)
 	if len(jobIDs) == 0 {
-		return usersGroupsBadRequest(c, "invalid request", fmt.Errorf("job_ids is required"))
+		if *req.Active {
+			return usersGroupsBadRequest(c, "invalid request", fmt.Errorf("job_ids is required when active=true"))
+		}
+		msg := strings.TrimSpace(req.Message)
+		if msg == "" {
+			msg = "Automatic backup deactivated: connect at least 10 storage nodes to your node group before starting backups."
+		}
+		if err := database.CronJobRepo.DeactivateAllActiveJobsForUser(userID, msg); err != nil {
+			return usersGroupsInternalError(c, ctx, "deactivate all jobs failed", err)
+		}
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"message": "all active jobs deactivated",
+			"active":  false,
+			"success": []interface{}{},
+			"failed":  []interface{}{},
+		})
 	}
 
 	success, failed := bulkUpdateUsersGroupsJobsActive(database.CronJobRepo, userID, jobIDs, *req.Active)
