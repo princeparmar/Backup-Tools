@@ -2,6 +2,7 @@ package crons
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -18,6 +19,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
 )
+
+// errJobDeactivated stops an in-flight backup when the user turns that job off,
+// so the worker can start the next pushed task (Contacts, Calendar, …).
+var errJobDeactivated = errors.New("job deactivated")
 
 type ProcessorInput struct {
 	InputData     *database.DbJson[map[string]interface{}]
@@ -325,6 +330,14 @@ func (a *AutosyncManager) processTask(ctx context.Context, task *repo.TaskListin
 			if currentTask.Status != repo.TaskStatusRunning {
 				return fmt.Errorf("task status changed to '%s', stopping execution", currentTask.Status)
 			}
+			currentJob, jobErr := a.store.CronJobRepo.GetCronJobByID(job.ID)
+			if jobErr == nil && currentJob != nil && !currentJob.Active {
+				_ = a.store.TaskRepo.UpdateTaskByID(task.ID, map[string]interface{}{
+					"status":  "cancelled",
+					"message": "Stopped because automatic backup was deactivated",
+				})
+				return errJobDeactivated
+			}
 			if hbErr := a.store.TaskRepo.UpdateHeartBeatForTask(task.ID); hbErr != nil {
 				return fmt.Errorf("failed to update heartbeat: %w", hbErr)
 			}
@@ -392,6 +405,22 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 	}
 
 	// Handle error case
+	if errors.Is(processErr, errJobDeactivated) {
+		task.Status = "cancelled"
+		task.Message = "Stopped because automatic backup was deactivated"
+		if task.StartTime != nil {
+			task.Execution = uint64(time.Since(*task.StartTime).Seconds())
+		}
+		if err := a.store.TaskRepo.UpdateTaskByID(task.ID, map[string]interface{}{
+			"status":    task.Status,
+			"message":   task.Message,
+			"execution": task.Execution,
+		}); err != nil {
+			return fmt.Errorf("failed to save task: %w", err)
+		}
+		return nil
+	}
+
 	if processErr != nil {
 		task.Status = repo.TaskStatusFailed
 		task.RetryCount++

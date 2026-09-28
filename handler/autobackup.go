@@ -84,21 +84,21 @@ const (
 // GoogleBackupOnboardingRequest is the Satellite → Backup-Tools job create body (POST /google/backup/onboarding/jobs or POST /auto-sync/job).
 // sync_type is query only (?sync_type=daily). Future: outlook/psql via services[] in this JSON (legacy POST /auto-sync/job/:method is commented out).
 type GoogleBackupOnboardingRequest struct {
-	Services        []string          `json:"services"`
-	Interval        string            `json:"interval"` // required when creating a new policy; optional when policy_id selects an existing policy
-	On              string            `json:"on"`       // required for weekly/monthly new policies; optional with policy_id
-	GoogleEmail     string            `json:"google_email"`
-	AccountType     string            `json:"account_type"`
-	ProjectID       string            `json:"project_id"`
-	SatelliteUserID string            `json:"satellite_user_id"`
-	RefreshToken    string            `json:"refresh_token"`
-	StorxToken      string            `json:"storx_token,omitempty"`
+	Services        []string `json:"services"`
+	Interval        string   `json:"interval"` // required when creating a new policy; optional when policy_id selects an existing policy
+	On              string   `json:"on"`       // required for weekly/monthly new policies; optional with policy_id
+	GoogleEmail     string   `json:"google_email"`
+	AccountType     string   `json:"account_type"`
+	ProjectID       string   `json:"project_id"`
+	SatelliteUserID string   `json:"satellite_user_id"`
+	RefreshToken    string   `json:"refresh_token"`
+	StorxToken      string   `json:"storx_token,omitempty"`
 	// Active: when false, keep jobs inactive (Satellite own_nodes gate). When omitted/null, keep legacy behavior (activate if storx present).
-	Active          *bool             `json:"active,omitempty"`
-	Emails          []string          `json:"emails"`
-	EmailOrgUnits   map[string]string `json:"email_org_units,omitempty"`
-	PolicyID        *uint             `json:"policy_id,omitempty"`
-	PolicyName      string            `json:"policy_name,omitempty"`
+	Active        *bool             `json:"active,omitempty"`
+	Emails        []string          `json:"emails"`
+	EmailOrgUnits map[string]string `json:"email_org_units,omitempty"`
+	PolicyID      *uint             `json:"policy_id,omitempty"`
+	PolicyName    string            `json:"policy_name,omitempty"`
 	// PolicyScope: "all" (default) applies one policy to every mailbox; "org_unit" creates one policy per OU.
 	PolicyScope string `json:"policy_scope,omitempty"`
 	// OrgUnitSchedules maps OU path → schedule/name. Used only when PolicyScope is org_unit.
@@ -880,6 +880,20 @@ func satelliteUserIDFromRequest(c echo.Context) (string, error) {
 		return "", jsonError(http.StatusUnauthorized, "Invalid Request", err)
 	}
 	return userID, nil
+}
+
+// restoreJobUserID is the Backup-Tools account that owns Google credentials for this restore.
+// Satellite sets X-Restore-As-User only for an invited Member. Owner and admin requests omit it.
+func restoreJobUserID(c echo.Context) (string, error) {
+	sessionID, err := satelliteUserIDFromRequest(c)
+	if err != nil {
+		return "", err
+	}
+	asUser := strings.TrimSpace(c.Request().Header.Get("X-Restore-As-User"))
+	if asUser == "" || asUser == sessionID {
+		return sessionID, nil
+	}
+	return asUser, nil
 }
 
 func syncTypeFromQuery(c echo.Context) (string, error) {

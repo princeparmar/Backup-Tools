@@ -395,7 +395,7 @@ func driveListAndSync(ctx context.Context, input ProcessorInput, task *repo.Sche
 			if f == nil || strings.TrimSpace(f.Id) == "" {
 				continue
 			}
-			if err := retrySyncDriveTreeItem(ctx, input, task, service, f, section, synced, parentCache, shortcutTargetCache, quotaSess); err != nil {
+			if err := retrySyncDriveTreeItem(ctx, input, task, service, f, section, synced, parentCache, shortcutTargetCache, quotaSess, false); err != nil {
 				if shouldAbortOnItemError(err) {
 					return wrapStorageAbort("google_drive", err)
 				}
@@ -461,7 +461,7 @@ func runDriveChangesLoop(ctx context.Context, input ProcessorInput, task *repo.S
 				item = got
 				section = classifyDriveSection(item, driveID, task.LoginId)
 			}
-			if err := retrySyncDriveTreeItem(ctx, input, task, service, item, section, synced, parentCache, shortcutTargetCache, quotaSess); err != nil {
+			if err := retrySyncDriveTreeItem(ctx, input, task, service, item, section, synced, parentCache, shortcutTargetCache, quotaSess, true); err != nil {
 				if shouldAbortOnItemError(err) {
 					return "", wrapStorageAbort("google_drive", err)
 				}
@@ -593,10 +593,10 @@ func driveExportMimeForGoogleApps(mimeType string) (exportMime string, ok bool) 
 	}
 }
 
-func retrySyncDriveTreeItem(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, preloaded *drive.File, section string, synced map[string]bool, parentCache map[string][]string, shortcutTargetCache map[string]*drive.File, quotaSess *driveQuotaSession) error {
+func retrySyncDriveTreeItem(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, preloaded *drive.File, section string, synced map[string]bool, parentCache map[string][]string, shortcutTargetCache map[string]*drive.File, quotaSess *driveQuotaSession, refresh bool) error {
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		if err := syncDriveTreeItem(ctx, input, task, service, preloaded, section, synced, parentCache, shortcutTargetCache, quotaSess); err != nil {
+		if err := syncDriveTreeItem(ctx, input, task, service, preloaded, section, synced, parentCache, shortcutTargetCache, quotaSess, refresh); err != nil {
 			if isAbusiveDownloadError(err) {
 				logger.Warn(ctx, "drive file skipped: marked abusive by Google",
 					logger.String("file_id", preloadedID(preloaded)),
@@ -632,7 +632,7 @@ func preloadedID(f *drive.File) string {
 	return f.Id
 }
 
-func syncDriveTreeItem(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, preloaded *drive.File, section string, synced map[string]bool, parentCache map[string][]string, shortcutTargetCache map[string]*drive.File, quotaSess *driveQuotaSession) error {
+func syncDriveTreeItem(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, preloaded *drive.File, section string, synced map[string]bool, parentCache map[string][]string, shortcutTargetCache map[string]*drive.File, quotaSess *driveQuotaSession, refresh bool) error {
 	file := preloaded
 	var err error
 	if file == nil || strings.TrimSpace(file.Id) == "" || strings.TrimSpace(file.MimeType) == "" || strings.TrimSpace(file.Name) == "" {
@@ -688,20 +688,42 @@ func syncDriveTreeItem(ctx context.Context, input ProcessorInput, task *repo.Sch
 			ep, ok := google.ParseDriveObjectKey(existing)
 			if ok && !ep.IsFolder {
 				if existing == logicalKey {
+					// Same stored key: full list skips below. A Drive change still falls through
+					// so an edited shared file is updated.
+					if !refresh {
+						return nil
+					}
+				} else {
+					meta := driveCustomMeta(file, "", shortcutTarget, existing, true)
+					if err := handler.UploadObjectWithMetadataAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, logicalKey, nil, meta, task.UserID, input.StorxRecovery); err != nil {
+						return err
+					}
+					synced[logicalKey] = true
 					return nil
 				}
-				// Alias to existing physical (cross-mailbox or same-mailbox other section).
-				meta := driveCustomMeta(file, "", shortcutTarget, existing, true)
-				if err := handler.UploadObjectWithMetadataAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, logicalKey, nil, meta, task.UserID, input.StorxRecovery); err != nil {
-					return err
-				}
-				synced[logicalKey] = true
-				return nil
 			}
 		}
 	}
 
 	if isFolder {
+		// Already stored: do not rewrite the folder placeholder on every pass.
+		if !refresh && synced[logicalKey] {
+			// sharedWithMe=true only returns top-level shares — still walk children for new files.
+			if section == google.DriveSectionSharedWithMe {
+				childQ := fmt.Sprintf("'%s' in parents and trashed=false", file.Id)
+				if err := driveListAndSync(ctx, input, task, service, childQ, "allDrives", "", google.DriveSectionSharedWithMe, synced, parentCache, shortcutTargetCache, quotaSess); err != nil {
+					if shouldAbortOnItemError(err) {
+						return err
+					}
+					logger.Warn(ctx, "drive shared-folder children sync failed",
+						logger.String("folder_id", file.Id),
+						logger.String("name", file.Name),
+						logger.ErrorField(err),
+					)
+				}
+			}
+			return nil
+		}
 		meta := driveCustomMeta(file, "", "", "", false)
 		meta[google.DriveMetaIsFolder] = "true"
 		if err := handler.UploadObjectWithMetadataAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, logicalKey, nil, meta, task.UserID, input.StorxRecovery); err != nil {
@@ -728,8 +750,12 @@ func syncDriveTreeItem(ctx context.Context, input ProcessorInput, task *repo.Sch
 	// Rekey: same mailbox fileId at different path → delete old after successful write.
 	oldKey := google.FindSyncedDriveKeyByFileID(filterSyncedByEmail(synced, task.LoginId), file.Id)
 
-	// Skip content if version/md5 unchanged and key unchanged.
-	if oldKey == logicalKey {
+	// Already stored at this key: do not download again. A Drive change notification
+	// (refresh) still re-checks version so an edited file is updated.
+	if oldKey == logicalKey || synced[logicalKey] {
+		if !refresh {
+			return nil
+		}
 		if unchanged, _ := driveContentUnchanged(ctx, task.StorxToken, logicalKey, file); unchanged {
 			return nil
 		}
@@ -824,7 +850,7 @@ func syncDriveTreeItem(ctx context.Context, input ProcessorInput, task *repo.Sch
 			if err == nil && tf != nil {
 				shortcutTargetCache[shortcutTarget] = tf
 				tsec := classifyDriveSection(tf, "", task.LoginId)
-				_ = syncDriveTreeItem(ctx, input, task, service, tf, tsec, synced, parentCache, shortcutTargetCache, quotaSess)
+				_ = syncDriveTreeItem(ctx, input, task, service, tf, tsec, synced, parentCache, shortcutTargetCache, quotaSess, false)
 			}
 		}
 	}
@@ -973,9 +999,9 @@ func ensureDriveParentFolderPlaceholders(ctx context.Context, input ProcessorInp
 			continue
 		}
 		meta := map[string]string{
-			google.DriveMetaGoogleFileID: folderID,
-			google.DriveMetaOriginalName: name,
-			google.DriveMetaIsFolder:     "true",
+			google.DriveMetaGoogleFileID:   folderID,
+			google.DriveMetaOriginalName:   name,
+			google.DriveMetaIsFolder:       "true",
 			google.DriveMetaGoogleMimeType: "application/vnd.google-apps.folder",
 		}
 		if f != nil && f.Starred {
@@ -1020,4 +1046,3 @@ func writeDriveRemovedTreeAlias(ctx context.Context, input ProcessorInput, task 
 	}
 	return nil
 }
-

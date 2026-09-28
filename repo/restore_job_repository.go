@@ -60,6 +60,8 @@ type RestoreJobListingDB struct {
 	EstimateBytes  int64  `json:"estimate_bytes,omitempty" gorm:"column:estimate_bytes;default:0"`
 	RemainingBytes int64  `json:"remaining_bytes,omitempty" gorm:"column:remaining_bytes;default:0"`
 	QuotaKind      string `json:"quota_kind,omitempty" gorm:"column:quota_kind;type:varchar(32);default:''"`
+	// RestoreTag is "invite_restored" when an invited member started the job on the owner's account.
+	RestoreTag string `json:"restore_tag,omitempty" gorm:"column:restore_tag;type:varchar(32);default:''"`
 
 	CancelledAt   *time.Time `json:"cancelled_at,omitempty"`
 	LastHeartBeat *time.Time `json:"last_heart_beat,omitempty"`

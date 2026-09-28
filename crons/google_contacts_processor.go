@@ -27,14 +27,20 @@ func (p *googleContactsProcessor) Run(input ProcessorInput) error {
 }
 
 type contactsStoredObject struct {
-	ResourceName    string   `json:"resource_name"`
-	Name            string   `json:"name"`
-	Phones          []string `json:"phones"`
-	Emails          []string `json:"emails"`
-	Organizations   []string `json:"organizations,omitempty"`
-	ETag            string   `json:"etag"`
-	SourceUpdatedAt string   `json:"source_updated_at,omitempty"`
-	UpdatedAt       string   `json:"updated_at"`
+	ResourceName    string                       `json:"resource_name"`
+	Name            string                       `json:"name"`
+	Phones          []string                     `json:"phones"`
+	Emails          []string                     `json:"emails"`
+	Organizations   []string                     `json:"organizations,omitempty"`
+	PhoneDetails    []google.ContactLabeledValue `json:"phone_details,omitempty"`
+	EmailDetails    []google.ContactLabeledValue `json:"email_details,omitempty"`
+	OrgDetails      []google.ContactOrganization `json:"organization_details,omitempty"`
+	Addresses       []google.ContactLabeledValue `json:"addresses,omitempty"`
+	Birthday        string                       `json:"birthday,omitempty"`
+	Notes           string                       `json:"notes,omitempty"`
+	ETag            string                       `json:"etag"`
+	SourceUpdatedAt string                       `json:"source_updated_at,omitempty"`
+	UpdatedAt       string                       `json:"updated_at"`
 }
 
 func runGoogleContactsAutosync(input ProcessorInput) error {
@@ -187,6 +193,12 @@ func syncContactByID(ctx context.Context, input ProcessorInput, task *repo.Sched
 		Phones:          item.Phones,
 		Emails:          item.Emails,
 		Organizations:   item.Organizations,
+		PhoneDetails:    item.PhoneDetails,
+		EmailDetails:    item.EmailDetails,
+		OrgDetails:      item.OrgDetails,
+		Addresses:       item.Addresses,
+		Birthday:        item.Birthday,
+		Notes:           item.Notes,
 		ETag:            item.ETag,
 		SourceUpdatedAt: item.SourceUpdatedAt,
 		UpdatedAt:       time.Now().UTC().Format(time.RFC3339),

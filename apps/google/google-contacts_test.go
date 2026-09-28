@@ -143,6 +143,72 @@ func TestPersonFromContactsBackup_usesWritableNameFields(t *testing.T) {
 	}
 }
 
+func TestPersonFromContactsBackup_labeledDetails(t *testing.T) {
+	tests := []struct {
+		name    string
+		backup  ContactsBackupObject
+		email   string
+		etype   string
+		phone   string
+		ptype   string
+		title   string
+		company string
+		address string
+		note    string
+	}{
+		{
+			name: "google detail fields",
+			backup: ContactsBackupObject{
+				Name: "Aarav Mehta",
+				EmailDetails: []ContactLabeledValue{
+					{Value: "aarav.mehta@example.com", Type: "Other"},
+				},
+				PhoneDetails: []ContactLabeledValue{
+					{Value: "+1 202-555-0101", Type: "Home"},
+				},
+				OrgDetails: []ContactOrganization{
+					{Name: "Northstar Labs", Title: "Software Engineer"},
+				},
+				Addresses: []ContactLabeledValue{
+					{Value: "1 Market St, San Francisco, CA", Type: "Work"},
+				},
+				Notes: "Test contact 01",
+			},
+			email:   "aarav.mehta@example.com",
+			etype:   "Other",
+			phone:   "+1 202-555-0101",
+			ptype:   "Home",
+			title:   "Software Engineer",
+			company: "Northstar Labs",
+			address: "1 Market St, San Francisco, CA",
+			note:    "Test contact 01",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			person := personFromContactsBackup(tt.backup)
+			if person == nil {
+				t.Fatal("person is nil")
+			}
+			if person.EmailAddresses[0].Value != tt.email || person.EmailAddresses[0].Type != tt.etype {
+				t.Fatalf("email = %+v", person.EmailAddresses[0])
+			}
+			if person.PhoneNumbers[0].Value != tt.phone || person.PhoneNumbers[0].Type != tt.ptype {
+				t.Fatalf("phone = %+v", person.PhoneNumbers[0])
+			}
+			if person.Organizations[0].Title != tt.title || person.Organizations[0].Name != tt.company {
+				t.Fatalf("org = %+v", person.Organizations[0])
+			}
+			if person.Addresses[0].FormattedValue != tt.address {
+				t.Fatalf("address = %+v", person.Addresses[0])
+			}
+			if person.Biographies[0].Value != tt.note {
+				t.Fatalf("note = %+v", person.Biographies[0])
+			}
+		})
+	}
+}
+
 func TestPersonFromContactsBackup_parsesVaultJSON(t *testing.T) {
 	raw := []byte(`{"resource_name":"people/c1","name":"Sales Desk","phones":["(22) 2278-5000"],"emails":[],"updated_at":"2026-09-18T00:00:00Z"}`)
 	var backup ContactsBackupObject
