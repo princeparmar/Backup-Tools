@@ -5,6 +5,47 @@ import (
 	"testing"
 )
 
+func TestSanitizeDrivePathSegment_spaces(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "plain", in: "Screenshot 2026-08-27 at 5.40.58 PM.png", want: "Screenshot 2026-08-27 at 5.40.58 PM.png"},
+		{name: "macos narrow space", in: "Screenshot 2026-08-27 at 5.40.58\u202fPM.png", want: "Screenshot 2026-08-27 at 5.40.58 PM.png"},
+		{name: "nbsp", in: "a\u00a0b", want: "a b"},
+		{name: "slash", in: "a/b", want: "a_b"},
+		{name: "accent stays", in: "caf\u00e9.png", want: "caf\u00e9.png"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SanitizeDrivePathSegment(tt.in); got != tt.want {
+				t.Fatalf("got %q want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildDriveObjectKey_macosScreenshotSpace(t *testing.T) {
+	key := BuildDriveObjectKey(
+		"dhavalder04@gmail.com",
+		[]string{DriveSectionSharedWithMe},
+		nil,
+		"1Y-BPbn7XBYVpq53izimqP0wEKQ1ZfRFu",
+		"Screenshot 2026-08-27 at 5.40.58\u202fPM.png",
+		"image/png",
+		false,
+		"",
+	)
+	want := "dhavalder04@gmail.com/SHARED_WITH_ME/1Y-BPbn7XBYVpq53izimqP0wEKQ1ZfRFu$Screenshot 2026-08-27 at 5.40.58 PM.png"
+	if key != want {
+		t.Fatalf("key = %q want %q", key, want)
+	}
+	if strings.Contains(key, "\u202f") {
+		t.Fatal("key still contains the macOS narrow space")
+	}
+}
+
 func TestBuildAndParseDriveFileKey(t *testing.T) {
 	key := BuildDriveObjectKey(
 		"alice@x.com",

@@ -286,7 +286,7 @@ func runGoogleDriveAutosync(input ProcessorInput) error {
 			driveID := strings.TrimSpace(d.Id)
 			if markerKey := google.BuildDriveSharedDriveMarkerKey(task.LoginId, driveID, d.Name); markerKey != "" && !synced[markerKey] {
 				meta := map[string]string{
-					google.DriveMetaOriginalName: strings.TrimSpace(d.Name),
+					google.DriveMetaOriginalName: google.SanitizeDrivePathSegment(d.Name),
 					google.DriveMetaGoogleFileID: driveID,
 				}
 				if err := handler.UploadObjectWithMetadataAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Drive, markerKey, nil, meta, task.UserID, input.StorxRecovery); err != nil {
@@ -873,7 +873,7 @@ func driveCustomMeta(file *drive.File, backupMime, shortcutTarget, physicalKey s
 	meta := map[string]string{
 		google.DriveMetaGoogleFileID:   strings.TrimSpace(file.Id),
 		google.DriveMetaGoogleMimeType: strings.TrimSpace(file.MimeType),
-		google.DriveMetaOriginalName:   strings.TrimSpace(file.Name),
+		google.DriveMetaOriginalName:   google.SanitizeDrivePathSegment(file.Name),
 	}
 	if file.Version != 0 {
 		meta[google.DriveMetaVersion] = fmt.Sprintf("%d", file.Version)
@@ -1000,7 +1000,7 @@ func ensureDriveParentFolderPlaceholders(ctx context.Context, input ProcessorInp
 		}
 		meta := map[string]string{
 			google.DriveMetaGoogleFileID:   folderID,
-			google.DriveMetaOriginalName:   name,
+			google.DriveMetaOriginalName:   google.SanitizeDrivePathSegment(name),
 			google.DriveMetaIsFolder:       "true",
 			google.DriveMetaGoogleMimeType: "application/vnd.google-apps.folder",
 		}
@@ -1029,7 +1029,7 @@ func writeDriveRemovedTreeAlias(ctx context.Context, input ProcessorInput, task 
 	logicalKey := google.BuildDriveObjectKey(task.LoginId, []string{google.DriveSectionBin}, nil, fileID, name, "application/octet-stream", false, "")
 	meta := map[string]string{
 		google.DriveMetaGoogleFileID: fileID,
-		google.DriveMetaOriginalName: name,
+		google.DriveMetaOriginalName: google.SanitizeDrivePathSegment(name),
 		google.DriveMetaIsAlias:      "true",
 	}
 	if oldKey != "" && oldKey != logicalKey {

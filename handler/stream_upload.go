@@ -74,8 +74,20 @@ func UploadObjectStreamWithMetadataAndSync(
 	userID string,
 	recovery ...*StorxRecovery,
 ) error {
+	return uploadObjectStreamWithMetadataAndSync(ctx, database, accessGrant, bucketName, objectKey, body, meta, userID, storxRecoveryFrom(recovery...), 0)
+}
+
+func uploadObjectStreamWithMetadataAndSync(
+	ctx context.Context,
+	database *db.PostgresDb,
+	accessGrant, bucketName, objectKey string,
+	body io.Reader,
+	meta map[string]string,
+	userID string,
+	rec *StorxRecovery,
+	attempt int,
+) error {
 	bucketName = satellite.BucketForAccess(accessGrant, bucketName)
-	rec := storxRecoveryFrom(recovery...)
 	if err := satellite.UploadObjectFromReaderWithMetadata(ctx, accessGrant, bucketName, objectKey, body, meta); err != nil {
 		uploadErr := fmt.Errorf("failed to upload object to Satellite: %w", err)
 		logger.Error(ctx, "Failed to stream object to Satellite",
@@ -83,16 +95,12 @@ func UploadObjectStreamWithMetadataAndSync(
 			logger.String("object_key", objectKey),
 			logger.ErrorField(err),
 		)
-		if rec != nil && IsStorxUplinkError(uploadErr) {
-			grant, continueOK, recErr := rec.OnStorxError(ctx, uploadErr)
-			if !continueOK {
-				if recErr != nil {
-					return recErr
-				}
-				return uploadErr
-			}
-			return UploadObjectStreamWithMetadataAndSync(ctx, database, grant, bucketName, objectKey, body, meta, userID, rec)
+		// The reader is already consumed, so a retried upload cannot resend the same body.
+		grant, recErr := refreshedStorxGrant(ctx, rec, accessGrant, uploadErr, attempt)
+		if recErr != nil {
+			return recErr
 		}
+		_ = grant
 		return uploadErr
 	}
 

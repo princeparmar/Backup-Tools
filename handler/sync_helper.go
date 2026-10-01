@@ -108,6 +108,26 @@ func deriveType(bucketName string) string {
 	}
 }
 
+// refreshedStorxGrant refreshes a failed grant at most MaxStorxUplinkRecoveriesPerRun times.
+// An empty return with a nil error means the original failure should be returned as-is.
+func refreshedStorxGrant(ctx context.Context, r *StorxRecovery, currentGrant string, cause error, attempt int) (string, error) {
+	if r == nil || !IsStorxUplinkError(cause) || attempt >= MaxStorxUplinkRecoveriesPerRun() {
+		return "", nil
+	}
+	grant, continueOK, recErr := r.OnStorxError(ctx, cause)
+	if !continueOK {
+		if recErr != nil {
+			return "", recErr
+		}
+		return "", nil
+	}
+	grant = strings.TrimSpace(grant)
+	if grant == "" || grant == strings.TrimSpace(currentGrant) {
+		return "", nil
+	}
+	return grant, nil
+}
+
 func storxRecoveryFrom(recovery ...*StorxRecovery) *StorxRecovery {
 	if len(recovery) > 0 {
 		return recovery[0]
@@ -139,8 +159,20 @@ func UploadObjectWithMetadataAndSync(
 	userID string,
 	recovery ...*StorxRecovery,
 ) error {
+	return uploadObjectWithMetadataAndSync(ctx, database, accessGrant, bucketName, objectKey, data, meta, userID, storxRecoveryFrom(recovery...), 0)
+}
+
+func uploadObjectWithMetadataAndSync(
+	ctx context.Context,
+	database *db.PostgresDb,
+	accessGrant, bucketName, objectKey string,
+	data []byte,
+	meta map[string]string,
+	userID string,
+	r *StorxRecovery,
+	attempt int,
+) error {
 	bucketName = satellite.BucketForAccess(accessGrant, bucketName)
-	r := storxRecoveryFrom(recovery...)
 	var err error
 	if len(meta) > 0 {
 		err = satellite.UploadObjectWithMetadata(ctx, accessGrant, bucketName, objectKey, data, meta)
@@ -154,17 +186,14 @@ func UploadObjectWithMetadataAndSync(
 			logger.String("object_key", objectKey),
 			logger.ErrorField(err),
 		)
-		if r != nil && IsStorxUplinkError(uploadErr) {
-			grant, continueOK, recErr := r.OnStorxError(ctx, uploadErr)
-			if !continueOK {
-				if recErr != nil {
-					return recErr
-				}
-				return uploadErr
-			}
-			return UploadObjectWithMetadataAndSync(ctx, database, grant, bucketName, objectKey, data, meta, userID, r)
+		grant, recErr := refreshedStorxGrant(ctx, r, accessGrant, uploadErr, attempt)
+		if recErr != nil {
+			return recErr
 		}
-		return uploadErr
+		if grant == "" {
+			return uploadErr
+		}
+		return uploadObjectWithMetadataAndSync(ctx, database, grant, bucketName, objectKey, data, meta, userID, r, attempt+1)
 	}
 
 	source := deriveSource(bucketName)
@@ -189,8 +218,17 @@ func GetSyncedObjectsWithPrefix(
 	accessGrant, bucketName, prefix, userID, source, objectType string,
 	recovery ...*StorxRecovery,
 ) (map[string]bool, error) {
+	return getSyncedObjectsWithPrefix(ctx, database, accessGrant, bucketName, prefix, userID, source, objectType, storxRecoveryFrom(recovery...), 0)
+}
+
+func getSyncedObjectsWithPrefix(
+	ctx context.Context,
+	database *db.PostgresDb,
+	accessGrant, bucketName, prefix, userID, source, objectType string,
+	r *StorxRecovery,
+	attempt int,
+) (map[string]bool, error) {
 	bucketName = satellite.BucketForAccess(accessGrant, bucketName)
-	r := storxRecoveryFrom(recovery...)
 
 	// External gateway S3 tokens are not uplink access grants — skip EnsureBucket.
 	if _, ok := satellite.ParseGatewayS3Token(accessGrant); ok {
@@ -200,33 +238,27 @@ func GetSyncedObjectsWithPrefix(
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
 		parseErr := fmt.Errorf("parse access grant: %w", err)
-		if r != nil && IsStorxUplinkError(parseErr) {
-			grant, continueOK, recErr := r.OnStorxError(ctx, parseErr)
-			if !continueOK {
-				if recErr != nil {
-					return nil, recErr
-				}
-				return nil, parseErr
-			}
-			return GetSyncedObjectsWithPrefix(ctx, database, grant, bucketName, prefix, userID, source, objectType, r)
+		grant, recErr := refreshedStorxGrant(ctx, r, accessGrant, parseErr, attempt)
+		if recErr != nil {
+			return nil, recErr
 		}
-		return nil, parseErr
+		if grant == "" {
+			return nil, parseErr
+		}
+		return getSyncedObjectsWithPrefix(ctx, database, grant, bucketName, prefix, userID, source, objectType, r, attempt+1)
 	}
 
 	project, err := uplink.OpenProject(ctx, access)
 	if err != nil {
 		openErr := fmt.Errorf("open project: %w", err)
-		if r != nil && IsStorxUplinkError(openErr) {
-			grant, continueOK, recErr := r.OnStorxError(ctx, openErr)
-			if !continueOK {
-				if recErr != nil {
-					return nil, recErr
-				}
-				return nil, openErr
-			}
-			return GetSyncedObjectsWithPrefix(ctx, database, grant, bucketName, prefix, userID, source, objectType, r)
+		grant, recErr := refreshedStorxGrant(ctx, r, accessGrant, openErr, attempt)
+		if recErr != nil {
+			return nil, recErr
 		}
-		return nil, openErr
+		if grant == "" {
+			return nil, openErr
+		}
+		return getSyncedObjectsWithPrefix(ctx, database, grant, bucketName, prefix, userID, source, objectType, r, attempt+1)
 	}
 	defer project.Close()
 
@@ -235,15 +267,15 @@ func GetSyncedObjectsWithPrefix(
 		_, err = project.CreateBucket(ctx, bucketName)
 		if err != nil {
 			bucketErr := fmt.Errorf("could not create bucket: %w", err)
-			if r != nil && IsStorxUplinkError(bucketErr) {
-				grant, continueOK, recErr := r.OnStorxError(ctx, bucketErr)
-				if !continueOK {
-					if recErr != nil {
-						return nil, recErr
-					}
+			if IsStorxUplinkError(bucketErr) {
+				grant, recErr := refreshedStorxGrant(ctx, r, accessGrant, bucketErr, attempt)
+				if recErr != nil {
+					return nil, recErr
+				}
+				if grant == "" {
 					return nil, bucketErr
 				}
-				return GetSyncedObjectsWithPrefix(ctx, database, grant, bucketName, prefix, userID, source, objectType, r)
+				return getSyncedObjectsWithPrefix(ctx, database, grant, bucketName, prefix, userID, source, objectType, r, attempt+1)
 			}
 			logger.Warn(ctx, "Failed to create bucket, will be created on first upload if needed",
 				logger.String("bucket", bucketName),

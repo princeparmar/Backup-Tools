@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
@@ -2116,7 +2117,15 @@ type DriveCronBackupMeta struct {
 }
 
 // SanitizeDrivePathSegment makes file/folder names safe for vault object keys.
+// macOS screenshot names use U+202F before "PM". That is not a normal space, and
+// the gateway signature then does not match. Only Drive names are normalized.
 func SanitizeDrivePathSegment(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r == '\uFEFF' || unicode.Is(unicode.Zs, r) || r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
 	s = strings.TrimSpace(s)
 	s = strings.ReplaceAll(s, "/", "_")
 	s = strings.ReplaceAll(s, "\\", "_")
