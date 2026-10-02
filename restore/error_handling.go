@@ -6,6 +6,7 @@ import (
 
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
+	"github.com/StorX2-0/Backup-Tools/pkg/quota"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	storxrefresh "github.com/StorX2-0/Backup-Tools/storx"
 )
@@ -48,6 +49,13 @@ func classifyRestoreError(method, loginID string, processErr error) restoreError
 			Kind:        restoreKindStorxRefreshLimit,
 			JobMessage:  restoreJobStorxRefreshLimit,
 			TaskMessage: restoreTaskStorxRefreshLimit,
+		}
+
+	case quota.IsBandwidthQuota(processErr):
+		return restoreErrorOutcome{
+			Kind:        restoreKindGeneric,
+			JobMessage:  processErr.Error(),
+			TaskMessage: processErr.Error(),
 		}
 
 	case storxrefresh.IsRefreshFailedError(processErr):

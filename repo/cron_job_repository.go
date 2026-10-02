@@ -100,6 +100,15 @@ type CronJobListingDB struct {
 	FailurePeriods uint `json:"failure_periods" gorm:"column:failure_periods;default:0"`
 	// StorxRefreshFailures counts consecutive Satellite storx refresh failures; reset on successful refresh.
 	StorxRefreshFailures uint `json:"storx_refresh_failures" gorm:"column:storx_refresh_failures;default:0"`
+
+	// FailureCode is STORAGE_QUOTA / BANDWIDTH_QUOTA (or empty) for UI CTAs.
+	FailureCode string `json:"failure_code,omitempty" gorm:"column:failure_code;type:varchar(64);default:''"`
+	// EstimateBytes is the last pre-check estimate (bytes) when a quota failure was recorded.
+	EstimateBytes int64 `json:"estimate_bytes,omitempty" gorm:"column:estimate_bytes;default:0"`
+	// RemainingBytes is remaining quota at the last quota failure.
+	RemainingBytes int64 `json:"remaining_bytes,omitempty" gorm:"column:remaining_bytes;default:0"`
+	// QuotaKind is "storage" or "bandwidth" when FailureCode is set.
+	QuotaKind string `json:"quota_kind,omitempty" gorm:"column:quota_kind;type:varchar(32);default:''"`
 }
 
 // TaskMemory represents the memory state of a task
@@ -116,7 +125,7 @@ type TaskMemory struct {
 	DatabaseSyncComplete bool `json:"database_sync_complete"`
 
 	// Drive incremental sync state (ID-based autosync architecture)
-	DrivePageToken    *string `json:"drive_page_token,omitempty"`
+	DrivePageToken    *string `json:"drive_page_token,omitempty"` // legacy single token; migrated into DriveUserPageToken
 	DriveBaselineDone bool    `json:"drive_baseline_done,omitempty"`
 
 	// OneDrive incremental sync state (Graph delta; do not reuse DrivePageToken)
@@ -134,9 +143,13 @@ type TaskMemory struct {
 	OutlookMailFolderDeltas map[string]string `json:"outlook_mail_folder_deltas,omitempty"`
 
 	// Deprecated: legacy exchange_* task_memory keys (read-only fallback in outlook processor).
-	ExchangeDeltaLink    *string `json:"exchange_delta_link,omitempty"`
-	ExchangeBaselineDone bool    `json:"exchange_baseline_done,omitempty"`
+	ExchangeDeltaLink    *string           `json:"exchange_delta_link,omitempty"`
+	ExchangeBaselineDone bool              `json:"exchange_baseline_done,omitempty"`
 	ExchangeFolderDeltas map[string]string `json:"exchange_folder_deltas,omitempty"`
+	// DriveUserPageToken is the USER change-log token (My Drive / shared-with-me).
+	DriveUserPageToken *string `json:"drive_user_page_token,omitempty"`
+	// DriveSharedDrives holds per-Shared-Drive baseline + change tokens.
+	DriveSharedDrives map[string]DriveSharedDriveState `json:"drive_shared_drives,omitempty"`
 
 	// Photos incremental sync state (ID-based autosync architecture)
 	PhotosBaselineDone bool `json:"photos_baseline_done,omitempty"`
@@ -192,6 +205,12 @@ type GroupsDriveSyncState struct {
 type CalendarCalendarState struct {
 	BaselineDone bool   `json:"baseline_done,omitempty"`
 	SyncToken    string `json:"sync_token,omitempty"`
+}
+
+// DriveSharedDriveState holds baseline + change token for one Shared Drive.
+type DriveSharedDriveState struct {
+	BaselineDone bool   `json:"baseline_done,omitempty"`
+	PageToken    string `json:"page_token,omitempty"`
 }
 
 // Scan implements the sql.Scanner interface
@@ -553,6 +572,13 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 			)
 			AND c2.deleted_at IS NULL
 			AND COALESCE(c2.placeholder, false) = false
+			AND NOT EXISTS (
+				SELECT 1
+				FROM account_tombstone_dbs tomb
+				WHERE tomb.satellite_user_id = c2.user_id
+				AND tomb.deleted_at IS NULL
+				AND tomb.status = ?
+			)
 			LIMIT 10
 		)
 		FOR UPDATE OF c
@@ -566,12 +592,16 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 	threeHourStart := PeriodStartForInterval("3h", now, location)
 	twelveHourStart := PeriodStartForInterval("12h", now, location)
 
+	// Parameter order: message, status_not_in_1, status_not_in_2,
+	// daily, weekly, monthly, 3h, 12h period starts, daily (ELSE),
+	// weekday, day, task_running, task_pushed, tombstone_status
 	rawQuery := tx.Raw(sqlQuery,
 		JobMessagePushToQueue,
 		JobStatusInQueue, JobStatusInProgress,
 		dailyStart, weeklyStart, monthlyStart, threeHourStart, twelveHourStart, dailyStart,
 		now.Weekday().String(), fmt.Sprint(now.Day()),
-		TaskStatusRunning, TaskStatusPushed)
+		TaskStatusRunning, TaskStatusPushed,
+		AccountTombstoneStatusPendingDelete)
 
 	scanResult := rawQuery.Scan(&res)
 	if scanResult.Error != nil {

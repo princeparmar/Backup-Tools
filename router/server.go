@@ -56,6 +56,13 @@ func StartServer(db *db.PostgresDb, address string) {
 	e.GET("/google-auth", googlepack.Autentificateg)
 	// Microsoft restore auth for all Graph services (mirrors /google-auth): restore scopes → exchange Graph token → JWT for satellite-to-*.
 	e.POST("/microsoft-auth", outlookpack.Authenticate)
+
+	// Satellite → Backup-Tools account deletion lifecycle (X-API-Key = BACKUP_TOOLS_API_KEY).
+	internalAccount := e.Group("/internal/account")
+	internalAccount.POST("/pending-delete", handler.HandleAccountPendingDelete)
+	internalAccount.POST("/resume", handler.HandleAccountResume)
+	internalAccount.POST("/purge", handler.HandleAccountPurge)
+
 	// e.POST("/auth/google/connect", handler.HandleGoogleConnect)
 	e.GET("/google/gmail/corporate/domain-users", handler.HandleGmailCorporateDomainUsers)
 	// Microsoft OAuth login moved to Satellite.
@@ -82,6 +89,7 @@ func StartServer(db *db.PostgresDb, address string) {
 
 	job := autoSync.Group("/job")
 	job.GET("/services", handler.HandleAutomaticSyncServicesForUser)
+	job.POST("/services-quota-check", handler.HandleAutomaticSyncServicesQuotaPrecheck)
 	job.GET("/", handler.HandleAutomaticSyncListForUser)
 	job.POST("", handler.HandleAutomaticSyncCreate)
 	job.GET("/interval", handler.HandleIntervalOnConfig)
@@ -105,6 +113,7 @@ func StartServer(db *db.PostgresDb, address string) {
 
 	task := autoSync.Group("/task")
 	task.POST("/:job_id/backup-now", handler.HandleAutomaticSyncBackupNow)
+	task.POST("/:job_id/quota-check", handler.HandleAutomaticSyncQuotaCheck)
 	task.POST("/:job_id", handler.HandleAutomaticSyncCreateTask)
 	task.GET("/:job_id", handler.HandleAutomaticSyncTaskList)
 

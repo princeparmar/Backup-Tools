@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -510,7 +511,7 @@ func HandleRestorePrepare(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	userID, err := satelliteUserIDFromRequest(c)
+	userID, err := restoreJobUserID(c)
 	if err != nil {
 		return err
 	}
@@ -560,8 +561,11 @@ func HandleRestoreAll(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	userID, err := satelliteUserIDFromRequest(c)
+	userID, err := restoreJobUserID(c)
 	if err != nil {
+		return err
+	}
+	if err := RejectIfAccountPendingDelete(c, userID); err != nil {
 		return err
 	}
 
@@ -619,12 +623,27 @@ func HandleRestoreAll(c echo.Context) error {
 			logger.ErrorField(err))
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
 	}
+	sessionID, sessionErr := satelliteUserIDFromRequest(c)
+	if sessionErr == nil && sessionID != "" && sessionID != userID {
+		job.RestoreTag = "invite_restored"
+		_ = database.RestoreJobRepo.UpdateJob(job.ID, map[string]interface{}{"restore_tag": job.RestoreTag})
+	}
 
 	logger.Info(ctx, "Restore job queued",
 		logger.Int("job_id", int(job.ID)),
 		logger.String("service", req.Service),
 		logger.String("login_id", req.LoginID),
 		logger.String("method", job.Method))
+
+	// Kick the worker immediately so restore does not wait for the next cron tick.
+	go func() {
+		bg := context.Background()
+		if err := restore.ProcessRestoreJobs(bg, database); err != nil {
+			logger.Warn(bg, "Immediate restore worker run failed",
+				logger.Int("job_id", int(job.ID)),
+				logger.ErrorField(err))
+		}
+	}()
 
 	return c.JSON(http.StatusAccepted, map[string]interface{}{
 		"job_id":        job.ID,
@@ -642,7 +661,7 @@ func HandleGetRestoreJob(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	userID, err := satelliteUserIDFromRequest(c)
+	userID, err := restoreJobUserID(c)
 	if err != nil {
 		return err
 	}
@@ -675,6 +694,7 @@ type RestoreJobListResponse struct {
 	MessageStatus string                 `json:"message_status"`
 	AccountType   string                 `json:"account_type"`
 	AuthMode      string                 `json:"auth_mode"`
+	RestoreTag    string                 `json:"restore_tag,omitempty"`
 	InputData     map[string]interface{} `json:"input_data"`
 	CreatedAt     time.Time              `json:"created_at"`
 	UpdatedAt     time.Time              `json:"updated_at"`
@@ -707,7 +727,7 @@ func HandleListRestoreJobs(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	userID, err := satelliteUserIDFromRequest(c)
+	userID, err := restoreJobUserID(c)
 	if err != nil {
 		return err
 	}
@@ -744,7 +764,7 @@ func HandleRestoreLive(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	userID, err := satelliteUserIDFromRequest(c)
+	userID, err := restoreJobUserID(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
 			"message": "not able to authenticate user",
@@ -796,6 +816,7 @@ func toRestoreJobListResponse(store *db.PostgresDb, job *repo.RestoreJobListingD
 		MessageStatus: repo.EffectiveRestoreMessageStatus(job),
 		AccountType:   job.AccountType,
 		AuthMode:      restore.AuthModeForJob(store, job),
+		RestoreTag:    job.RestoreTag,
 		InputData:     restoreJobInputData(job),
 		CreatedAt:     job.CreatedAt,
 		UpdatedAt:     job.UpdatedAt,

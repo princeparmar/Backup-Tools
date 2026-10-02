@@ -98,11 +98,11 @@ func (s *GmailService) UploadMessagesToSatellite(ctx context.Context, database *
 					return nil
 				}
 
-				messagePath := s.userEmail + "/" + utils.GenerateTitleFromGmailMessage(msg)
+				messagePath := google.GmailObjectKey(s.userEmail, msg)
 
 				// Use helper function to upload and sync
-				// Source and Type are automatically derived from bucket name ("gmail" -> source: "google", type: "gmail")
-				err = UploadObjectAndSync(ctx, database, s.accessGrant, "gmail", messagePath, b, s.userEmail)
+				// Source and Type are automatically derived from bucket name ("cyberls-gmail" -> source: "google", type: "gmail")
+				err = UploadObjectAndSync(ctx, database, s.accessGrant, satellite.ReserveBucket_Gmail, messagePath, b, s.userEmail)
 				if err != nil {
 					logger.Info(ctx, "error uploading to satellite", logger.ErrorField(err))
 					failedIDs.Add(id)
@@ -404,8 +404,7 @@ func HandleGmailGetThreadsIDsControlled(c echo.Context) error {
 	}
 
 	for _, message := range res.Messages {
-		messagePath := userDetails.Email + "/" + utils.GenerateTitleFromGmailMessage(message)
-		synced := syncedMap[messagePath]
+		synced := google.IsGmailMessageSynced(syncedMap, userDetails.Email, message)
 		threads = append(threads, MessageListJSON{Message: *message, Synced: synced})
 	}
 	nextPageToken = res.NextPageToken

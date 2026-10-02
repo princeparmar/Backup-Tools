@@ -74,11 +74,17 @@ const (
 	ReserveBucket_Photos            = "google-photos"
 	ReserveBucket_Contacts          = "google-contacts"
 	ReserveBucket_Calendar          = "google-calendar"
-	ReserveBucket_Dropbox    = "dropbox"
-	ReserveBucket_S3         = "aws-s3"
-	ReserveBucket_Github     = "github"
-	ReserveBucket_Shopify    = "shopify"
-	RestoreBucket_Quickbooks = "quickbooks"
+	ReserveBucket_Dropbox           = "dropbox"
+	ReserveBucket_S3                = "aws-s3"
+	ReserveBucket_Github            = "github"
+	ReserveBucket_Shopify           = "shopify"
+	RestoreBucket_Quickbooks        = "quickbooks"
+
+	// External S3 (gateway) vault names — only used when storx_token is gateway_s3.
+	ExternalS3Bucket_Gmail    = "cyberls-gmail"
+	ExternalS3Bucket_Drive    = "cyberls-drive"
+	ExternalS3Bucket_Contacts = "cyberls-contacts"
+	ExternalS3Bucket_Calendar = "cyberls-calendar"
 )
 
 var StorxSatelliteService string
@@ -157,27 +163,105 @@ func UploadObject(ctx context.Context, accessGrant, bucketName, objectKey string
 
 // UploadObjectFromReader streams content to satellite storage without loading the full object into memory.
 func UploadObjectFromReader(ctx context.Context, accessGrant, bucketName, objectKey string, r io.Reader) error {
-	upload, err := GetUploader(ctx, accessGrant, bucketName, objectKey)
-	if err != nil {
-		return err
+	return UploadObjectFromReaderWithMetadata(ctx, accessGrant, bucketName, objectKey, r, nil)
+}
+
+// UploadObjectWithMetadata uploads bytes and sets StorX custom metadata before commit.
+func UploadObjectWithMetadata(ctx context.Context, accessGrant, bucketName, objectKey string, data []byte, meta map[string]string) error {
+	return UploadObjectFromReaderWithMetadata(ctx, accessGrant, bucketName, objectKey, bytes.NewReader(data), meta)
+}
+
+// UploadObjectFromReaderWithMetadata streams content and optionally sets custom metadata before commit.
+func UploadObjectFromReaderWithMetadata(ctx context.Context, accessGrant, bucketName, objectKey string, r io.Reader, meta map[string]string) error {
+	bucketName = BucketForAccess(accessGrant, bucketName)
+	if tok, ok := ParseGatewayS3Token(accessGrant); ok {
+		return uploadViaGatewayS3(ctx, tok, bucketName, objectKey, r, meta)
 	}
 
-	_, err = io.Copy(upload, r)
+	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
+		return fmt.Errorf("parse access grant: %w", err)
+	}
+	project, err := uplink.OpenProject(ctx, access)
+	if err != nil {
+		return fmt.Errorf("open project: %w", err)
+	}
+	defer project.Close()
+
+	if _, err = project.EnsureBucket(ctx, bucketName); err != nil {
+		if _, err = project.CreateBucket(ctx, bucketName); err != nil {
+			return fmt.Errorf("create bucket: %w", err)
+		}
+	}
+
+	upload, err := project.UploadObject(ctx, bucketName, objectKey, nil)
+	if err != nil {
+		return fmt.Errorf("initiate upload: %w", err)
+	}
+
+	if _, err = io.Copy(upload, r); err != nil {
 		_ = upload.Abort()
 		return fmt.Errorf("upload data: %w", err)
 	}
 
-	err = upload.Commit()
-	if err != nil {
-		return fmt.Errorf("commit object: %w", err)
+	if len(meta) > 0 {
+		if err = upload.SetCustomMetadata(ctx, uplink.CustomMetadata(meta)); err != nil {
+			_ = upload.Abort()
+			return fmt.Errorf("set custom metadata: %w", err)
+		}
 	}
 
+	if err = upload.Commit(); err != nil {
+		return fmt.Errorf("commit object: %w", err)
+	}
 	return nil
+}
+
+// StatObject returns object info including custom metadata (Custom map).
+func StatObject(ctx context.Context, accessGrant, bucketName, objectKey string) (*uplink.Object, error) {
+	bucketName = BucketForAccess(accessGrant, bucketName)
+	if tok, ok := ParseGatewayS3Token(accessGrant); ok {
+		meta, size, err := headViaGatewayS3(ctx, tok, bucketName, objectKey)
+		if err != nil {
+			return nil, err
+		}
+		return &uplink.Object{
+			Key: objectKey,
+			System: uplink.SystemMetadata{
+				ContentLength: size,
+			},
+			Custom: uplink.CustomMetadata(meta),
+		}, nil
+	}
+
+	access, err := uplink.ParseAccess(accessGrant)
+	if err != nil {
+		return nil, fmt.Errorf("parse access grant: %w", err)
+	}
+	project, err := uplink.OpenProject(ctx, access)
+	if err != nil {
+		return nil, fmt.Errorf("open project: %w", err)
+	}
+	defer project.Close()
+
+	if _, err = project.EnsureBucket(ctx, bucketName); err != nil {
+		return nil, fmt.Errorf("ensure bucket: %w", err)
+	}
+
+	obj, err := project.StatObject(ctx, bucketName, objectKey)
+	if err != nil {
+		return nil, fmt.Errorf("stat object: %w", err)
+	}
+	return obj, nil
 }
 
 // DownloadObjectTo streams an object from satellite storage into w.
 func DownloadObjectTo(ctx context.Context, accessGrant, bucketName, objectKey string, w io.Writer) error {
+	bucketName = BucketForAccess(accessGrant, bucketName)
+	if tok, ok := ParseGatewayS3Token(accessGrant); ok {
+		return downloadViaGatewayS3(ctx, tok, bucketName, objectKey, w)
+	}
+
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
 		return fmt.Errorf("parse access grant: %w", err)
@@ -223,6 +307,11 @@ func ListObjects(ctx context.Context, accessGrant, bucketName string) (map[strin
 
 // ListObjectsWithPrefix lists objects with a specific prefix
 func ListObjectsWithPrefix(ctx context.Context, accessGrant, bucketName, prefix string) (map[string]bool, error) {
+	bucketName = BucketForAccess(accessGrant, bucketName)
+	if tok, ok := ParseGatewayS3Token(accessGrant); ok {
+		return listViaGatewayS3(ctx, tok, bucketName, prefix)
+	}
+
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
 		return nil, fmt.Errorf("parse access grant: %w", err)
@@ -276,6 +365,23 @@ func ListObjectsRecursive(ctx context.Context, accessGrant, bucketName string) (
 
 // listObjectsWithOptions helper function for listing objects with options
 func listObjectsWithOptions(ctx context.Context, accessGrant, bucketName string, options *uplink.ListObjectsOptions) ([]uplink.Object, error) {
+	bucketName = BucketForAccess(accessGrant, bucketName)
+	if tok, ok := ParseGatewayS3Token(accessGrant); ok {
+		prefix := ""
+		if options != nil {
+			prefix = options.Prefix
+		}
+		keys, err := listViaGatewayS3(ctx, tok, bucketName, prefix)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]uplink.Object, 0, len(keys))
+		for k := range keys {
+			out = append(out, uplink.Object{Key: k})
+		}
+		return out, nil
+	}
+
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
 		return nil, fmt.Errorf("parse access grant: %w", err)
@@ -308,6 +414,7 @@ func listObjectsWithOptions(ctx context.Context, accessGrant, bucketName string,
 
 // DeleteObject deletes an object from satellite storage
 func DeleteObject(ctx context.Context, accessGrant, bucketName, objectKey string) error {
+	bucketName = BucketForAccess(accessGrant, bucketName)
 	access, err := uplink.ParseAccess(accessGrant)
 	if err != nil {
 		return fmt.Errorf("parse access grant: %w", err)
@@ -385,6 +492,11 @@ func GetUserdetails(c echo.Context) (string, error) {
 
 // GetProjectIDFromAccessGrant extracts project_id from access grant
 func GetProjectIDFromAccessGrant(ctx context.Context, accessGrant string) (string, error) {
+	if _, ok := ParseGatewayS3Token(accessGrant); ok {
+		// Gateway S3 tokens are not StorX access grants — project_id comes from the job/credential.
+		return "", nil
+	}
+
 	if StorxSatelliteService == "" {
 		return "", nil
 	}
@@ -512,6 +624,93 @@ func RefreshStorxToken(ctx context.Context, userID, projectID, email string) (st
 		return "", fmt.Errorf("storx refresh returned empty access_grant")
 	}
 	return grant, nil
+}
+
+// ProjectUsageLimits is the Redis-backed usage snapshot from Satellite.
+type ProjectUsageLimits struct {
+	StorageLimit   int64 `json:"storageLimit"`
+	StorageUsed    int64 `json:"storageUsed"`
+	BandwidthLimit int64 `json:"bandwidthLimit"`
+	BandwidthUsed  int64 `json:"bandwidthUsed"`
+	ObjectCount    int64 `json:"objectCount"`
+	SegmentCount   int64 `json:"segmentCount"`
+}
+
+// GetProjectUsageLimits fetches storage/bandwidth used+limit for Backup-Tools pre-checks.
+// Uses POST /api/v0/internal/project-usage-limits (X-API-Key). Does not write Redis.
+func GetProjectUsageLimits(ctx context.Context, userID, projectID string) (*ProjectUsageLimits, error) {
+	userID = strings.TrimSpace(userID)
+	projectID = strings.TrimSpace(projectID)
+	if userID == "" || projectID == "" {
+		return nil, fmt.Errorf("user_id and project_id are required for usage-limits")
+	}
+	if StorxSatelliteService == "" {
+		return nil, fmt.Errorf("STORX_SATELLITE_SERVICE not set")
+	}
+	apiKey := utils.GetEnvWithKey("BACKUP_TOOLS_API_KEY")
+	if apiKey == "" {
+		return nil, fmt.Errorf("BACKUP_TOOLS_API_KEY not set")
+	}
+
+	payload := struct {
+		UserID    string `json:"user_id"`
+		ProjectID string `json:"project_id"`
+	}{
+		UserID:    userID,
+		ProjectID: projectID,
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal usage-limits payload: %w", err)
+	}
+
+	url := strings.TrimSuffix(StorxSatelliteService, "/") + "/api/v0/internal/project-usage-limits"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return nil, fmt.Errorf("create usage-limits request: %w", err)
+	}
+	req.Header.Set("accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("X-User-Id", userID)
+
+	res, err := satelliteHTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("usage-limits request: %w", err)
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read usage-limits response: %w", err)
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return nil, fmt.Errorf("usage-limits status %d: %s", res.StatusCode, string(body))
+	}
+
+	var response struct {
+		StorageLimit   int64  `json:"storageLimit"`
+		StorageUsed    int64  `json:"storageUsed"`
+		BandwidthLimit int64  `json:"bandwidthLimit"`
+		BandwidthUsed  int64  `json:"bandwidthUsed"`
+		ObjectCount    int64  `json:"objectCount"`
+		SegmentCount   int64  `json:"segmentCount"`
+		Error          string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, fmt.Errorf("parse usage-limits response: %w", err)
+	}
+	if response.Error != "" {
+		return nil, fmt.Errorf("usage-limits: %s", response.Error)
+	}
+	return &ProjectUsageLimits{
+		StorageLimit:   response.StorageLimit,
+		StorageUsed:    response.StorageUsed,
+		BandwidthLimit: response.BandwidthLimit,
+		BandwidthUsed:  response.BandwidthUsed,
+		ObjectCount:    response.ObjectCount,
+		SegmentCount:   response.SegmentCount,
+	}, nil
 }
 
 // ClearGoogleRefreshToken tells Satellite to clear the stored Google OAuth refresh token for a user + mailbox email.

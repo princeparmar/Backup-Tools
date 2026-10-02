@@ -2,6 +2,7 @@ package crons
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,12 +12,17 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
+	"github.com/StorX2-0/Backup-Tools/pkg/quota"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	tasks "github.com/StorX2-0/Backup-Tools/tasks"
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
 )
+
+// errJobDeactivated stops an in-flight backup when the user turns that job off,
+// so the worker can start the next pushed task (Contacts, Calendar, …).
+var errJobDeactivated = errors.New("job deactivated")
 
 type ProcessorInput struct {
 	InputData     *database.DbJson[map[string]interface{}]
@@ -290,6 +296,20 @@ func (a *AutosyncManager) processTask(ctx context.Context, task *repo.TaskListin
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
+	if a.store.AccountLifecycleRepo != nil {
+		pending, pendErr := a.store.AccountLifecycleRepo.IsPendingDelete(job.UserID)
+		if pendErr != nil {
+			return pendErr
+		}
+		if pending {
+			logger.Info(ctx, "Skipping task; account pending deletion",
+				logger.String("user_id", job.UserID),
+				logger.Int("job_id", int(job.ID)),
+			)
+			return nil
+		}
+	}
+
 	processor, ok := processorMap[job.Method]
 	if !ok {
 		return fmt.Errorf("processor for method '%s' not found", job.Method)
@@ -323,6 +343,14 @@ func (a *AutosyncManager) processTask(ctx context.Context, task *repo.TaskListin
 			}
 			if currentTask.Status != repo.TaskStatusRunning {
 				return fmt.Errorf("task status changed to '%s', stopping execution", currentTask.Status)
+			}
+			currentJob, jobErr := a.store.CronJobRepo.GetCronJobByID(job.ID)
+			if jobErr == nil && currentJob != nil && !currentJob.Active {
+				_ = a.store.TaskRepo.UpdateTaskByID(task.ID, map[string]interface{}{
+					"status":  "cancelled",
+					"message": "Stopped because automatic backup was deactivated",
+				})
+				return errJobDeactivated
 			}
 			if hbErr := a.store.TaskRepo.UpdateHeartBeatForTask(task.ID); hbErr != nil {
 				return fmt.Errorf("failed to update heartbeat: %w", hbErr)
@@ -362,10 +390,14 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 	// Initialize default values for success case
 	task.Status = repo.TaskStatusSuccess
 	onDemand := repo.IsOnDemandTask(task)
-	if onDemand {
-		task.Message = "On-demand backup completed successfully"
+	partialMsg := ""
+	if ProcessorLeftWarningOutcome(job) {
+		partialMsg = strings.TrimSpace(job.Message)
+	}
+	if partialMsg != "" {
+		task.Message = partialMsg
 	} else {
-		task.Message = "Automatic backup completed successfully"
+		task.Message = BackupSuccessMessage(onDemand)
 	}
 
 	if task.StartTime != nil {
@@ -373,12 +405,13 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 	}
 
 	if job != nil {
-		if onDemand {
-			job.Message = "On-demand backup completed successfully"
+		if partialMsg != "" {
+			job.Message = partialMsg
+			job.MessageStatus = repo.JobMessageStatusWarning
 		} else {
-			job.Message = "Automatic backup completed successfully"
+			job.Message = BackupSuccessMessage(onDemand)
+			job.MessageStatus = repo.JobMessageStatusInfo
 		}
-		job.MessageStatus = repo.JobMessageStatusInfo
 		if !onDemand {
 			now := time.Now()
 			job.LastRun = &now
@@ -386,6 +419,22 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 	}
 
 	// Handle error case
+	if errors.Is(processErr, errJobDeactivated) {
+		task.Status = "cancelled"
+		task.Message = "Stopped because automatic backup was deactivated"
+		if task.StartTime != nil {
+			task.Execution = uint64(time.Since(*task.StartTime).Seconds())
+		}
+		if err := a.store.TaskRepo.UpdateTaskByID(task.ID, map[string]interface{}{
+			"status":    task.Status,
+			"message":   task.Message,
+			"execution": task.Execution,
+		}); err != nil {
+			return fmt.Errorf("failed to save task: %w", err)
+		}
+		return nil
+	}
+
 	if processErr != nil {
 		task.Status = repo.TaskStatusFailed
 		task.RetryCount++
@@ -434,7 +483,7 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 			task.Message = processErr.Error()
 		}
 	} else {
-		// Handle success case - send notification
+		// Handle success case - send notification (include partial/skip wording when present)
 		if job != nil {
 			job.FailurePeriods = 0
 			priority := "normal"
@@ -447,7 +496,15 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 				"name":      job.Name,
 				"execution": task.Execution,
 			}
-			satellite.SendNotificationAsync(context.Background(), job.UserID, "Automatic Backup Completed", fmt.Sprintf("Automatic backup for %s completed successfully in %d seconds", job.Name, task.Execution), &priority, data, nil)
+			notifyTitle := "Automatic Backup Completed"
+			notifyBody := fmt.Sprintf("Automatic backup for %s completed successfully in %d seconds", job.Name, task.Execution)
+			if job.MessageStatus == repo.JobMessageStatusWarning && strings.TrimSpace(job.Message) != "" {
+				notifyTitle = "Automatic Backup Completed with Warnings"
+				notifyBody = fmt.Sprintf("%s (%s)", job.Message, job.Name)
+				data["event"] = "cron_completed_with_warnings"
+				data["level"] = 3
+			}
+			satellite.SendNotificationAsync(context.Background(), job.UserID, notifyTitle, notifyBody, &priority, data, nil)
 		}
 	}
 
@@ -597,23 +654,39 @@ func (a *AutosyncManager) deactivatePersonalGmailAuth(job *repo.CronJobListingDB
 	task.Message = cronTaskPersonalGoogleAuthDeactivated
 }
 
-func (a *AutosyncManager) deactivateAllJobsForStorageLimit(job *repo.CronJobListingDB, task *repo.TaskListingDB) {
+func isStorageQuotaPrecheck(err error) bool {
+	sq := asErrStorageQuota(err)
+	return sq != nil && !sq.MidRun
+}
+
+// failJobForStorageQuotaPrecheck deactivates only this job (per-service independence). Does not clear Redis.
+func (a *AutosyncManager) failJobForStorageQuotaPrecheck(job *repo.CronJobListingDB, task *repo.TaskListingDB, processErr error) {
 	if job == nil {
 		return
 	}
-	if err := a.store.CronJobRepo.DeactivateAllActiveJobsForUser(job.UserID, cronJobStorxStorageLimitFinal); err != nil {
-		logger.Warn(context.Background(), "Failed to deactivate jobs after storage limit exceeded",
-			logger.String("user_id", job.UserID),
-			logger.Int("job_id", int(job.ID)),
-			logger.ErrorField(err))
+	estimate, remaining := int64(0), int64(-1)
+	if sq := asErrStorageQuota(processErr); sq != nil {
+		estimate, remaining = sq.EstimateBytes, sq.RemainingBytes
 	}
-	job.Active = false
-	job.AutoDeactivated = true
-	job.Message = cronJobStorxStorageLimitFinal
+	deactivateJobStorageQuota(a.store, job, cronJobStorxStorageQuotaPrecheck, repo.JobMessageStatusError, estimate, remaining)
+	if task != nil {
+		task.Message = cronTaskStorxStorageQuotaPrecheck
+		task.RetryCount = repo.MaxRetryCount
+	}
+}
+
+// failJobForStorageQuotaMidRun pauses this job on mid-run limit; keeps uploaded data and Redis.
+// Sibling services stay active and will be gated independently by their own pre-checks.
+func (a *AutosyncManager) failJobForStorageQuotaMidRun(job *repo.CronJobListingDB, task *repo.TaskListingDB, processErr error) {
+	if job == nil {
+		return
+	}
+	deactivateJobStorageQuota(a.store, job, cronJobStorxStorageLimitFinal, repo.JobMessageStatusError, 0, -1)
 	if task != nil {
 		task.Message = cronTaskStorxStorageLimitDeactivated
 		task.RetryCount = repo.MaxRetryCount
 	}
+	_ = processErr
 }
 
 func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.CronJobListingDB, task *repo.TaskListingDB) string {
@@ -621,7 +694,10 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.Cron
 	errLower := strings.ToLower(errMsg)
 
 	switch {
-	case handler.IsStorxStorageLimitError(processErr):
+	case isStorageQuotaPrecheck(processErr):
+		return cronEmailStorxStorageQuotaPrecheck
+
+	case handler.IsStorxStorageLimitError(processErr) || quota.IsStorageQuota(processErr):
 		return cronEmailStorxStorageLimitFinal
 
 	case handler.IsStorxSatelliteRefreshError(processErr):
@@ -678,8 +754,11 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 	errLower := strings.ToLower(errMsg)
 
 	switch {
-	case handler.IsStorxStorageLimitError(processErr):
-		a.deactivateAllJobsForStorageLimit(job, task)
+	case isStorageQuotaPrecheck(processErr):
+		a.failJobForStorageQuotaPrecheck(job, task, processErr)
+
+	case handler.IsStorxStorageLimitError(processErr) || quota.IsStorageQuota(processErr):
+		a.failJobForStorageQuotaMidRun(job, task, processErr)
 
 	case handler.IsStorxSatelliteRefreshError(processErr):
 		job.Message = cronJobStorxSatelliteRefreshFinal

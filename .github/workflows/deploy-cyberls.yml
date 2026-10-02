@@ -1,4 +1,4 @@
-name: Deploy to CyberLS Production
+name: Deploy to CyberLS
 
 on:
   push:
@@ -11,48 +11,102 @@ env:
   BUILD_DIR: 'D:\deployment'
   DEPLOY_DIR: 'D:\bin'
   SERVICE_NAME: 'backuptools'
-  GOMODCACHE: 'D:\gocache\mod'
-  GOCACHE: 'D:\gocache\build'
+  # Module + compile caches (dependencies / .a objects) — NOT the Go stdlib.
+  # Keep them off runner _temp: that path is wiped and has produced corrupt
+  # golang.org/toolchain downloads ("package context is not in std").
+  GOMODCACHE: 'D:\go-pkg\mod'
+  GOCACHE: 'D:\go-pkg\cache'
+  # Use the Go already installed on the CyberLS host. Do not auto-download
+  # golang.org/toolchain@… into GOMODCACHE (that is what broke the build).
+  GOTOOLCHAIN: 'local'
 
 jobs:
   deploy:
-    runs-on: [self-hosted, Windows, X64, production, cyberls]
-    timeout-minutes: 10
-
+    runs-on: [self-hosted, Windows, X64, cyberls]
+    timeout-minutes: 25
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          clean: true
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21.13'
-          cache: false # Use persistent GOMODCACHE/GOCACHE on runner disk instead
+      - name: Verify Go
+        shell: powershell
+        run: |
+          $verOutput = go version
+          Write-Host $verOutput
+          Write-Host "GOROOT=$(go env GOROOT)"
+          Write-Host "GOMODCACHE=$(go env GOMODCACHE)"
+          Write-Host "GOCACHE=$(go env GOCACHE)"
+          Write-Host "GOTOOLCHAIN=$(go env GOTOOLCHAIN)"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Go is not available on this runner. Install Go 1.24+ on the CyberLS host."
+            exit 1
+          }
+          # go.mod requires 1.24; with GOTOOLCHAIN=local the host must already match.
+          if ($verOutput -notmatch 'go1\.2[4-9]|go1\.[3-9]\d') {
+            Write-Error "Host Go is too old for this module (need 1.24+). Installed: $verOutput"
+            exit 1
+          }
 
       - name: Pre-download dependencies
+        shell: powershell
         run: |
+          New-Item -ItemType Directory -Path $env:GOMODCACHE -Force | Out-Null
+          New-Item -ItemType Directory -Path $env:GOCACHE -Force | Out-Null
+          Write-Host "GOMODCACHE=$env:GOMODCACHE"
           Write-Host "Pre-downloading dependencies..."
           go mod download
-
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "go mod download failed; clearing module cache and retrying..."
+            go clean -modcache
+            New-Item -ItemType Directory -Path $env:GOMODCACHE -Force | Out-Null
+            go mod download
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          
       - name: Fast build application
+        shell: powershell
         run: |
           # Ensure build directory exists
           if (!(Test-Path "${{ env.BUILD_DIR }}")) {
             New-Item -ItemType Directory -Path "${{ env.BUILD_DIR }}" -Force | Out-Null
           }
-
+          
           $buildStart = Get-Date
           Write-Host "Building with optimizations..."
-
+          Write-Host "GOMODCACHE=$env:GOMODCACHE"
+          Write-Host "GOROOT=$(go env GOROOT)"
+          
           # Use Go build optimizations
           $env:GOFLAGS = "-buildvcs=false"
           $buildTime = Get-Date -Format 'yyyy-MM-dd_HH:mm:ss'
           $buildPath = Join-Path "${{ env.BUILD_DIR }}" "${{ env.APP_NAME }}"
-
+          
           go build -ldflags="-s -w -X main.buildTime=$buildTime" -trimpath -o $buildPath ./cmd
-
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Build failed; clearing module cache (and any leftover toolchain dirs) then retrying once..."
+            go clean -modcache
+            # Also drop known bad auto-toolchain paths from older runs / other runners
+            $badToolchains = @(
+              (Join-Path $env:GOMODCACHE 'golang.org'),
+              'D:\deployment\storx-runner\_work\_temp\go-mod-cache\golang.org',
+              'D:\deployment\backup-tool-runner\_work\_temp\go-mod-cache\golang.org'
+            )
+            foreach ($p in $badToolchains) {
+              if (Test-Path $p) {
+                Write-Host "Removing $p"
+                Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue
+              }
+            }
+            New-Item -ItemType Directory -Path $env:GOMODCACHE -Force | Out-Null
+            go mod download
+            go build -ldflags="-s -w -X main.buildTime=$buildTime" -trimpath -o $buildPath ./cmd
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          
           $buildDuration = (Get-Date) - $buildStart
           if (Test-Path $buildPath) {
             $size = (Get-Item $buildPath).Length
@@ -61,7 +115,7 @@ jobs:
             Write-Error "Build failed - binary not found"
             exit 1
           }
-
+          
       - name: Stop NSSM service
         run: |
           # Fast stop using optimized polling
@@ -70,7 +124,7 @@ jobs:
             $status = $service.Status
             if ($status -eq "Running" -or $status -eq "Paused" -or $status -eq "StartPending") {
               Stop-Service -Name "${{ env.SERVICE_NAME }}" -Force -WarningAction SilentlyContinue
-
+              
               # Quick wait with timeout
               $timeout = 5
               $elapsed = 0
@@ -84,18 +138,18 @@ jobs:
               Write-Host "Service already stopped"
             }
           }
-
+          
       - name: Quick file replacement
         run: |
           # Ensure deploy directory exists
           if (!(Test-Path "${{ env.DEPLOY_DIR }}")) {
             New-Item -ItemType Directory -Path "${{ env.DEPLOY_DIR }}" -Force | Out-Null
           }
-
+          
           # Use Move-Item for faster replacement (atomic operation)
           $buildPath = Join-Path "${{ env.BUILD_DIR }}" "${{ env.APP_NAME }}"
           $deployPath = Join-Path "${{ env.DEPLOY_DIR }}" "${{ env.APP_NAME }}"
-
+          
           if (Test-Path $buildPath) {
             # Remove old file if exists
             if (Test-Path $deployPath) {
@@ -108,7 +162,7 @@ jobs:
             Write-Error "Build file not found at: $buildPath"
             exit 1
           }
-
+          
       - name: Start NSSM service and verify
         run: |
           # Fast start with quick verification
@@ -117,11 +171,11 @@ jobs:
             Write-Error "Service '${{ env.SERVICE_NAME }}' not found"
             exit 1
           }
-
+          
           # Suppress warnings and start service
           $WarningPreference = 'SilentlyContinue'
           Start-Service -Name "${{ env.SERVICE_NAME }}" -WarningAction SilentlyContinue
-
+          
           # Quick wait with timeout
           $timeout = 8
           $elapsed = 0
@@ -130,10 +184,10 @@ jobs:
             $service.Refresh()
             $elapsed += 0.3
           }
-
+          
           # Verify deployment
           if ($service.Status -eq 'Running') {
-            Write-Host "✅ CyberLS production deployment successful - Service is running"
+            Write-Host "✅ Production deployment successful - Service is running"
           } else {
             Write-Error "Deployment failed - Service status: $($service.Status)"
             exit 1

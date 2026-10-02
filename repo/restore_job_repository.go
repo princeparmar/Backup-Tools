@@ -55,6 +55,14 @@ type RestoreJobListingDB struct {
 	Message       string `json:"message" gorm:"type:varchar(512)"`
 	MessageStatus string `json:"message_status" gorm:"column:message_status;not null;default:info"`
 
+	// FailureCode is BANDWIDTH_QUOTA / STORAGE_QUOTA for UI CTAs.
+	FailureCode    string `json:"failure_code,omitempty" gorm:"column:failure_code;type:varchar(64);default:''"`
+	EstimateBytes  int64  `json:"estimate_bytes,omitempty" gorm:"column:estimate_bytes;default:0"`
+	RemainingBytes int64  `json:"remaining_bytes,omitempty" gorm:"column:remaining_bytes;default:0"`
+	QuotaKind      string `json:"quota_kind,omitempty" gorm:"column:quota_kind;type:varchar(32);default:''"`
+	// RestoreTag is "invite_restored" when an invited member started the job on the owner's account.
+	RestoreTag string `json:"restore_tag,omitempty" gorm:"column:restore_tag;type:varchar(32);default:''"`
+
 	CancelledAt   *time.Time `json:"cancelled_at,omitempty"`
 	LastHeartBeat *time.Time `json:"last_heart_beat,omitempty"`
 }
@@ -130,6 +138,7 @@ type RestoreDeadItemDB struct {
 
 	RestoreJobID uint   `json:"restore_job_id" gorm:"index"`
 	ObjectKey    string `json:"object_key" gorm:"not null;type:varchar(1000)"`
+	Service      string `json:"service" gorm:"not null;type:text"`
 	ErrorCode    string `json:"error_code" gorm:"column:error_code;type:varchar(32)"`
 	Reason       string `json:"reason" gorm:"type:varchar(500)"`
 }
@@ -213,6 +222,10 @@ func (r *RestoreJobRepository) ClaimNextQueuedJob() (*RestoreJobListingDB, error
 	}
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
 		Where("status = ?", RestoreJobStatusQueued).
+		Where(`user_id NOT IN (
+			SELECT satellite_user_id FROM account_tombstone_dbs
+			WHERE deleted_at IS NULL AND status = ?
+		)`, AccountTombstoneStatusPendingDelete).
 		Order("id ASC").
 		First(&job).Error; err != nil {
 		tx.Rollback()
@@ -246,6 +259,10 @@ func (r *RestoreJobRepository) ClaimNextRunningJob() (*RestoreJobListingDB, erro
 	}
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
 		Where("status = ? AND (last_heart_beat IS NULL OR last_heart_beat < ?)", RestoreJobStatusRunning, readyBefore).
+		Where(`user_id NOT IN (
+			SELECT satellite_user_id FROM account_tombstone_dbs
+			WHERE deleted_at IS NULL AND status = ?
+		)`, AccountTombstoneStatusPendingDelete).
 		Order("last_heart_beat ASC NULLS FIRST").
 		First(&job).Error; err != nil {
 		tx.Rollback()
@@ -263,17 +280,35 @@ func (r *RestoreJobRepository) ClaimNextRunningJob() (*RestoreJobListingDB, erro
 }
 
 func (r *RestoreJobRepository) AdvanceRestoreJobCursor(jobID, expectedCursor, newCursor uint, batchOK, batchFail uint) (bool, error) {
+	// Progress counts are bumped per-item for live UI; this only advances the page cursor.
+	_ = batchOK
+	_ = batchFail
 	res := r.db.Model(&RestoreJobListingDB{}).
 		Where("id = ? AND cursor_id = ?", jobID, expectedCursor).
 		Updates(map[string]interface{}{
-			"cursor_id":       newCursor,
-			"processed_count": gormdb.Expr("processed_count + ?", batchOK),
-			"failed_count":    gormdb.Expr("failed_count + ?", batchFail),
+			"cursor_id": newCursor,
 		})
 	if res.Error != nil {
 		return false, fmt.Errorf("advance restore cursor: %w", res.Error)
 	}
 	return res.RowsAffected > 0, nil
+}
+
+// BumpRestoreProgress increments processed/failed for live polling mid-batch.
+func (r *RestoreJobRepository) BumpRestoreProgress(jobID uint, ok, fail uint) error {
+	if ok == 0 && fail == 0 {
+		return nil
+	}
+	updates := map[string]interface{}{
+		"last_heart_beat": time.Now(),
+	}
+	if ok > 0 {
+		updates["processed_count"] = gormdb.Expr("processed_count + ?", ok)
+	}
+	if fail > 0 {
+		updates["failed_count"] = gormdb.Expr("failed_count + ?", fail)
+	}
+	return r.db.Model(&RestoreJobListingDB{}).Where("id = ?", jobID).Updates(updates).Error
 }
 
 func (r *RestoreJobRepository) UpdateJob(id uint, updates map[string]interface{}) error {

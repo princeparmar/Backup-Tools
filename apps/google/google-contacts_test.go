@@ -1,6 +1,9 @@
 package google
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestContactsIDFromResourceName(t *testing.T) {
 	tests := []struct {
@@ -114,5 +117,106 @@ func TestIsContactSynced(t *testing.T) {
 				t.Fatalf("IsContactSynced() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestPersonFromContactsBackup_usesWritableNameFields(t *testing.T) {
+	person := personFromContactsBackup(ContactsBackupObject{
+		Name:   "Ada Lovelace",
+		Phones: []string{"+1 555-0100"},
+		Emails: []string{"ada@example.com"},
+	})
+	if person == nil || len(person.Names) != 1 {
+		t.Fatalf("expected one name, got %+v", person)
+	}
+	if person.Names[0].DisplayName != "" {
+		t.Fatalf("displayName must stay empty on create, got %q", person.Names[0].DisplayName)
+	}
+	if person.Names[0].UnstructuredName != "Ada Lovelace" {
+		t.Fatalf("unstructuredName = %q, want Ada Lovelace", person.Names[0].UnstructuredName)
+	}
+	if len(person.PhoneNumbers) != 1 || person.PhoneNumbers[0].Value != "+1 555-0100" {
+		t.Fatalf("phones = %+v", person.PhoneNumbers)
+	}
+	if len(person.EmailAddresses) != 1 || person.EmailAddresses[0].Value != "ada@example.com" {
+		t.Fatalf("emails = %+v", person.EmailAddresses)
+	}
+}
+
+func TestPersonFromContactsBackup_labeledDetails(t *testing.T) {
+	tests := []struct {
+		name    string
+		backup  ContactsBackupObject
+		email   string
+		etype   string
+		phone   string
+		ptype   string
+		title   string
+		company string
+		address string
+		note    string
+	}{
+		{
+			name: "google detail fields",
+			backup: ContactsBackupObject{
+				Name: "Aarav Mehta",
+				EmailDetails: []ContactLabeledValue{
+					{Value: "aarav.mehta@example.com", Type: "Other"},
+				},
+				PhoneDetails: []ContactLabeledValue{
+					{Value: "+1 202-555-0101", Type: "Home"},
+				},
+				OrgDetails: []ContactOrganization{
+					{Name: "Northstar Labs", Title: "Software Engineer"},
+				},
+				Addresses: []ContactLabeledValue{
+					{Value: "1 Market St, San Francisco, CA", Type: "Work"},
+				},
+				Notes: "Test contact 01",
+			},
+			email:   "aarav.mehta@example.com",
+			etype:   "Other",
+			phone:   "+1 202-555-0101",
+			ptype:   "Home",
+			title:   "Software Engineer",
+			company: "Northstar Labs",
+			address: "1 Market St, San Francisco, CA",
+			note:    "Test contact 01",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			person := personFromContactsBackup(tt.backup)
+			if person == nil {
+				t.Fatal("person is nil")
+			}
+			if person.EmailAddresses[0].Value != tt.email || person.EmailAddresses[0].Type != tt.etype {
+				t.Fatalf("email = %+v", person.EmailAddresses[0])
+			}
+			if person.PhoneNumbers[0].Value != tt.phone || person.PhoneNumbers[0].Type != tt.ptype {
+				t.Fatalf("phone = %+v", person.PhoneNumbers[0])
+			}
+			if person.Organizations[0].Title != tt.title || person.Organizations[0].Name != tt.company {
+				t.Fatalf("org = %+v", person.Organizations[0])
+			}
+			if person.Addresses[0].FormattedValue != tt.address {
+				t.Fatalf("address = %+v", person.Addresses[0])
+			}
+			if person.Biographies[0].Value != tt.note {
+				t.Fatalf("note = %+v", person.Biographies[0])
+			}
+		})
+	}
+}
+
+func TestPersonFromContactsBackup_parsesVaultJSON(t *testing.T) {
+	raw := []byte(`{"resource_name":"people/c1","name":"Sales Desk","phones":["(22) 2278-5000"],"emails":[],"updated_at":"2026-09-18T00:00:00Z"}`)
+	var backup ContactsBackupObject
+	if err := json.Unmarshal(raw, &backup); err != nil {
+		t.Fatal(err)
+	}
+	person := personFromContactsBackup(backup)
+	if person == nil || person.Names[0].UnstructuredName != "Sales Desk" {
+		t.Fatalf("got %+v", person)
 	}
 }

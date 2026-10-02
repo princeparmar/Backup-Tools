@@ -27,14 +27,20 @@ func (p *googleContactsProcessor) Run(input ProcessorInput) error {
 }
 
 type contactsStoredObject struct {
-	ResourceName    string   `json:"resource_name"`
-	Name            string   `json:"name"`
-	Phones          []string `json:"phones"`
-	Emails          []string `json:"emails"`
-	Organizations   []string `json:"organizations,omitempty"`
-	ETag            string   `json:"etag"`
-	SourceUpdatedAt string   `json:"source_updated_at,omitempty"`
-	UpdatedAt       string   `json:"updated_at"`
+	ResourceName    string                       `json:"resource_name"`
+	Name            string                       `json:"name"`
+	Phones          []string                     `json:"phones"`
+	Emails          []string                     `json:"emails"`
+	Organizations   []string                     `json:"organizations,omitempty"`
+	PhoneDetails    []google.ContactLabeledValue `json:"phone_details,omitempty"`
+	EmailDetails    []google.ContactLabeledValue `json:"email_details,omitempty"`
+	OrgDetails      []google.ContactOrganization `json:"organization_details,omitempty"`
+	Addresses       []google.ContactLabeledValue `json:"addresses,omitempty"`
+	Birthday        string                       `json:"birthday,omitempty"`
+	Notes           string                       `json:"notes,omitempty"`
+	ETag            string                       `json:"etag"`
+	SourceUpdatedAt string                       `json:"source_updated_at,omitempty"`
+	UpdatedAt       string                       `json:"updated_at"`
 }
 
 func runGoogleContactsAutosync(input ProcessorInput) error {
@@ -42,29 +48,38 @@ func runGoogleContactsAutosync(input ProcessorInput) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	accessToken, storx, err := googleMediaAutosyncPreflight(input)
+	auth, err := googleMediaAutosyncPreflight(input)
 	if err != nil {
 		return err
 	}
 
 	go func() {
 		processCtx := context.Background()
-		if processErr := handler.ProcessWebhookEvents(processCtx, input.Database, storx, 100); processErr != nil {
+		if processErr := handler.ProcessWebhookEvents(processCtx, input.Database, auth.Storx, 100); processErr != nil {
 			logger.Warn(processCtx, "Failed to process webhook events from auto-sync", logger.ErrorField(processErr))
 		}
 	}()
 
-	task := scheduledTaskShellFromCronJob(input.Job, accessToken, storx)
-	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Contacts, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
-		return fmt.Errorf("setup storage placeholder: %w", err)
-	}
+	task := scheduledTaskShellFromCronJob(input.Job, auth.AccessToken, auth.Storx)
 
-	service, err := google.NewPeopleServiceWithAccessToken(ctx, accessToken)
+	var service *people.Service
+	if auth.UseDWD {
+		service, err = google.NewPeopleServiceForBackupDWD(ctx, auth.Mailbox)
+	} else {
+		service, err = google.NewPeopleServiceWithAccessToken(ctx, auth.AccessToken)
+	}
 	if err != nil {
 		return err
 	}
+	if err := estimateAndEnforceContacts(ctx, input, service); err != nil {
+		return err
+	}
 
-	syncedSet, err := loadContactsSyncedIDSet(ctx, input, task, storx)
+	if err := handler.UploadObjectAndSync(ctx, input.Database, auth.Storx, satellite.ReserveBucket_Contacts, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
+		return mapUploadErr("google_contacts", fmt.Errorf("setup storage placeholder: %w", err))
+	}
+
+	syncedSet, err := loadContactsSyncedIDSet(ctx, input, task, auth.Storx)
 	if err != nil {
 		return err
 	}
@@ -159,6 +174,9 @@ func processContactsPage(ctx context.Context, input ProcessorInput, task *repo.S
 		}
 		newFound = true
 		if err := retrySyncContactByID(ctx, input, task, items[i]); err != nil {
+			if shouldAbortOnItemError(err) {
+				return false, wrapStorageAbort("google_contacts", err)
+			}
 			logger.Warn(ctx, "Contacts sync failed", logger.String("contact_id", id), logger.ErrorField(err))
 			continue
 		}
@@ -175,6 +193,12 @@ func syncContactByID(ctx context.Context, input ProcessorInput, task *repo.Sched
 		Phones:          item.Phones,
 		Emails:          item.Emails,
 		Organizations:   item.Organizations,
+		PhoneDetails:    item.PhoneDetails,
+		EmailDetails:    item.EmailDetails,
+		OrgDetails:      item.OrgDetails,
+		Addresses:       item.Addresses,
+		Birthday:        item.Birthday,
+		Notes:           item.Notes,
 		ETag:            item.ETag,
 		SourceUpdatedAt: item.SourceUpdatedAt,
 		UpdatedAt:       time.Now().UTC().Format(time.RFC3339),

@@ -16,21 +16,39 @@ import (
 
 const (
 	contactsPageSize      = 100
-	contactsPersonFields  = "names,emailAddresses,phoneNumbers,organizations,addresses,birthdays,photos,metadata"
+	contactsPersonFields  = "names,emailAddresses,phoneNumbers,organizations,addresses,birthdays,biographies,photos,metadata"
 	contactsReadonlyScope = "https://www.googleapis.com/auth/contacts.readonly"
 	contactsScope         = "https://www.googleapis.com/auth/contacts"
 )
 
+// ContactLabeledValue is a phone, email, or address with Google's type label (Home, Work, Other).
+type ContactLabeledValue struct {
+	Value string `json:"value"`
+	Type  string `json:"type,omitempty"`
+}
+
+// ContactOrganization is a company and job title from People API organizations.
+type ContactOrganization struct {
+	Name  string `json:"name,omitempty"`
+	Title string `json:"title,omitempty"`
+}
+
 // ContactsBackupObject is the JSON stored in the vault by cron autosync.
 type ContactsBackupObject struct {
-	ResourceName    string   `json:"resource_name"`
-	Name            string   `json:"name"`
-	Phones          []string `json:"phones"`
-	Emails          []string `json:"emails"`
-	Organizations   []string `json:"organizations,omitempty"`
-	ETag            string   `json:"etag"`
-	SourceUpdatedAt string   `json:"source_updated_at,omitempty"`
-	UpdatedAt       string   `json:"updated_at"`
+	ResourceName    string                `json:"resource_name"`
+	Name            string                `json:"name"`
+	Phones          []string              `json:"phones"`
+	Emails          []string              `json:"emails"`
+	Organizations   []string              `json:"organizations,omitempty"`
+	PhoneDetails    []ContactLabeledValue `json:"phone_details,omitempty"`
+	EmailDetails    []ContactLabeledValue `json:"email_details,omitempty"`
+	OrgDetails      []ContactOrganization `json:"organization_details,omitempty"`
+	Addresses       []ContactLabeledValue `json:"addresses,omitempty"`
+	Birthday        string                `json:"birthday,omitempty"`
+	Notes           string                `json:"notes,omitempty"`
+	ETag            string                `json:"etag"`
+	SourceUpdatedAt string                `json:"source_updated_at,omitempty"`
+	UpdatedAt       string                `json:"updated_at"`
 }
 
 // FlatContactsResponse is the paginated contacts listing (HTTP route + cron).
@@ -42,14 +60,20 @@ type FlatContactsResponse struct {
 
 // FlatContact is a slim contact for listing and sync.
 type FlatContact struct {
-	ID              string   `json:"id"`
-	Name            string   `json:"name"`
-	Phones          []string `json:"phones"`
-	Emails          []string `json:"emails"`
-	Organizations   []string `json:"organizations,omitempty"`
-	ETag            string   `json:"etag,omitempty"`
-	SourceUpdatedAt string   `json:"source_updated_at,omitempty"`
-	Synced          bool     `json:"synced,omitempty"`
+	ID              string                `json:"id"`
+	Name            string                `json:"name"`
+	Phones          []string              `json:"phones"`
+	Emails          []string              `json:"emails"`
+	Organizations   []string              `json:"organizations,omitempty"`
+	PhoneDetails    []ContactLabeledValue `json:"phone_details,omitempty"`
+	EmailDetails    []ContactLabeledValue `json:"email_details,omitempty"`
+	OrgDetails      []ContactOrganization `json:"organization_details,omitempty"`
+	Addresses       []ContactLabeledValue `json:"addresses,omitempty"`
+	Birthday        string                `json:"birthday,omitempty"`
+	Notes           string                `json:"notes,omitempty"`
+	ETag            string                `json:"etag,omitempty"`
+	SourceUpdatedAt string                `json:"source_updated_at,omitempty"`
+	Synced          bool                  `json:"synced,omitempty"`
 }
 
 // ListAllContactsFlat returns a paginated connections list via People API.
@@ -155,6 +179,8 @@ func flatContactFromPerson(person *people.Person) FlatContact {
 		name := person.Names[0]
 		if strings.TrimSpace(name.DisplayName) != "" {
 			out.Name = strings.TrimSpace(name.DisplayName)
+		} else if strings.TrimSpace(name.UnstructuredName) != "" {
+			out.Name = strings.TrimSpace(name.UnstructuredName)
 		} else {
 			out.Name = strings.TrimSpace(strings.TrimSpace(name.GivenName) + " " + strings.TrimSpace(name.FamilyName))
 		}
@@ -165,6 +191,7 @@ func flatContactFromPerson(person *people.Person) FlatContact {
 		}
 		if v := strings.TrimSpace(email.Value); v != "" {
 			out.Emails = append(out.Emails, v)
+			out.EmailDetails = append(out.EmailDetails, ContactLabeledValue{Value: v, Type: peopleFieldType(email.FormattedType, email.Type)})
 		}
 	}
 	for _, phone := range person.PhoneNumbers {
@@ -173,21 +200,90 @@ func flatContactFromPerson(person *people.Person) FlatContact {
 		}
 		if v := strings.TrimSpace(phone.Value); v != "" {
 			out.Phones = append(out.Phones, v)
+			out.PhoneDetails = append(out.PhoneDetails, ContactLabeledValue{Value: v, Type: peopleFieldType(phone.FormattedType, phone.Type)})
 		}
 	}
 	for _, org := range person.Organizations {
 		if org == nil {
 			continue
 		}
-		label := strings.TrimSpace(org.Name)
-		if label == "" {
-			label = strings.TrimSpace(org.Title)
+		name := strings.TrimSpace(org.Name)
+		title := strings.TrimSpace(org.Title)
+		if name == "" && title == "" {
+			continue
 		}
-		if label != "" {
-			out.Organizations = append(out.Organizations, label)
+		out.OrgDetails = append(out.OrgDetails, ContactOrganization{Name: name, Title: title})
+		label := name
+		if label == "" {
+			label = title
+		}
+		out.Organizations = append(out.Organizations, label)
+	}
+	for _, addr := range person.Addresses {
+		if addr == nil {
+			continue
+		}
+		v := strings.TrimSpace(addr.FormattedValue)
+		if v == "" {
+			parts := []string{
+				addr.StreetAddress, addr.ExtendedAddress, addr.City,
+				addr.Region, addr.PostalCode, addr.Country,
+			}
+			v = joinNonEmpty(parts, ", ")
+		}
+		if v == "" {
+			continue
+		}
+		out.Addresses = append(out.Addresses, ContactLabeledValue{Value: v, Type: peopleFieldType(addr.FormattedType, addr.Type)})
+	}
+	out.Birthday = formatPeopleBirthday(person.Birthdays)
+	for _, bio := range person.Biographies {
+		if bio == nil {
+			continue
+		}
+		if v := strings.TrimSpace(bio.Value); v != "" {
+			out.Notes = v
+			break
 		}
 	}
 	return out
+}
+
+func peopleFieldType(formatted, raw string) string {
+	if v := strings.TrimSpace(formatted); v != "" {
+		return v
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	return strings.ToUpper(raw[:1]) + raw[1:]
+}
+
+func joinNonEmpty(parts []string, sep string) string {
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if v := strings.TrimSpace(p); v != "" {
+			out = append(out, v)
+		}
+	}
+	return strings.Join(out, sep)
+}
+
+func formatPeopleBirthday(days []*people.Birthday) string {
+	for _, b := range days {
+		if b == nil || b.Date == nil {
+			continue
+		}
+		d := b.Date
+		if d.Year > 0 && d.Month > 0 && d.Day > 0 {
+			return fmt.Sprintf("%04d-%02d-%02d", d.Year, d.Month, d.Day)
+		}
+		if d.Month > 0 && d.Day > 0 {
+			return fmt.Sprintf("%02d-%02d", d.Month, d.Day)
+		}
+	}
+	return ""
 }
 
 // ContactsIDFromResourceName returns the stable id segment from people/{id}.
@@ -305,26 +401,87 @@ func RestoreContactFromBackup(ctx context.Context, service *people.Service, data
 
 func personFromContactsBackup(backup ContactsBackupObject) *people.Person {
 	person := &people.Person{}
+	// displayName is OUTPUT ONLY on createContact — use unstructuredName.
 	if name := strings.TrimSpace(backup.Name); name != "" {
-		person.Names = []*people.Name{{DisplayName: name}}
+		person.Names = []*people.Name{{UnstructuredName: name}}
 	}
-	for _, e := range backup.Emails {
-		if v := strings.TrimSpace(e); v != "" {
-			person.EmailAddresses = append(person.EmailAddresses, &people.EmailAddress{Value: v})
+	if len(backup.EmailDetails) > 0 {
+		for _, e := range backup.EmailDetails {
+			if v := strings.TrimSpace(e.Value); v != "" {
+				person.EmailAddresses = append(person.EmailAddresses, &people.EmailAddress{Value: v, Type: strings.TrimSpace(e.Type)})
+			}
+		}
+	} else {
+		for _, e := range backup.Emails {
+			if v := strings.TrimSpace(e); v != "" {
+				person.EmailAddresses = append(person.EmailAddresses, &people.EmailAddress{Value: v})
+			}
 		}
 	}
-	for _, p := range backup.Phones {
-		if v := strings.TrimSpace(p); v != "" {
-			person.PhoneNumbers = append(person.PhoneNumbers, &people.PhoneNumber{Value: v})
+	if len(backup.PhoneDetails) > 0 {
+		for _, p := range backup.PhoneDetails {
+			if v := strings.TrimSpace(p.Value); v != "" {
+				person.PhoneNumbers = append(person.PhoneNumbers, &people.PhoneNumber{Value: v, Type: strings.TrimSpace(p.Type)})
+			}
+		}
+	} else {
+		for _, p := range backup.Phones {
+			if v := strings.TrimSpace(p); v != "" {
+				person.PhoneNumbers = append(person.PhoneNumbers, &people.PhoneNumber{Value: v})
+			}
 		}
 	}
-	for _, o := range backup.Organizations {
-		if v := strings.TrimSpace(o); v != "" {
-			person.Organizations = append(person.Organizations, &people.Organization{Name: v})
+	if len(backup.OrgDetails) > 0 {
+		for _, o := range backup.OrgDetails {
+			if strings.TrimSpace(o.Name) == "" && strings.TrimSpace(o.Title) == "" {
+				continue
+			}
+			person.Organizations = append(person.Organizations, &people.Organization{Name: o.Name, Title: o.Title})
+		}
+	} else {
+		for _, o := range backup.Organizations {
+			if v := strings.TrimSpace(o); v != "" {
+				person.Organizations = append(person.Organizations, &people.Organization{Name: v})
+			}
 		}
 	}
-	if len(person.Names) == 0 && len(person.EmailAddresses) == 0 && len(person.PhoneNumbers) == 0 && len(person.Organizations) == 0 {
+	for _, a := range backup.Addresses {
+		if v := strings.TrimSpace(a.Value); v != "" {
+			person.Addresses = append(person.Addresses, &people.Address{FormattedValue: v, Type: strings.TrimSpace(a.Type)})
+		}
+	}
+	if bday := strings.TrimSpace(backup.Birthday); bday != "" {
+		if date := birthdayDate(bday); date != nil {
+			person.Birthdays = []*people.Birthday{{Date: date}}
+		}
+	}
+	if note := strings.TrimSpace(backup.Notes); note != "" {
+		person.Biographies = []*people.Biography{{Value: note}}
+	}
+	if len(person.Names) == 0 && len(person.EmailAddresses) == 0 && len(person.PhoneNumbers) == 0 && len(person.Organizations) == 0 && len(person.Addresses) == 0 && len(person.Biographies) == 0 {
 		return nil
 	}
 	return person
+}
+
+func birthdayDate(raw string) *people.Date {
+	parts := strings.Split(raw, "-")
+	date := &people.Date{}
+	switch len(parts) {
+	case 3:
+		var y, m, d int64
+		if _, err := fmt.Sscanf(raw, "%d-%d-%d", &y, &m, &d); err != nil || m == 0 || d == 0 {
+			return nil
+		}
+		date.Year, date.Month, date.Day = y, m, d
+	case 2:
+		var m, d int64
+		if _, err := fmt.Sscanf(raw, "%d-%d", &m, &d); err != nil || m == 0 || d == 0 {
+			return nil
+		}
+		date.Month, date.Day = m, d
+	default:
+		return nil
+	}
+	return date
 }

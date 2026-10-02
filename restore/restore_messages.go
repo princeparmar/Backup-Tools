@@ -61,7 +61,7 @@ const (
 	restoreReadinessRefreshInvalid   = "Google refresh token is invalid or expired"
 	restoreReadinessTokenValidation  = "Google token validation failed"
 	restoreReadinessMissingScopes    = "Missing OAuth scopes required for restore"
-	restoreReadinessDWDNotConfigured = "Ask your Google Workspace admin to authorize all restore scopes in Admin Console → Domain-wide delegation"
+	restoreTplReadinessDWDNotConfigured = "Ask your Google Workspace admin to authorize the %s restore scope in Admin Console → Domain-wide delegation"
 )
 
 // Notification bodies (Satellite push).

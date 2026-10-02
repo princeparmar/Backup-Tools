@@ -8,8 +8,8 @@ import (
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/repo"
-	storxrefresh "github.com/StorX2-0/Backup-Tools/storx"
 	"github.com/StorX2-0/Backup-Tools/satellite"
+	storxrefresh "github.com/StorX2-0/Backup-Tools/storx"
 	"github.com/gphotosuploader/google-photos-api-client-go/v2/albums"
 	"golang.org/x/time/rate"
 	"google.golang.org/api/calendar/v3"
@@ -21,11 +21,11 @@ import (
 type APIService string
 
 const (
-	APIServiceGmail     APIService = "gmail"
-	APIServiceDrive     APIService = "drive"
-	APIServicePhotos    APIService = "photos"
-	APIServiceCalendar  APIService = "calendar"
-	APIServiceContacts  APIService = "contacts"
+	APIServiceGmail    APIService = "gmail"
+	APIServiceDrive    APIService = "drive"
+	APIServicePhotos   APIService = "photos"
+	APIServiceCalendar APIService = "calendar"
+	APIServiceContacts APIService = "contacts"
 
 	// Microsoft UI services (distinct from Google calendar/contacts).
 	APIServiceOutlook           APIService = "outlook"
@@ -43,8 +43,8 @@ const (
 )
 
 const (
-	RestoreProviderGoogle     = "google"
-	RestoreProviderMicrosoft  = "microsoft"
+	RestoreProviderGoogle    = "google"
+	RestoreProviderMicrosoft = "microsoft"
 )
 
 // ServiceConfig holds per-method batch and concurrency limits.
@@ -63,13 +63,13 @@ type ServiceConfig struct {
 var serviceConfigs = map[string]ServiceConfig{
 	"gmail": {
 		Method: "gmail", Bucket: satellite.ReserveBucket_Gmail,
-		Source: "google", ObjectType: "gmail", Provider: RestoreProviderGoogle,
-		BatchSize: 50, MaxConcurrency: 10, VaultConcurrency: 10, RateLimitPerSec: 20,
+		Source: "google", ObjectType: "gmail",
+		BatchSize: 25, MaxConcurrency: 2, VaultConcurrency: 2, RateLimitPerSec: 2,
 	},
 	"google_drive": {
 		Method: "google_drive", Bucket: satellite.ReserveBucket_Drive,
-		Source: "google", ObjectType: "drive", Provider: RestoreProviderGoogle,
-		BatchSize: 25, MaxConcurrency: 10, VaultConcurrency: 5, RateLimitPerSec: 20,
+		Source: "google", ObjectType: "drive",
+		BatchSize: 25, MaxConcurrency: 3, VaultConcurrency: 3, RateLimitPerSec: 5,
 	},
 	"google_photos": {
 		Method: "google_photos", Bucket: satellite.ReserveBucket_Photos,
@@ -78,13 +78,13 @@ var serviceConfigs = map[string]ServiceConfig{
 	},
 	"google_calendar": {
 		Method: "google_calendar", Bucket: satellite.ReserveBucket_Calendar,
-		Source: "google", ObjectType: "calendar", Provider: RestoreProviderGoogle,
-		BatchSize: 100, MaxConcurrency: 20, VaultConcurrency: 20, RateLimitPerSec: 40,
+		Source: "google", ObjectType: "calendar",
+		BatchSize: 50, MaxConcurrency: 5, VaultConcurrency: 5, RateLimitPerSec: 8,
 	},
 	"google_contacts": {
 		Method: "google_contacts", Bucket: satellite.ReserveBucket_Contacts,
-		Source: "google", ObjectType: "contacts", Provider: RestoreProviderGoogle,
-		BatchSize: 100, MaxConcurrency: 20, VaultConcurrency: 20, RateLimitPerSec: 40,
+		Source: "google", ObjectType: "contacts",
+		BatchSize: 50, MaxConcurrency: 5, VaultConcurrency: 5, RateLimitPerSec: 8,
 	},
 	"outlook": {
 		Method: "outlook", Bucket: satellite.ReserveBucket_Outlook,
@@ -163,11 +163,11 @@ func ConfigForMethod(method string) (ServiceConfig, bool) {
 
 // RestoreDeps is per-task runtime state (clients created in Processor.Setup).
 type RestoreDeps struct {
-	Store         *db.PostgresDb
-	Job           *repo.RestoreJobListingDB
-	CronJob       *repo.CronJobListingDB
-	StorxRecovery *storxrefresh.Recovery
-	AccessGrant   string
+	Store              *db.PostgresDb
+	Job                *repo.RestoreJobListingDB
+	CronJob            *repo.CronJobListingDB
+	StorxRecovery      *storxrefresh.Recovery
+	AccessGrant        string
 	GoogleToken        string
 	MicrosoftToken     string
 	RefreshToken       string
@@ -186,6 +186,13 @@ type RestoreDeps struct {
 
 	PhotosAlbumCache map[string]*albums.Album
 	PhotosAlbumMu    sync.Mutex
+
+	// DriveFolderNames caches Google folder ID → display name for one restore job (loaded once).
+	DriveFolderNames     map[string]string
+	driveFolderNamesOnce sync.Once
+
+	// SeenGmailMessageIDs dedupes restore-all when legacy + labeled keys share JSON message.Id.
+	SeenGmailMessageIDs *sync.Map
 
 	googleLimiter *rate.Limiter
 	vaultSem      chan struct{}

@@ -3,12 +3,15 @@ package restore
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
+	google "github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/satellite"
+	"google.golang.org/api/drive/v3"
 )
 
 // StreamThresholdBytes matches handler.AutosyncStreamThresholdBytes (10 MB).
@@ -110,7 +113,23 @@ func AwaitStorxStream(errCh <-chan error, restoreErr error) error {
 	if restoreErr != nil {
 		return restoreErr
 	}
+	// Google restore often returns nil without reading (file exists / untrash).
+	// Closing the pipe then yields a closed-pipe write error from StorX — not a failure.
+	if isBenignClosedPipeErr(dlErr) {
+		return nil
+	}
 	return dlErr
+}
+
+func isBenignClosedPipeErr(err error) bool {
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, io.ErrClosedPipe) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "closed pipe")
 }
 
 // streamToFileRestoreAll writes a StorX object to disk via io.Copy (restore-all photos; avoids RAM).
@@ -127,4 +146,30 @@ func StreamToFile(ctx context.Context, grant, bucket, key, destPath string) erro
 		return err
 	}
 	return f.Close()
+}
+
+// restoreDriveDataFromStorxStream pipes StorX file bytes into Google Drive (restore-all; no full RAM buffer).
+func restoreDriveDataFromStorxStream(
+	ctx context.Context,
+	accessGrant string,
+	srv *drive.Service,
+	userEmail, dataKey string,
+	metadataJSON []byte,
+) error {
+	// Each RetryGoogle attempt needs a fresh pipe: restore may return without reading
+	// (file already exists) or fail mid-stream after consuming bytes.
+	return RetryGoogle(ctx, func() error {
+		content, errCh := streamFromStorxRestoreAll(ctx, accessGrant, satellite.ReserveBucket_Drive, dataKey)
+		pr, isPipe := content.(*io.PipeReader)
+		if isPipe {
+			defer pr.Close()
+		}
+		restoreErr := google.RestoreFromBackupReader(ctx, srv, userEmail, metadataJSON, content)
+		// Unblock the download goroutine BEFORE waiting on errCh. RestoreFile often
+		// returns nil without reading when the owned file already exists in Drive.
+		if isPipe {
+			_ = pr.Close()
+		}
+		return awaitStorxStream(errCh, restoreErr)
+	})
 }

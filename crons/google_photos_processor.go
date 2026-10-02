@@ -49,29 +49,38 @@ func runGooglePhotosAutosync(input ProcessorInput) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	accessToken, storx, err := googleMediaAutosyncPreflight(input)
+	auth, err := googleMediaAutosyncPreflight(input)
 	if err != nil {
 		return err
 	}
 
 	go func() {
 		processCtx := context.Background()
-		if processErr := handler.ProcessWebhookEvents(processCtx, input.Database, storx, 100); processErr != nil {
+		if processErr := handler.ProcessWebhookEvents(processCtx, input.Database, auth.Storx, 100); processErr != nil {
 			logger.Warn(processCtx, "Failed to process webhook events from auto-sync", logger.ErrorField(processErr))
 		}
 	}()
 
-	task := scheduledTaskShellFromCronJob(input.Job, accessToken, storx)
-	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Photos, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
+	task := scheduledTaskShellFromCronJob(input.Job, auth.AccessToken, auth.Storx)
+	if err := handler.UploadObjectAndSync(ctx, input.Database, auth.Storx, satellite.ReserveBucket_Photos, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
 		return fmt.Errorf("setup storage placeholder: %w", err)
 	}
 
-	service, err := createPhotosServiceWithAccessToken(ctx, accessToken)
+	var service *photoslibrary.Service
+	if auth.UseDWD {
+		client, dwdErr := google.NewGPhotosClientForBackupDWD(ctx, auth.Mailbox)
+		if dwdErr != nil {
+			return dwdErr
+		}
+		service = client.Service
+	} else {
+		service, err = createPhotosServiceWithAccessToken(ctx, auth.AccessToken)
+	}
 	if err != nil {
 		return err
 	}
 
-	syncedSet, err := loadPhotosSyncedIDSet(ctx, input, task, storx)
+	syncedSet, err := loadPhotosSyncedIDSet(ctx, input, task, auth.Storx)
 	if err != nil {
 		return err
 	}

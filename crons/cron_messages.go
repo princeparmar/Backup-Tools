@@ -1,9 +1,11 @@
 package crons
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/repo"
 )
 
@@ -26,6 +28,10 @@ const (
 	cronEmailStorxUplinkFinal = "Your automatic backup has been temporarily disabled due to insufficient StorX permissions. Please update your StorX permissions and reactivate the backup from your dashboard."
 
 	cronEmailStorxStorageLimitFinal = "Your automatic backups have been paused because your CyberLS storage limit was exceeded. Free up space or upgrade your storage plan, then reactivate backups from your dashboard."
+
+	cronEmailStorxStorageQuotaPrecheck = "Your automatic backup could not start because there is not enough CyberLS storage for the estimated backup size. Free up space or upgrade your plan, then try again."
+
+	cronEmailStorxBandwidthQuota = "Your restore or download could not start because there is not enough CyberLS bandwidth quota. Upgrade your plan or try again later."
 
 	cronEmailNetworkFinal = "Your automatic backup has been temporarily disabled due to network connectivity issues. Please check your internet connection and reactivate the backup from your dashboard."
 
@@ -60,7 +66,18 @@ const (
 
 	cronJobStorxStorageLimitFinal = "CyberLS storage limit exceeded. Free up storage or upgrade your plan, then reactivate automatic backup from your dashboard."
 
+	cronJobStorxStorageQuotaPrecheck = "Not enough CyberLS storage for this backup (pre-check). Free up space or upgrade your plan, then retry."
+
+	cronJobStorxBandwidthQuota = "Not enough CyberLS bandwidth quota for this download. Upgrade your plan or try again later."
+
 	cronJobFailurePeriodsExhausted = "Backup failed after 3 scheduled runs, each with up to 3 automatic retries. Job has been deactivated—reactivate from your dashboard after fixing the issue."
+
+	// Drive per-file storage skips (no counts — common wording).
+	cronJobDriveStoragePartial = "Backup completed with some files skipped — not enough CyberLS storage. Free up space or upgrade, then run backup again."
+
+	cronJobDriveStorageNone = "Backup could not upload files — not enough CyberLS storage. Free up space or upgrade your plan, then retry."
+
+	cronJobBackupSuccess = "Backup completed successfully"
 )
 
 const (
@@ -87,7 +104,11 @@ const (
 
 	cronTaskNetworkDeactivated = "Task failed due to network connectivity issues. Job has been deactivated."
 
-	cronTaskStorxStorageLimitDeactivated = "CyberLS storage limit exceeded. All active automatic backups for your account have been deactivated."
+	cronTaskStorxStorageLimitDeactivated = "CyberLS storage limit exceeded. This automatic backup has been deactivated."
+
+	cronTaskStorxStorageQuotaPrecheck = "Backup blocked by storage quota pre-check (STORAGE_QUOTA). Free up space or upgrade, then retry."
+
+	cronTaskStorxBandwidthQuota = "Download blocked by bandwidth quota pre-check (BANDWIDTH_QUOTA)."
 
 	cronTaskFailurePeriodsExhausted = "Failed after multiple scheduled runs (3 runs × up to 3 retries each). Automatic backup has been deactivated."
 )
@@ -158,4 +179,38 @@ func cronTaskGoogleAuthRetry(attempt uint) string {
 func cronTaskOutlookAuthRetry(attempt uint) string {
 	a, m := cronAttempt(attempt)
 	return fmt.Sprintf(cronTplTaskOutlookAuthRetry, a, m)
+}
+
+// BackupSuccessMessage is the default success copy for job/task (scheduled or Backup Now).
+func BackupSuccessMessage(onDemand bool) string {
+	_ = onDemand
+	return cronJobBackupSuccess
+}
+
+// ApplyDriveStorageSkipMessage deactivates this Drive job when files were skipped for CyberLS space.
+// No file counts in the user message — details stay in logs.
+func ApplyDriveStorageSkipMessage(input ProcessorInput, synced, skipped int, skippedBytes, remainingBytes int64) {
+	if input.Job == nil || input.Database == nil || skipped <= 0 {
+		return
+	}
+	msg := cronJobDriveStoragePartial
+	if synced <= 0 {
+		msg = cronJobDriveStorageNone
+	}
+	deactivateJobStorageQuota(input.Database, input.Job, msg, repo.JobMessageStatusWarning, skippedBytes, remainingBytes)
+	logger.Warn(context.Background(), "drive storage skip: job deactivated",
+		logger.String("method", strings.TrimSpace(input.Job.Method)),
+		logger.Int("synced", synced),
+		logger.Int("skipped", skipped),
+		logger.Int64("skipped_bytes", skippedBytes),
+		logger.Int64("remaining_bytes", remainingBytes),
+		logger.String("job_message", msg),
+	)
+}
+
+// ProcessorLeftWarningOutcome is true when a processor already set a warning message on the job.
+func ProcessorLeftWarningOutcome(job *repo.CronJobListingDB) bool {
+	return job != nil &&
+		job.MessageStatus == repo.JobMessageStatusWarning &&
+		strings.TrimSpace(job.Message) != ""
 }

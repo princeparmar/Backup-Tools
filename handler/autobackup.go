@@ -99,19 +99,21 @@ const (
 // GoogleBackupOnboardingRequest is the Satellite job-create JSON for POST /auto-sync/job (Google).
 // Microsoft onboarding converts to this shape in microsoft_onboarding.go.
 type GoogleBackupOnboardingRequest struct {
-	Services        []string          `json:"services"`
-	Interval        string            `json:"interval"` // required when creating a new policy; optional when policy_id selects an existing policy
-	On              string            `json:"on"`       // required for weekly/monthly new policies; optional with policy_id
-	GoogleEmail     string            `json:"google_email"`
-	AccountType     string            `json:"account_type"`
-	ProjectID       string            `json:"project_id"`
-	SatelliteUserID string            `json:"satellite_user_id"`
-	RefreshToken    string            `json:"refresh_token"`
-	StorxToken      string            `json:"storx_token,omitempty"`
-	Emails          []string          `json:"emails"`
-	EmailOrgUnits   map[string]string `json:"email_org_units,omitempty"`
-	PolicyID        *uint             `json:"policy_id,omitempty"`
-	PolicyName      string            `json:"policy_name,omitempty"`
+	Services        []string `json:"services"`
+	Interval        string   `json:"interval"` // required when creating a new policy; optional when policy_id selects an existing policy
+	On              string   `json:"on"`       // required for weekly/monthly new policies; optional with policy_id
+	GoogleEmail     string   `json:"google_email"`
+	AccountType     string   `json:"account_type"`
+	ProjectID       string   `json:"project_id"`
+	SatelliteUserID string   `json:"satellite_user_id"`
+	RefreshToken    string   `json:"refresh_token"`
+	StorxToken      string   `json:"storx_token,omitempty"`
+	// Active: when false, keep jobs inactive (Satellite own_nodes gate). When omitted/null, keep legacy behavior (activate if storx present).
+	Active        *bool             `json:"active,omitempty"`
+	Emails        []string          `json:"emails"`
+	EmailOrgUnits map[string]string `json:"email_org_units,omitempty"`
+	PolicyID      *uint             `json:"policy_id,omitempty"`
+	PolicyName    string            `json:"policy_name,omitempty"`
 	// PolicyScope: "all" (default) applies one policy to every mailbox; "org_unit" creates one policy per OU.
 	PolicyScope string `json:"policy_scope,omitempty"`
 	// OrgUnitSchedules maps OU path → schedule/name. Used only when PolicyScope is org_unit.
@@ -899,6 +901,9 @@ func HandleAutomaticSyncCreate(c echo.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := RejectIfAccountPendingDelete(c, userID); err != nil {
+		return err
+	}
 
 	var req GoogleBackupOnboardingRequest
 	if err := c.Bind(&req); err != nil {
@@ -917,6 +922,20 @@ func satelliteUserIDFromRequest(c echo.Context) (string, error) {
 		return "", jsonError(http.StatusUnauthorized, "Invalid Request", err)
 	}
 	return userID, nil
+}
+
+// restoreJobUserID is the Backup-Tools account that owns Google credentials for this restore.
+// Satellite sets X-Restore-As-User only for an invited Member. Owner and admin requests omit it.
+func restoreJobUserID(c echo.Context) (string, error) {
+	sessionID, err := satelliteUserIDFromRequest(c)
+	if err != nil {
+		return "", err
+	}
+	asUser := strings.TrimSpace(c.Request().Header.Get("X-Restore-As-User"))
+	if asUser == "" || asUser == sessionID {
+		return sessionID, nil
+	}
+	return asUser, nil
 }
 
 func syncTypeFromQuery(c echo.Context) (string, error) {
@@ -1146,14 +1165,19 @@ func createGoogleJobsForServiceEmails(
 			failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: err.Error()})
 			continue
 		}
-		// Recurring jobs stay inactive unless storx was supplied at create (stored on credential).
-		if syncType != "one_time" && hasStorxTokenAtJobCreate(req, cred) {
-			if err := database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(true)); err != nil {
-				failed = append(failed, onboardingFailedResult{
-					Service: svc, Email: targetEmail,
-					Error: fmt.Sprintf("job %d created but activation failed: %v", cronJob.ID, err),
-				})
-				continue
+		// Recurring: activate only when storx is present AND caller did not force active=false
+		// (Satellite sets active=false when own_nodes mode has fewer than MinOwnNodes).
+		if syncType != "one_time" {
+			if shouldActivateOnboardingJob(req, cred) {
+				if err := database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(true)); err != nil {
+					failed = append(failed, onboardingFailedResult{
+						Service: svc, Email: targetEmail,
+						Error: fmt.Sprintf("job %d created but activation failed: %v", cronJob.ID, err),
+					})
+					continue
+				}
+			} else if isForcedInactiveOnboarding(req) {
+				_ = database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(false))
 			}
 		}
 		latestJob, _ := database.CronJobRepo.GetCronJobByID(cronJob.ID)
@@ -1166,7 +1190,9 @@ func createGoogleJobsForServiceEmails(
 			entry.PolicyID = policy.ID
 		}
 		if syncType == "one_time" {
-			if task, taskErr := database.TaskRepo.CreateTaskForCronJob(cronJob.ID); taskErr == nil {
+			if isForcedInactiveOnboarding(req) {
+				_ = database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(false))
+			} else if task, taskErr := database.TaskRepo.CreateTaskForCronJob(cronJob.ID); taskErr == nil {
 				entry.TaskID = task.ID
 			}
 		}
@@ -2519,6 +2545,19 @@ func hasStorxTokenAtJobCreate(req *GoogleBackupOnboardingRequest, cred *repo.Goo
 		return true
 	}
 	return cred != nil && strings.TrimSpace(cred.StorxToken) != ""
+}
+
+func isForcedInactiveOnboarding(req *GoogleBackupOnboardingRequest) bool {
+	return req != nil && req.Active != nil && !*req.Active
+}
+
+// shouldActivateOnboardingJob returns whether a newly created recurring job should become active.
+// Satellite may send active=false (own_nodes under MinOwnNodes); that always wins over storx_token.
+func shouldActivateOnboardingJob(req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB) bool {
+	if isForcedInactiveOnboarding(req) {
+		return false
+	}
+	return hasStorxTokenAtJobCreate(req, cred)
 }
 
 func activeStateUpdateFields(active bool) map[string]interface{} {

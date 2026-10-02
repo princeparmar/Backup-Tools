@@ -31,26 +31,35 @@ func runGoogleCalendarAutosync(input ProcessorInput) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	accessToken, storx, err := googleMediaAutosyncPreflight(input)
+	auth, err := googleMediaAutosyncPreflight(input)
 	if err != nil {
 		return err
 	}
 
 	go func() {
 		processCtx := context.Background()
-		if processErr := handler.ProcessWebhookEvents(processCtx, input.Database, storx, 100); processErr != nil {
+		if processErr := handler.ProcessWebhookEvents(processCtx, input.Database, auth.Storx, 100); processErr != nil {
 			logger.Warn(processCtx, "Failed to process webhook events from calendar auto-sync", logger.ErrorField(processErr))
 		}
 	}()
 
-	task := scheduledTaskShellFromCronJob(input.Job, accessToken, storx)
-	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Calendar, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
-		return fmt.Errorf("setup storage placeholder: %w", err)
-	}
+	task := scheduledTaskShellFromCronJob(input.Job, auth.AccessToken, auth.Storx)
 
-	service, err := google.NewCalendarServiceWithAccessToken(ctx, accessToken)
+	var service *calendar.Service
+	if auth.UseDWD {
+		service, err = google.NewCalendarServiceForBackupDWD(ctx, auth.Mailbox)
+	} else {
+		service, err = google.NewCalendarServiceWithAccessToken(ctx, auth.AccessToken)
+	}
 	if err != nil {
 		return err
+	}
+	if err := estimateAndEnforceCalendar(ctx, input, service); err != nil {
+		return err
+	}
+
+	if err := handler.UploadObjectAndSync(ctx, input.Database, auth.Storx, satellite.ReserveBucket_Calendar, task.LoginId+"/.file_placeholder", nil, task.UserID, input.StorxRecovery); err != nil {
+		return mapUploadErr("google_calendar", fmt.Errorf("setup storage placeholder: %w", err))
 	}
 
 	calendars, err := google.ListCalendarsWithService(service)
@@ -65,7 +74,7 @@ func runGoogleCalendarAutosync(input ProcessorInput) error {
 		if err := input.HeartBeatFunc(); err != nil {
 			return err
 		}
-		if err := syncOneCalendar(ctx, input, task, service, storx, cal); err != nil {
+		if err := syncOneCalendar(ctx, input, task, service, auth.Storx, cal); err != nil {
 			return err
 		}
 	}
@@ -141,6 +150,11 @@ func syncOneCalendar(ctx context.Context, input ProcessorInput, task *repo.Sched
 }
 
 func runCalendarBaselineSync(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *calendar.Service, calendarID, calendarSummary string) (string, error) {
+	synced, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Calendar, task.LoginId+"/", task.UserID, "google", "calendar", input.StorxRecovery)
+	if err != nil {
+		logger.Warn(ctx, "calendar synced map load failed; continuing with empty map", logger.ErrorField(err))
+		synced = map[string]bool{}
+	}
 	pageToken := ""
 	var lastSyncToken string
 	for {
@@ -151,7 +165,7 @@ func runCalendarBaselineSync(ctx context.Context, input ProcessorInput, task *re
 		if err != nil {
 			return "", err
 		}
-		if err := processCalendarEventsPage(ctx, input, task, calendarID, calendarSummary, page.RawEvents); err != nil {
+		if err := processCalendarEventsPage(ctx, input, task, calendarID, calendarSummary, page.RawEvents, synced); err != nil {
 			return "", err
 		}
 		if t := strings.TrimSpace(page.NextSyncToken); t != "" {
@@ -179,7 +193,7 @@ func runCalendarIncrementalSync(ctx context.Context, input ProcessorInput, task 
 		if err != nil {
 			return "", err
 		}
-		if err := processCalendarEventsPage(ctx, input, task, calendarID, calendarSummary, page.RawEvents); err != nil {
+		if err := processCalendarEventsPage(ctx, input, task, calendarID, calendarSummary, page.RawEvents, nil); err != nil {
 			return "", err
 		}
 		if t := strings.TrimSpace(page.NextSyncToken); t != "" {
@@ -194,17 +208,30 @@ func runCalendarIncrementalSync(ctx context.Context, input ProcessorInput, task 
 	return lastSyncToken, nil
 }
 
-func processCalendarEventsPage(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, calendarID, calendarSummary string, events []*calendar.Event) error {
+func processCalendarEventsPage(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, calendarID, calendarSummary string, events []*calendar.Event, synced map[string]bool) error {
 	for _, ev := range events {
 		if !google.EventShouldBackup(ev) {
 			continue
 		}
+		// Full pass: an event already in synced_objects is not uploaded again.
+		// Incremental passes (synced == nil) still write events Google reports as changed.
+		if synced != nil && google.IsCalendarEventSynced(synced, task.LoginId, calendarID, ev.Id, calendarSummary, ev.Summary) {
+			continue
+		}
 		if err := retrySyncCalendarEvent(ctx, input, task, calendarID, calendarSummary, ev); err != nil {
+			if shouldAbortOnItemError(err) {
+				return wrapStorageAbort("google_calendar", err)
+			}
 			logger.Warn(ctx, "calendar event sync failed",
 				logger.String("calendar_id", calendarID),
 				logger.String("event_id", ev.Id),
 				logger.ErrorField(err),
 			)
+			continue
+		}
+		if synced != nil {
+			key := google.CalendarObjectKey(task.LoginId, calendarID, calendarSummary, ev.Id, ev.Summary, ev.Created)
+			synced[key] = true
 		}
 	}
 	return nil
