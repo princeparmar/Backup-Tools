@@ -13,7 +13,6 @@ import (
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
-	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"google.golang.org/api/calendar/v3"
 	"google.golang.org/api/drive/v3"
@@ -44,8 +43,8 @@ func RestoreGmailKey(ctx context.Context, accessGrant string, client *google.Gma
 // RestoreGmailKeyDeduped is like RestoreGmailKey but skips insert when JSON message.Id
 // was already restored in this job run (legacy + labeled overlap).
 func RestoreGmailKeyDeduped(ctx context.Context, accessGrant string, client *google.GmailClient, objectKey string, seen *sync.Map) error {
-	data, err := downloadBytesRestoreAll(ctx, accessGrant, satellite.ReserveBucket_Gmail, objectKey, restoreDownloadHints{
-		mimeType: "application/json",
+	data, err := restore.DownloadBytes(ctx, accessGrant, satellite.ReserveBucket_Gmail, objectKey, restore.DownloadHints{
+		MimeType: "application/json",
 	})
 	if err != nil {
 		return err
@@ -59,56 +58,13 @@ func RestoreGmailKeyDeduped(ctx context.Context, accessGrant string, client *goo
 			return nil
 		}
 	}
-	err = RetryGoogle(ctx, func() error {
+	err = restore.RetryGoogle(ctx, func() error {
 		return client.InsertMessage(&msg)
 	})
 	if err != nil && seen != nil && strings.TrimSpace(msg.Id) != "" {
 		seen.Delete(msg.Id)
 	}
 	return err
-}
-
-// DedupeGmailRestoreRows keeps one synced row per Gmail message id when legacy + labeled
-// keys coexist. Prefers non-legacy (labeled) keys.
-func DedupeGmailRestoreRows(rows []repo.SyncedObject) []repo.SyncedObject {
-	if len(rows) <= 1 {
-		return rows
-	}
-	type pick struct {
-		row    repo.SyncedObject
-		legacy bool
-		msgID  string
-		hasID  bool
-	}
-	best := map[string]pick{}
-	var order []string
-	passthrough := make([]repo.SyncedObject, 0)
-
-	for _, row := range rows {
-		parsed, ok := google.ParseGmailObjectKey(row.ObjectKey)
-		if !ok || parsed.MessageID == "" {
-			passthrough = append(passthrough, row)
-			continue
-		}
-		id := parsed.MessageID
-		cur, exists := best[id]
-		if !exists {
-			best[id] = pick{row: row, legacy: parsed.Legacy, msgID: id, hasID: true}
-			order = append(order, id)
-			continue
-		}
-		// Prefer labeled (non-legacy) over legacy.
-		if cur.legacy && !parsed.Legacy {
-			best[id] = pick{row: row, legacy: false, msgID: id, hasID: true}
-		}
-	}
-
-	out := make([]repo.SyncedObject, 0, len(order)+len(passthrough))
-	for _, id := range order {
-		out = append(out, best[id].row)
-	}
-	out = append(out, passthrough...)
-	return out
 }
 
 // RestoreDriveKeyWithSession restores one Drive object using DB storx grant (manual restore).
@@ -128,20 +84,16 @@ func RestoreDriveKeyWithFolderMap(ctx context.Context, accessGrant string, srv *
 	return restoreDriveObjectKeyRestoreAll(ctx, accessGrant, srv, userEmail, objectKey, folderNames)
 }
 
-func loadDriveFolderNameMap(ctx context.Context, deps *RestoreDeps) map[string]string {
+func loadDriveFolderNameMap(ctx context.Context, deps *restore.RestoreDeps) map[string]string {
 	if deps == nil {
 		return map[string]string{}
 	}
-	deps.driveFolderNamesOnce.Do(func() {
-		deps.DriveFolderNames = buildDriveFolderNameMap(deps)
+	return deps.DriveFolderNameMap(func() map[string]string {
+		return buildDriveFolderNameMap(deps)
 	})
-	if deps.DriveFolderNames == nil {
-		return map[string]string{}
-	}
-	return deps.DriveFolderNames
 }
 
-func buildDriveFolderNameMap(deps *RestoreDeps) map[string]string {
+func buildDriveFolderNameMap(deps *restore.RestoreDeps) map[string]string {
 	out := map[string]string{}
 	if deps == nil || deps.Store == nil || deps.Store.SyncedObjectRepo == nil {
 		return out
@@ -155,7 +107,7 @@ func buildDriveFolderNameMap(deps *RestoreDeps) map[string]string {
 	}
 	email := strings.TrimSpace(deps.LoginID)
 	if email == "" {
-		email = strings.TrimSpace(deps.GoogleWriteEmail())
+		email = strings.TrimSpace(WriteEmail(deps))
 	}
 	rows, err := deps.Store.SyncedObjectRepo.GetSyncedObjectsByUserAndBucket(userID, satellite.ReserveBucket_Drive, "google", "drive")
 	if err != nil {
@@ -472,7 +424,7 @@ func restoreDriveTreeObjectKey(
 	}
 
 	if accessGrant != "" {
-		err := restoreDriveDataFromStorxStream(ctx, accessGrant, srv, userEmail, physicalKey, metadataJSON)
+		err := RestoreDriveDataFromStorxStream(ctx, accessGrant, srv, userEmail, physicalKey, metadataJSON)
 		return err
 	}
 	if download == nil {
@@ -482,7 +434,7 @@ func restoreDriveTreeObjectKey(
 	if err != nil {
 		return err
 	}
-	return RetryGoogle(ctx, func() error {
+	return restore.RetryGoogle(ctx, func() error {
 		return google.RestoreFromBackup(ctx, srv, userEmail, metadataJSON, fileBytes)
 	})
 }

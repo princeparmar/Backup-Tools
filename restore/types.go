@@ -63,12 +63,12 @@ type ServiceConfig struct {
 var serviceConfigs = map[string]ServiceConfig{
 	"gmail": {
 		Method: "gmail", Bucket: satellite.ReserveBucket_Gmail,
-		Source: "google", ObjectType: "gmail",
+		Source: "google", ObjectType: "gmail", Provider: RestoreProviderGoogle,
 		BatchSize: 25, MaxConcurrency: 2, VaultConcurrency: 2, RateLimitPerSec: 2,
 	},
 	"google_drive": {
 		Method: "google_drive", Bucket: satellite.ReserveBucket_Drive,
-		Source: "google", ObjectType: "drive",
+		Source: "google", ObjectType: "drive", Provider: RestoreProviderGoogle,
 		BatchSize: 25, MaxConcurrency: 3, VaultConcurrency: 3, RateLimitPerSec: 5,
 	},
 	"google_photos": {
@@ -78,12 +78,12 @@ var serviceConfigs = map[string]ServiceConfig{
 	},
 	"google_calendar": {
 		Method: "google_calendar", Bucket: satellite.ReserveBucket_Calendar,
-		Source: "google", ObjectType: "calendar",
+		Source: "google", ObjectType: "calendar", Provider: RestoreProviderGoogle,
 		BatchSize: 50, MaxConcurrency: 5, VaultConcurrency: 5, RateLimitPerSec: 8,
 	},
 	"google_contacts": {
 		Method: "google_contacts", Bucket: satellite.ReserveBucket_Contacts,
-		Source: "google", ObjectType: "contacts",
+		Source: "google", ObjectType: "contacts", Provider: RestoreProviderGoogle,
 		BatchSize: 50, MaxConcurrency: 5, VaultConcurrency: 5, RateLimitPerSec: 8,
 	},
 	"outlook": {
@@ -199,6 +199,20 @@ type RestoreDeps struct {
 
 	heartbeatMu   sync.Mutex
 	lastHeartbeat time.Time
+}
+
+// DriveFolderNameMap loads folder ID → name once per job (loader provided by restore/google).
+func (d *RestoreDeps) DriveFolderNameMap(loader func() map[string]string) map[string]string {
+	if d == nil {
+		return map[string]string{}
+	}
+	d.driveFolderNamesOnce.Do(func() {
+		d.DriveFolderNames = loader()
+	})
+	if d.DriveFolderNames == nil {
+		return map[string]string{}
+	}
+	return d.DriveFolderNames
 }
 
 // BatchResult summarizes one batch execution.

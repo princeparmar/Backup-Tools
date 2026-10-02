@@ -1,4 +1,4 @@
-package restore
+package googlestore
 
 import (
 	"testing"
@@ -16,7 +16,7 @@ func TestDriveProcessor_ShouldRestoreKey(t *testing.T) {
 		{key: "alice@x.com/MY_DRIVE/F1/F2/.folder__Work", want: true},
 		{key: "alice@x.com/SHARED_DRIVE~0ACx/S1/.shared_drive__test", want: false},
 		{key: "alice@x.com/data/2026/07/21/ABC123_report.pdf", want: false},
-		{key: "alice@x.com/meta/2026/07/21/ABC123_report.pdf.json", want: true}, // meta is restored; pulls data via meta
+		{key: "alice@x.com/meta/2026/07/21/ABC123_report.pdf.json", want: true},
 		{key: "alice@x.com/MY_DRIVE/F1/.file_placeholder", want: false},
 		{key: "", want: false},
 	}

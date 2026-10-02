@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/restore"
@@ -25,6 +26,9 @@ func (g *gmailProcessor) Config() restore.ServiceConfig {
 }
 func (g *gmailProcessor) ShouldRestoreKey(key string) bool { return !restore.ShouldSkipObjectKey(key) }
 func (g *gmailProcessor) Setup(ctx context.Context, deps *restore.RestoreDeps) error {
+	if deps.SeenGmailMessageIDs == nil {
+		deps.SeenGmailMessageIDs = &sync.Map{}
+	}
 	if deps.AuthMode == restore.RestoreAuthModeDWD {
 		client, err := google.NewGmailClientWithServiceAccountDelegationForRestore(ctx, WriteEmail(deps))
 		if err != nil {
@@ -44,7 +48,7 @@ func (g *gmailProcessor) Setup(ctx context.Context, deps *restore.RestoreDeps) e
 	return nil
 }
 func (g *gmailProcessor) RestoreKey(ctx context.Context, deps *restore.RestoreDeps, objectKey string) error {
-	return RestoreGmailKey(ctx, deps.AccessGrant, deps.GmailClient, objectKey)
+	return RestoreGmailKeyDeduped(ctx, deps.AccessGrant, deps.GmailClient, objectKey, deps.SeenGmailMessageIDs)
 }
 func (g *gmailProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error { return nil }
 
@@ -63,6 +67,9 @@ func (d *driveProcessor) ShouldRestoreKey(key string) bool {
 	if google.IsDriveIDBasedDataKey(key) {
 		return false
 	}
+	if google.IsDriveSharedDriveMarkerKey(key) {
+		return false
+	}
 	return true
 }
 func (d *driveProcessor) Setup(ctx context.Context, deps *restore.RestoreDeps) error {
@@ -72,20 +79,22 @@ func (d *driveProcessor) Setup(ctx context.Context, deps *restore.RestoreDeps) e
 			return err
 		}
 		deps.DriveService = srv
-		return nil
+	} else {
+		if err := requireGoogleToken(deps); err != nil {
+			return err
+		}
+		srv, err := google.GetDriveServiceUsingToken(deps.GoogleToken)
+		if err != nil {
+			return err
+		}
+		deps.DriveService = srv
 	}
-	if err := requireGoogleToken(deps); err != nil {
-		return err
-	}
-	srv, err := google.GetDriveServiceUsingToken(deps.GoogleToken)
-	if err != nil {
-		return err
-	}
-	deps.DriveService = srv
+	_ = loadDriveFolderNameMap(ctx, deps)
 	return nil
 }
 func (d *driveProcessor) RestoreKey(ctx context.Context, deps *restore.RestoreDeps, objectKey string) error {
-	return RestoreDriveKey(ctx, deps.AccessGrant, deps.DriveService, WriteEmail(deps), objectKey)
+	folderNames := loadDriveFolderNameMap(ctx, deps)
+	return RestoreDriveKeyWithFolderMap(ctx, deps.AccessGrant, deps.DriveService, WriteEmail(deps), objectKey, folderNames)
 }
 func (d *driveProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error { return nil }
 
