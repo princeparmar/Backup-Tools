@@ -23,9 +23,9 @@ type SharePointSiteOnboardingInput struct {
 
 // TeamsOnboardingInput selects a Team for outlook_teams jobs.
 type TeamsOnboardingInput struct {
-	TeamID      string   `json:"team_id"`
-	TeamName    string   `json:"team_name,omitempty"`
-	ChannelIDs  []string `json:"channel_ids,omitempty"`
+	TeamID     string   `json:"team_id"`
+	TeamName   string   `json:"team_name,omitempty"`
+	ChannelIDs []string `json:"channel_ids,omitempty"`
 }
 
 // GroupsOnboardingInput selects an M365 Group for outlook_groups jobs.
@@ -36,29 +36,47 @@ type GroupsOnboardingInput struct {
 
 // MicrosoftBackupOnboardingRequest is the Satellite → Backup-Tools MS job create body.
 // Both POST /microsoft/auto-sync/job and POST /microsoft/backup/onboarding/jobs use this.
+//
+// auth_mode=delegated (backup_mode=self): the caller's own mailbox with their refresh token.
+// auth_mode=application (backup_mode=organization): tenant app-only token; authorized only by tenant
+// consent + capabilities, never by account_type or is_admin. No refresh token is sent or stored.
 type MicrosoftBackupOnboardingRequest struct {
-	Services        []string `json:"services"`
-	Interval        string   `json:"interval"`
-	On              string   `json:"on"`
-	MicrosoftEmail  string   `json:"microsoft_email"`
-	AccountType     string   `json:"account_type"`
-	TenantID        string   `json:"tenant_id"`
-	TenantName      string   `json:"tenant_name"`
-	ProjectID       string   `json:"project_id"`
-	SatelliteUserID string   `json:"satellite_user_id"`
-	RefreshToken    string   `json:"refresh_token"`
-	StorxToken      string   `json:"storx_token,omitempty"`
+	Services        []string                        `json:"services"`
+	Interval        string                          `json:"interval"`
+	On              string                          `json:"on"`
+	MicrosoftEmail  string                          `json:"microsoft_email"`
+	AccountType     string                          `json:"account_type"`
+	TenantID        string                          `json:"tenant_id"`
+	TenantName      string                          `json:"tenant_name"`
+	ProjectID       string                          `json:"project_id"`
+	SatelliteUserID string                          `json:"satellite_user_id"`
+	RefreshToken    string                          `json:"refresh_token"`
+	StorxToken      string                          `json:"storx_token,omitempty"`
+	AuthMode        string                          `json:"auth_mode"`
+	BackupMode      string                          `json:"backup_mode"`
+	AllUsers        bool                            `json:"all_users"`
+	UserIDs         []string                        `json:"user_ids"`
 	Emails          []string                        `json:"emails"`
 	SharedMailboxes []string                        `json:"shared_mailboxes"`
 	BackupScope     string                          `json:"backup_scope"`
-	MicrosoftAppClientID     string                 `json:"microsoft_app_client_id"`
-	MicrosoftAppClientSecret string                 `json:"microsoft_app_client_secret"`
 	Sites           []SharePointSiteOnboardingInput `json:"sites"`
 	Teams           []TeamsOnboardingInput          `json:"teams"`
 	Groups          []GroupsOnboardingInput         `json:"groups"`
 	PolicyID        *uint                           `json:"policy_id,omitempty"`
-	PolicyName      string   `json:"policy_name,omitempty"`
+	PolicyName      string                          `json:"policy_name,omitempty"`
+	PolicyScope     string                          `json:"policy_scope,omitempty"`
+	// EmailOrgUnits overrides the directory org unit per mailbox (application mode fills it from the directory).
+	EmailOrgUnits    map[string]string               `json:"email_org_units,omitempty"`
+	OrgUnitSchedules map[string]OrgUnitScheduleInput `json:"org_unit_schedules,omitempty"`
 }
+
+const (
+	microsoftBackupModeSelf         = "self"
+	microsoftBackupModeOrganization = "organization"
+)
+
+// microsoftUserServices are per-mailbox services (one job per directory user).
+var microsoftUserServices = map[string]bool{"outlook": true, "mail": true, "calendar": true, "contacts": true, "onedrive": true}
 
 func (r *MicrosoftBackupOnboardingRequest) trim() {
 	r.MicrosoftEmail = strings.TrimSpace(r.MicrosoftEmail)
@@ -70,19 +88,46 @@ func (r *MicrosoftBackupOnboardingRequest) trim() {
 	r.SatelliteUserID = strings.TrimSpace(r.SatelliteUserID)
 	r.PolicyName = strings.TrimSpace(r.PolicyName)
 	r.AccountType = strings.TrimSpace(r.AccountType)
-	r.TenantID = strings.TrimSpace(r.TenantID)
+	r.TenantID = strings.ToLower(strings.TrimSpace(r.TenantID))
 	r.TenantName = strings.TrimSpace(r.TenantName)
 	r.BackupScope = strings.TrimSpace(r.BackupScope)
-	r.MicrosoftAppClientID = strings.TrimSpace(r.MicrosoftAppClientID)
-	r.MicrosoftAppClientSecret = strings.TrimSpace(r.MicrosoftAppClientSecret)
+	r.AuthMode = strings.ToLower(strings.TrimSpace(r.AuthMode))
+	r.BackupMode = strings.ToLower(strings.TrimSpace(r.BackupMode))
+	r.PolicyScope = strings.TrimSpace(r.PolicyScope)
 }
 
 func (r *MicrosoftBackupOnboardingRequest) hasPolicyID() bool {
 	return r.PolicyID != nil && *r.PolicyID > 0
 }
 
+// applicationMode reports whether the request is an organization (app-only) backup.
+func (r *MicrosoftBackupOnboardingRequest) applicationMode() bool {
+	if r.AuthMode != "" {
+		return r.AuthMode == outlook.MicrosoftAuthModeApplication
+	}
+	return r.BackupMode == microsoftBackupModeOrganization
+}
+
+func (r *MicrosoftBackupOnboardingRequest) wantsAllUsers() bool {
+	return r.AllUsers || strings.EqualFold(r.BackupScope, "all_tenant")
+}
+
 func (r *MicrosoftBackupOnboardingRequest) validate(userID string) error {
-	if r.RefreshToken == "" {
+	switch r.AuthMode {
+	case "", outlook.MicrosoftAuthModeApplication, outlook.MicrosoftAuthModeDelegated:
+	default:
+		return fmt.Errorf("auth_mode must be %q or %q", outlook.MicrosoftAuthModeDelegated, outlook.MicrosoftAuthModeApplication)
+	}
+	switch r.BackupMode {
+	case "", microsoftBackupModeSelf, microsoftBackupModeOrganization:
+	default:
+		return fmt.Errorf("backup_mode must be %q or %q", microsoftBackupModeSelf, microsoftBackupModeOrganization)
+	}
+	if (r.AuthMode == outlook.MicrosoftAuthModeDelegated && r.BackupMode == microsoftBackupModeOrganization) ||
+		(r.AuthMode == outlook.MicrosoftAuthModeApplication && r.BackupMode == microsoftBackupModeSelf) {
+		return errors.New("auth_mode and backup_mode conflict")
+	}
+	if !r.applicationMode() && r.RefreshToken == "" {
 		return errors.New("refresh_token is required")
 	}
 	if r.MicrosoftEmail == "" {
@@ -94,7 +139,7 @@ func (r *MicrosoftBackupOnboardingRequest) validate(userID string) error {
 	if err := validateMicrosoftOnboardingServiceNames(r.Services); err != nil {
 		return err
 	}
-	if !r.hasPolicyID() && r.Interval == "" {
+	if !r.hasPolicyID() && r.Interval == "" && !strings.EqualFold(r.PolicyScope, OnboardingPolicyScopeOrgUnit) {
 		return errors.New("interval is required")
 	}
 	if r.ProjectID == "" {
@@ -115,19 +160,6 @@ func validateMicrosoftOnboardingServiceNames(raw []string) error {
 	return nil
 }
 
-func rejectPersonalOrgServices(accountType string, services []string) error {
-	if strings.ToLower(strings.TrimSpace(accountType)) != "personal" {
-		return nil
-	}
-	for _, svc := range services {
-		switch svc {
-		case "teams", "groups", "sharepoint":
-			return fmt.Errorf("service %q is not available for personal Microsoft accounts", svc)
-		}
-	}
-	return nil
-}
-
 func (r *MicrosoftBackupOnboardingRequest) toGoogleShape() *GoogleBackupOnboardingRequest {
 	return r.toGoogleShapeWithAccountType(r.AccountType)
 }
@@ -138,127 +170,209 @@ func (r *MicrosoftBackupOnboardingRequest) toGoogleShapeWithAccountType(accountT
 		acct = "personal"
 	}
 	return &GoogleBackupOnboardingRequest{
-		Services:        r.Services,
-		Interval:        r.Interval,
-		On:              r.On,
-		GoogleEmail:     r.MicrosoftEmail,
-		AccountType:     acct,
-		ProjectID:       r.ProjectID,
-		SatelliteUserID: r.SatelliteUserID,
-		RefreshToken:    r.RefreshToken,
-		StorxToken:      r.StorxToken,
-		Emails:          r.Emails,
-		PolicyID:        r.PolicyID,
-		PolicyName:      r.PolicyName,
+		Services:         r.Services,
+		Interval:         r.Interval,
+		On:               r.On,
+		GoogleEmail:      r.MicrosoftEmail,
+		AccountType:      acct,
+		ProjectID:        r.ProjectID,
+		SatelliteUserID:  r.SatelliteUserID,
+		RefreshToken:     r.RefreshToken,
+		StorxToken:       r.StorxToken,
+		Emails:           r.Emails,
+		EmailOrgUnits:    r.EmailOrgUnits,
+		PolicyID:         r.PolicyID,
+		PolicyName:       r.PolicyName,
+		PolicyScope:      r.PolicyScope,
+		OrgUnitSchedules: r.OrgUnitSchedules,
 	}
 }
 
 func normalizeCredentialAccountTypeForMicrosoft(s string) string {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "personal", "employee_workspace", "admin_workspace":
-		return strings.ToLower(strings.TrimSpace(s))
-	default:
-		return ""
-	}
+	return outlook.NormalizeAccountType(s)
 }
 
-// validateMicrosoftAdminForOnboarding enforces org-backup rules using stored account_type (no Graph re-detect).
-func validateMicrosoftAdminForOnboarding(
-	services, emails []string,
-	sites []SharePointSiteOnboardingInput,
-	teams []TeamsOnboardingInput,
-	groups []GroupsOnboardingInput,
-	connectedEmail, accountType, tenantID string,
-	existingCred *repo.GoogleBackupCredentialDB,
-) error {
-	connectedEmail = strings.TrimSpace(connectedEmail)
-	accountType = strings.ToLower(strings.TrimSpace(accountType))
-	if accountType == "" {
-		accountType = "personal"
+// validateMicrosoftDelegatedOnboarding enforces self-only delegated backup: the caller's own mailbox
+// services. Other users, all-users and tenant resources require backup_mode=organization.
+func validateMicrosoftDelegatedOnboarding(req *MicrosoftBackupOnboardingRequest, services, emails []string) *echo.HTTPError {
+	forbidden := func(msg string) *echo.HTTPError {
+		return echo.NewHTTPError(http.StatusForbidden, map[string]interface{}{"error": msg, "code": "organization_backup_required"})
 	}
-	if existingCred != nil && strings.TrimSpace(existingCred.TenantID) != "" && strings.TrimSpace(tenantID) == "" {
-		tenantID = strings.TrimSpace(existingCred.TenantID)
+	if req.wantsAllUsers() || len(req.UserIDs) > 0 {
+		return forbidden("backing up all users requires backup_mode=organization with tenant admin consent")
 	}
-
-	hasSharePoint := false
 	for _, svc := range services {
-		if svc == "sharepoint" {
-			hasSharePoint = true
-			break
+		if !microsoftUserServices[svc] {
+			return forbidden(fmt.Sprintf("%s backup requires backup_mode=organization with tenant admin consent", svc))
 		}
 	}
-	if hasSharePoint {
-		if accountType != outlook.AccountTypeAdminWorkspace {
-			return echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{
-				"error": "SharePoint backup requires an organization admin account",
-			})
-		}
-		if len(sites) == 0 {
-			return echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{
-				"error": "sites is required when sharepoint service is selected",
-			})
+	for _, e := range append(append([]string{}, emails...), req.SharedMailboxes...) {
+		if !strings.EqualFold(strings.TrimSpace(e), req.MicrosoftEmail) {
+			return forbidden("backing up other users' mailboxes requires backup_mode=organization with tenant admin consent")
 		}
 	}
+	return nil
+}
 
-	hasTeams := false
+// microsoftApplicationOnboarding is the authorized org-backup context.
+type microsoftApplicationOnboarding struct {
+	AccessToken string
+	Tenant      *repo.MicrosoftTenantDB
+	Emails      []string
+	OrgUnits    map[string]string
+	ObjectIDs   map[string]string
+}
+
+// authorizeMicrosoftApplicationOnboarding applies the org authorization rule for every requested
+// service and resolves target users from the live tenant directory.
+func authorizeMicrosoftApplicationOnboarding(
+	ctx context.Context, database *db.PostgresDb, req *MicrosoftBackupOnboardingRequest, tenantID string, services []string,
+) (*microsoftApplicationOnboarding, error) {
+	token, tenant, err := MicrosoftOrgAccess(ctx, database, tenantID, "")
+	if err != nil {
+		return nil, err
+	}
+	needsUsers := false
 	for _, svc := range services {
-		if svc == "teams" {
-			hasTeams = true
-			break
+		if microsoftUserServices[svc] {
+			needsUsers = true
+		}
+		if capName := MicrosoftCapabilityForService(svc); capName != "" && !tenant.Capability(capName) {
+			return nil, capabilityDenied(tenant, capName)
 		}
 	}
-	if hasTeams {
-		if accountType == "personal" {
-			return echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{
-				"error": "Teams backup is not available for personal Microsoft accounts",
-			})
-		}
-		if len(teams) == 0 {
-			return echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{
-				"error": "teams is required when teams service is selected",
-			})
+	out := &microsoftApplicationOnboarding{AccessToken: token, Tenant: tenant, OrgUnits: map[string]string{}, ObjectIDs: map[string]string{}}
+	if !needsUsers {
+		return out, nil
+	}
+
+	directory, err := msListDirectoryUsersFn(ctx, token)
+	if err != nil {
+		return nil, &MicrosoftOrgAccessError{HTTPStatus: http.StatusBadGateway, Code: "directory_unavailable",
+			Message: "could not list tenant users: " + err.Error()}
+	}
+	byID := make(map[string]outlook.DirectoryUser, len(directory))
+	byEmail := make(map[string]outlook.DirectoryUser, 2*len(directory))
+	for _, u := range directory {
+		byID[u.ObjectID] = u
+		for _, e := range []string{u.Mail, u.UPN} {
+			if e = strings.ToLower(strings.TrimSpace(e)); e != "" {
+				byEmail[e] = u
+			}
 		}
 	}
 
-	hasGroups := false
-	for _, svc := range services {
-		if svc == "groups" {
-			hasGroups = true
-			break
+	var users []outlook.DirectoryUser
+	if req.wantsAllUsers() {
+		users = filterMicrosoftDirectoryUsers(directory, microsoftDirectoryFilter{EnabledOnly: true})
+	} else {
+		for _, id := range dedupeStrings(req.UserIDs) {
+			u, ok := byID[id]
+			if !ok || !u.AccountEnabled {
+				return nil, &MicrosoftOrgAccessError{HTTPStatus: http.StatusBadRequest, Code: "unknown_users",
+					Message: "user_ids contains users that are not active in the tenant directory"}
+			}
+			users = append(users, u)
+		}
+		for _, email := range req.Emails {
+			if strings.TrimSpace(email) == "" {
+				continue
+			}
+			u, ok := byEmail[strings.ToLower(strings.TrimSpace(email))]
+			if !ok || !u.AccountEnabled {
+				return nil, &MicrosoftOrgAccessError{HTTPStatus: http.StatusBadRequest, Code: "unknown_users",
+					Message: fmt.Sprintf("%s is not an active user in the tenant directory", email)}
+			}
+			users = append(users, u)
+		}
+		// Shared mailboxes are usually backed by disabled accounts, so only existence is required.
+		for _, email := range req.SharedMailboxes {
+			if strings.TrimSpace(email) == "" {
+				continue
+			}
+			u, ok := byEmail[strings.ToLower(strings.TrimSpace(email))]
+			if !ok {
+				return nil, &MicrosoftOrgAccessError{HTTPStatus: http.StatusBadRequest, Code: "unknown_users",
+					Message: fmt.Sprintf("%s is not a mailbox in the tenant directory", email)}
+			}
+			users = append(users, u)
 		}
 	}
-	if hasGroups {
-		if accountType == "personal" {
-			return echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{
-				"error": "Groups backup is not available for personal Microsoft accounts",
-			})
+	for _, u := range users {
+		email := u.Email()
+		if email == "" {
+			continue
 		}
-		if len(groups) == 0 {
-			return echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{
-				"error": "groups is required when groups service is selected",
-			})
+		if _, dup := out.ObjectIDs[strings.ToLower(email)]; dup {
+			continue
 		}
+		out.Emails = append(out.Emails, email)
+		out.OrgUnits[email] = u.OrgUnitPath()
+		out.ObjectIDs[strings.ToLower(email)] = u.ObjectID
 	}
+	if len(out.Emails) == 0 {
+		return nil, &MicrosoftOrgAccessError{HTTPStatus: http.StatusBadRequest, Code: "no_users",
+			Message: "select users with all_users, user_ids or emails"}
+	}
+	return out, nil
+}
 
-	needsOtherMailboxes := false
-	for _, e := range emails {
-		if !strings.EqualFold(strings.TrimSpace(e), connectedEmail) {
-			needsOtherMailboxes = true
-			break
+func dedupeStrings(in []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if _, ok := seen[s]; ok || s == "" {
+			continue
 		}
+		seen[s] = struct{}{}
+		out = append(out, s)
 	}
-	if !needsOtherMailboxes {
+	return out
+}
+
+// expandMicrosoftApplicationResources fills teams/groups/sites with every tenant resource when the
+// request asks for all users and listed none (app-only, full pagination).
+func expandMicrosoftApplicationResources(ctx context.Context, req *MicrosoftBackupOnboardingRequest, token string, services []string) error {
+	if !req.wantsAllUsers() {
 		return nil
 	}
-	if accountType != outlook.AccountTypeAdminWorkspace {
-		return echo.NewHTTPError(http.StatusForbidden, map[string]interface{}{
-			"error": "Only Microsoft 365 admins can backup other users' accounts",
-		})
-	}
-	if strings.TrimSpace(tenantID) == "" {
-		return echo.NewHTTPError(http.StatusForbidden, map[string]interface{}{
-			"error": "tenant_id is required for multi-mailbox organization backup",
-		})
+	for _, svc := range services {
+		switch svc {
+		case "teams":
+			if len(req.Teams) > 0 {
+				continue
+			}
+			teams, err := outlook.ListTenantTeams(ctx, token, 0)
+			if err != nil {
+				return err
+			}
+			for _, t := range teams {
+				req.Teams = append(req.Teams, TeamsOnboardingInput{TeamID: t.ID, TeamName: t.DisplayName})
+			}
+		case "groups":
+			if len(req.Groups) > 0 {
+				continue
+			}
+			groups, err := outlook.ListTenantGroups(ctx, token, 0)
+			if err != nil {
+				return err
+			}
+			for _, g := range groups {
+				req.Groups = append(req.Groups, GroupsOnboardingInput{GroupID: g.ID, GroupName: g.DisplayName})
+			}
+		case "sharepoint":
+			if len(req.Sites) > 0 {
+				continue
+			}
+			sites, err := outlook.ListTenantSharePointSites(ctx, token, "", 0)
+			if err != nil {
+				return err
+			}
+			for _, s := range sites {
+				req.Sites = append(req.Sites, SharePointSiteOnboardingInput{SiteID: s.ID})
+			}
+		}
 	}
 	return nil
 }
@@ -300,88 +414,94 @@ func runMicrosoftOnboardingCreate(c echo.Context, ctx context.Context, userID st
 		return err
 	}
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
-
-	emails, normErr := normalizeGmailEmails(req.Emails, req.MicrosoftEmail)
-	if normErr != nil {
-		return normErr
-	}
-
 	services := normalizeOnboardingServices(req.Services)
 
 	existingCred, found, findErr := database.CredentialRepo.FindByUserProjectAndEmail(userID, req.ProjectID, req.MicrosoftEmail)
 	if findErr != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": findErr.Error()})
 	}
-
-	effectiveAccountType := strings.TrimSpace(req.AccountType)
-	effectiveTenantID := strings.TrimSpace(req.TenantID)
-	effectiveTenantName := strings.TrimSpace(req.TenantName)
+	effectiveTenantID := req.TenantID
+	effectiveTenantName := req.TenantName
 	if found && existingCred != nil {
-		if bodyType := normalizeCredentialAccountTypeForMicrosoft(req.AccountType); bodyType != "" &&
-			!strings.EqualFold(bodyType, strings.TrimSpace(existingCred.AccountType)) {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "account_type mismatch with connected credential",
-			})
-		}
-		effectiveAccountType = strings.TrimSpace(existingCred.AccountType)
 		if effectiveTenantID == "" {
-			effectiveTenantID = strings.TrimSpace(existingCred.TenantID)
+			effectiveTenantID = strings.ToLower(strings.TrimSpace(existingCred.TenantID))
 		}
 		if effectiveTenantName == "" {
 			effectiveTenantName = strings.TrimSpace(existingCred.TenantName)
 		}
 	}
-	if effectiveAccountType == "" {
-		effectiveAccountType = "personal"
-	}
-	if strings.EqualFold(strings.TrimSpace(req.BackupScope), "all_tenant") {
-		if effectiveAccountType != outlook.AccountTypeAdminWorkspace {
-			return c.JSON(http.StatusForbidden, map[string]interface{}{
-				"error": "all_tenant backup requires admin_workspace account",
-			})
+
+	var emails []string
+	var effectiveAccountType string
+	var orgToken string
+	objectIDs := map[string]string{}
+	application := req.applicationMode()
+
+	if application {
+		if effectiveTenantID == "" {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": "tenant_id is required for organization backup"})
 		}
-		expanded, expandErr := expandMicrosoftTenantMailboxEmails(ctx, req.RefreshToken, effectiveTenantID)
-		if expandErr != nil {
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": expandErr.Error()})
+		appCtx, aerr := authorizeMicrosoftApplicationOnboarding(ctx, database, req, effectiveTenantID, services)
+		if aerr != nil {
+			return orgAccessErrorJSON(c, aerr)
 		}
-		emails = expanded
-		for _, svc := range services {
-			switch svc {
-			case "teams":
-				if len(req.Teams) == 0 {
-					tenantTeams, terr := expandMicrosoftTenantTeams(ctx, req.RefreshToken)
-					if terr != nil {
-						return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": terr.Error()})
-					}
-					req.Teams = tenantTeams
-				}
-			case "groups":
-				if len(req.Groups) == 0 {
-					tenantGroups, gerr := expandMicrosoftTenantGroups(ctx, req.RefreshToken)
-					if gerr != nil {
-						return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": gerr.Error()})
-					}
-					req.Groups = tenantGroups
-				}
+		if effectiveTenantName == "" {
+			effectiveTenantName = appCtx.Tenant.TenantName
+		}
+		orgToken = appCtx.AccessToken
+		emails = appCtx.Emails
+		objectIDs = appCtx.ObjectIDs
+		if len(appCtx.OrgUnits) > 0 {
+			merged := make(map[string]string, len(appCtx.OrgUnits)+len(req.EmailOrgUnits))
+			for k, v := range appCtx.OrgUnits {
+				merged[k] = v
 			}
+			for k, v := range req.EmailOrgUnits {
+				merged[k] = v
+			}
+			req.EmailOrgUnits = merged
 		}
-	}
-
-	if err := rejectPersonalOrgServices(effectiveAccountType, services); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
-	}
-
-	if err := validateMicrosoftAdminForOnboarding(services, emails, req.Sites, req.Teams, req.Groups, req.MicrosoftEmail, effectiveAccountType, effectiveTenantID, existingCred); err != nil {
-		if he, ok := err.(*echo.HTTPError); ok {
+		if err := expandMicrosoftApplicationResources(ctx, req, orgToken, services); err != nil {
+			return c.JSON(http.StatusBadGateway, map[string]interface{}{"error": err.Error()})
+		}
+		effectiveAccountType = outlook.AccountTypeAdminWorkspace
+	} else {
+		var normErr error
+		emails, normErr = normalizeGmailEmails(req.Emails, req.MicrosoftEmail)
+		if normErr != nil {
+			return normErr
+		}
+		if he := validateMicrosoftDelegatedOnboarding(req, services, emails); he != nil {
 			return c.JSON(he.Code, he.Message)
 		}
-		return c.JSON(http.StatusForbidden, map[string]interface{}{"error": err.Error()})
+		effectiveAccountType = normalizeCredentialAccountTypeForMicrosoft(req.AccountType)
+		if found && existingCred != nil {
+			existingAccountType := normalizeCredentialAccountTypeForMicrosoft(existingCred.AccountType)
+			if effectiveAccountType != "" && effectiveAccountType != existingAccountType {
+				return c.JSON(http.StatusForbidden, map[string]interface{}{"error": "account_type mismatch with connected credential"})
+			}
+			effectiveAccountType = existingAccountType
+		}
+		if effectiveAccountType == "" {
+			effectiveAccountType = outlook.AccountTypePersonal
+		}
+		if effectiveAccountType == outlook.AccountTypeAdminWorkspace {
+			effectiveAccountType = outlook.AccountTypeWorkAccount
+		}
 	}
 
 	gReq := req.toGoogleShapeWithAccountType(effectiveAccountType)
+	if err := validateOrgUnitOnboardingSchedules(gReq, emails); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+	}
+
+	credRefresh := req.RefreshToken
+	if application {
+		credRefresh = ""
+	}
 	cred, err := database.CredentialRepo.FindOrCreateForUserWithTenant(
 		userID, req.MicrosoftEmail, req.ProjectID, effectiveAccountType,
-		effectiveTenantID, effectiveTenantName, req.RefreshToken, req.StorxToken,
+		effectiveTenantID, effectiveTenantName, credRefresh, req.StorxToken,
 	)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
@@ -395,11 +515,8 @@ func runMicrosoftOnboardingCreate(c echo.Context, ctx context.Context, userID st
 			}
 		}
 	}
-
-	if req.MicrosoftAppClientID != "" && req.MicrosoftAppClientSecret != "" {
-		if uerr := database.CredentialRepo.UpdateMicrosoftAppCredentials(
-			ctx, cred.ID, outlook.MicrosoftAuthModeApplication, req.MicrosoftAppClientID, req.MicrosoftAppClientSecret,
-		); uerr != nil {
+	if application {
+		if uerr := database.CredentialRepo.SetMicrosoftApplicationMode(ctx, cred.ID); uerr != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": uerr.Error()})
 		}
 		if reloaded, rerr := database.CredentialRepo.GetByID(cred.ID); rerr == nil {
@@ -416,7 +533,7 @@ func runMicrosoftOnboardingCreate(c echo.Context, ctx context.Context, userID st
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": perr.Error()})
 	}
 	isFirstConnection := isFirstOnboardingConnection(cred, hasJobs, userHasPolicies)
-	if !isFirstConnection && (req.PolicyID == nil || *req.PolicyID == 0) && strings.TrimSpace(req.PolicyName) == "" {
+	if !isFirstConnection && !req.hasPolicyID() && req.PolicyName == "" && !gReq.isOrgUnitPolicyScope() {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"error": "policy_id or policy_name is required for subsequent connections",
 		})
@@ -433,13 +550,19 @@ func runMicrosoftOnboardingCreate(c echo.Context, ctx context.Context, userID st
 		}
 	}
 
+	// Delegated jobs never resolve tenant resources at create time; application jobs use the app-only token.
+	resourceToken := orgToken
+
 	policyBatch := &onboardingPolicyBatch{}
+	if !gReq.isOrgUnitPolicyScope() && !req.hasPolicyID() {
+		policyBatch.allID = credentialPolicyIDByName(database, userID, cred.ID, req.PolicyName)
+	}
 	var jobs []onboardingJobResult
 	var failed []onboardingFailedResult
 	servicesOut := make([]string, 0)
 	seenSvc := make(map[string]struct{})
 
-	for _, svc := range normalizeOnboardingServices(req.Services) {
+	for _, svc := range services {
 		if _, dup := seenSvc[svc]; dup {
 			continue
 		}
@@ -454,90 +577,181 @@ func runMicrosoftOnboardingCreate(c echo.Context, ctx context.Context, userID st
 			failed = append(failed, onboardingFailedResult{Service: svc, Error: "method not enabled"})
 			continue
 		}
-		if method == "outlook_sharepoint" {
-			j, f := createMicrosoftJobsForSharePointSites(c, ctx, userID, svc, syncType, schedule, gReq, cred, isFirstConnection, policyBatch, req.Sites, req.RefreshToken, database)
+		switch method {
+		case "outlook_sharepoint":
+			j, f := createMicrosoftJobsForSharePointSites(c, ctx, userID, svc, syncType, schedule, gReq, cred, isFirstConnection, policyBatch, req.Sites, resourceToken, database)
 			jobs = append(jobs, j...)
 			failed = append(failed, f...)
 			continue
-		}
-		if method == "outlook_teams" {
-			j, f := createMicrosoftJobsForTeams(c, ctx, userID, svc, syncType, schedule, gReq, cred, isFirstConnection, policyBatch, req.Teams, req.RefreshToken, database)
+		case "outlook_teams":
+			j, f := createMicrosoftJobsForTeams(c, ctx, userID, svc, syncType, schedule, gReq, cred, isFirstConnection, policyBatch, req.Teams, resourceToken, database)
 			jobs = append(jobs, j...)
 			failed = append(failed, f...)
 			continue
-		}
-		if method == "outlook_groups" {
-			j, f := createMicrosoftJobsForGroups(c, ctx, userID, svc, syncType, schedule, gReq, cred, isFirstConnection, policyBatch, req.Groups, req.RefreshToken, database)
+		case "outlook_groups":
+			j, f := createMicrosoftJobsForGroups(c, ctx, userID, svc, syncType, schedule, gReq, cred, isFirstConnection, policyBatch, req.Groups, resourceToken, database)
 			jobs = append(jobs, j...)
 			failed = append(failed, f...)
 			continue
 		}
 		targetEmails := emails
-		if method == "outlook" && len(req.SharedMailboxes) > 0 {
-			targetEmails = mergeOnboardingEmails(emails, req.SharedMailboxes)
+		if gReq.isOrgUnitPolicyScope() {
+			targetEmails = emailsWithOrgUnitService(gReq, emails, svc)
 		}
-		j, f := createMicrosoftJobsForServiceEmails(c, userID, method, svc, syncType, schedule, gReq, cred, isFirstConnection, policyBatch, targetEmails, database)
+		j, f := createMicrosoftJobsForServiceEmails(c, userID, method, svc, syncType, schedule, gReq, cred, isFirstConnection, policyBatch, targetEmails, objectIDs, database)
 		jobs = append(jobs, j...)
 		failed = append(failed, f...)
 	}
 
 	policies := onboardingPoliciesFromBatch(database, policyBatch)
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"success":  len(failed) == 0,
-		"message":  syncCreateMessage(syncType),
-		"jobs":     nullSliceJSON(jobs),
-		"failed":   nullSliceJSON(failed),
-		"services": nullSliceJSON(servicesOut),
-		"policies": nullSliceJSON(policies),
+		"success":   len(failed) == 0,
+		"message":   syncCreateMessage(syncType),
+		"auth_mode": cred.MicrosoftAuthMode,
+		"jobs":      nullSliceJSON(jobs),
+		"failed":    nullSliceJSON(failed),
+		"services":  nullSliceJSON(servicesOut),
+		"policies":  nullSliceJSON(policies),
 	})
+}
+
+// emailsWithOrgUnitService keeps mailboxes whose org unit schedule includes svc.
+func emailsWithOrgUnitService(req *GoogleBackupOnboardingRequest, emails []string, svc string) []string {
+	out := make([]string, 0, len(emails))
+	for _, email := range emails {
+		path := orgUnitPathForEmail(req, email)
+		if path == "" {
+			path = "/"
+		}
+		svcs, err := servicesForOnboardingOrgUnit(req, path)
+		if err != nil {
+			continue
+		}
+		for _, s := range svcs {
+			if s == svc {
+				out = append(out, email)
+				break
+			}
+		}
+	}
+	return out
 }
 
 func createMicrosoftJobsForServiceEmails(
 	c echo.Context, userID, method, svc, syncType string, schedule onboardingSchedule,
 	req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB, isFirstConnection bool, policyBatch *onboardingPolicyBatch,
-	emails []string, database *db.PostgresDb,
+	emails []string, objectIDs map[string]string, database *db.PostgresDb,
 ) ([]onboardingJobResult, []onboardingFailedResult) {
 	emails = dedupeEmailsPreservingOrder(emails)
 	var jobs []onboardingJobResult
 	var failed []onboardingFailedResult
 	for _, targetEmail := range emails {
-		cronJob, createErr := createSyncJobWithCredential(userID, targetEmail, method, syncType, cred.ID, nil, c)
-		if createErr != nil {
-			failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: extractCreateJobError(createErr)})
-			continue
-		}
-		if err := applyOnboardingJobSchedule(database, userID, cronJob.ID, targetEmail, schedule, cred, req, isFirstConnection, policyBatch); err != nil {
-			if errors.Is(err, repo.ErrPolicyNameExists) {
-				failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: "policy name already exists for user"})
-				continue
+		extra := orgUnitInputData(req, targetEmail)
+		if oid := objectIDs[strings.ToLower(targetEmail)]; oid != "" {
+			if extra == nil {
+				extra = map[string]interface{}{}
 			}
-			failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: err.Error()})
-			continue
+			extra["directory_user_id"] = oid
 		}
-		if syncType != "one_time" && hasStorxTokenAtJobCreate(req, cred) {
-			if err := database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(true)); err != nil {
-				failed = append(failed, onboardingFailedResult{
-					Service: svc, Email: targetEmail,
-					Error: fmt.Sprintf("job %d created but activation failed: %v", cronJob.ID, err),
-				})
-				continue
+		job, fail := onboardMicrosoftJob(c, database, userID, svc, targetEmail, method, syncType, extra,
+			schedule, req, cred, isFirstConnection, policyBatch)
+		jobs, failed = appendMicrosoftJobResult(jobs, failed, job, fail)
+	}
+	return jobs, failed
+}
+
+// onboardMicrosoftJob creates one job, applies its schedule, activates it and (one_time) queues a
+// task. A job that already exists for the same name, method and sync type is returned as existing
+// so a retried onboarding succeeds.
+func onboardMicrosoftJob(
+	c echo.Context, database *db.PostgresDb, userID, svc, name, method, syncType string, extra map[string]interface{},
+	schedule onboardingSchedule, req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB,
+	isFirstConnection bool, policyBatch *onboardingPolicyBatch,
+) (*onboardingJobResult, *onboardingFailedResult) {
+	fail := func(msg string) (*onboardingJobResult, *onboardingFailedResult) {
+		return nil, &onboardingFailedResult{Service: svc, Email: name, Error: msg}
+	}
+
+	cronJob, createErr := createSyncJobWithCredential(userID, name, method, syncType, cred.ID, extra, c)
+	if createErr != nil {
+		existing, _ := database.CronJobRepo.FindJobForUser(userID, name, method, syncType)
+		if existing == nil {
+			return fail(extractCreateJobError(createErr))
+		}
+		policyID := existing.PolicyID
+		if policyID == 0 {
+			// A previous attempt created the job but failed to assign its policy.
+			if err := applyOnboardingJobSchedule(database, userID, existing.ID, name, schedule, cred, req, isFirstConnection, policyBatch); err != nil {
+				return fail(err.Error())
+			}
+			if latest, _ := database.CronJobRepo.GetCronJobByID(existing.ID); latest != nil {
+				policyID = latest.PolicyID
 			}
 		}
-		latestJob, _ := database.CronJobRepo.GetCronJobByID(cronJob.ID)
-		var policy *repo.AutosyncBackupPolicyDB
-		if latestJob != nil && latestJob.PolicyID > 0 {
-			policy, _ = database.PolicyRepo.GetByID(latestJob.PolicyID)
+		return &onboardingJobResult{
+			Service: svc, Email: name, JobID: existing.ID, PolicyID: policyID,
+			Existing: true, Active: existing.Active,
+		}, nil
+	}
+	if err := applyOnboardingJobSchedule(database, userID, cronJob.ID, name, schedule, cred, req, isFirstConnection, policyBatch); err != nil {
+		if errors.Is(err, repo.ErrPolicyNameExists) {
+			return fail("policy name already exists for user")
 		}
-		entry := onboardingJobResult{Service: svc, Email: targetEmail, JobID: cronJob.ID}
-		if policy != nil {
-			entry.PolicyID = policy.ID
+		return fail(err.Error())
+	}
+	if syncType != "one_time" && hasStorxTokenAtJobCreate(req, cred) {
+		if err := database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(true)); err != nil {
+			return fail(fmt.Sprintf("job %d created but activation failed: %v", cronJob.ID, err))
 		}
-		if syncType == "one_time" {
-			if task, taskErr := database.TaskRepo.CreateTaskForCronJob(cronJob.ID); taskErr == nil {
-				entry.TaskID = task.ID
-			}
+	}
+	entry := &onboardingJobResult{Service: svc, Email: name, JobID: cronJob.ID}
+	if latest, _ := database.CronJobRepo.GetCronJobByID(cronJob.ID); latest != nil {
+		entry.PolicyID = latest.PolicyID
+	}
+	if syncType == "one_time" {
+		if task, taskErr := database.TaskRepo.CreateTaskForCronJob(cronJob.ID); taskErr == nil {
+			entry.TaskID = task.ID
 		}
-		jobs = append(jobs, entry)
+	}
+	return entry, nil
+}
+
+// credentialPolicyIDByName returns the policy named policyName that already holds this
+// credential's jobs (a retried onboarding), so new jobs join it instead of failing on the name.
+func credentialPolicyIDByName(database *db.PostgresDb, userID string, credentialID uint, policyName string) uint {
+	policyName = strings.TrimSpace(policyName)
+	if policyName == "" {
+		return 0
+	}
+	jobs, err := database.CronJobRepo.ListJobsByCredentialID(userID, credentialID)
+	if err != nil || len(jobs) == 0 {
+		return 0
+	}
+	ids := make([]uint, 0, len(jobs))
+	for _, j := range jobs {
+		if j.PolicyID > 0 {
+			ids = append(ids, j.PolicyID)
+		}
+	}
+	policies, err := database.PolicyRepo.GetByIDs(ids)
+	if err != nil {
+		return 0
+	}
+	for id, p := range policies {
+		if p != nil && strings.EqualFold(strings.TrimSpace(p.Name), policyName) {
+			return id
+		}
+	}
+	return 0
+}
+
+func appendMicrosoftJobResult(jobs []onboardingJobResult, failed []onboardingFailedResult,
+	job *onboardingJobResult, fail *onboardingFailedResult) ([]onboardingJobResult, []onboardingFailedResult) {
+	if job != nil {
+		jobs = append(jobs, *job)
+	}
+	if fail != nil {
+		failed = append(failed, *fail)
 	}
 	return jobs, failed
 }
@@ -552,15 +766,14 @@ func createMicrosoftJobsForSharePointSites(
 	isFirstConnection bool,
 	policyBatch *onboardingPolicyBatch,
 	sites []SharePointSiteOnboardingInput,
-	refreshToken string,
+	accessToken string,
 	database *db.PostgresDb,
 ) ([]onboardingJobResult, []onboardingFailedResult) {
 	if len(sites) == 0 {
 		return nil, []onboardingFailedResult{{Service: svc, Error: "sites is required when sharepoint service is selected"}}
 	}
-	accessToken, err := outlook.AuthTokenUsingRefreshToken(strings.TrimSpace(refreshToken))
-	if err != nil {
-		return nil, []onboardingFailedResult{{Service: svc, Error: fmt.Sprintf("token refresh failed: %v", err)}}
+	if strings.TrimSpace(accessToken) == "" {
+		return nil, []onboardingFailedResult{{Service: svc, Error: "organization resources require backup_mode=organization"}}
 	}
 
 	var jobs []onboardingJobResult
@@ -576,11 +789,15 @@ func createMicrosoftJobsForSharePointSites(
 		}
 		resolved, rerr := outlook.ResolveSharePointSite(ctx, accessToken, siteID, siteURL)
 		if rerr != nil {
-			label := siteID
+			label := siteURL
 			if label == "" {
-				label = siteURL
+				label = siteID
 			}
-			failed = append(failed, onboardingFailedResult{Service: svc, Email: label, Error: rerr.Error()})
+			if errors.Is(rerr, outlook.ErrSharePointSiteNoDocumentLibrary) {
+				jobs = append(jobs, onboardingJobResult{Service: svc, Email: label, Skipped: rerr.Error()})
+			} else {
+				failed = append(failed, onboardingFailedResult{Service: svc, Email: label, Error: rerr.Error()})
+			}
 			continue
 		}
 		if _, dup := seen[resolved.SiteID]; dup {
@@ -598,31 +815,9 @@ func createMicrosoftJobsForSharePointSites(
 			"site_name": resolved.SiteName,
 			"site_url":  resolved.SiteURL,
 		}
-		cronJob, createErr := createSyncJobWithCredential(userID, jobName, "outlook_sharepoint", syncType, cred.ID, extra, c)
-		if createErr != nil {
-			failed = append(failed, onboardingFailedResult{Service: svc, Email: jobName, Error: extractCreateJobError(createErr)})
-			continue
-		}
-		if err := applyOnboardingJobSchedule(database, userID, cronJob.ID, jobName, schedule, cred, req, isFirstConnection, policyBatch); err != nil {
-			failed = append(failed, onboardingFailedResult{Service: svc, Email: jobName, Error: err.Error()})
-			continue
-		}
-		if syncType != "one_time" && hasStorxTokenAtJobCreate(req, cred) {
-			if err := database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(true)); err != nil {
-				failed = append(failed, onboardingFailedResult{
-					Service: svc, Email: jobName,
-					Error: fmt.Sprintf("job %d created but activation failed: %v", cronJob.ID, err),
-				})
-				continue
-			}
-		}
-		entry := onboardingJobResult{Service: svc, Email: jobName, JobID: cronJob.ID}
-		if syncType == "one_time" {
-			if task, taskErr := database.TaskRepo.CreateTaskForCronJob(cronJob.ID); taskErr == nil {
-				entry.TaskID = task.ID
-			}
-		}
-		jobs = append(jobs, entry)
+		job, fail := onboardMicrosoftJob(c, database, userID, svc, jobName, "outlook_sharepoint", syncType, extra,
+			schedule, req, cred, isFirstConnection, policyBatch)
+		jobs, failed = appendMicrosoftJobResult(jobs, failed, job, fail)
 	}
 	return jobs, failed
 }
@@ -637,15 +832,14 @@ func createMicrosoftJobsForTeams(
 	isFirstConnection bool,
 	policyBatch *onboardingPolicyBatch,
 	teams []TeamsOnboardingInput,
-	refreshToken string,
+	accessToken string,
 	database *db.PostgresDb,
 ) ([]onboardingJobResult, []onboardingFailedResult) {
 	if len(teams) == 0 {
 		return nil, []onboardingFailedResult{{Service: svc, Error: "teams is required when teams service is selected"}}
 	}
-	accessToken, err := outlook.AuthTokenUsingRefreshToken(strings.TrimSpace(refreshToken))
-	if err != nil {
-		return nil, []onboardingFailedResult{{Service: svc, Error: fmt.Sprintf("token refresh failed: %v", err)}}
+	if strings.TrimSpace(accessToken) == "" {
+		return nil, []onboardingFailedResult{{Service: svc, Error: "organization resources require backup_mode=organization"}}
 	}
 
 	var jobs []onboardingJobResult
@@ -677,39 +871,17 @@ func createMicrosoftJobsForTeams(
 			jobName = outlook.SanitizeTeamsTeamKey(resolved.TeamID)
 		}
 		extra := map[string]interface{}{
-			"team_id":     resolved.TeamID,
-			"team_name":   resolved.TeamName,
+			"team_id":      resolved.TeamID,
+			"team_name":    resolved.TeamName,
 			"team_web_url": resolved.TeamWebURL,
-			"group_id":    resolved.GroupID,
+			"group_id":     resolved.GroupID,
 		}
 		if len(resolved.ChannelIDs) > 0 {
 			extra["channel_ids"] = resolved.ChannelIDs
 		}
-		cronJob, createErr := createSyncJobWithCredential(userID, jobName, "outlook_teams", syncType, cred.ID, extra, c)
-		if createErr != nil {
-			failed = append(failed, onboardingFailedResult{Service: svc, Email: jobName, Error: extractCreateJobError(createErr)})
-			continue
-		}
-		if err := applyOnboardingJobSchedule(database, userID, cronJob.ID, jobName, schedule, cred, req, isFirstConnection, policyBatch); err != nil {
-			failed = append(failed, onboardingFailedResult{Service: svc, Email: jobName, Error: err.Error()})
-			continue
-		}
-		if syncType != "one_time" && hasStorxTokenAtJobCreate(req, cred) {
-			if err := database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(true)); err != nil {
-				failed = append(failed, onboardingFailedResult{
-					Service: svc, Email: jobName,
-					Error: fmt.Sprintf("job %d created but activation failed: %v", cronJob.ID, err),
-				})
-				continue
-			}
-		}
-		entry := onboardingJobResult{Service: svc, Email: jobName, JobID: cronJob.ID}
-		if syncType == "one_time" {
-			if task, taskErr := database.TaskRepo.CreateTaskForCronJob(cronJob.ID); taskErr == nil {
-				entry.TaskID = task.ID
-			}
-		}
-		jobs = append(jobs, entry)
+		job, fail := onboardMicrosoftJob(c, database, userID, svc, jobName, "outlook_teams", syncType, extra,
+			schedule, req, cred, isFirstConnection, policyBatch)
+		jobs, failed = appendMicrosoftJobResult(jobs, failed, job, fail)
 	}
 	return jobs, failed
 }
@@ -724,15 +896,14 @@ func createMicrosoftJobsForGroups(
 	isFirstConnection bool,
 	policyBatch *onboardingPolicyBatch,
 	groups []GroupsOnboardingInput,
-	refreshToken string,
+	accessToken string,
 	database *db.PostgresDb,
 ) ([]onboardingJobResult, []onboardingFailedResult) {
 	if len(groups) == 0 {
 		return nil, []onboardingFailedResult{{Service: svc, Error: "groups is required when groups service is selected"}}
 	}
-	accessToken, err := outlook.AuthTokenUsingRefreshToken(strings.TrimSpace(refreshToken))
-	if err != nil {
-		return nil, []onboardingFailedResult{{Service: svc, Error: fmt.Sprintf("token refresh failed: %v", err)}}
+	if strings.TrimSpace(accessToken) == "" {
+		return nil, []onboardingFailedResult{{Service: svc, Error: "organization resources require backup_mode=organization"}}
 	}
 
 	var jobs []onboardingJobResult
@@ -768,31 +939,9 @@ func createMicrosoftJobsForGroups(
 			"group_name": resolved.GroupName,
 			"group_mail": resolved.GroupMail,
 		}
-		cronJob, createErr := createSyncJobWithCredential(userID, jobName, "outlook_groups", syncType, cred.ID, extra, c)
-		if createErr != nil {
-			failed = append(failed, onboardingFailedResult{Service: svc, Email: jobName, Error: extractCreateJobError(createErr)})
-			continue
-		}
-		if err := applyOnboardingJobSchedule(database, userID, cronJob.ID, jobName, schedule, cred, req, isFirstConnection, policyBatch); err != nil {
-			failed = append(failed, onboardingFailedResult{Service: svc, Email: jobName, Error: err.Error()})
-			continue
-		}
-		if syncType != "one_time" && hasStorxTokenAtJobCreate(req, cred) {
-			if err := database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(true)); err != nil {
-				failed = append(failed, onboardingFailedResult{
-					Service: svc, Email: jobName,
-					Error: fmt.Sprintf("job %d created but activation failed: %v", cronJob.ID, err),
-				})
-				continue
-			}
-		}
-		entry := onboardingJobResult{Service: svc, Email: jobName, JobID: cronJob.ID}
-		if syncType == "one_time" {
-			if task, taskErr := database.TaskRepo.CreateTaskForCronJob(cronJob.ID); taskErr == nil {
-				entry.TaskID = task.ID
-			}
-		}
-		jobs = append(jobs, entry)
+		job, fail := onboardMicrosoftJob(c, database, userID, svc, jobName, "outlook_groups", syncType, extra,
+			schedule, req, cred, isFirstConnection, policyBatch)
+		jobs, failed = appendMicrosoftJobResult(jobs, failed, job, fail)
 	}
 	return jobs, failed
 }
@@ -813,99 +962,4 @@ func mergeOnboardingEmails(base, extra []string) []string {
 		out = append(out, e)
 	}
 	return out
-}
-
-func expandMicrosoftTenantMailboxEmails(ctx context.Context, refreshToken, tenantID string) ([]string, error) {
-	refreshToken = strings.TrimSpace(refreshToken)
-	if refreshToken == "" {
-		return nil, fmt.Errorf("refresh_token is required for all_tenant backup")
-	}
-	accessToken, err := outlook.AuthTokenUsingRefreshToken(refreshToken)
-	if err != nil {
-		return nil, fmt.Errorf("resolve access token for directory listing: %w", err)
-	}
-	client, err := outlook.NewOutlookClientUsingToken(accessToken)
-	if err != nil {
-		return nil, err
-	}
-	users, err := client.ListDomainUsers(999)
-	if err != nil {
-		return nil, fmt.Errorf("list tenant mailboxes: %w", err)
-	}
-	out := make([]string, 0, len(users))
-	for _, u := range users {
-		email := strings.TrimSpace(u.Mail)
-		if email == "" {
-			email = strings.TrimSpace(u.UserPrincipalName)
-		}
-		if email != "" {
-			out = append(out, email)
-		}
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("no tenant mailboxes found")
-	}
-	_ = tenantID
-	_ = ctx
-	return out, nil
-}
-
-func expandMicrosoftTenantTeams(ctx context.Context, refreshToken string) ([]TeamsOnboardingInput, error) {
-	refreshToken = strings.TrimSpace(refreshToken)
-	if refreshToken == "" {
-		return nil, fmt.Errorf("refresh_token is required for all_tenant teams backup")
-	}
-	accessToken, err := outlook.AuthTokenUsingRefreshToken(refreshToken)
-	if err != nil {
-		return nil, fmt.Errorf("resolve access token for teams listing: %w", err)
-	}
-	teams, err := outlook.ListTeams(ctx, accessToken, 999)
-	if err != nil {
-		return nil, fmt.Errorf("list tenant teams: %w", err)
-	}
-	out := make([]TeamsOnboardingInput, 0, len(teams))
-	for _, t := range teams {
-		if strings.TrimSpace(t.ID) == "" {
-			continue
-		}
-		out = append(out, TeamsOnboardingInput{
-			TeamID:   t.ID,
-			TeamName: t.DisplayName,
-		})
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("no tenant teams found")
-	}
-	_ = ctx
-	return out, nil
-}
-
-func expandMicrosoftTenantGroups(ctx context.Context, refreshToken string) ([]GroupsOnboardingInput, error) {
-	refreshToken = strings.TrimSpace(refreshToken)
-	if refreshToken == "" {
-		return nil, fmt.Errorf("refresh_token is required for all_tenant groups backup")
-	}
-	accessToken, err := outlook.AuthTokenUsingRefreshToken(refreshToken)
-	if err != nil {
-		return nil, fmt.Errorf("resolve access token for groups listing: %w", err)
-	}
-	groups, err := outlook.ListGroups(ctx, accessToken, 999)
-	if err != nil {
-		return nil, fmt.Errorf("list tenant groups: %w", err)
-	}
-	out := make([]GroupsOnboardingInput, 0, len(groups))
-	for _, g := range groups {
-		if strings.TrimSpace(g.ID) == "" {
-			continue
-		}
-		out = append(out, GroupsOnboardingInput{
-			GroupID:   g.ID,
-			GroupName: g.DisplayName,
-		})
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("no tenant groups found")
-	}
-	_ = ctx
-	return out, nil
 }

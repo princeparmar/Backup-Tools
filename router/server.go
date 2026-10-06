@@ -136,6 +136,13 @@ func StartServer(db *db.PostgresDb, address string) {
 	microsoft.GET("/outlook/corporate/domain-users", handler.HandleMicrosoftCorporateDomainUsers)
 	microsoft.GET("/account/detect", handler.HandleMicrosoftCorporateDomainUsers)
 	microsoft.GET("/directory/users", handler.HandleMicrosoftDirectoryUsers)
+	microsoft.GET("/workspace", handler.HandleMicrosoftWorkspace)
+
+	msTenants := microsoft.Group("/tenants/:tid")
+	msTenants.POST("/consent", handler.HandleMicrosoftTenantConsent)
+	msTenants.POST("/capabilities/refresh", handler.HandleMicrosoftTenantCapabilitiesRefresh)
+	msTenants.GET("/directory/users", handler.HandleMicrosoftTenantDirectoryUsers)
+	msTenants.GET("/org-structure", handler.HandleMicrosoftTenantOrgStructure)
 
 	msUsersGroups := microsoft.Group("/users-groups")
 	msUsersGroups.GET("/domains", handler.HandleMicrosoftAutosyncUsersGroupsDomains)

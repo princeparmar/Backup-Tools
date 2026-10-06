@@ -32,10 +32,11 @@ func runOutlookOneDriveAutosync(input ProcessorInput) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	accessToken, storx, err := outlookAutosyncPreflight(input)
+	auth, err := microsoftJobAccessToken(input)
 	if err != nil {
 		return err
 	}
+	accessToken, storx := auth.AccessToken, auth.StorxToken
 
 	go func() {
 		processCtx := context.Background()
@@ -48,18 +49,14 @@ func runOutlookOneDriveAutosync(input ProcessorInput) error {
 		return err
 	}
 
-	client, err := outlook.NewOutlookClientUsingToken(accessToken)
+	client, err := microsoftJobClient(auth, jobOutlookMailbox(input.Job))
 	if err != nil {
 		return fmt.Errorf("create outlook client: %w", err)
 	}
 
-	mailbox := strings.TrimSpace(input.Job.Name)
-	if mailbox == "" {
-		user, uerr := client.GetCurrentUser()
-		if uerr != nil {
-			return fmt.Errorf("resolve mailbox: %w", uerr)
-		}
-		mailbox = strings.TrimSpace(user.Mail)
+	mailbox, err := microsoftJobMailbox(auth, input.Job, client)
+	if err != nil {
+		return err
 	}
 	if mailbox == "" {
 		return fmt.Errorf("mailbox email is required for onedrive backup")

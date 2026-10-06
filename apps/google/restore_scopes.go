@@ -25,10 +25,14 @@ const (
 	restoreContactsScope = contactsScope
 )
 
+// microsoftWorkAccount is the Microsoft credential name for a non-admin-consented work account;
+// restore treats it like employee_workspace.
+const microsoftWorkAccount = "work_account"
+
 // NormalizeAccountType returns a known account type or personal as default.
 func NormalizeAccountType(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
-	case AccountTypeEmployeeWorkspace:
+	case AccountTypeEmployeeWorkspace, microsoftWorkAccount:
 		return AccountTypeEmployeeWorkspace
 	case AccountTypeAdminWorkspace:
 		return AccountTypeAdminWorkspace

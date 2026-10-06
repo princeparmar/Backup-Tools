@@ -38,11 +38,11 @@ type TeamChannelSummary struct {
 
 // ResolvedTeam holds validated team metadata for job input_data.
 type ResolvedTeam struct {
-	TeamID      string
-	TeamName    string
-	TeamWebURL  string
-	GroupID     string
-	ChannelIDs  []string
+	TeamID     string
+	TeamName   string
+	TeamWebURL string
+	GroupID    string
+	ChannelIDs []string
 }
 
 // TeamsDeltaMessage is a channel message stub from Graph.
@@ -89,18 +89,6 @@ type TeamsTeamSnapshot struct {
 	TeamWebURL string `json:"team_web_url,omitempty"`
 	GroupID    string `json:"group_id,omitempty"`
 	SnapshotAt string `json:"snapshot_at,omitempty"`
-}
-
-type graphTeamsListResponse struct {
-	Value     []graphTeamRow `json:"value"`
-	NextLink  string         `json:"@odata.nextLink"`
-}
-
-type graphTeamRow struct {
-	ID          string `json:"id"`
-	DisplayName string `json:"displayName"`
-	Description string `json:"description"`
-	WebURL      string `json:"webUrl"`
 }
 
 type graphTeamDetail struct {
@@ -190,36 +178,6 @@ func TeamsHostedContentKey(teamKey, channelID, messageID, contentID string) stri
 		strings.TrimSpace(messageID),
 		strings.TrimSpace(contentID),
 	)
-}
-
-// ListTeams returns teams visible to the signed-in user.
-func ListTeams(ctx context.Context, accessToken string, top int32) ([]TeamSummary, error) {
-	if top <= 0 {
-		top = 50
-	}
-	reqURL := fmt.Sprintf("%s/me/joinedTeams?$top=%d&$select=id,displayName,description,webUrl", graphBaseURL, top)
-	body, status, err := graphDoJSON(ctx, accessToken, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	if status < 200 || status >= 300 {
-		return nil, fmt.Errorf("teams list http %d: %s", status, truncateForErr(body))
-	}
-	var parsed graphTeamsListResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, err
-	}
-	out := make([]TeamSummary, 0, len(parsed.Value))
-	for i := range parsed.Value {
-		row := parsed.Value[i]
-		out = append(out, TeamSummary{
-			ID:          strings.TrimSpace(row.ID),
-			DisplayName: strings.TrimSpace(row.DisplayName),
-			Description: strings.TrimSpace(row.Description),
-			WebURL:      strings.TrimSpace(row.WebURL),
-		})
-	}
-	return out, nil
 }
 
 // ListTeamChannels lists channels for a team.
@@ -511,9 +469,4 @@ func ListTeamsFlatMessagesPage(ctx context.Context, accessToken, teamID, channel
 		all = all[:top]
 	}
 	return all, nil
-}
-
-// TeamsGetAllMessagesURL is application-only tenant export (Phase 4).
-func TeamsGetAllMessagesURL(teamID string) string {
-	return fmt.Sprintf("%s/teams/%s/channels/getAllMessages", graphBaseURL, url.PathEscape(teamID))
 }

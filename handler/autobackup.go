@@ -169,6 +169,11 @@ type onboardingJobResult struct {
 	JobID    uint   `json:"job_id,omitempty"`
 	PolicyID uint   `json:"policy_id,omitempty"`
 	TaskID   uint   `json:"task_id,omitempty"`
+	// Existing marks a job that was already configured (retried onboarding); Active is its state.
+	Existing bool `json:"existing,omitempty"`
+	Active   bool `json:"active,omitempty"`
+	// Skipped is set (with no JobID) when the resource has nothing to back up.
+	Skipped string `json:"skipped,omitempty"`
 }
 
 type onboardingFailedResult struct {
@@ -2219,6 +2224,10 @@ func getServiceName(method string) string {
 		return "Google Calendar"
 	case "google_contacts":
 		return "Google Contacts"
+	case "outlook_calendar":
+		return "Outlook Calendar"
+	case "outlook_contacts":
+		return "Outlook Contacts"
 	case "outlook_onedrive":
 		return "OneDrive"
 	case "outlook_sharepoint":

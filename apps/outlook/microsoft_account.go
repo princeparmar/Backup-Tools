@@ -2,54 +2,59 @@ package outlook
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"net/url"
+	"net/http"
 	"strings"
 )
 
 // MSATenantID is the Entra tenant id for Microsoft personal (consumer) accounts.
-const MSATenantID = "9188040d-6c67-4c48-b9bd-d25dd015834a"
+const MSATenantID = "9188040d-6c67-4c5b-b112-36a304b66dad"
 
-// OrgBackupAdminRoleTemplateIDs — directory role templates that qualify for admin_workspace.
-// v1 includes SharePoint Administrator so SharePoint-only admins are not blocked.
-var OrgBackupAdminRoleTemplateIDs = []string{
-	"62e90294-69f5-4237-9190-012177145947", // Global Administrator
-	"fe930be7-5e62-47db-91fc-433a67967a1a", // User Administrator
-	"9b895d92-2cd3-44c7-9d02-a6ac1d3ea011", // SharePoint Administrator
+const (
+	AccountTypePersonal = "personal"
+	// AccountTypeWorkAccount is any work or school account (admins included) until the tenant
+	// grants admin consent; it says nothing about the user's role (see IsAdmin).
+	AccountTypeWorkAccount = "work_account"
+	// AccountTypeLegacyEmployeeWorkspace is the previous name of AccountTypeWorkAccount, still
+	// present in stored credentials.
+	AccountTypeLegacyEmployeeWorkspace = "employee_workspace"
+	// AccountTypeAdminWorkspace is a label only; it is set from tenant consent + capabilities,
+	// never from the user's delegated admin roles.
+	AccountTypeAdminWorkspace = "admin_workspace"
+)
+
+// NormalizeAccountType maps stored or requested Microsoft account types to the current names
+// (legacy employee_workspace becomes work_account). Unknown values are returned as "".
+func NormalizeAccountType(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case AccountTypePersonal:
+		return AccountTypePersonal
+	case AccountTypeWorkAccount, AccountTypeLegacyEmployeeWorkspace:
+		return AccountTypeWorkAccount
+	case AccountTypeAdminWorkspace:
+		return AccountTypeAdminWorkspace
+	default:
+		return ""
+	}
 }
 
 const (
-	AccountTypePersonal           = "personal"
-	AccountTypeEmployeeWorkspace  = "employee_workspace"
-	AccountTypeAdminWorkspace     = "admin_workspace"
+	WorkspaceKindPersonal     = "personal"
+	WorkspaceKindOrganization = "organization"
 )
 
-// MicrosoftAccountContext is the resolved account classification after OAuth.
+// MicrosoftAccountContext is the resolved account classification after OAuth (delegated token).
+// AccountType is personal or work_account here; admin_workspace comes from the tenant row.
 type MicrosoftAccountContext struct {
-	Email              string
-	AccountType        string
-	TenantID           string
-	TenantName         string
-	IsAdmin            bool
-	SharePointEligible bool
-	RoleTemplateIDs    []string
-}
-
-// MicrosoftDirectoryUserEntity is a tenant user row for admin pickers.
-type MicrosoftDirectoryUserEntity struct {
-	ID          string `json:"id"`
-	Email       string `json:"email"`
-	DisplayName string `json:"display_name"`
-	Enabled     bool   `json:"enabled"`
-}
-
-// MicrosoftDirectoryUsersPage is a paginated directory user list.
-type MicrosoftDirectoryUsersPage struct {
-	Entities   []MicrosoftDirectoryUserEntity `json:"entities"`
-	NextLink   string                         `json:"next_link,omitempty"`
-	SkipToken  string                         `json:"skip_token,omitempty"`
+	Email           string
+	AccountType     string
+	WorkspaceKind   string
+	TenantID        string
+	TenantName      string
+	IsAdmin         bool
+	AdminRoles      []string
+	RoleTemplateIDs []string
 }
 
 // IsMSATenant reports whether tid belongs to a Microsoft personal (consumer) account.
@@ -57,39 +62,13 @@ func IsMSATenant(tenantID string) bool {
 	return strings.EqualFold(strings.TrimSpace(tenantID), MSATenantID)
 }
 
-// CanPerformOrgBackup returns true when any assigned directory role template qualifies for org backup.
-func CanPerformOrgBackup(roleTemplateIDs []string) bool {
-	if len(roleTemplateIDs) == 0 {
-		return false
-	}
-	allowed := make(map[string]struct{}, len(OrgBackupAdminRoleTemplateIDs))
-	for _, id := range OrgBackupAdminRoleTemplateIDs {
-		allowed[strings.ToLower(strings.TrimSpace(id))] = struct{}{}
-	}
-	for _, id := range roleTemplateIDs {
-		if _, ok := allowed[strings.ToLower(strings.TrimSpace(id))]; ok {
-			return true
-		}
-	}
-	return false
-}
-
 // TenantIDFromAccessToken reads the tid claim from a JWT access token.
 func TenantIDFromAccessToken(accessToken string) (string, error) {
-	accessToken = strings.TrimSpace(accessToken)
-	parts := strings.Split(accessToken, ".")
-	if len(parts) < 2 {
-		return "", fmt.Errorf("access token is not a JWT")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", fmt.Errorf("decode access token payload: %w", err)
-	}
 	var claims struct {
 		TID string `json:"tid"`
 	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return "", fmt.Errorf("parse access token payload: %w", err)
+	if err := decodeJWTClaims(accessToken, &claims); err != nil {
+		return "", err
 	}
 	tid := strings.TrimSpace(claims.TID)
 	if tid == "" {
@@ -98,8 +77,26 @@ func TenantIDFromAccessToken(accessToken string) (string, error) {
 	return tid, nil
 }
 
-// ResolveMicrosoftAccountContext classifies the connected Microsoft account (MSA vs Entra, admin vs employee).
+// ResolveMicrosoftAccountContext classifies the connected Microsoft account (consumer vs work/school)
+// and detects Entra Administrator roles. Work/school accounts, admins included, are work_account;
+// admin roles never authorize organization backup.
 func ResolveMicrosoftAccountContext(ctx context.Context, accessToken string) (*MicrosoftAccountContext, error) {
+	return ResolveMicrosoftAccountContextWithIDToken(ctx, accessToken, "")
+}
+
+// ResolveMicrosoftAccountContextFromRefreshToken refreshes with account-detection scopes so the
+// id_token's `wids` claim is available for admin-role detection, then classifies the account.
+func ResolveMicrosoftAccountContextFromRefreshToken(ctx context.Context, refreshToken string) (*MicrosoftAccountContext, error) {
+	tok, err := AuthTokenResponseForAccountDetection(refreshToken)
+	if err != nil {
+		return nil, err
+	}
+	return ResolveMicrosoftAccountContextWithIDToken(ctx, tok.AccessToken, tok.IDToken)
+}
+
+// ResolveMicrosoftAccountContextWithIDToken is ResolveMicrosoftAccountContext with an optional
+// id_token from the same sign-in, used as an additional `wids` source.
+func ResolveMicrosoftAccountContextWithIDToken(ctx context.Context, accessToken, idToken string) (*MicrosoftAccountContext, error) {
 	accessToken = strings.TrimSpace(accessToken)
 	if accessToken == "" {
 		return nil, fmt.Errorf("access token is required")
@@ -116,30 +113,32 @@ func ResolveMicrosoftAccountContext(ctx context.Context, accessToken string) (*M
 	}
 
 	out := &MicrosoftAccountContext{
-		Email:       profile.email(),
-		TenantID:    tid,
-		TenantName:  tenantName,
-		AccountType: AccountTypePersonal,
+		Email:         profile.email(),
+		TenantID:      tid,
+		TenantName:    tenantName,
+		AccountType:   AccountTypePersonal,
+		WorkspaceKind: WorkspaceKindPersonal,
+		AdminRoles:    []string{},
 	}
 
 	if IsMSATenant(tid) {
 		return out, nil
 	}
 
+	out.AccountType = AccountTypeWorkAccount
+	out.WorkspaceKind = WorkspaceKindOrganization
 	if out.TenantName == "" {
 		orgName, _ := graphOrganizationDisplayName(ctx, accessToken, tid)
 		out.TenantName = orgName
 	}
 
-	roleTemplateIDs, _ := graphMyDirectoryRoleTemplateIDs(ctx, accessToken)
-	out.RoleTemplateIDs = roleTemplateIDs
-	if CanPerformOrgBackup(roleTemplateIDs) {
-		out.AccountType = AccountTypeAdminWorkspace
-		out.IsAdmin = true
-		out.SharePointEligible = true
-	} else {
-		out.AccountType = AccountTypeEmployeeWorkspace
+	roles := DetectEntraAdminRoles(ctx, accessToken, idToken)
+	out.IsAdmin = roles.IsAdmin()
+	out.AdminRoles = roles.Names
+	if out.AdminRoles == nil {
+		out.AdminRoles = []string{}
 	}
+	out.RoleTemplateIDs = roles.TemplateIDs
 	return out, nil
 }
 
@@ -154,92 +153,23 @@ func tenantIDForAccountDetection(ctx context.Context, accessToken string) (tenan
 		return tid, name, nil
 	}
 
-	orgID, orgName, orgErr := graphPrimaryOrganization(ctx, accessToken)
-	if orgErr == nil && strings.TrimSpace(orgID) != "" {
-		return orgID, orgName, nil
+	// Opaque access tokens (common for @outlook.com MSA) cannot expose tid via JWT. Only a definitive
+	// /organization answer (no rows, 403 or 404) classifies the account as personal; transient or auth
+	// failures are returned so callers report a detection error instead of mislabeling a work account.
+	parsed, status, orgErr := graphOrganizationList(ctx, accessToken)
+	if orgErr != nil {
+		return "", "", fmt.Errorf("detect microsoft tenant: %w", orgErr)
 	}
-	// Opaque access tokens (common for @outlook.com MSA) cannot expose tid via JWT; /organization
-	// is also unavailable for consumer accounts — classify as personal MSA tenant.
-	return MSATenantID, "", nil
-}
-
-// ListDirectoryUsersPage lists tenant users with optional OData nextLink pagination.
-func ListDirectoryUsersPage(ctx context.Context, accessToken, nextLink string, top int32) (*MicrosoftDirectoryUsersPage, error) {
-	reqURL := strings.TrimSpace(nextLink)
-	if reqURL == "" {
-		if top <= 0 {
-			top = 100
+	switch {
+	case status >= 200 && status < 300:
+		if len(parsed) > 0 && strings.TrimSpace(parsed[0].ID) != "" {
+			return strings.TrimSpace(parsed[0].ID), strings.TrimSpace(parsed[0].DisplayName), nil
 		}
-		reqURL = fmt.Sprintf("%s/users?$top=%d&$select=id,mail,userPrincipalName,displayName,accountEnabled", graphBaseURL, top)
-	}
-	body, status, err := graphDoJSON(ctx, accessToken, "GET", reqURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	if status < 200 || status >= 300 {
-		return nil, fmt.Errorf("list directory users: HTTP %d: %s", status, truncateForErr(body))
-	}
-
-	var parsed struct {
-		Value    []graphUserRow `json:"value"`
-		NextLink string         `json:"@odata.nextLink"`
-	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("parse directory users: %w", err)
-	}
-
-	page := &MicrosoftDirectoryUsersPage{
-		NextLink: parsed.NextLink,
-	}
-	if page.NextLink != "" {
-		page.SkipToken = odataSkipTokenFromNextLink(page.NextLink)
-	}
-	for _, u := range parsed.Value {
-		entity := u.toEntity()
-		if entity.Email == "" && entity.ID == "" {
-			continue
-		}
-		page.Entities = append(page.Entities, entity)
-	}
-	return page, nil
-}
-
-// DirectoryUsersToEntities converts DomainUser rows to directory user entities.
-func DirectoryUsersToEntities(users []DomainUser) []MicrosoftDirectoryUserEntity {
-	out := make([]MicrosoftDirectoryUserEntity, 0, len(users))
-	for _, u := range users {
-		email := strings.TrimSpace(u.Mail)
-		if email == "" {
-			email = strings.TrimSpace(u.UserPrincipalName)
-		}
-		out = append(out, MicrosoftDirectoryUserEntity{
-			ID:          strings.TrimSpace(u.ID),
-			Email:       email,
-			DisplayName: strings.TrimSpace(u.DisplayName),
-			Enabled:     u.AccountEnabled,
-		})
-	}
-	return out
-}
-
-type graphUserRow struct {
-	ID                string `json:"id"`
-	Mail              string `json:"mail"`
-	UserPrincipalName string `json:"userPrincipalName"`
-	DisplayName       string `json:"displayName"`
-	AccountEnabled    bool   `json:"accountEnabled"`
-}
-
-func (u graphUserRow) toEntity() MicrosoftDirectoryUserEntity {
-	email := strings.TrimSpace(u.Mail)
-	if email == "" {
-		email = strings.TrimSpace(u.UserPrincipalName)
-	}
-	return MicrosoftDirectoryUserEntity{
-		ID:          strings.TrimSpace(u.ID),
-		Email:       email,
-		DisplayName: strings.TrimSpace(u.DisplayName),
-		Enabled:     u.AccountEnabled,
+		return MSATenantID, "", nil
+	case status == http.StatusForbidden || status == http.StatusNotFound:
+		return MSATenantID, "", nil
+	default:
+		return "", "", fmt.Errorf("detect microsoft tenant: /organization HTTP %d", status)
 	}
 }
 
@@ -273,21 +203,6 @@ func graphMeProfile(ctx context.Context, accessToken string) (*graphMeProfileRow
 		return nil, fmt.Errorf("graph /me returned no email")
 	}
 	return &row, nil
-}
-
-func graphPrimaryOrganization(ctx context.Context, accessToken string) (id, displayName string, err error) {
-	parsed, status, err := graphOrganizationList(ctx, accessToken)
-	if err != nil {
-		return "", "", err
-	}
-	if status < 200 || status >= 300 {
-		return "", "", nil
-	}
-	if len(parsed) == 0 {
-		return "", "", nil
-	}
-	row := parsed[0]
-	return strings.TrimSpace(row.ID), strings.TrimSpace(row.DisplayName), nil
 }
 
 type graphOrganizationRow struct {
@@ -330,38 +245,4 @@ func graphOrganizationDisplayName(ctx context.Context, accessToken, tenantID str
 		return strings.TrimSpace(parsed[0].DisplayName), nil
 	}
 	return "", nil
-}
-
-func graphMyDirectoryRoleTemplateIDs(ctx context.Context, accessToken string) ([]string, error) {
-	reqURL := graphBaseURL + "/me/memberOf/microsoft.graph.directoryRole?$select=roleTemplateId"
-	body, status, err := graphDoJSON(ctx, accessToken, "GET", reqURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	if status < 200 || status >= 300 {
-		return nil, fmt.Errorf("graph directory roles: HTTP %d", status)
-	}
-	var parsed struct {
-		Value []struct {
-			RoleTemplateID string `json:"roleTemplateId"`
-		} `json:"value"`
-	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(parsed.Value))
-	for _, row := range parsed.Value {
-		if id := strings.TrimSpace(row.RoleTemplateID); id != "" {
-			out = append(out, id)
-		}
-	}
-	return out, nil
-}
-
-func odataSkipTokenFromNextLink(nextLink string) string {
-	u, err := url.Parse(nextLink)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(u.Query().Get("$skiptoken"))
 }

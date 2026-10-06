@@ -11,8 +11,10 @@ import (
 	"time"
 )
 
+// graphBaseURL is a var so tests can point Graph calls at an httptest server.
+var graphBaseURL = "https://graph.microsoft.com/v1.0"
+
 const (
-	graphBaseURL              = "https://graph.microsoft.com/v1.0"
 	fallbackObjectKeyDatePath = "1970/01/01"
 	maxGraphRetries           = 5
 )
@@ -65,9 +67,9 @@ type OneDriveDeltaPage struct {
 }
 
 type graphDeltaResponse struct {
-	Value    []graphDriveItem `json:"value"`
-	NextLink string           `json:"@odata.nextLink"`
-	DeltaLink string          `json:"@odata.deltaLink"`
+	Value     []graphDriveItem `json:"value"`
+	NextLink  string           `json:"@odata.nextLink"`
+	DeltaLink string           `json:"@odata.deltaLink"`
 }
 
 type graphDriveItem struct {
@@ -97,18 +99,11 @@ type graphDriveItem struct {
 // OneDriveDriveRootURL returns the Graph drive root for mailbox.
 // Uses /me/drive when mailbox matches the signed-in user; otherwise /users/{mailbox}/drive.
 func (client *OutlookClient) OneDriveDriveRootURL(mailbox string) (string, error) {
-	mailbox = strings.TrimSpace(mailbox)
-	user, err := client.GetCurrentUser()
+	base, err := client.MailUserBaseURL(mailbox)
 	if err != nil {
 		return "", err
 	}
-	meMail := strings.ToLower(strings.TrimSpace(user.Mail))
-	meUPN := strings.ToLower(strings.TrimSpace(user.UserPrincipalName))
-	mb := strings.ToLower(mailbox)
-	if mailbox == "" || mb == meMail || mb == meUPN {
-		return graphBaseURL + "/me/drive", nil
-	}
-	return graphBaseURL + "/users/" + urlPathEscape(mailbox) + "/drive", nil
+	return base + "/drive", nil
 }
 
 func urlPathEscape(s string) string {

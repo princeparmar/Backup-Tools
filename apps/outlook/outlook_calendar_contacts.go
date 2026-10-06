@@ -11,11 +11,11 @@ import (
 
 // FlatCalendar is a calendar summary for browse/autosync.
 type FlatCalendar struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Color    string `json:"color,omitempty"`
-	CanEdit  bool   `json:"can_edit"`
-	IsDefault bool  `json:"is_default"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Color     string `json:"color,omitempty"`
+	CanEdit   bool   `json:"can_edit"`
+	IsDefault bool   `json:"is_default"`
 }
 
 // FlatEvent is a calendar event summary for browse/autosync.
@@ -34,29 +34,20 @@ type FlatEvent struct {
 
 // FlatContact is a contact summary for browse/autosync.
 type FlatContact struct {
-	ID             string   `json:"id"`
-	DisplayName    string   `json:"display_name"`
-	GivenName      string   `json:"given_name,omitempty"`
-	Surname        string   `json:"surname,omitempty"`
-	Emails         []string `json:"emails,omitempty"`
-	Phones         []string `json:"phones,omitempty"`
-	CompanyName    string   `json:"company_name,omitempty"`
-	JobTitle       string   `json:"job_title,omitempty"`
-	ChangeKey      string   `json:"change_key,omitempty"`
-}
-
-// DomainUser is a directory user for corporate listing.
-type DomainUser struct {
-	ID                string `json:"id"`
-	DisplayName       string `json:"display_name"`
-	Mail              string `json:"mail"`
-	UserPrincipalName string `json:"user_principal_name"`
-	AccountEnabled    bool   `json:"account_enabled"`
+	ID          string   `json:"id"`
+	DisplayName string   `json:"display_name"`
+	GivenName   string   `json:"given_name,omitempty"`
+	Surname     string   `json:"surname,omitempty"`
+	Emails      []string `json:"emails,omitempty"`
+	Phones      []string `json:"phones,omitempty"`
+	CompanyName string   `json:"company_name,omitempty"`
+	JobTitle    string   `json:"job_title,omitempty"`
+	ChangeKey   string   `json:"change_key,omitempty"`
 }
 
 // ListCalendars returns calendars for the signed-in user.
 func (client *OutlookClient) ListCalendars() ([]FlatCalendar, error) {
-	result, err := client.Me().Calendars().Get(context.Background(), &users.ItemCalendarsRequestBuilderGetRequestConfiguration{
+	result, err := client.user().Calendars().Get(context.Background(), &users.ItemCalendarsRequestBuilderGetRequestConfiguration{
 		QueryParameters: &users.ItemCalendarsRequestBuilderGetQueryParameters{
 			Top:    int32Ptr(100),
 			Select: []string{"id", "name", "color", "canEdit", "isDefaultCalendar"},
@@ -97,11 +88,11 @@ func (client *OutlookClient) ListCalendarEvents(calendarID string, skip, top int
 	if top <= 0 {
 		top = 50
 	}
-	result, err := client.Me().Calendars().ByCalendarId(calendarID).Events().Get(context.Background(), &users.ItemCalendarsItemEventsRequestBuilderGetRequestConfiguration{
+	result, err := client.user().Calendars().ByCalendarId(calendarID).Events().Get(context.Background(), &users.ItemCalendarsItemEventsRequestBuilderGetRequestConfiguration{
 		QueryParameters: &users.ItemCalendarsItemEventsRequestBuilderGetQueryParameters{
-			Top:    &top,
-			Skip:   &skip,
-			Select: []string{"id", "subject", "start", "end", "isCancelled", "isAllDay", "bodyPreview", "organizer", "lastModifiedDateTime"},
+			Top:     &top,
+			Skip:    &skip,
+			Select:  []string{"id", "subject", "start", "end", "isCancelled", "isAllDay", "bodyPreview", "organizer", "lastModifiedDateTime"},
 			Orderby: []string{"start/dateTime"},
 		},
 	})
@@ -161,7 +152,7 @@ func (client *OutlookClient) GetCalendarEvent(calendarID, eventID string) (model
 	if calendarID == "" || eventID == "" {
 		return nil, fmt.Errorf("calendar_id and event_id are required")
 	}
-	ev, err := client.Me().Calendars().ByCalendarId(calendarID).Events().ByEventId(eventID).Get(context.Background(), nil)
+	ev, err := client.user().Calendars().ByCalendarId(calendarID).Events().ByEventId(eventID).Get(context.Background(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("get event: %w", err)
 	}
@@ -173,7 +164,7 @@ func (client *OutlookClient) ListContacts(skip, top int32) ([]FlatContact, error
 	if top <= 0 {
 		top = 100
 	}
-	result, err := client.Me().Contacts().Get(context.Background(), &users.ItemContactsRequestBuilderGetRequestConfiguration{
+	result, err := client.user().Contacts().Get(context.Background(), &users.ItemContactsRequestBuilderGetRequestConfiguration{
 		QueryParameters: &users.ItemContactsRequestBuilderGetQueryParameters{
 			Top:    &top,
 			Skip:   &skip,
@@ -224,50 +215,6 @@ func (client *OutlookClient) ListContacts(skip, top int32) ([]FlatContact, error
 			item.Phones = append(item.Phones, strings.TrimSpace(*c.GetMobilePhone()))
 		}
 		out = append(out, item)
-	}
-	return out, nil
-}
-
-// ListDomainUsers lists users in the tenant (requires Directory.Read.All or User.Read.All).
-func (client *OutlookClient) ListDomainUsers(top int32) ([]DomainUser, error) {
-	if top <= 0 {
-		top = 100
-	}
-	// Use /users via Me's client adapter path: GraphServiceClient.Users()
-	result, err := client.Users().Get(context.Background(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("list directory users (requires Directory.Read.All or User.Read.All): %w", err)
-	}
-	out := make([]DomainUser, 0)
-	if result == nil || result.GetValue() == nil {
-		return out, nil
-	}
-	count := int32(0)
-	for _, u := range result.GetValue() {
-		if u == nil || u.GetId() == nil {
-			continue
-		}
-		item := DomainUser{ID: *u.GetId()}
-		if u.GetDisplayName() != nil {
-			item.DisplayName = *u.GetDisplayName()
-		}
-		if u.GetMail() != nil {
-			item.Mail = *u.GetMail()
-		}
-		if u.GetUserPrincipalName() != nil {
-			item.UserPrincipalName = *u.GetUserPrincipalName()
-		}
-		if u.GetAccountEnabled() != nil {
-			item.AccountEnabled = *u.GetAccountEnabled()
-		}
-		if item.Mail == "" {
-			item.Mail = item.UserPrincipalName
-		}
-		out = append(out, item)
-		count++
-		if count >= top {
-			break
-		}
 	}
 	return out, nil
 }

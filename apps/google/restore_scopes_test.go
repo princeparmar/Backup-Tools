@@ -15,6 +15,7 @@ func TestNormalizeAccountType(t *testing.T) {
 	}{
 		{name: "personal default", in: "", want: AccountTypePersonal},
 		{name: "employee", in: "employee_workspace", want: AccountTypeEmployeeWorkspace},
+		{name: "microsoft work account", in: "work_account", want: AccountTypeEmployeeWorkspace},
 		{name: "admin", in: "ADMIN_WORKSPACE", want: AccountTypeAdminWorkspace},
 		{name: "unknown", in: "corp", want: AccountTypePersonal},
 	}

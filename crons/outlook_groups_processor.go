@@ -32,10 +32,11 @@ func runOutlookGroupsAutosync(input ProcessorInput) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	accessToken, storx, err := outlookAutosyncPreflight(input)
+	auth, err := microsoftJobAccessToken(input)
 	if err != nil {
 		return err
 	}
+	accessToken, storx := auth.AccessToken, auth.StorxToken
 
 	go func() {
 		processCtx := context.Background()

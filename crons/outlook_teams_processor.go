@@ -31,11 +31,11 @@ func runOutlookTeamsAutosync(input ProcessorInput) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	accessToken, storx, err := outlookAutosyncPreflight(input)
+	auth, err := microsoftJobAccessToken(input)
 	if err != nil {
 		return err
 	}
-	delegatedToken := accessToken
+	accessToken, storx := auth.AccessToken, auth.StorxToken
 
 	go func() {
 		processCtx := context.Background()
@@ -57,13 +57,6 @@ func runOutlookTeamsAutosync(input ProcessorInput) error {
 	task := scheduledTaskShellFromCronJob(input.Job, accessToken, storx)
 	task.LoginId = teamKey
 	task.StorxToken = storx
-
-	if appToken, appErr := resolveOutlookMailAccessToken(input); appErr == nil && appToken != "" {
-		if exportErr := runTeamsAppOnlyExport(ctx, input, task, appToken, teamID, teamKey); exportErr != nil {
-			logger.Warn(ctx, "teams app-only export failed", logger.ErrorField(exportErr))
-		}
-	}
-	accessToken = delegatedToken
 
 	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_OutlookTeams, teamKey+"/.file_placeholder", nil, input.Job.UserID, input.StorxRecovery); err != nil {
 		return fmt.Errorf("setup storage placeholder: %w", err)
@@ -325,32 +318,4 @@ func writeTeamsRemovedMetadata(ctx context.Context, input ProcessorInput, task *
 	}
 	b, _ := json.Marshal(meta)
 	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_OutlookTeams, metaKey, b, task.UserID, input.StorxRecovery)
-}
-
-// runTeamsAppOnlyExport uses getAllMessages when application token is available (Phase 4).
-func runTeamsAppOnlyExport(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, accessToken, teamID, teamKey string) error {
-	url := outlook.TeamsGetAllMessagesURL(teamID)
-	for url != "" {
-		if err := input.HeartBeatFunc(); err != nil {
-			return err
-		}
-		page, err := outlook.FetchTeamsChannelMessagesPage(ctx, accessToken, url)
-		if err != nil {
-			return err
-		}
-		for i := range page.Messages {
-			channelID := ""
-			if input.Job.InputData != nil && input.Job.InputData.Json() != nil {
-				if v, ok := (*input.Job.InputData.Json())["default_channel_id"].(string); ok {
-					channelID = v
-				}
-			}
-			if channelID == "" {
-				channelID = "unknown"
-			}
-			_ = syncTeamsMessage(ctx, input, task, accessToken, teamID, teamKey, channelID, &page.Messages[i])
-		}
-		url = strings.TrimSpace(page.NextLink)
-	}
-	return nil
 }

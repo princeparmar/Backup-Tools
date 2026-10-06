@@ -43,7 +43,7 @@ type OutlookMailCronBackupMeta struct {
 	LastModifiedDateTime string `json:"last_modified_date_time,omitempty"`
 	ChangeKey            string `json:"change_key,omitempty"`
 	HasAttachments       bool   `json:"has_attachments,omitempty"`
-	RemovedFromMailbox  bool   `json:"removed_from_mailbox,omitempty"`
+	RemovedFromMailbox   bool   `json:"removed_from_mailbox,omitempty"`
 	DeletedAt            string `json:"deleted_at,omitempty"`
 	DataObjectKey        string `json:"data_object_key,omitempty"`
 	UpdatedAt            string `json:"updated_at,omitempty"`
@@ -51,8 +51,8 @@ type OutlookMailCronBackupMeta struct {
 
 type graphOutlookMailDeltaResponse struct {
 	Value     []graphOutlookMailMessageRow `json:"value"`
-	NextLink  string                    `json:"@odata.nextLink"`
-	DeltaLink string                    `json:"@odata.deltaLink"`
+	NextLink  string                       `json:"@odata.nextLink"`
+	DeltaLink string                       `json:"@odata.deltaLink"`
 }
 
 type graphOutlookMailMessageRow struct {
@@ -74,18 +74,17 @@ type graphOutlookMailMessageRow struct {
 
 // MailUserBaseURL returns /me or /users/{mailbox} for Graph mail paths.
 func (client *OutlookClient) MailUserBaseURL(mailbox string) (string, error) {
-	mailbox = strings.TrimSpace(mailbox)
+	if client.targetUser != "" {
+		if strings.TrimSpace(mailbox) == "" {
+			mailbox = client.targetUser
+		}
+		return UserBaseURL(mailbox, "", "", true)
+	}
 	user, err := client.GetCurrentUser()
 	if err != nil {
 		return "", err
 	}
-	meMail := strings.ToLower(strings.TrimSpace(user.Mail))
-	meUPN := strings.ToLower(strings.TrimSpace(user.UserPrincipalName))
-	mb := strings.ToLower(mailbox)
-	if mailbox == "" || mb == meMail || mb == meUPN {
-		return graphBaseURL + "/me", nil
-	}
-	return graphBaseURL + "/users/" + urlPathEscape(mailbox), nil
+	return UserBaseURL(mailbox, user.Mail, user.UserPrincipalName, false)
 }
 
 // outlookMailDeltaSelect asks Graph for list/browse fields on every delta page (including baseline).

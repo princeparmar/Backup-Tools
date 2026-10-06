@@ -501,6 +501,15 @@ func GetDriveServiceUsingToken(accessToken string) (*drive.Service, error) {
 	return drive.NewService(context.Background(), option.WithHTTPClient(client))
 }
 
+// DriveReadonlyServiceUsingToken builds a read-only Drive API client from a user access token.
+func DriveReadonlyServiceUsingToken(ctx context.Context, accessToken string) (*drive.Service, error) {
+	client, err := clientUsingTokenScopes(accessToken, drive.DriveReadonlyScope)
+	if err != nil {
+		return nil, err
+	}
+	return drive.NewService(ctx, option.WithHTTPClient(client))
+}
+
 func clientUsingToken(token string) (*http.Client, error) {
 	return clientUsingTokenScopes(token,
 		drive.DriveScope,

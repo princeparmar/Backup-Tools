@@ -3,6 +3,7 @@ package outlook
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -56,10 +57,6 @@ type graphSiteResponse struct {
 	Name        string `json:"name"`
 	DisplayName string `json:"displayName"`
 	WebURL      string `json:"webUrl"`
-}
-
-type graphSitesSearchResponse struct {
-	Value []graphSiteResponse `json:"value"`
 }
 
 type graphDriveResponse struct {
@@ -123,40 +120,6 @@ func FetchSharePointDeltaPage(ctx context.Context, accessToken, requestURL strin
 // OpenSharePointItemContentStream streams file content from /drives/{drive_id}/items/{item_id}/content.
 func OpenSharePointItemContentStream(ctx context.Context, accessToken, driveID, itemID string) (io.ReadCloser, int64, error) {
 	return OpenOneDriveItemContentStream(ctx, accessToken, DriveRootURLFromDriveID(driveID), itemID)
-}
-
-// ListSharePointSites searches sites visible to the signed-in user.
-func ListSharePointSites(ctx context.Context, accessToken, search string, top int32) ([]SharePointSiteSummary, error) {
-	if top <= 0 {
-		top = 50
-	}
-	q := url.QueryEscape(strings.TrimSpace(search))
-	if q == "" {
-		q = "*"
-	}
-	reqURL := fmt.Sprintf("%s/sites?search=%s&$top=%d&$select=id,name,displayName,webUrl", graphBaseURL, q, top)
-	body, status, err := graphDoJSON(ctx, accessToken, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	if status < 200 || status >= 300 {
-		return nil, fmt.Errorf("sharepoint sites http %d: %s", status, truncateForErr(body))
-	}
-	var parsed graphSitesSearchResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, err
-	}
-	out := make([]SharePointSiteSummary, 0, len(parsed.Value))
-	for i := range parsed.Value {
-		s := parsed.Value[i]
-		out = append(out, SharePointSiteSummary{
-			ID:          strings.TrimSpace(s.ID),
-			Name:        strings.TrimSpace(s.Name),
-			DisplayName: strings.TrimSpace(s.DisplayName),
-			WebURL:      strings.TrimSpace(s.WebURL),
-		})
-	}
-	return out, nil
 }
 
 // ResolveSharePointSite resolves site_id (and default drive_id) from site_id or site_url input.
@@ -225,24 +188,47 @@ func ResolveSharePointSite(ctx context.Context, accessToken, siteID, siteURL str
 	}, nil
 }
 
+// ErrSharePointSiteNoDocumentLibrary means the site exists but has no document library to back up
+// (typically a hidden system site returned by getAllSites).
+var ErrSharePointSiteNoDocumentLibrary = errors.New("sharepoint site has no document library to back up")
+
 func fetchSiteDefaultDriveID(ctx context.Context, accessToken, siteID string) (string, error) {
 	reqURL := graphBaseURL + "/sites/" + url.PathEscape(siteID) + "/drive?$select=id"
 	body, status, err := graphDoJSON(ctx, accessToken, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return "", err
 	}
+	if status >= 200 && status < 300 {
+		var drive graphDriveResponse
+		if err := json.Unmarshal(body, &drive); err != nil {
+			return "", err
+		}
+		driveID := strings.TrimSpace(drive.ID)
+		if driveID != "" {
+			return driveID, nil
+		}
+	}
+	// getAllSites returns entries with no default library; try document libraries list.
+	if status == http.StatusNotFound {
+		drives, listErr := graphListAll[graphDriveResponse](
+			ctx,
+			accessToken,
+			graphBaseURL+"/sites/"+url.PathEscape(siteID)+"/drives?$select=id",
+			8,
+		)
+		if listErr == nil {
+			for _, d := range drives {
+				if id := strings.TrimSpace(d.ID); id != "" {
+					return id, nil
+				}
+			}
+			return "", ErrSharePointSiteNoDocumentLibrary
+		}
+	}
 	if status < 200 || status >= 300 {
 		return "", fmt.Errorf("sharepoint default drive http %d: %s", status, truncateForErr(body))
 	}
-	var drive graphDriveResponse
-	if err := json.Unmarshal(body, &drive); err != nil {
-		return "", err
-	}
-	driveID := strings.TrimSpace(drive.ID)
-	if driveID == "" {
-		return "", fmt.Errorf("sharepoint default drive id missing")
-	}
-	return driveID, nil
+	return "", fmt.Errorf("sharepoint default drive id missing")
 }
 
 func parseSharePointSiteURL(raw string) (host, path string, err error) {

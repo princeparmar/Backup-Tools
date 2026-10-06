@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -9,6 +8,7 @@ import (
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
+	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/labstack/echo/v4"
 )
 
@@ -20,13 +20,21 @@ func outlookClientFromRefreshHeader(c echo.Context) (*outlook.OutlookClient, err
 	return outlook.NewOutlookClientUsingToken(token)
 }
 
-func outlookAccessTokenFromRefreshHeader(c echo.Context) (string, error) {
+func refreshTokenFromRequest(c echo.Context) (string, error) {
 	refresh := strings.TrimSpace(c.Request().Header.Get("REFRESH_TOKEN"))
 	if refresh == "" {
 		refresh = strings.TrimSpace(c.QueryParam("refresh_token"))
 	}
 	if refresh == "" {
 		return "", fmt.Errorf("REFRESH_TOKEN header is required")
+	}
+	return refresh, nil
+}
+
+func outlookAccessTokenFromRefreshHeader(c echo.Context) (string, error) {
+	refresh, err := refreshTokenFromRequest(c)
+	if err != nil {
+		return "", err
 	}
 	return outlook.AuthTokenUsingRefreshToken(refresh)
 }
@@ -131,18 +139,20 @@ func HandleMicrosoftListCalendarEvents(c echo.Context) error {
 	})
 }
 
-// HandleMicrosoftCorporateDomainUsers detects account type (Google twin) and optionally lists tenant users for admins.
+// HandleMicrosoftCorporateDomainUsers detects the delegated account and returns the shared workspace
+// contract. Tenant consent/capabilities are read-only here; directory entities are listed live from
+// Graph only when the tenant is authorized for org backup.
 func HandleMicrosoftCorporateDomainUsers(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	accessToken, err := outlookAccessTokenFromRefreshHeader(c)
+	refreshToken, err := refreshTokenFromRequest(c)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
 	}
 
-	acctCtx, err := outlook.ResolveMicrosoftAccountContext(ctx, accessToken)
+	acctCtx, err := msResolveAccountFn(ctx, refreshToken)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"error": err.Error(),
@@ -150,102 +160,64 @@ func HandleMicrosoftCorporateDomainUsers(c echo.Context) error {
 		})
 	}
 
-	if acctCtx.AccountType == outlook.AccountTypePersonal {
-		return c.JSON(http.StatusOK, map[string]interface{}{
-			"account_type": acctCtx.AccountType,
-			"email":        acctCtx.Email,
-		})
+	database := microsoftDB(c)
+	var tenant *repo.MicrosoftTenantDB
+	if acctCtx.AccountType != outlook.AccountTypePersonal && acctCtx.TenantID != "" {
+		tenant, err = database.MicrosoftTenantRepo.Get(acctCtx.TenantID)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+		}
 	}
+	appTokenOK := tenant != nil && tenant.ConsentStatus == repo.MicrosoftConsentGranted &&
+		microsoftAppTokenUsable(ctx, tenant.TenantID)
+	contract := buildMicrosoftWorkspaceContract(acctCtx, tenant, appTokenOK)
 
-	if acctCtx.AccountType == outlook.AccountTypeEmployeeWorkspace {
-		return c.JSON(http.StatusOK, map[string]interface{}{
-			"account_type": acctCtx.AccountType,
-			"email":        acctCtx.Email,
-			"tenant_id":    acctCtx.TenantID,
-			"tenant_name":  acctCtx.TenantName,
-		})
-	}
-
-	top, _ := strconv.Atoi(c.QueryParam("top"))
-	if top <= 0 {
-		top = 200
-	}
-	client, err := outlook.NewOutlookClientUsingToken(accessToken)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
-	}
-	users, listErr := client.ListDomainUsers(int32(top))
 	entities := make([]map[string]interface{}, 0)
-	if listErr == nil {
-		for _, u := range outlook.DirectoryUsersToEntities(users) {
-			entities = append(entities, map[string]interface{}{
-				"id":           u.ID,
-				"email":        u.Email,
-				"display_name": u.DisplayName,
-				"enabled":      u.Enabled,
-			})
+	if contract.AccountType == outlook.AccountTypeAdminWorkspace {
+		top, _ := strconv.Atoi(c.QueryParam("top"))
+		if top <= 0 {
+			top = 200
+		}
+		if token, _, aerr := MicrosoftOrgAccess(ctx, database, tenant.TenantID, ""); aerr == nil {
+			if users, lerr := msListDirectoryUsersFn(ctx, token); lerr == nil {
+				users = filterMicrosoftDirectoryUsers(users, microsoftDirectoryFilter{EnabledOnly: true})
+				roles, _ := microsoftTenantUserRoles(ctx, token)
+				entities = microsoftDirectoryUserViews(users[:min(top, len(users))], roles)
+			}
 		}
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"account":              acctCtx.Email,
-		"account_type":         acctCtx.AccountType,
-		"tenant_id":            acctCtx.TenantID,
-		"tenant_name":          acctCtx.TenantName,
-		"is_admin":             acctCtx.IsAdmin,
-		"sharepoint_eligible":  acctCtx.SharePointEligible,
-		"entities":             entities,
+		"account":           contract.Email,
+		"email":             contract.Email,
+		"account_type":      contract.AccountType,
+		"workspace_kind":    contract.WorkspaceKind,
+		"tenant_id":         contract.TenantID,
+		"tenant_name":       contract.TenantName,
+		"is_admin":          contract.IsAdmin,
+		"admin_roles":       contract.AdminRoles,
+		"consent":           contract.Consent,
+		"capabilities":      contract.Capabilities,
+		"capability_errors": contract.CapabilityErrors,
+		"entities":          entities,
 	})
 }
 
-// HandleMicrosoftDirectoryUsers lists tenant users with pagination (admin picker lazy load).
+// HandleMicrosoftDirectoryUsers lists tenant users live for the delegated caller's tenant.
 func HandleMicrosoftDirectoryUsers(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	accessToken, err := outlookAccessTokenFromRefreshHeader(c)
+	accessToken, err := msDelegatedAccessFn(c)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
 	}
-
-	acctCtx, err := outlook.ResolveMicrosoftAccountContext(ctx, accessToken)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+	tid, err := msTenantIDFromAccessFn(accessToken)
+	if err != nil || tid == "" || outlook.IsMSATenant(tid) {
+		return c.JSON(http.StatusForbidden, map[string]interface{}{"error": "directory listing requires a Microsoft 365 work or school tenant"})
 	}
-	if acctCtx.AccountType != outlook.AccountTypeAdminWorkspace {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "Only Microsoft 365 admins can list directory users",
-		})
-	}
-
-	top, _ := strconv.Atoi(c.QueryParam("top"))
-	nextLink := strings.TrimSpace(c.QueryParam("next_link"))
-	if nextLink == "" {
-		nextLink = strings.TrimSpace(c.QueryParam("skip_token"))
-	}
-	page, err := outlook.ListDirectoryUsersPage(ctx, accessToken, nextLink, int32(top))
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"error": err.Error(),
-			"hint":  "Directory listing requires Microsoft Graph User.Read.All or Directory.Read.All (admin consent)",
-		})
-	}
-
-	entities := make([]map[string]interface{}, 0, len(page.Entities))
-	for _, u := range page.Entities {
-		entities = append(entities, map[string]interface{}{
-			"id":           u.ID,
-			"email":        u.Email,
-			"display_name": u.DisplayName,
-			"enabled":      u.Enabled,
-		})
-	}
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"entities":   entities,
-		"next_link":  page.NextLink,
-		"skip_token": page.SkipToken,
-	})
+	return respondMicrosoftDirectoryUsers(c, microsoftDB(c), strings.ToLower(tid))
 }
 
 // HandleMicrosoftOneDriveFlatFiles lists non-folder OneDrive files (browse twin of Google drive-flat-files).
@@ -339,13 +311,9 @@ func HandleMicrosoftSharePointSites(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	if _, err := requireMicrosoftSharePointAdmin(ctx, c); err != nil {
-		return sharePointBrowseForbidden(c, err)
-	}
-
-	accessToken, err := outlookAccessTokenFromRefreshHeader(c)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+	accessToken, respErr := microsoftOrgBrowseToken(c, outlook.CapabilitySharePoint)
+	if accessToken == "" {
+		return respErr
 	}
 
 	search := strings.TrimSpace(c.QueryParam("search"))
@@ -354,11 +322,11 @@ func HandleMicrosoftSharePointSites(c echo.Context) error {
 		top = 50
 	}
 
-	sites, err := outlook.ListSharePointSites(ctx, accessToken, search, int32(top))
+	sites, err := outlook.ListTenantSharePointSites(ctx, accessToken, search, top)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"error": err.Error(),
-			"hint":  "SharePoint site listing requires Microsoft Graph Sites.Read.All (admin consent)",
+			"hint":  "SharePoint site listing requires the Sites.Read.All application permission",
 		})
 	}
 	return c.JSON(http.StatusOK, map[string]interface{}{
@@ -374,13 +342,9 @@ func HandleMicrosoftSharePointFlatFiles(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	if _, err := requireMicrosoftSharePointAdmin(ctx, c); err != nil {
-		return sharePointBrowseForbidden(c, err)
-	}
-
-	accessToken, err := outlookAccessTokenFromRefreshHeader(c)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+	accessToken, respErr := microsoftOrgBrowseToken(c, outlook.CapabilitySharePoint)
+	if accessToken == "" {
+		return respErr
 	}
 
 	driveID := strings.TrimSpace(c.QueryParam("drive_id"))
@@ -407,52 +371,29 @@ func HandleMicrosoftSharePointFlatFiles(c echo.Context) error {
 	})
 }
 
-func requireMicrosoftSharePointAdmin(ctx context.Context, c echo.Context) (*outlook.MicrosoftAccountContext, error) {
-	accessToken, err := outlookAccessTokenFromRefreshHeader(c)
+// microsoftOrgBrowseToken resolves the tenant (tenant_id query, else the delegated token's tenant),
+// authorizes the caller for it, and returns an app-only token gated on consent + capability.
+func microsoftOrgBrowseToken(c echo.Context, capability string) (string, error) {
+	database := microsoftDB(c)
+	tid := strings.ToLower(strings.TrimSpace(c.QueryParam("tenant_id")))
+	if tid == "" {
+		access, err := msDelegatedAccessFn(c)
+		if err != nil {
+			return "", c.JSON(http.StatusBadRequest, map[string]interface{}{"error": "tenant_id query or REFRESH_TOKEN header is required"})
+		}
+		tid, err = msTenantIDFromAccessFn(access)
+		if err != nil || tid == "" {
+			return "", c.JSON(http.StatusBadRequest, map[string]interface{}{"error": "could not determine Microsoft tenant"})
+		}
+		tid = strings.ToLower(tid)
+	} else if _, he := authorizeMicrosoftTenantRequest(c, database, tid); he != nil {
+		return "", httpErrorJSON(c, he)
+	}
+	token, _, err := MicrosoftOrgAccess(c.Request().Context(), database, tid, capability)
 	if err != nil {
-		return nil, err
+		return "", orgAccessErrorJSON(c, err)
 	}
-	acctCtx, err := outlook.ResolveMicrosoftAccountContext(ctx, accessToken)
-	if err != nil {
-		return nil, err
-	}
-	if acctCtx.AccountType != outlook.AccountTypeAdminWorkspace {
-		return nil, fmt.Errorf("SharePoint backup requires an organization admin account")
-	}
-	return acctCtx, nil
-}
-
-func sharePointBrowseForbidden(c echo.Context, err error) error {
-	if err == nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "SharePoint backup requires an organization admin account",
-		})
-	}
-	return c.JSON(http.StatusForbidden, map[string]interface{}{"error": err.Error()})
-}
-
-func requireMicrosoftOrgResourceAccess(ctx context.Context, c echo.Context) (*outlook.MicrosoftAccountContext, error) {
-	accessToken, err := outlookAccessTokenFromRefreshHeader(c)
-	if err != nil {
-		return nil, err
-	}
-	acctCtx, err := outlook.ResolveMicrosoftAccountContext(ctx, accessToken)
-	if err != nil {
-		return nil, err
-	}
-	if acctCtx.AccountType == "personal" {
-		return nil, fmt.Errorf("Teams and Groups backup are not available for personal Microsoft accounts")
-	}
-	return acctCtx, nil
-}
-
-func orgResourceBrowseForbidden(c echo.Context, err error) error {
-	if err == nil {
-		return c.JSON(http.StatusForbidden, map[string]interface{}{
-			"error": "Teams and Groups backup require a work or school account",
-		})
-	}
-	return c.JSON(http.StatusForbidden, map[string]interface{}{"error": err.Error()})
+	return token, nil
 }
 
 // HandleMicrosoftTeamsList lists Teams for team picker.
@@ -461,13 +402,9 @@ func HandleMicrosoftTeamsList(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	if _, err := requireMicrosoftOrgResourceAccess(ctx, c); err != nil {
-		return orgResourceBrowseForbidden(c, err)
-	}
-
-	accessToken, err := outlookAccessTokenFromRefreshHeader(c)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+	accessToken, respErr := microsoftOrgBrowseToken(c, outlook.CapabilityTeamsChannel)
+	if accessToken == "" {
+		return respErr
 	}
 
 	top, _ := strconv.Atoi(c.QueryParam("top"))
@@ -475,11 +412,11 @@ func HandleMicrosoftTeamsList(c echo.Context) error {
 		top = 50
 	}
 
-	teams, err := outlook.ListTeams(ctx, accessToken, int32(top))
+	teams, err := outlook.ListTenantTeams(ctx, accessToken, top)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"error": err.Error(),
-			"hint":  "Teams listing requires Team.ReadBasic.All",
+			"hint":  "Teams listing requires the Group.Read.All application permission",
 		})
 	}
 	return c.JSON(http.StatusOK, map[string]interface{}{
@@ -495,13 +432,9 @@ func HandleMicrosoftTeamChannels(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	if _, err := requireMicrosoftOrgResourceAccess(ctx, c); err != nil {
-		return orgResourceBrowseForbidden(c, err)
-	}
-
-	accessToken, err := outlookAccessTokenFromRefreshHeader(c)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+	accessToken, respErr := microsoftOrgBrowseToken(c, outlook.CapabilityTeamsChannel)
+	if accessToken == "" {
+		return respErr
 	}
 
 	teamID := strings.TrimSpace(c.QueryParam("team_id"))
@@ -526,13 +459,9 @@ func HandleMicrosoftTeamsFlatMessages(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	if _, err := requireMicrosoftOrgResourceAccess(ctx, c); err != nil {
-		return orgResourceBrowseForbidden(c, err)
-	}
-
-	accessToken, err := outlookAccessTokenFromRefreshHeader(c)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+	accessToken, respErr := microsoftOrgBrowseToken(c, outlook.CapabilityTeamsChannel)
+	if accessToken == "" {
+		return respErr
 	}
 
 	teamID := strings.TrimSpace(c.QueryParam("team_id"))
@@ -567,13 +496,9 @@ func HandleMicrosoftGroupsList(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	if _, err := requireMicrosoftOrgResourceAccess(ctx, c); err != nil {
-		return orgResourceBrowseForbidden(c, err)
-	}
-
-	accessToken, err := outlookAccessTokenFromRefreshHeader(c)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+	accessToken, respErr := microsoftOrgBrowseToken(c, outlook.CapabilityGroups)
+	if accessToken == "" {
+		return respErr
 	}
 
 	top, _ := strconv.Atoi(c.QueryParam("top"))
@@ -581,11 +506,11 @@ func HandleMicrosoftGroupsList(c echo.Context) error {
 		top = 50
 	}
 
-	groups, err := outlook.ListGroups(ctx, accessToken, int32(top))
+	groups, err := outlook.ListTenantGroups(ctx, accessToken, top)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"error": err.Error(),
-			"hint":  "Groups listing requires Group.Read.All",
+			"hint":  "Groups listing requires the Group.Read.All application permission",
 		})
 	}
 	return c.JSON(http.StatusOK, map[string]interface{}{
@@ -601,13 +526,9 @@ func HandleMicrosoftGroupsFlatConversations(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	if _, err := requireMicrosoftOrgResourceAccess(ctx, c); err != nil {
-		return orgResourceBrowseForbidden(c, err)
-	}
-
-	accessToken, err := outlookAccessTokenFromRefreshHeader(c)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+	accessToken, respErr := microsoftOrgBrowseToken(c, outlook.CapabilityGroups)
+	if accessToken == "" {
+		return respErr
 	}
 
 	groupID := strings.TrimSpace(c.QueryParam("group_id"))

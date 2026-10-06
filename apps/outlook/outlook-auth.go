@@ -19,6 +19,7 @@ type TokenResponse struct {
 	ExpiresIn    int    `json:"expires_in"`
 	RefreshToken string `json:"refresh_token"`
 	Scope        string `json:"scope"`
+	IDToken      string `json:"id_token"`
 }
 
 const (
@@ -26,32 +27,22 @@ const (
 	authURL  = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
 )
 
-// defaultScopes are delegated Microsoft Graph permissions for backup connect / cron (read).
-// Restore write scopes are separate — UI must OAuth with RestoreScopes then POST /microsoft-auth
-// (all Microsoft Graph restore: mail, calendar, contacts, OneDrive, SharePoint, Teams, Groups).
-// (same pattern as Google: backup scopes ≠ restore; POST /google-auth before restore).
-// Auth uses the authorization-code + refresh-token (delegated) flow, not app-only.
-// Files.Read.All is required for OneDrive and SharePoint document libraries.
-// Sites.Read.All is required to list/resolve SharePoint sites (outlook_sharepoint).
-// Existing users must reconnect (and often grant admin consent) after scope changes.
+var tokenEndpointURL = tokenURL
+
+// defaultScopes are the minimal delegated Microsoft Graph permissions for personal backup connect / cron.
+// Organization backups (other mailboxes, Teams, Groups, SharePoint, directory) use the platform
+// app-only token with admin consent instead of delegated scopes.
+// Restore write scopes are separate — UI must OAuth with RestoreScopes then POST /microsoft-auth.
 var defaultScopes = []string{
-	"offline_access",
-	"Mail.Read",
-	"Mail.Read.Shared",
-	"Calendars.Read",
-	"Contacts.Read",
-	"Files.Read.All",
-	"Sites.Read.All",
-	"Team.ReadBasic.All",
-	"Channel.ReadBasic.All",
-	"ChannelMessage.Read.All",
-	"Group.Read.All",
-	"Group-Conversation.Read.All",
 	"openid",
 	"profile",
 	"email",
+	"offline_access",
 	"User.Read",
-	"RoleManagement.Read.Directory",
+	"Mail.Read",
+	"Calendars.Read",
+	"Contacts.Read",
+	"Files.Read",
 }
 
 // restoreScopes are write permissions for select-and-restore only.
@@ -166,6 +157,20 @@ func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 // response. Personal Microsoft accounts often return opaque (non-JWT) access tokens; granted
 // scopes are then only available on TokenResponse.Scope — not in a JWT `scp` claim.
 func AuthTokenResponseUsingRefreshToken(refreshToken string) (*TokenResponse, error) {
+	return refreshTokenResponse(refreshToken, "")
+}
+
+// accountDetectionScopes is a subset of the sign-in grant. Requesting openid makes Microsoft
+// return an id_token, whose `wids` claim carries the user's Entra directory roles.
+var accountDetectionScopes = "openid profile email offline_access User.Read"
+
+// AuthTokenResponseForAccountDetection refreshes with scopes that return an id_token alongside a
+// User.Read access token, for account classification and admin-role detection.
+func AuthTokenResponseForAccountDetection(refreshToken string) (*TokenResponse, error) {
+	return refreshTokenResponse(refreshToken, accountDetectionScopes)
+}
+
+func refreshTokenResponse(refreshToken, scope string) (*TokenResponse, error) {
 	refreshToken = strings.TrimSpace(refreshToken)
 	// Common Satellite/proxy artifacts that make AAD return AADSTS9002313.
 	refreshToken = strings.Trim(refreshToken, `"'`)
@@ -194,9 +199,12 @@ func AuthTokenResponseUsingRefreshToken(refreshToken string) (*TokenResponse, er
 	data.Set("client_secret", clientSecret)
 	data.Set("refresh_token", refreshToken)
 	data.Set("grant_type", "refresh_token")
+	if scope != "" {
+		data.Set("scope", scope)
+	}
 
 	// Create the request
-	req, err := http.NewRequestWithContext(context.Background(), "POST", tokenURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(context.Background(), "POST", tokenEndpointURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("error creating request: %v", err)
 	}

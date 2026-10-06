@@ -27,10 +27,11 @@ func (p *outlookCalendarProcessor) Run(input ProcessorInput) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	accessToken, storx, err := outlookAutosyncPreflight(input)
+	auth, err := microsoftJobAccessToken(input)
 	if err != nil {
 		return err
 	}
+	storx := auth.StorxToken
 
 	go func() {
 		processCtx := context.Background()
@@ -39,17 +40,22 @@ func (p *outlookCalendarProcessor) Run(input ProcessorInput) error {
 		}
 	}()
 
-	client, err := outlook.NewOutlookClientUsingToken(accessToken)
+	client, err := microsoftJobClient(auth, jobOutlookMailbox(input.Job))
 	if err != nil {
 		return err
 	}
-	user, err := client.GetCurrentUser()
-	if err != nil {
-		return err
-	}
-	mailbox := strings.TrimSpace(user.Mail)
-	if mailbox == "" {
-		mailbox = strings.TrimSpace(input.Job.Name)
+	var mailbox string
+	if auth.Application {
+		mailbox = client.TargetUser()
+	} else {
+		user, err := client.GetCurrentUser()
+		if err != nil {
+			return err
+		}
+		mailbox = strings.TrimSpace(user.Mail)
+		if mailbox == "" {
+			mailbox = strings.TrimSpace(input.Job.Name)
+		}
 	}
 
 	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_OutlookCalendar, mailbox+"/.file_placeholder", nil, input.Job.UserID); err != nil {

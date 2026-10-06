@@ -32,6 +32,9 @@ type OutlookFilter struct {
 
 type OutlookClient struct {
 	*msgraph.GraphServiceClient
+	// targetUser (UPN or object id) routes every call to /users/{targetUser}. Application (app-only)
+	// clients always have one: an app-only token has no /me.
+	targetUser string
 }
 
 // BearerTokenAuthenticationProvider implements the AuthenticationProvider interface
@@ -53,12 +56,53 @@ func NewOutlookClientUsingToken(accessToken string) (*OutlookClient, error) {
 	}
 	client := msgraph.NewGraphServiceClient(adapter)
 
-	return &OutlookClient{client}, nil
+	return &OutlookClient{GraphServiceClient: client}, nil
+}
+
+// NewOutlookClientForUser returns a client bound to one user (application jobs; never /me).
+func NewOutlookClientForUser(accessToken, user string) (*OutlookClient, error) {
+	user = strings.TrimSpace(user)
+	if user == "" {
+		return nil, errors.New("target user is required for application (app-only) Microsoft access")
+	}
+	client, err := NewOutlookClientUsingToken(accessToken)
+	if err != nil {
+		return nil, err
+	}
+	client.targetUser = user
+	return client, nil
+}
+
+// TargetUser returns the bound user ("" for delegated /me clients).
+func (client *OutlookClient) TargetUser() string { return client.targetUser }
+
+func (client *OutlookClient) user() *users.UserItemRequestBuilder {
+	if client.targetUser != "" {
+		return client.Users().ByUserId(client.targetUser)
+	}
+	return client.Me()
+}
+
+// UserBaseURL is the Graph base for a mailbox: /users/{mailbox} for application access, else /me
+// when the mailbox is the signed-in user.
+func UserBaseURL(mailbox, signedInMail, signedInUPN string, application bool) (string, error) {
+	mailbox = strings.TrimSpace(mailbox)
+	if application {
+		if mailbox == "" {
+			return "", errors.New("application access requires a target mailbox")
+		}
+		return graphBaseURL + "/users/" + urlPathEscape(mailbox), nil
+	}
+	mb := strings.ToLower(mailbox)
+	if mailbox == "" || mb == strings.ToLower(strings.TrimSpace(signedInMail)) || mb == strings.ToLower(strings.TrimSpace(signedInUPN)) {
+		return graphBaseURL + "/me", nil
+	}
+	return graphBaseURL + "/users/" + urlPathEscape(mailbox), nil
 }
 
 func (client *OutlookClient) GetCurrentUser() (*OutlookUser, error) {
 
-	user, err := client.Me().Get(context.Background(), &users.UserItemRequestBuilderGetRequestConfiguration{
+	user, err := client.user().Get(context.Background(), &users.UserItemRequestBuilderGetRequestConfiguration{
 		QueryParameters: &users.UserItemRequestBuilderGetQueryParameters{
 			Select: []string{"id", "displayName", "mail", "userPrincipalName"},
 		},
@@ -276,7 +320,7 @@ func (client *OutlookClient) GetUserMessagesControlled(skip, limit int32, filter
 		QueryParameters: &query,
 	}
 
-	result, err := client.Me().Messages().Get(context.Background(), &configuration)
+	result, err := client.user().Messages().Get(context.Background(), &configuration)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user messages: %w", err)
 	}
@@ -358,7 +402,7 @@ func (client *OutlookClient) GetMessageWithDetails(skip, limit int32) ([]*Outloo
 		QueryParameters: &query,
 	}
 
-	result, err := client.Me().Messages().Get(context.Background(), &configuration)
+	result, err := client.user().Messages().Get(context.Background(), &configuration)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get detailed messages: %w", err)
 	}
@@ -378,7 +422,7 @@ func (client *OutlookClient) GetMessage(msgID string) (*OutlookMessage, error) {
 		return nil, errors.New("message ID cannot be empty")
 	}
 
-	msg, err := client.Me().Messages().ByMessageId(msgID).Get(context.Background(), &users.ItemMessagesMessageItemRequestBuilderGetRequestConfiguration{
+	msg, err := client.user().Messages().ByMessageId(msgID).Get(context.Background(), &users.ItemMessagesMessageItemRequestBuilderGetRequestConfiguration{
 		QueryParameters: &users.ItemMessagesMessageItemRequestBuilderGetQueryParameters{
 			Select: []string{
 				"subject", "body", "from", "toRecipients", "receivedDateTime",
@@ -402,7 +446,7 @@ func (client *OutlookClient) GetAttachment(msgID, attID string) (*OutlookAttachm
 		return nil, errors.New("message ID and attachment ID cannot be empty")
 	}
 
-	att, err := client.Me().Messages().ByMessageId(msgID).Attachments().ByAttachmentId(attID).Get(context.Background(), nil)
+	att, err := client.user().Messages().ByMessageId(msgID).Attachments().ByAttachmentId(attID).Get(context.Background(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get attachment %s for message %s: %w", attID, msgID, err)
 	}
@@ -543,7 +587,7 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 	}
 
 	// Create the message in drafts
-	createdMessage, err := client.Me().Messages().Post(context.Background(), messageRequest, nil)
+	createdMessage, err := client.user().Messages().Post(context.Background(), messageRequest, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create message: %w", err)
 	}
@@ -552,7 +596,7 @@ func (client *OutlookClient) InsertMessage(message *OutlookMessage) (models.Mess
 	req := users.NewItemMailFoldersItemMovePostRequestBody()
 	req.SetDestinationId(stringPointer("inbox"))
 
-	_, err = client.Me().Messages().ByMessageId(*createdMessage.GetId()).
+	_, err = client.user().Messages().ByMessageId(*createdMessage.GetId()).
 		Move().Post(context.Background(), req, nil)
 	if err != nil {
 		// Log the error but don't fail the entire operation
@@ -577,7 +621,7 @@ func (client *OutlookClient) SendMessage(message *OutlookMessage) error {
 	}
 
 	// Then send it immediately
-	err = client.Me().Messages().ByMessageId(*createdMessage.GetId()).
+	err = client.user().Messages().ByMessageId(*createdMessage.GetId()).
 		Send().Post(context.Background(), nil)
 	if err != nil {
 		return fmt.Errorf("failed to send message: %w", err)

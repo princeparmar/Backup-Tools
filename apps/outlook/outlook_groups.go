@@ -33,9 +33,9 @@ type GroupConversationThread struct {
 
 // GroupConversationPost is a post stub from Graph.
 type GroupConversationPost struct {
-	ID              string
-	BodyPreview     string
-	ReceivedDateTime string
+	ID                   string
+	BodyPreview          string
+	ReceivedDateTime     string
 	LastModifiedDateTime string
 }
 
@@ -47,11 +47,6 @@ type GroupCalendarEvent struct {
 	EndDateTime          string
 	TimeZone             string
 	LastModifiedDateTime string
-}
-
-type graphGroupsListResponse struct {
-	Value    []graphGroupRow `json:"value"`
-	NextLink string          `json:"@odata.nextLink"`
 }
 
 type graphGroupRow struct {
@@ -156,36 +151,6 @@ func GroupDriveRootURL(groupID string) string {
 // GroupDriveInitialDeltaURL is GET /groups/{id}/drive/root/delta for baseline.
 func GroupDriveInitialDeltaURL(groupID string) string {
 	return GroupDriveRootURL(groupID) + "/root/delta"
-}
-
-// ListGroups returns M365 groups visible to the signed-in user.
-func ListGroups(ctx context.Context, accessToken string, top int32) ([]GroupSummary, error) {
-	if top <= 0 {
-		top = 50
-	}
-	reqURL := fmt.Sprintf("%s/me/memberOf/microsoft.graph.group?$top=%d&$select=id,displayName,mail,description", graphBaseURL, top)
-	body, status, err := graphDoJSON(ctx, accessToken, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	if status < 200 || status >= 300 {
-		return nil, fmt.Errorf("groups list http %d: %s", status, truncateForErr(body))
-	}
-	var parsed graphGroupsListResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, err
-	}
-	out := make([]GroupSummary, 0, len(parsed.Value))
-	for i := range parsed.Value {
-		row := parsed.Value[i]
-		out = append(out, GroupSummary{
-			ID:          strings.TrimSpace(row.ID),
-			DisplayName: strings.TrimSpace(row.DisplayName),
-			Mail:        strings.TrimSpace(row.Mail),
-			Description: strings.TrimSpace(row.Description),
-		})
-	}
-	return out, nil
 }
 
 // ResolveGroup validates group_id exists and caller can access it.

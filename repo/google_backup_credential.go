@@ -15,17 +15,17 @@ import (
 type GoogleBackupCredentialDB struct {
 	gorm.GormModel
 
-	UserID         string `json:"user_id,omitempty" gorm:"column:user_id;not null;default:'';index;uniqueIndex:idx_google_backup_cred_user_project_email,priority:1"`
-	Email          string `json:"email" gorm:"column:email;uniqueIndex:idx_google_backup_cred_user_project_email,priority:3"`
-	StorjProjectID string `json:"storj_project_id,omitempty" gorm:"column:storj_project_id;uniqueIndex:idx_google_backup_cred_user_project_email,priority:2;index:idx_google_backup_cred_project_id"`
-	AccountType    string `json:"account_type" gorm:"column:account_type;not null;default:personal"`
-	TenantID       string `json:"tenant_id,omitempty" gorm:"column:tenant_id"`
-	TenantName     string `json:"tenant_name,omitempty" gorm:"column:tenant_name"`
+	UserID                   string `json:"user_id,omitempty" gorm:"column:user_id;not null;default:'';index;uniqueIndex:idx_google_backup_cred_user_project_email,priority:1"`
+	Email                    string `json:"email" gorm:"column:email;uniqueIndex:idx_google_backup_cred_user_project_email,priority:3"`
+	StorjProjectID           string `json:"storj_project_id,omitempty" gorm:"column:storj_project_id;uniqueIndex:idx_google_backup_cred_user_project_email,priority:2;index:idx_google_backup_cred_project_id"`
+	AccountType              string `json:"account_type" gorm:"column:account_type;not null;default:personal"`
+	TenantID                 string `json:"tenant_id,omitempty" gorm:"column:tenant_id"`
+	TenantName               string `json:"tenant_name,omitempty" gorm:"column:tenant_name"`
 	MicrosoftAuthMode        string `json:"microsoft_auth_mode,omitempty" gorm:"column:microsoft_auth_mode"`
 	MicrosoftAppClientID     string `json:"microsoft_app_client_id,omitempty" gorm:"column:microsoft_app_client_id"`
 	MicrosoftAppClientSecret string `json:"microsoft_app_client_secret,omitempty" gorm:"column:microsoft_app_client_secret"`
-	RefreshToken   string `json:"refresh_token,omitempty" gorm:"column:refresh_token"`
-	StorxToken     string `json:"storx_token,omitempty" gorm:"column:storx_token"`
+	RefreshToken             string `json:"refresh_token,omitempty" gorm:"column:refresh_token"`
+	StorxToken               string `json:"storx_token,omitempty" gorm:"column:storx_token"`
 }
 
 // GoogleBackupCredentialRepository handles google_backup_credential_dbs.
@@ -424,23 +424,79 @@ func (r *GoogleBackupCredentialRepository) ListUniqueDomainsForUser(userID strin
 	return domains, nil
 }
 
-// UpdateMicrosoftAppCredentials stores tenant app-only auth metadata on a credential row.
-func (r *GoogleBackupCredentialRepository) UpdateMicrosoftAppCredentials(ctx context.Context, id uint, authMode, clientID, clientSecret string) error {
+// ListByUserAndTenant returns the user's credentials linked to a Microsoft tenant (newest first).
+func (r *GoogleBackupCredentialRepository) ListByUserAndTenant(userID, tenantID string) ([]GoogleBackupCredentialDB, error) {
+	userID = strings.TrimSpace(userID)
+	tenantID = normalizeTenantID(tenantID)
+	if userID == "" || tenantID == "" {
+		return nil, nil
+	}
+	var rows []GoogleBackupCredentialDB
+	err := r.db.Where("user_id = ? AND LOWER(TRIM(tenant_id)) = ?", userID, tenantID).
+		Order("updated_at DESC").Find(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("list credentials by tenant: %w", err)
+	}
+	return rows, nil
+}
+
+// UserHasTenant reports whether the user owns any credential for the tenant.
+func (r *GoogleBackupCredentialRepository) UserHasTenant(userID, tenantID string) (bool, error) {
+	userID = strings.TrimSpace(userID)
+	tenantID = normalizeTenantID(tenantID)
+	if userID == "" || tenantID == "" {
+		return false, nil
+	}
+	var n int64
+	err := r.db.Model(&GoogleBackupCredentialDB{}).
+		Where("user_id = ? AND LOWER(TRIM(tenant_id)) = ?", userID, tenantID).Count(&n).Error
+	if err != nil {
+		return false, fmt.Errorf("check tenant credential: %w", err)
+	}
+	return n > 0, nil
+}
+
+// ListMicrosoftByUser returns the user's credentials with a Microsoft tenant id (newest first).
+func (r *GoogleBackupCredentialRepository) ListMicrosoftByUser(userID string) ([]GoogleBackupCredentialDB, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, nil
+	}
+	var rows []GoogleBackupCredentialDB
+	err := r.db.Where("user_id = ? AND TRIM(COALESCE(tenant_id, '')) <> ''", userID).
+		Order("updated_at DESC").Find(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("list microsoft credentials: %w", err)
+	}
+	return rows, nil
+}
+
+// ListMicrosoftApplicationByTenant returns every application-mode credential for a tenant (all users).
+func (r *GoogleBackupCredentialRepository) ListMicrosoftApplicationByTenant(tenantID string) ([]GoogleBackupCredentialDB, error) {
+	tenantID = normalizeTenantID(tenantID)
+	if tenantID == "" {
+		return nil, nil
+	}
+	var rows []GoogleBackupCredentialDB
+	err := r.db.Where("LOWER(TRIM(tenant_id)) = ? AND LOWER(TRIM(COALESCE(microsoft_auth_mode, ''))) = ?", tenantID, "application").
+		Find(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("list application credentials by tenant: %w", err)
+	}
+	return rows, nil
+}
+
+// SetMicrosoftApplicationMode marks a credential as tenant app-only (no per-credential secrets).
+func (r *GoogleBackupCredentialRepository) SetMicrosoftApplicationMode(ctx context.Context, id uint) error {
 	if id == 0 {
 		return fmt.Errorf("credential id is required")
 	}
-	authMode = strings.TrimSpace(authMode)
-	if authMode == "" {
-		authMode = microsoftAuthModeDelegated
-	}
 	return r.db.WithContext(ctx).Model(&GoogleBackupCredentialDB{}).Where("id = ?", id).Updates(map[string]interface{}{
-		"microsoft_auth_mode":          authMode,
-		"microsoft_app_client_id":      strings.TrimSpace(clientID),
-		"microsoft_app_client_secret":  strings.TrimSpace(clientSecret),
+		"microsoft_auth_mode":         "application",
+		"microsoft_app_client_id":     "",
+		"microsoft_app_client_secret": "",
 	}).Error
 }
-
-const microsoftAuthModeDelegated = "delegated"
 
 // OAuthHolderEmail returns the credential email when it differs from the mailbox (corporate delegation).
 func OAuthHolderEmail(cred *GoogleBackupCredentialDB, mailbox string) string {

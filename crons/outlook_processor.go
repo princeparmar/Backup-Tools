@@ -22,23 +22,6 @@ func NewOutlookProcessor() *outlookProcessor {
 	return &outlookProcessor{}
 }
 
-// outlookAutosyncPreflight resolves StorX + Microsoft access token from credential_id (with legacy fallback).
-func outlookAutosyncPreflight(input ProcessorInput) (accessToken, storx string, err error) {
-	storx = input.Database.CronJobRepo.ResolvedStorxToken(input.Job)
-	if storx == "" {
-		return "", "", fmt.Errorf("storx token not found")
-	}
-	refresh := input.Database.CronJobRepo.ResolvedRefreshToken(input.Job)
-	if refresh == "" {
-		return "", "", fmt.Errorf("refresh token not found")
-	}
-	accessToken, err = outlook.AuthTokenUsingRefreshToken(refresh)
-	if err != nil {
-		return "", "", fmt.Errorf("error while getting token from refresh token: %w", err)
-	}
-	return accessToken, storx, nil
-}
-
 func (p *outlookProcessor) Run(input ProcessorInput) error {
 	return runOutlookMailAutosync(input)
 }
@@ -76,13 +59,11 @@ func runOutlookMailAutosync(input ProcessorInput) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	accessToken, storx, err := outlookAutosyncPreflight(input)
+	auth, err := microsoftJobAccessToken(input)
 	if err != nil {
 		return err
 	}
-	if appToken, appErr := resolveOutlookMailAccessToken(input); appErr == nil && appToken != "" {
-		accessToken = appToken
-	}
+	accessToken, storx := auth.AccessToken, auth.StorxToken
 
 	go func() {
 		processCtx := context.Background()
@@ -95,18 +76,14 @@ func runOutlookMailAutosync(input ProcessorInput) error {
 		return err
 	}
 
-	client, err := outlook.NewOutlookClientUsingToken(accessToken)
+	client, err := microsoftJobClient(auth, jobOutlookMailbox(input.Job))
 	if err != nil {
 		return fmt.Errorf("create outlook client: %w", err)
 	}
 
-	mailbox := jobOutlookMailbox(input.Job)
-	if mailbox == "" {
-		user, uerr := client.GetCurrentUser()
-		if uerr != nil {
-			return fmt.Errorf("resolve mailbox: %w", uerr)
-		}
-		mailbox = strings.TrimSpace(user.Mail)
+	mailbox, err := microsoftJobMailbox(auth, input.Job, client)
+	if err != nil {
+		return err
 	}
 	if mailbox == "" {
 		return fmt.Errorf("mailbox email is required for outlook backup")
@@ -337,31 +314,16 @@ func writeOutlookMailRemovedMetadata(ctx context.Context, input ProcessorInput, 
 	}
 	metaKey := outlook.OutlookMailIDBasedMetaKey(task.LoginId, msg.ID, received)
 	meta := outlook.OutlookMailCronBackupMeta{
-		MessageID:           msg.ID,
-		Subject:             msg.Subject,
-		From:                msg.From,
-		ReceivedDateTime:    msg.ReceivedDateTime,
-		RemovedFromMailbox:  true,
-		DeletedAt:           time.Now().UTC().Format(time.RFC3339),
-		UpdatedAt:           time.Now().UTC().Format(time.RFC3339),
+		MessageID:          msg.ID,
+		Subject:            msg.Subject,
+		From:               msg.From,
+		ReceivedDateTime:   msg.ReceivedDateTime,
+		RemovedFromMailbox: true,
+		DeletedAt:          time.Now().UTC().Format(time.RFC3339),
+		UpdatedAt:          time.Now().UTC().Format(time.RFC3339),
 	}
 	b, _ := json.Marshal(meta)
 	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_Outlook, metaKey, b, task.UserID, input.StorxRecovery)
-}
-
-func resolveOutlookMailAccessToken(input ProcessorInput) (string, error) {
-	credID := repo.JobCredentialID(input.Job)
-	if credID == 0 {
-		return "", nil
-	}
-	cred, err := input.Database.CredentialRepo.GetByID(credID)
-	if err != nil || cred == nil {
-		return "", err
-	}
-	if !strings.EqualFold(strings.TrimSpace(cred.MicrosoftAuthMode), outlook.MicrosoftAuthModeApplication) {
-		return "", nil
-	}
-	return outlook.AcquireMicrosoftAppOnlyToken(context.Background(), cred.TenantID, cred.MicrosoftAppClientID, cred.MicrosoftAppClientSecret)
 }
 
 func syncOutlookMailAdditionalFolders(

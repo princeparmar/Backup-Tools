@@ -63,7 +63,12 @@ tags:
       Shared job management (list, live, update, policy, backup-now): use /auto-sync/* (Google + Microsoft).
       Dashboard alerts: GET /autosync/dashboard-alerts (Google + Microsoft).
       OneDrive vault bucket: outlook-onedrive (Satellite must reserve). SharePoint vault bucket: outlook-sharepoint.
-      Existing OAuth users need reconnect + Files.Read.All and Sites.Read.All (SharePoint) admin consent.
+      Delegated OAuth uses minimal scopes (signed-in user only). Organization backups use the platform
+      app-only token after tenant admin consent (see Microsoft Tenants).
+  - name: Microsoft Tenants
+    description: |
+      Tenant admin consent, capabilities, directory sync and org structure. Backup-Tools is the authority
+      for consent/capability state; the directory is synced every 6 hours and on demand.
   - name: AWS S3
     description: AWS S3 bucket and object operations
   - name: GitHub
@@ -183,7 +188,13 @@ paths:
       description: |
         Same handler as POST /microsoft/auto-sync/job.
         Body uses microsoft_email + services[] (outlook|mail|calendar|contacts|onedrive|sharepoint|teams|groups).
-        SharePoint requires sites[]; Teams requires teams[]; Groups requires groups[].
+        auth_mode=delegated (default) backs up only the signed-in mailbox and requires refresh_token;
+        other mailboxes, shared mailboxes, all_users and teams/groups/sharepoint return 403 organization_backup_required.
+        auth_mode=application uses the platform app-only token for tenant_id and requires granted admin consent
+        plus the per-service capability (403 consent_* / capability error, 503 temporary). Users are resolved
+        live from Microsoft Graph (all_users, user_ids or emails; shared mailboxes may be disabled accounts);
+        502 directory_unavailable when the tenant user list cannot be read.
+        With all_users and no sites/teams/groups listed, sharepoint/teams/groups expand to every tenant resource.
         Jobs store input_data.credential_id on google_backup_credential_dbs (table name unchanged).
       security:
         - bearerAuth: []
@@ -205,7 +216,7 @@ paths:
           application/json:
             schema:
               type: object
-              required: [services, microsoft_email, project_id, refresh_token]
+              required: [services, microsoft_email, project_id]
               properties:
                 services:
                   type: array
@@ -218,14 +229,86 @@ paths:
                   type: string
                 project_id:
                   type: string
+                tenant_id:
+                  type: string
+                  description: Required when auth_mode=application.
+                tenant_name:
+                  type: string
                 refresh_token:
                   type: string
+                  description: Required when auth_mode=delegated; ignored in application mode.
                 storx_token:
                   type: string
+                auth_mode:
+                  type: string
+                  enum: [delegated, application]
+                  default: delegated
+                backup_mode:
+                  type: string
+                  enum: [self, organization]
+                  description: organization requires auth_mode=application.
+                all_users:
+                  type: boolean
+                  description: Back up every enabled directory user (application mode).
+                user_ids:
+                  type: array
+                  description: Directory object IDs (application mode).
+                  items:
+                    type: string
                 emails:
                   type: array
                   items:
                     type: string
+                shared_mailboxes:
+                  type: array
+                  items:
+                    type: string
+                teams:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      team_id:
+                        type: string
+                      team_name:
+                        type: string
+                      channel_ids:
+                        type: array
+                        items:
+                          type: string
+                groups:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      group_id:
+                        type: string
+                      group_name:
+                        type: string
+                policy_scope:
+                  type: string
+                  enum: [org_unit]
+                  description: One policy per org unit; jobs are created per user with org_unit_path.
+                email_org_units:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: email -> org_unit_path override (defaults to the directory org_unit_path).
+                org_unit_schedules:
+                  type: object
+                  additionalProperties:
+                    type: object
+                    properties:
+                      policy_name:
+                        type: string
+                      interval:
+                        type: string
+                      "on":
+                        type: string
+                      services:
+                        type: array
+                        items:
+                          type: string
                 sites:
                   type: array
                   description: Required when services includes sharepoint; one job per site.
@@ -246,9 +329,19 @@ paths:
                   type: string
       responses:
         '200':
-          description: Jobs created
+          description: |
+            Jobs created. Each `jobs` entry has `service`, `email`, `job_id`, `policy_id`, `task_id`.
+            Retrying is safe: a job that already exists is returned with `existing: true` and its
+            `active` state instead of being reported in `failed`. A SharePoint site with no document
+            library is returned with `skipped` (reason) and no `job_id`.
         '400':
           description: Validation error
+        '403':
+          description: organization_backup_required, personal_account, consent_* or capability denied
+        '502':
+          description: directory_unavailable
+        '503':
+          description: Temporary Microsoft Graph failure
 
   /microsoft/auto-sync/job:
     post:
@@ -407,8 +500,9 @@ paths:
         - Microsoft Autosync
       summary: Browse SharePoint sites (site picker)
       description: |
-        Lists SharePoint sites visible to the signed-in user via Microsoft Graph site search.
-        Requires REFRESH_TOKEN header and Sites.Read.All (admin consent).
+        Lists all SharePoint sites in the caller's tenant (getAllSites, falling back to search).
+        REFRESH_TOKEN identifies the tenant; listing uses the platform app-only token and requires
+        granted admin consent plus the sharepoint_backup capability.
       security:
         - bearerAuth: []
       parameters:
@@ -467,7 +561,9 @@ paths:
       tags:
         - Microsoft Autosync
       summary: Browse Teams (team picker)
-      description: Lists Teams visible to the signed-in user. Work/school accounts only.
+      description: |
+        Lists all Teams in the caller's tenant via the platform app-only token.
+        Requires granted admin consent plus the teams_backup capability.
       security:
         - bearerAuth: []
       parameters:
@@ -546,7 +642,9 @@ paths:
       tags:
         - Microsoft Autosync
       summary: Browse M365 Groups (group picker)
-      description: Lists M365 groups visible to the signed-in user. Work/school accounts only.
+      description: |
+        Lists all Microsoft 365 groups in the caller's tenant via the platform app-only token.
+        Requires granted admin consent plus the groups_backup capability.
       security:
         - bearerAuth: []
       parameters:
@@ -595,8 +693,10 @@ paths:
         - Microsoft Autosync
       summary: Detect Microsoft account type (Google twin)
       description: |
-        Resolves account_type (personal, employee_workspace, admin_workspace), tenant_id, and tenant_name.
-        Admin accounts include a first page of directory users in entities[].
+        Returns the workspace contract (account_type, tenant_id, consent, capabilities, directory).
+        Read-only: never writes tenant consent or capabilities. account_type and is_admin are labels;
+        admin_workspace means consent is granted and list_users is available. In that case entities[]
+        holds a first page of users from the synced directory.
         Requires REFRESH_TOKEN header (Satellite convention).
       security:
         - bearerAuth: []
@@ -626,26 +726,160 @@ paths:
       tags:
         - Microsoft Autosync
       summary: Paginated Microsoft tenant directory users (admin picker)
+      description: |
+        Lists users live from Microsoft Graph for the REFRESH_TOKEN's tenant (nothing is stored).
+        Same response as GET /microsoft/tenants/{tid}/directory/users.
       security:
         - bearerAuth: []
       parameters:
-        - name: top
-          in: query
+        - $ref: '#/components/parameters/MicrosoftDirectoryPage'
+        - $ref: '#/components/parameters/MicrosoftDirectoryPageSize'
+        - $ref: '#/components/parameters/MicrosoftDirectorySearch'
+        - $ref: '#/components/parameters/MicrosoftDirectoryDepartment'
+        - $ref: '#/components/parameters/MicrosoftDirectoryOrgUnit'
+        - $ref: '#/components/parameters/MicrosoftDirectoryEnabledOnly'
+      responses:
+        '200':
+          description: Paginated directory users
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MicrosoftDirectoryUsersResponse'
+        '403':
+          description: Personal account or tenant consent not granted
+
+  /microsoft/workspace:
+    get:
+      tags:
+        - Microsoft Autosync
+      summary: Microsoft workspace contract
+      description: |
+        Returns the shared Satellite <-> Backup-Tools workspace contract. With a REFRESH_TOKEN header,
+        the signed-in account is resolved live. Otherwise the caller's stored Microsoft credential is used
+        (optionally narrowed by tenant_id, email or project_id). Read-only.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: REFRESH_TOKEN
+          in: header
           schema:
-            type: integer
-        - name: next_link
+            type: string
+        - name: tenant_id
           in: query
           schema:
             type: string
-        - name: skip_token
+        - name: email
+          in: query
+          schema:
+            type: string
+        - name: project_id
           in: query
           schema:
             type: string
       responses:
         '200':
-          description: Paginated directory users
+          description: Workspace contract
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MicrosoftWorkspaceContract'
+        '404':
+          description: No Microsoft credential found for this user
+
+  /microsoft/tenants/{tid}/consent:
+    post:
+      tags:
+        - Microsoft Tenants
+      summary: Record or re-check tenant admin consent
+      description: |
+        Call after the admin-consent redirect. Probes the platform app-only token, classifies consent
+        (granted, insufficient, revoked, auth_error) and refreshes capabilities. Authorized by X-API-Key, a token_key user with a credential in the tenant,
+        or a REFRESH_TOKEN from the same tenant.
+      parameters:
+        - $ref: '#/components/parameters/MicrosoftTenantID'
+        - $ref: '#/components/parameters/MicrosoftTenantAPIKey'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tenant_name:
+                  type: string
+                consented_by:
+                  type: string
+      responses:
+        '200':
+          description: Updated workspace contract
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MicrosoftWorkspaceContract'
         '403':
-          description: Requires admin_workspace
+          description: Caller is not authorized for this tenant
+
+  /microsoft/tenants/{tid}/capabilities/refresh:
+    post:
+      tags:
+        - Microsoft Tenants
+      summary: Re-probe tenant capabilities
+      parameters:
+        - $ref: '#/components/parameters/MicrosoftTenantID'
+        - $ref: '#/components/parameters/MicrosoftTenantAPIKey'
+      responses:
+        '200':
+          description: Updated workspace contract
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MicrosoftWorkspaceContract'
+        '403':
+          description: Caller is not authorized for this tenant
+        '404':
+          description: Tenant not found
+
+  /microsoft/tenants/{tid}/directory/users:
+    get:
+      tags:
+        - Microsoft Tenants
+      summary: List tenant users live from Microsoft Graph
+      description: Nothing is stored; filtering and pagination run over the live list.
+      parameters:
+        - $ref: '#/components/parameters/MicrosoftTenantID'
+        - $ref: '#/components/parameters/MicrosoftTenantAPIKey'
+        - $ref: '#/components/parameters/MicrosoftDirectoryPage'
+        - $ref: '#/components/parameters/MicrosoftDirectoryPageSize'
+        - $ref: '#/components/parameters/MicrosoftDirectorySearch'
+        - $ref: '#/components/parameters/MicrosoftDirectoryDepartment'
+        - $ref: '#/components/parameters/MicrosoftDirectoryOrgUnit'
+        - $ref: '#/components/parameters/MicrosoftDirectoryEnabledOnly'
+      responses:
+        '200':
+          description: Paginated directory users
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MicrosoftDirectoryUsersResponse'
+        '403':
+          description: Consent not granted or caller not authorized
+        '502':
+          description: Microsoft Graph user listing failed
+
+  /microsoft/tenants/{tid}/org-structure:
+    get:
+      tags:
+        - Microsoft Tenants
+      summary: Org units derived live from user departments ("/" + department)
+      parameters:
+        - $ref: '#/components/parameters/MicrosoftTenantID'
+        - $ref: '#/components/parameters/MicrosoftTenantAPIKey'
+      responses:
+        '200':
+          description: Org units
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MicrosoftOrgStructureResponse'
 
   # Auto Sync Endpoints
   /auto-sync/live:
@@ -3978,6 +4212,52 @@ components:
       schema:
         type: string
       description: Satellite session token (_tokenKey). Required for /auto-sync/*, /autosync/*, and /restore/* (Satellite BFF).
+    MicrosoftTenantID:
+      name: tid
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Microsoft Entra tenant ID (GUID).
+    MicrosoftTenantAPIKey:
+      name: X-API-Key
+      in: header
+      schema:
+        type: string
+      description: Backup-Tools API key (service-to-service). Alternatively send token_key or a same-tenant REFRESH_TOKEN.
+    MicrosoftDirectoryPage:
+      name: page
+      in: query
+      schema:
+        type: integer
+        default: 1
+    MicrosoftDirectoryPageSize:
+      name: page_size
+      in: query
+      schema:
+        type: integer
+      description: Page size (alias top).
+    MicrosoftDirectorySearch:
+      name: search
+      in: query
+      schema:
+        type: string
+      description: Matches display name, mail or UPN.
+    MicrosoftDirectoryDepartment:
+      name: department
+      in: query
+      schema:
+        type: string
+    MicrosoftDirectoryOrgUnit:
+      name: org_unit_path
+      in: query
+      schema:
+        type: string
+    MicrosoftDirectoryEnabledOnly:
+      name: enabled_only
+      in: query
+      schema:
+        type: boolean
 
   securitySchemes:
     bearerAuth:
@@ -3987,6 +4267,129 @@ components:
       description: JWT token for authentication
 
   schemas:
+    MicrosoftWorkspaceContract:
+      type: object
+      description: account_type and is_admin are labels; org backup is authorized by consent + capabilities. work_account is any work/school account (admins included) before admin consent; legacy stored value employee_workspace means the same.
+      properties:
+        email:
+          type: string
+        account_type:
+          type: string
+          enum: [personal, work_account, admin_workspace]
+        workspace_kind:
+          type: string
+        tenant_id:
+          type: string
+        tenant_name:
+          type: string
+        is_admin:
+          type: boolean
+        admin_roles:
+          type: array
+          items:
+            type: string
+        consent:
+          type: object
+          properties:
+            status:
+              type: string
+              enum: [not_requested, granted, insufficient, revoked, auth_error]
+            consented_by:
+              type: string
+            consented_at:
+              type: string
+              format: date-time
+            granted_roles:
+              type: array
+              items:
+                type: string
+            last_error:
+              type: string
+        capabilities:
+          type: object
+          description: Keys list_users, mail_backup, calendar_backup, contacts_backup, onedrive_backup, sharepoint_backup, teams_backup, groups_backup.
+          additionalProperties:
+            type: boolean
+        capability_errors:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              code:
+                type: string
+                description: e.g. missing_role, not_provisioned, temporary
+              role:
+                type: string
+              message:
+                type: string
+    MicrosoftDirectoryUser:
+      type: object
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+        upn:
+          type: string
+        display_name:
+          type: string
+        department:
+          type: string
+        job_title:
+          type: string
+        office_location:
+          type: string
+        enabled:
+          type: boolean
+        has_license:
+          type: boolean
+        org_unit_path:
+          type: string
+        roles:
+          type: array
+          description: |
+            Entra directory role names held by the user, as reported live by Graph /directoryRoles
+            (requires the RoleManagement.Read.Directory application permission; empty otherwise).
+          items:
+            type: string
+        is_admin:
+          type: boolean
+          description: True when roles is non-empty (like Google isAdmin || isDelegatedAdmin).
+    MicrosoftDirectoryUsersResponse:
+      type: object
+      properties:
+        tenant_id:
+          type: string
+        users:
+          type: array
+          items:
+            $ref: '#/components/schemas/MicrosoftDirectoryUser'
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total:
+          type: integer
+        roles_error:
+          type: string
+          description: Present when user roles could not be read (e.g. missing RoleManagement.Read.Directory).
+    MicrosoftOrgStructureResponse:
+      type: object
+      properties:
+        tenant_id:
+          type: string
+        org_units:
+          type: array
+          items:
+            type: object
+            properties:
+              org_unit_path:
+                type: string
+              name:
+                type: string
+              user_count:
+                type: integer
+
     # Common Response Schemas
     SuccessResponse:
       type: object

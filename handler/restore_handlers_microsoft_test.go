@@ -61,6 +61,7 @@ func TestRestoreAccountKind(t *testing.T) {
 		{name: "empty defaults personal", accountType: "", want: "personal"},
 		{name: "admin workspace", accountType: "admin_workspace", want: "workspace"},
 		{name: "employee workspace", accountType: "employee_workspace", want: "workspace"},
+		{name: "work account", accountType: "work_account", want: "workspace"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

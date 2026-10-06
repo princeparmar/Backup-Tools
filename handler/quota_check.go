@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 
@@ -16,11 +15,8 @@ import (
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/labstack/echo/v4"
-	"golang.org/x/oauth2"
-	oauth2google "golang.org/x/oauth2/google"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/gmail/v1"
-	"google.golang.org/api/option"
 )
 
 // HandleAutomaticSyncQuotaCheck estimates backup size and compares against satellite usage-limits.
@@ -142,16 +138,7 @@ func driveServiceForQuotaEstimate(ctx context.Context, store *db.PostgresDb, job
 	if err != nil {
 		return nil, err
 	}
-	b, err := os.ReadFile("credentials.json")
-	if err != nil {
-		return nil, fmt.Errorf("unable to read credentials file: %w", err)
-	}
-	config, err := oauth2google.ConfigFromJSON(b, drive.DriveReadonlyScope)
-	if err != nil {
-		return nil, err
-	}
-	client := config.Client(ctx, &oauth2.Token{AccessToken: accessToken})
-	return drive.NewService(ctx, option.WithHTTPClient(client))
+	return google.DriveReadonlyServiceUsingToken(ctx, accessToken)
 }
 
 func gmailServiceForQuotaEstimate(ctx context.Context, store *db.PostgresDb, job *repo.CronJobListingDB) (*gmail.Service, string, error) {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -18,11 +17,8 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/quota"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
-	"golang.org/x/oauth2"
-	oauth2google "golang.org/x/oauth2/google"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/googleapi"
-	"google.golang.org/api/option"
 )
 
 // errDriveAbusiveSkipped means Google refused the download as malware/spam even after AcknowledgeAbuse.
@@ -209,7 +205,7 @@ func runGoogleDriveAutosync(input ProcessorInput) error {
 	if auth.UseDWD {
 		service, err = google.GetDriveServiceForBackupDWD(ctx, auth.Mailbox)
 	} else {
-		service, err = createDriveServiceWithAccessToken(ctx, auth.AccessToken)
+		service, err = google.DriveReadonlyServiceUsingToken(ctx, auth.AccessToken)
 	}
 	if err != nil {
 		return err
@@ -337,24 +333,6 @@ func runGoogleDriveAutosync(input ProcessorInput) error {
 	return input.Database.CronJobRepo.UpdateCronJobFieldsForCron(input.Job.ID, map[string]interface{}{
 		"task_memory": input.Job.TaskMemory,
 	})
-}
-
-func createDriveServiceWithAccessToken(ctx context.Context, accessToken string) (*drive.Service, error) {
-	b, err := os.ReadFile("credentials.json")
-	if err != nil {
-		return nil, fmt.Errorf("unable to read credentials file: %w", err)
-	}
-	config, err := oauth2google.ConfigFromJSON(b, drive.DriveReadonlyScope)
-	if err != nil {
-		return nil, fmt.Errorf("unable to parse credentials: %w", err)
-	}
-	token := &oauth2.Token{AccessToken: accessToken}
-	client := config.Client(ctx, token)
-	svc, err := drive.NewService(ctx, option.WithHTTPClient(client))
-	if err != nil {
-		return nil, fmt.Errorf("unable to create drive service: %w", err)
-	}
-	return svc, nil
 }
 
 func runDriveTreeBaseline(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, service *drive.Service, synced map[string]bool, parentCache map[string][]string, shortcutTargetCache map[string]*drive.File, quotaSess *driveQuotaSession) error {

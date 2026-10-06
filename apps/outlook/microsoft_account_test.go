@@ -4,36 +4,34 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
 	"testing"
+	"time"
 )
 
 func TestIsMSATenant(t *testing.T) {
 	if !IsMSATenant(MSATenantID) {
 		t.Fatal("MSA tenant id must be recognized")
 	}
+	if !IsMSATenant("9188040d-6c67-4c5b-b112-36a304b66dad") {
+		t.Fatal("documented consumer tenant id must be recognized")
+	}
 	if IsMSATenant("contoso-tenant-id") {
 		t.Fatal("work tenant must not be MSA")
 	}
 }
 
-func TestCanPerformOrgBackup(t *testing.T) {
-	if CanPerformOrgBackup(nil) {
-		t.Fatal("empty roles must not qualify")
+func fakeJWT(t *testing.T, claims map[string]interface{}) string {
+	t.Helper()
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if CanPerformOrgBackup([]string{"random-role"}) {
-		t.Fatal("unknown role must not qualify")
-	}
-	if !CanPerformOrgBackup([]string{OrgBackupAdminRoleTemplateIDs[2]}) {
-		t.Fatal("SharePoint Administrator must qualify")
-	}
-	if !CanPerformOrgBackup([]string{"other", OrgBackupAdminRoleTemplateIDs[0]}) {
-		t.Fatal("Global Administrator must qualify")
-	}
+	return "header." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
 }
 
 func TestTenantIDFromAccessToken(t *testing.T) {
-	payload, _ := json.Marshal(map[string]string{"tid": MSATenantID})
-	token := "header." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
+	token := fakeJWT(t, map[string]interface{}{"tid": MSATenantID})
 	tid, err := TenantIDFromAccessToken(token)
 	if err != nil || tid != MSATenantID {
 		t.Fatalf("tid: got %q err=%v", tid, err)
@@ -45,8 +43,7 @@ func TestTenantIDFromAccessToken(t *testing.T) {
 
 func TestTenantIDForAccountDetection_JWTPreferred(t *testing.T) {
 	workTenant := "11111111-1111-1111-1111-111111111111"
-	payload, _ := json.Marshal(map[string]string{"tid": workTenant})
-	token := "header." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
+	token := fakeJWT(t, map[string]interface{}{"tid": workTenant})
 
 	tid, err := TenantIDFromAccessToken(token)
 	if err != nil || tid != workTenant {
@@ -57,22 +54,41 @@ func TestTenantIDForAccountDetection_JWTPreferred(t *testing.T) {
 	}
 }
 
-func TestTenantIDForAccountDetection_opaqueFallsBackToMSA(t *testing.T) {
-	tid, name, err := tenantIDForAccountDetection(context.Background(), "opaque-consumer-access-token")
-	if err != nil {
-		t.Fatalf("opaque token should fall back to MSA: %v", err)
+func TestTenantIDForAccountDetection_opaqueToken(t *testing.T) {
+	cases := []struct {
+		name     string
+		status   int
+		body     string
+		wantTID  string
+		wantName string
+		wantErr  bool
+	}{
+		{name: "work org", status: 200, body: `{"value":[{"id":"contoso-tid","displayName":"Contoso"}]}`, wantTID: "contoso-tid", wantName: "Contoso"},
+		{name: "no org is personal", status: 200, body: `{"value":[]}`, wantTID: MSATenantID},
+		{name: "forbidden is personal", status: 403, body: `{}`, wantTID: MSATenantID},
+		{name: "not found is personal", status: 404, body: `{}`, wantTID: MSATenantID},
+		{name: "unauthorized is error", status: 401, body: `{}`, wantErr: true},
+		{name: "server error is error", status: 500, body: `{}`, wantErr: true},
 	}
-	if tid != MSATenantID || name != "" {
-		t.Fatalf("got tid=%q name=%q", tid, name)
-	}
-}
-
-func TestDirectoryUsersToEntities(t *testing.T) {
-	entities := DirectoryUsersToEntities([]DomainUser{
-		{ID: "1", Mail: "a@contoso.com", DisplayName: "A", AccountEnabled: true},
-		{ID: "2", UserPrincipalName: "b@contoso.com"},
-	})
-	if len(entities) != 2 || entities[1].Email != "b@contoso.com" {
-		t.Fatalf("unexpected entities: %+v", entities)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var g capabilityGraph
+			g.serve(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			tid, name, err := tenantIDForAccountDetection(ctx, "opaque-access-token")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got tid=%q", tid)
+				}
+				return
+			}
+			if err != nil || tid != tc.wantTID || name != tc.wantName {
+				t.Fatalf("got tid=%q name=%q err=%v", tid, name, err)
+			}
+		})
 	}
 }

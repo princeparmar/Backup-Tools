@@ -668,6 +668,20 @@ func (r *CronJobRepository) GetJobByIDForUser(userID string, jobID uint) (*CronJ
 	return &res, nil
 }
 
+// FindJobForUser returns the job with the unique (user, name, method, sync_type) key, or nil.
+func (r *CronJobRepository) FindJobForUser(userID, name, method, syncType string) (*CronJobListingDB, error) {
+	var res CronJobListingDB
+	err := r.db.Where("user_id = ? AND name = ? AND method = ? AND sync_type = ?", userID, name, method, syncType).
+		Where("COALESCE(placeholder, false) = ?", false).First(&res).Error
+	if errors.Is(err, gormio.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find cron job for user: %w", err)
+	}
+	return &res, nil
+}
+
 // =============================================================================
 // ACTIVE: google_backup_credentials + input_data.credential_id
 // =============================================================================
@@ -1603,6 +1617,20 @@ func (r *CronJobRepository) scheduleForActivation(job *CronJobListingDB) (interv
 	return interval, ""
 }
 
+// jobUsesMicrosoftApplicationAuth reports whether the job's credential uses the tenant app-only token
+// (no refresh token; authorization is tenant consent + capabilities).
+func (r *CronJobRepository) jobUsesMicrosoftApplicationAuth(job *CronJobListingDB) bool {
+	credID := JobCredentialID(job)
+	if credID == 0 {
+		return false
+	}
+	var cred GoogleBackupCredentialDB
+	if err := r.db.Select("id", "microsoft_auth_mode", "tenant_id").Where("id = ?", credID).First(&cred).Error; err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(cred.MicrosoftAuthMode), "application") && strings.TrimSpace(cred.TenantID) != ""
+}
+
 func (r *CronJobRepository) validateJobForActivation(job *CronJobListingDB) error {
 	if job == nil || job.PolicyID == 0 {
 		return fmt.Errorf("policy_id is required when activating backup")
@@ -1649,8 +1677,11 @@ func (r *CronJobRepository) validateJobForActivation(job *CronJobListingDB) erro
 		}
 	case "outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive", "outlook_sharepoint", "outlook_teams", "outlook_groups",
 		"google_drive", "google_photos", "google_calendar", "google_contacts":
-		rt := r.ResolvedRefreshToken(job)
-		if strings.TrimSpace(rt) == "" {
+		if strings.HasPrefix(job.Method, "outlook") && r.jobUsesMicrosoftApplicationAuth(job) {
+			if strings.TrimSpace(job.Name) == "" {
+				return fmt.Errorf("job name (mailbox or resource) is required for application %s jobs", job.Method)
+			}
+		} else if strings.TrimSpace(r.ResolvedRefreshToken(job)) == "" {
 			return fmt.Errorf("refresh_token is required in input_data for %s method", job.Method)
 		}
 		if job.Method == "outlook_teams" {

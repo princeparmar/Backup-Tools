@@ -38,19 +38,19 @@ type Processor interface {
 }
 
 var processorMap = map[string]Processor{
-	"gmail":            NewGmailProcessor(),
-	"outlook":          NewOutlookProcessor(),
-	"outlook_calendar": NewOutlookCalendarProcessor(),
-	"outlook_contacts": NewOutlookContactsProcessor(),
+	"gmail":              NewGmailProcessor(),
+	"outlook":            NewOutlookProcessor(),
+	"outlook_calendar":   NewOutlookCalendarProcessor(),
+	"outlook_contacts":   NewOutlookContactsProcessor(),
 	"outlook_onedrive":   NewOutlookOneDriveProcessor(),
 	"outlook_sharepoint": NewOutlookSharePointProcessor(),
 	"outlook_teams":      NewOutlookTeamsProcessor(),
 	"outlook_groups":     NewOutlookGroupsProcessor(),
 	"psql_database":      NewPsqlDatabaseProcessor(),
-	"google_drive":     NewGoogleDriveProcessor(),
-	"google_photos":    NewGooglePhotosProcessor(),
-	"google_contacts":  NewGoogleContactsProcessor(),
-	"google_calendar":  NewGoogleCalendarProcessor(),
+	"google_drive":       NewGoogleDriveProcessor(),
+	"google_photos":      NewGooglePhotosProcessor(),
+	"google_contacts":    NewGoogleContactsProcessor(),
+	"google_calendar":    NewGoogleCalendarProcessor(),
 }
 
 type AutosyncManager struct {

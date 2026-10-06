@@ -1,9 +1,9 @@
 package microsoft
 
 import (
-	"github.com/StorX2-0/Backup-Tools/restore"
 	"context"
 	"fmt"
+	"github.com/StorX2-0/Backup-Tools/restore"
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
@@ -45,10 +45,7 @@ func mintMicrosoftTokenFromCredential(ctx context.Context, cred *repo.GoogleBack
 // (needed when the access token is opaque and has no JWT scp claim).
 func mintMicrosoftTokenAndScopeFromCredential(ctx context.Context, cred *repo.GoogleBackupCredentialDB, refreshFallback string) (string, string, error) {
 	if cred != nil && strings.EqualFold(strings.TrimSpace(cred.MicrosoftAuthMode), outlook.MicrosoftAuthModeApplication) {
-		tenant := strings.TrimSpace(cred.TenantID)
-		clientID := strings.TrimSpace(cred.MicrosoftAppClientID)
-		secret := strings.TrimSpace(cred.MicrosoftAppClientSecret)
-		tok, err := outlook.AcquireMicrosoftAppOnlyToken(ctx, tenant, clientID, secret)
+		tok, _, err := outlook.AppOnlyToken(ctx, strings.TrimSpace(cred.TenantID))
 		if err != nil {
 			return "", "", fmt.Errorf("microsoft app-only token: %w", err)
 		}
@@ -74,4 +71,3 @@ func RequireToken(deps *restore.RestoreDeps) error {
 	}
 	return nil
 }
-

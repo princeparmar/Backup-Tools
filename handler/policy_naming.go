@@ -143,7 +143,7 @@ func isPersonalCredential(cred *repo.GoogleBackupCredentialDB) bool {
 		return true
 	}
 	switch strings.ToLower(strings.TrimSpace(cred.AccountType)) {
-	case "admin_workspace", "employee_workspace":
+	case "admin_workspace", "employee_workspace", "work_account":
 		return false
 	default:
 		return true

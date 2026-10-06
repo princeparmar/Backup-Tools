@@ -243,7 +243,7 @@ func usersGroupsIsCorporateMailbox(mailboxEmail string, cred *repo.GoogleBackupC
 			return true
 		}
 		switch strings.ToLower(strings.TrimSpace(cred.AccountType)) {
-		case "admin_workspace", "employee_workspace":
+		case "admin_workspace", "employee_workspace", "work_account":
 			return true
 		}
 	}
