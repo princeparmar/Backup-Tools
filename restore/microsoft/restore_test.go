@@ -1,8 +1,8 @@
 package microsoft
 
 import (
+	"strings"
 	"testing"
-
 )
 
 func TestMicrosoftRestoreScopesForMethod_table(t *testing.T) {
@@ -110,7 +110,10 @@ func TestShouldRestoreOutlookMailKey_table(t *testing.T) {
 		want bool
 	}{
 		{key: "user@contoso.com/meta/2026/01/01/msgid.json", want: true},
+		{key: "user@contoso.com/data/2026/01/01/msgid.json", want: false},
 		{key: "user@contoso.com/data/2026/01/01/msgid", want: false},
+		{key: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/user/oid/Inbox/2026/01/01/a@b.c - s - C - M.outlook", want: true},
+		{key: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/user/oid/_folders.json", want: false},
 		{key: "user@contoso.com/.file_placeholder", want: false},
 		{key: "", want: false},
 	}
@@ -122,5 +125,81 @@ func TestShouldRestoreOutlookMailKey_table(t *testing.T) {
 				t.Fatalf("got %v want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestShouldRestoreOutlookOneDriveKey_table(t *testing.T) {
+	t.Parallel()
+	const prefix = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/user/oid"
+	tests := []struct {
+		key  string
+		want bool
+	}{
+		{key: prefix + "/MY_DRIVE/F1/ITEM1$report.txt", want: true},
+		{key: prefix + "/MY_DRIVE/F1/.folder__Docs", want: true},
+		{key: prefix + "/BIN/ITEM2$old.txt", want: true},
+		{key: prefix + "/meta/2026/01/01/ITEM3_a.txt.json", want: true},
+		{key: prefix + "/data/2026/01/01/ITEM3_a.txt", want: false},
+		{key: prefix + "/.file_placeholder", want: false},
+		{key: "", want: false},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.key, func(t *testing.T) {
+			t.Parallel()
+			if got := shouldRestoreOutlookOneDriveKey(tt.key); got != tt.want {
+				t.Fatalf("got %v want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShouldRestoreOutlookCalendarAndContactsKeys(t *testing.T) {
+	t.Parallel()
+	const prefix = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/user/oid"
+	for key, want := range map[string]bool{
+		prefix + "/AQMkCal/AAMkEvent.json": true,
+		prefix + "/AQMkCal/_calendar.json": false,
+		prefix + "/AQMkCal/_index.json":    false,
+		prefix + "/.file_placeholder":      false,
+		prefix + "/AQMkCal/notes.txt":      false,
+		"":                                 false,
+	} {
+		if got := shouldRestoreOutlookCalendarKey(key); got != want {
+			t.Errorf("calendar %q = %v, want %v", key, got, want)
+		}
+	}
+	for key, want := range map[string]bool{
+		prefix + "/c1.json":                 true,
+		prefix + "/folders/F1/c2.json":      true,
+		prefix + "/folders/F1/_folder.json": false,
+		prefix + "/folders/F1/_index.json":  false,
+		prefix + "/_index.json":             false,
+	} {
+		if got := shouldRestoreOutlookContactsKey(key); got != want {
+			t.Errorf("contacts %q = %v, want %v", key, got, want)
+		}
+	}
+}
+
+func TestContactFolderIDForDefaultFolderSkipsLookup(t *testing.T) {
+	t.Parallel()
+	if got := ContactFolderIDForKey(t.Context(), "", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/user/oid/c1.json", nil); got != "" {
+		t.Fatalf("default folder id = %q", got)
+	}
+}
+
+func TestRestoreUserBase(t *testing.T) {
+	t.Parallel()
+	key := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/user/oid-1/MY_DRIVE/ITEM1$a.txt"
+	got, err := restoreUserBase(true, key)
+	if err != nil || !strings.HasSuffix(got, "/users/oid-1") {
+		t.Fatalf("app-only base = %q, %v", got, err)
+	}
+	if got, err := restoreUserBase(false, key); err != nil || !strings.HasSuffix(got, "/me") {
+		t.Fatalf("delegated base = %q, %v", got, err)
+	}
+	if _, err := restoreUserBase(true, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/group/g1/x"); err == nil {
+		t.Fatal("group key must not resolve to a user")
 	}
 }

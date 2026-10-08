@@ -163,18 +163,20 @@ func ConfigForMethod(method string) (ServiceConfig, bool) {
 
 // RestoreDeps is per-task runtime state (clients created in Processor.Setup).
 type RestoreDeps struct {
-	Store              *db.PostgresDb
-	Job                *repo.RestoreJobListingDB
-	CronJob            *repo.CronJobListingDB
-	StorxRecovery      *storxrefresh.Recovery
-	AccessGrant        string
-	GoogleToken        string
-	MicrosoftToken     string
-	RefreshToken       string
-	AuthMode           string
-	LoginID            string
-	GoogleWriteSubject string // DWD impersonation target (migration cross-mailbox); defaults to LoginID
-	Config             ServiceConfig
+	Store          *db.PostgresDb
+	Job            *repo.RestoreJobListingDB
+	CronJob        *repo.CronJobListingDB
+	StorxRecovery  *storxrefresh.Recovery
+	AccessGrant    string
+	GoogleToken    string
+	MicrosoftToken string
+	// MicrosoftApplication is true when MicrosoftToken is an app-only token (no /me; target /users/{id}).
+	MicrosoftApplication bool
+	RefreshToken         string
+	AuthMode             string
+	LoginID              string
+	GoogleWriteSubject   string // DWD impersonation target (migration cross-mailbox); defaults to LoginID
+	Config               ServiceConfig
 	// WriteCred is the credential used to mint provider tokens (Google or Microsoft).
 	WriteCred *repo.GoogleBackupCredentialDB
 
@@ -187,12 +189,15 @@ type RestoreDeps struct {
 	PhotosAlbumCache map[string]*albums.Album
 	PhotosAlbumMu    sync.Mutex
 
-	// DriveFolderNames caches Google folder ID → display name for one restore job (loaded once).
+	// DriveFolderNames caches Google Drive or OneDrive folder ID → display name for one restore job (loaded once).
 	DriveFolderNames     map[string]string
 	driveFolderNamesOnce sync.Once
 
 	// SeenGmailMessageIDs dedupes restore-all when legacy + labeled keys share JSON message.Id.
 	SeenGmailMessageIDs *sync.Map
+
+	// ContainerIDs caches backup folder key → Microsoft calendar or contact folder id for one job.
+	ContainerIDs sync.Map
 
 	googleLimiter *rate.Limiter
 	vaultSem      chan struct{}

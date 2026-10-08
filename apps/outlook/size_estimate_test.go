@@ -32,6 +32,16 @@ func TestEstimateMailboxBytes(t *testing.T) {
 	}
 }
 
+func TestEstimateMailBytesFromFolders(t *testing.T) {
+	folders := []MailFolder{{TotalItems: 10}, {TotalItems: 30}, {TotalItems: -1}, {}}
+	if got, want := EstimateMailBytesFromFolders(folders), 40*averageMailMessageBytes; got != want {
+		t.Fatalf("estimate = %d, want %d", got, want)
+	}
+	if got := EstimateMailBytesFromFolders(nil); got != 0 {
+		t.Fatalf("empty estimate = %d", got)
+	}
+}
+
 func TestEstimateMailboxBytes_graphError(t *testing.T) {
 	base := serveSizeEstimateGraph(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)

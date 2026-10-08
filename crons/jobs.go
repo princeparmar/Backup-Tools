@@ -45,12 +45,13 @@ var processorMap = map[string]Processor{
 	"outlook_onedrive":   NewOutlookOneDriveProcessor(),
 	"outlook_sharepoint": NewOutlookSharePointProcessor(),
 	"outlook_teams":      NewOutlookTeamsProcessor(),
-	"outlook_groups":     NewOutlookGroupsProcessor(),
-	"psql_database":      NewPsqlDatabaseProcessor(),
-	"google_drive":       NewGoogleDriveProcessor(),
-	"google_photos":      NewGooglePhotosProcessor(),
-	"google_contacts":    NewGoogleContactsProcessor(),
-	"google_calendar":    NewGoogleCalendarProcessor(),
+	// Groups backup is hidden for now; re-enable together with handler/autobackup.go allowedMethods.
+	// "outlook_groups":     NewOutlookGroupsProcessor(),
+	"psql_database":   NewPsqlDatabaseProcessor(),
+	"google_drive":    NewGoogleDriveProcessor(),
+	"google_photos":   NewGooglePhotosProcessor(),
+	"google_contacts": NewGoogleContactsProcessor(),
+	"google_calendar": NewGoogleCalendarProcessor(),
 }
 
 type AutosyncManager struct {
@@ -136,6 +137,14 @@ func (a *AutosyncManager) Start() {
 		} else {
 			logger.Info(ctx, "Successfully processed scheduled tasks")
 		}
+	})
+
+	a.microsoftDailyChecks(createCronContext("microsoft_daily_checks"))
+	c.AddFunc("@daily", func() {
+		a.microsoftDailyChecks(createCronContext("microsoft_daily_checks"))
+	})
+	c.AddFunc("@every 6h", func() {
+		a.reconcileMicrosoftScopes(createCronContext("microsoft_scope_reconcile"))
 	})
 
 	// c.AddFunc("@every 1m", func() {
@@ -366,7 +375,7 @@ func (a *AutosyncManager) processTask(ctx context.Context, task *repo.TaskListin
 			return nil
 		}
 		if !handler.IsStorxUplinkError(err) {
-			return err
+			return a.microsoftRunOutcome(ctx, job, err)
 		}
 		uplinkRecoveries++
 		if uplinkRecoveries > handler.MaxStorxUplinkRecoveriesPerRun() {

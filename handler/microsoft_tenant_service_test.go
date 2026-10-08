@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -12,6 +11,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
+	"github.com/StorX2-0/Backup-Tools/mstenant"
 	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/gorm"
 	"github.com/StorX2-0/Backup-Tools/repo"
@@ -26,13 +26,18 @@ func newMicrosoftTestDB(t *testing.T) *db.PostgresDb {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := gdb.Migrate(&repo.MicrosoftTenantDB{}, &repo.GoogleBackupCredentialDB{}); err != nil {
+	if err := gdb.Migrate(&repo.MicrosoftTenantDB{}, &repo.GoogleBackupCredentialDB{}, &repo.CronJobListingDB{},
+		&repo.MicrosoftAccountTenantDB{}, &repo.MicrosoftResourceDB{}, &repo.MicrosoftBackupScopeDB{}); err != nil {
 		t.Fatal(err)
 	}
 	return &db.PostgresDb{
-		DB:                  gdb,
-		CredentialRepo:      repo.NewGoogleBackupCredentialRepository(gdb),
-		MicrosoftTenantRepo: repo.NewMicrosoftTenantRepository(gdb),
+		DB:                    gdb,
+		CronJobRepo:           repo.NewCronJobRepository(gdb),
+		CredentialRepo:        repo.NewGoogleBackupCredentialRepository(gdb),
+		MicrosoftTenantRepo:   repo.NewMicrosoftTenantRepository(gdb),
+		MicrosoftLinkRepo:     repo.NewMicrosoftAccountTenantRepository(gdb),
+		MicrosoftResourceRepo: repo.NewMicrosoftResourceRepository(gdb),
+		MicrosoftScopeRepo:    repo.NewMicrosoftBackupScopeRepository(gdb),
 	}
 }
 
@@ -45,12 +50,20 @@ type stubMicrosoftGraph struct {
 	userRoles  map[string][]string
 	samples    []string
 	tokenCalls int
+	// noServicePrincipal simulates the StorX app missing from the tenant.
+	noServicePrincipal bool
 }
 
 func (s *stubMicrosoftGraph) install(t *testing.T) {
 	t.Helper()
 	prevToken, prevInv, prevEval, prevList := msAppOnlyTokenFn, msInvalidateAppOnlyFn, msEvaluateCapabilitiesFn, msListDirectoryUsersFn
-	prevRoles := msListTenantUserRolesFn
+	prevRoles, prevSP := msListTenantUserRolesFn, msServicePrincipalFn
+	msServicePrincipalFn = func(context.Context, string) (string, bool, error) {
+		if s.noServicePrincipal {
+			return "", false, nil
+		}
+		return "sp-1", true, nil
+	}
 	msAppOnlyTokenFn = func(ctx context.Context, tenantID string) (string, []string, error) {
 		s.tokenCalls++
 		if s.tokenErr != nil {
@@ -66,7 +79,7 @@ func (s *stubMicrosoftGraph) install(t *testing.T) {
 	msListDirectoryUsersFn = func(context.Context, string) ([]outlook.DirectoryUser, error) { return s.users, nil }
 	msListTenantUserRolesFn = func(context.Context, string) (map[string][]string, error) { return s.userRoles, nil }
 	t.Cleanup(func() {
-		msListTenantUserRolesFn = prevRoles
+		msListTenantUserRolesFn, msServicePrincipalFn = prevRoles, prevSP
 		msAppOnlyTokenFn, msInvalidateAppOnlyFn, msEvaluateCapabilitiesFn, msListDirectoryUsersFn = prevToken, prevInv, prevEval, prevList
 	})
 }
@@ -196,34 +209,54 @@ func TestCheckConsent_revokedClearsCapabilities(t *testing.T) {
 	}
 }
 
+func TestCheckConsent_missingServicePrincipalIsNotConsent(t *testing.T) {
+	database := newMicrosoftTestDB(t)
+	stub := &stubMicrosoftGraph{roles: []string{"User.Read.All", "Mail.Read"}, caps: outlook.CapabilityResult{Capabilities: allCaps(true)}, noServicePrincipal: true}
+	stub.install(t)
+	tenant, err := newMicrosoftTenantService(database).CheckConsent(context.Background(), testTenantID, "Contoso", "a@b.c", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tenant.ConsentStatus == repo.MicrosoftConsentGranted || tenant.ServicePrincipalID != "" || mstenant.ConsentEffective(tenant) {
+		t.Fatalf("a missing service principal must not be consent: %+v", tenant)
+	}
+	if tenant.Capability(outlook.CapabilityMail) {
+		t.Fatal("no consent means no capabilities")
+	}
+}
+
 func TestBuildMicrosoftWorkspaceContract_accountTypeLabel(t *testing.T) {
-	granted := &repo.MicrosoftTenantDB{TenantID: testTenantID, ConsentStatus: repo.MicrosoftConsentGranted}
+	withSP := func(tn *repo.MicrosoftTenantDB) *repo.MicrosoftTenantDB { tn.ServicePrincipalID = "sp-1"; return tn }
+	granted := withSP(&repo.MicrosoftTenantDB{TenantID: testTenantID, ConsentStatus: repo.MicrosoftConsentGranted})
 	granted.Capabilities = dbJSON(map[string]bool{outlook.CapabilityListUsers: true, outlook.CapabilityMail: true})
-	noListUsers := &repo.MicrosoftTenantDB{TenantID: testTenantID, ConsentStatus: repo.MicrosoftConsentGranted}
+	noSP := &repo.MicrosoftTenantDB{TenantID: testTenantID, ConsentStatus: repo.MicrosoftConsentGranted}
+	noSP.Capabilities = dbJSON(map[string]bool{outlook.CapabilityListUsers: true})
+	noListUsers := withSP(&repo.MicrosoftTenantDB{TenantID: testTenantID, ConsentStatus: repo.MicrosoftConsentGranted})
 	noListUsers.Capabilities = dbJSON(map[string]bool{outlook.CapabilityMail: true})
-	insufficient := &repo.MicrosoftTenantDB{TenantID: testTenantID, ConsentStatus: repo.MicrosoftConsentInsufficient}
+	insufficient := withSP(&repo.MicrosoftTenantDB{TenantID: testTenantID, ConsentStatus: repo.MicrosoftConsentInsufficient})
 	insufficient.Capabilities = dbJSON(map[string]bool{outlook.CapabilityListUsers: true})
 
-	employee := func() *outlook.MicrosoftAccountContext {
-		return &outlook.MicrosoftAccountContext{AccountType: outlook.AccountTypeWorkAccount, TenantID: testTenantID, IsAdmin: true}
+	link := func(tid string) *repo.MicrosoftAccountTenantDB {
+		return &repo.MicrosoftAccountTenantDB{TenantID: tid, HomeTenantID: tid, Category: repo.MicrosoftTenantCategoryHome,
+			RoleStatus: repo.MicrosoftStatusKnown, IsAdmin: true, TokenStatus: repo.MicrosoftStatusWorking}
 	}
 	cases := []struct {
 		name   string
-		acct   *outlook.MicrosoftAccountContext
+		link   *repo.MicrosoftAccountTenantDB
 		tenant *repo.MicrosoftTenantDB
-		token  bool
 		want   string
 	}{
-		{"granted + list_users + token", employee(), granted, true, outlook.AccountTypeAdminWorkspace},
-		{"token fails", employee(), granted, false, outlook.AccountTypeWorkAccount},
-		{"no list_users", employee(), noListUsers, true, outlook.AccountTypeWorkAccount},
-		{"insufficient consent", employee(), insufficient, true, outlook.AccountTypeWorkAccount},
-		{"no tenant row (Entra admin only)", employee(), nil, true, outlook.AccountTypeWorkAccount},
-		{"personal never admin", &outlook.MicrosoftAccountContext{AccountType: outlook.AccountTypePersonal}, granted, true, outlook.AccountTypePersonal},
+		{"consent + service principal + list_users", link(testTenantID), granted, outlook.AccountTypeAdminWorkspace},
+		{"service principal missing", link(testTenantID), noSP, outlook.AccountTypeWorkAccount},
+		{"no list_users", link(testTenantID), noListUsers, outlook.AccountTypeWorkAccount},
+		{"insufficient consent", link(testTenantID), insufficient, outlook.AccountTypeWorkAccount},
+		{"no tenant row (Entra admin only)", link(testTenantID), nil, outlook.AccountTypeWorkAccount},
+		{"personal never admin", link(outlook.MSATenantID), nil, outlook.AccountTypePersonal},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildMicrosoftWorkspaceContract(tc.acct, tc.tenant, tc.token)
+			state := mstenant.BuildAccessState(tc.link, tc.tenant)
+			got := buildMicrosoftWorkspaceContract("a@contoso.com", &state, tc.tenant)
 			if got.AccountType != tc.want {
 				t.Fatalf("account_type = %q, want %q", got.AccountType, tc.want)
 			}
@@ -233,71 +266,25 @@ func TestBuildMicrosoftWorkspaceContract_accountTypeLabel(t *testing.T) {
 		})
 	}
 
-	got := buildMicrosoftWorkspaceContract(employee(), insufficient, true)
-	if got.Capabilities[outlook.CapabilityListUsers] {
+	state := mstenant.BuildAccessState(link(testTenantID), insufficient)
+	if got := buildMicrosoftWorkspaceContract("", &state, insufficient); got.Capabilities[outlook.CapabilityListUsers] {
 		t.Fatal("capabilities must read false while consent is not granted")
 	}
 }
 
-func TestMicrosoftOrgAccess(t *testing.T) {
-	database := newMicrosoftTestDB(t)
-	stub := &stubMicrosoftGraph{
-		roles: []string{"User.Read.All", "Mail.Read"},
-		caps: outlook.CapabilityResult{
-			Capabilities: map[string]bool{outlook.CapabilityListUsers: true, outlook.CapabilityMail: true},
-			Errors:       map[string]outlook.CapabilityError{outlook.CapabilitySharePoint: {Code: outlook.CapabilityErrMissingRole, Role: "Sites.Read.All"}},
-		},
-	}
-	stub.install(t)
-	ctx := context.Background()
-
-	var accessErr *MicrosoftOrgAccessError
-	if _, _, err := MicrosoftOrgAccess(ctx, database, testTenantID, outlook.CapabilityMail); !errors.As(err, &accessErr) || accessErr.Code != "consent_not_requested" {
-		t.Fatalf("missing tenant: %v", err)
-	}
-	if _, _, err := MicrosoftOrgAccess(ctx, database, outlook.MSATenantID, ""); !errors.As(err, &accessErr) || accessErr.Code != "personal_account" {
-		t.Fatalf("MSA tenant: %v", err)
-	}
-
-	if _, err := newMicrosoftTenantService(database).CheckConsent(ctx, testTenantID, "", "", true); err != nil {
-		t.Fatal(err)
-	}
-	token, _, err := MicrosoftOrgAccess(ctx, database, testTenantID, outlook.CapabilityMail)
-	if err != nil || token != "app-token" {
-		t.Fatalf("mail access: token=%q err=%v", token, err)
-	}
-	_, _, err = MicrosoftOrgAccess(ctx, database, testTenantID, outlook.CapabilitySharePoint)
-	if !errors.As(err, &accessErr) || accessErr.Code != outlook.CapabilityErrMissingRole || accessErr.Capability != outlook.CapabilitySharePoint {
-		t.Fatalf("sharepoint must be refused with missing_role: %v", err)
-	}
-
-	stub.tokenErr = &outlook.AppOnlyTokenError{StatusCode: 401, Code: "invalid_client"}
-	if _, _, err := MicrosoftOrgAccess(ctx, database, testTenantID, outlook.CapabilityMail); !errors.As(err, &accessErr) || accessErr.Code != "app_token_failed" {
-		t.Fatalf("token failure: %v", err)
-	}
-}
-
-// Regression gate: delegated detect/domain-users must never write tenant consent or capabilities,
-// and must not create a tenant row.
+// Regression gate: detect must never write tenant consent or capabilities, and must not create a
+// tenant row.
 func TestDelegatedDetectDoesNotMutateTenant(t *testing.T) {
 	database := newMicrosoftTestDB(t)
 	stub := &stubMicrosoftGraph{roles: []string{"User.Read.All"}, caps: outlook.CapabilityResult{Capabilities: map[string]bool{outlook.CapabilityListUsers: true}}}
 	stub.install(t)
-
-	prevResolve := msResolveAccountFn
-	msResolveAccountFn = func(ctx context.Context, refreshToken string) (*outlook.MicrosoftAccountContext, error) {
-		return &outlook.MicrosoftAccountContext{
-			Email: "admin@contoso.com", AccountType: outlook.AccountTypeWorkAccount,
-			WorkspaceKind: outlook.WorkspaceKindOrganization, TenantID: testTenantID, IsAdmin: true,
-			AdminRoles: []string{"Global Administrator"},
-		}, nil
-	}
-	t.Cleanup(func() { msResolveAccountFn = prevResolve })
+	installMicrosoftAccountStubs(t, database, testTenantID)
 
 	call := func() *httptest.ResponseRecorder {
 		e := echo.New()
 		req := httptest.NewRequest(http.MethodGet, "/microsoft/account/detect", nil)
 		req.Header.Set("REFRESH_TOKEN", "delegated-refresh")
+		req.Header.Set(headerMicrosoftAccountID, "oid-admin")
 		rec := httptest.NewRecorder()
 		c := e.NewContext(req, rec)
 		c.Set(middleware.DbContextKey, database)
@@ -312,7 +299,7 @@ func TestDelegatedDetectDoesNotMutateTenant(t *testing.T) {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
 	if row, _ := database.MicrosoftTenantRepo.Get(testTenantID); row != nil {
-		t.Fatal("delegated detect must not create a tenant row")
+		t.Fatal("detect must not create a tenant row")
 	}
 
 	if _, err := newMicrosoftTenantService(database).CheckConsent(context.Background(), testTenantID, "Contoso", "a@b.c", true); err != nil {
@@ -328,11 +315,34 @@ func TestDelegatedDetectDoesNotMutateTenant(t *testing.T) {
 	after, _ := database.MicrosoftTenantRepo.Get(testTenantID)
 	if after.ConsentStatus != before.ConsentStatus || !after.UpdatedAt.Equal(before.UpdatedAt) ||
 		after.LastProbeAt == nil || !after.LastProbeAt.Equal(*before.LastProbeAt) {
-		t.Fatalf("delegated detect mutated tenant: before=%+v after=%+v", before, after)
+		t.Fatalf("detect mutated tenant: before=%+v after=%+v", before, after)
 	}
-	if stub.tokenCalls-tokenCallsBefore > 1 {
-		t.Fatalf("detect should at most check token usability once, got %d calls", stub.tokenCalls-tokenCallsBefore)
+	if stub.tokenCalls != tokenCallsBefore {
+		t.Fatalf("detect must not mint app-only tokens for a delegated link, got %d calls", stub.tokenCalls-tokenCallsBefore)
 	}
+}
+
+// installMicrosoftAccountStubs makes token_key resolve to user "u1" and REFRESH_TOKEN verify as
+// oid-admin in homeTenant, without calling Microsoft.
+func installMicrosoftAccountStubs(t *testing.T, database *db.PostgresDb, homeTenant string) {
+	t.Helper()
+	prevUser, prevUpsert, prevCheck, prevSignIn := msSatelliteUserIDFn, msUpsertCredentialFn, msCheckTenantAccessFn, msSignInFn
+	msSatelliteUserIDFn = func(echo.Context) (string, error) { return "u1", nil }
+	msSignInFn = func(string) (mstenant.SignIn, error) {
+		return mstenant.SignIn{ObjectID: "oid-admin", HomeTenantID: homeTenant, Email: "admin@contoso.com"}, nil
+	}
+	msUpsertCredentialFn = func(d *db.PostgresDb, userID, accountID, projectID, refresh string) (*repo.GoogleBackupCredentialDB, error) {
+		return d.CredentialRepo.UpsertMicrosoftAccount(repo.MicrosoftAccountUpsert{
+			UserID: userID, ExternalAccountID: "oid-admin", HomeTenantID: homeTenant, Email: "admin@contoso.com",
+			AccountType: outlook.AccountTypeWorkAccount, RefreshToken: refresh, StorjProjectID: projectID,
+		})
+	}
+	msCheckTenantAccessFn = func(_ context.Context, d *db.PostgresDb, cred *repo.GoogleBackupCredentialDB, tenantID, _ string) {
+		_ = d.MicrosoftLinkRepo.SaveTokenStatus(cred.ID, tenantID, repo.MicrosoftStatusWorking, "")
+	}
+	t.Cleanup(func() {
+		msSatelliteUserIDFn, msUpsertCredentialFn, msCheckTenantAccessFn, msSignInFn = prevUser, prevUpsert, prevCheck, prevSignIn
+	})
 }
 
 func dbJSON[V any](v V) *database.DbJson[V] { return database.NewDbJsonFromValue(v) }

@@ -6,20 +6,6 @@ import (
 	"testing"
 )
 
-func TestOutlookMailIDBasedKeys(t *testing.T) {
-	meta := OutlookMailIDBasedMetaKey("a@b.com", "MSG1", "2026-07-21T15:04:05Z")
-	data := OutlookMailIDBasedDataKey("a@b.com", "MSG1", "2026-07-21T15:04:05Z")
-	if !strings.Contains(meta, "MSG1.json") {
-		t.Fatalf("meta key: %s", meta)
-	}
-	if !strings.Contains(data, "MSG1.json") {
-		t.Fatalf("data key: %s", data)
-	}
-	if !strings.Contains(meta, "/meta/2026/07/21/") {
-		t.Fatalf("expected date path in meta: %s", meta)
-	}
-}
-
 func TestErrOutlookMailDeltaInvalid(t *testing.T) {
 	if !errors.Is(ErrOutlookMailDeltaInvalid, ErrOutlookMailDeltaInvalid) {
 		t.Fatal("sentinel")
@@ -46,15 +32,5 @@ func TestMessagesDeltaURL(t *testing.T) {
 				t.Fatalf("expected $select with subject/from: %s", got)
 			}
 		})
-	}
-}
-
-func TestInboxMessagesDeltaInitialURL(t *testing.T) {
-	got := InboxMessagesDeltaInitialURL("https://graph.microsoft.com/v1.0/me")
-	if !strings.HasPrefix(got, "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta?") {
-		t.Fatalf("got %s", got)
-	}
-	if !strings.Contains(got, "subject") || !strings.Contains(got, "from") {
-		t.Fatalf("expected $select with subject/from: %s", got)
 	}
 }

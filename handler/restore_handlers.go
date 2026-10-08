@@ -43,6 +43,16 @@ type restoreAllRequest struct {
 	ProjectID   string `json:"project_id"`
 	LoginID     string `json:"login_id"`
 	TargetEmail string `json:"target_email,omitempty"`
+	// TenantID selects the Microsoft tenant when MICROSOFT_TENANT_ID is not sent.
+	TenantID string `json:"tenant_id,omitempty"`
+}
+
+// restoreTenantID is the Microsoft tenant a restore runs in: MICROSOFT_TENANT_ID, else tenant_id.
+func restoreTenantID(c echo.Context, fallback string) string {
+	if tid := strings.TrimSpace(c.Request().Header.Get("MICROSOFT_TENANT_ID")); tid != "" {
+		return tid
+	}
+	return strings.TrimSpace(fallback)
 }
 
 // RestoreCredentialItem is one personal account for the restore list (no workspace tab).
@@ -530,7 +540,7 @@ func HandleRestorePrepare(c echo.Context) error {
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	result, err := restore.EvaluateReadinessWithOptions(ctx, database, restore.ReadinessRequest{
 		UserID: userID, ProjectID: projectID, LoginID: loginID, Service: service,
-		TargetEmail: targetEmail,
+		TargetEmail: targetEmail, TenantID: restoreTenantID(c, c.QueryParam("tenant_id")),
 	})
 	if err != nil {
 		logger.Warn(ctx, "Restore prepare check failed",
@@ -585,7 +595,7 @@ func HandleRestoreAll(c echo.Context) error {
 
 	prep, err := restore.EvaluateReadinessWithOptions(ctx, database, restore.ReadinessRequest{
 		UserID: userID, ProjectID: req.ProjectID, LoginID: req.LoginID, Service: req.Service,
-		TargetEmail: req.TargetEmail,
+		TargetEmail: req.TargetEmail, TenantID: restoreTenantID(c, req.TenantID),
 	})
 	if err != nil {
 		logger.Warn(ctx, "Restore all readiness check failed",

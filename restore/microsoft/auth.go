@@ -3,14 +3,18 @@ package microsoft
 import (
 	"context"
 	"fmt"
-	"github.com/StorX2-0/Backup-Tools/restore"
 	"strings"
 
-	"github.com/StorX2-0/Backup-Tools/apps/outlook"
+	"github.com/StorX2-0/Backup-Tools/db"
+	"github.com/StorX2-0/Backup-Tools/mstenant"
 	"github.com/StorX2-0/Backup-Tools/repo"
+	"github.com/StorX2-0/Backup-Tools/restore"
 )
 
-// mintMicrosoftAccessToken fills MicrosoftToken from stored refresh or app-only credentials.
+var resolveTenantFn = mstenant.Resolve
+
+// MintAccessToken fills MicrosoftToken for the write credential in the restore job's tenant
+// (equal to the backup job's tenant; see restore.CheckMicrosoftTenantGuard).
 func MintAccessToken(ctx context.Context, d *restore.RestoreDeps) error {
 	if strings.TrimSpace(d.MicrosoftToken) != "" {
 		return nil
@@ -22,47 +26,43 @@ func MintAccessToken(ctx context.Context, d *restore.RestoreDeps) error {
 			d.WriteCred = c
 		}
 	}
-	tok, err := mintMicrosoftTokenFromCredential(ctx, cred, d.RefreshToken)
+	userID, method, tenantID := "", "", ""
+	if d.Job != nil {
+		userID, method, tenantID = d.Job.UserID, d.Job.Method, d.Job.TenantID
+	}
+	if strings.TrimSpace(tenantID) == "" {
+		return fmt.Errorf("%w: the restore job has no tenant", restore.ErrMicrosoftTenantMismatch)
+	}
+	tc, err := resolveRestoreTenant(ctx, d.Store, userID, cred, tenantID, method, d.RefreshToken)
 	if err != nil {
 		return err
 	}
-	d.MicrosoftToken = tok
+	d.MicrosoftToken = tc.Token
+	d.MicrosoftApplication = tc.Application
 	return nil
 }
 
-// RefreshMicrosoftAccessToken forces a new Graph access token (401 retry path).
+// RefreshAccessToken forces a new Graph access token (401 retry path).
 func RefreshAccessToken(ctx context.Context, d *restore.RestoreDeps) error {
 	d.MicrosoftToken = ""
 	return MintAccessToken(ctx, d)
 }
 
-func mintMicrosoftTokenFromCredential(ctx context.Context, cred *repo.GoogleBackupCredentialDB, refreshFallback string) (string, error) {
-	tok, _, err := mintMicrosoftTokenAndScopeFromCredential(ctx, cred, refreshFallback)
-	return tok, err
-}
-
-// mintMicrosoftTokenAndScopeFromCredential returns access token plus OAuth token-endpoint scope
-// (needed when the access token is opaque and has no JWT scp claim).
-func mintMicrosoftTokenAndScopeFromCredential(ctx context.Context, cred *repo.GoogleBackupCredentialDB, refreshFallback string) (string, string, error) {
-	if cred != nil && strings.EqualFold(strings.TrimSpace(cred.MicrosoftAuthMode), outlook.MicrosoftAuthModeApplication) {
-		tok, _, err := outlook.AppOnlyToken(ctx, strings.TrimSpace(cred.TenantID))
-		if err != nil {
-			return "", "", fmt.Errorf("microsoft app-only token: %w", err)
-		}
-		return tok, "", nil
+func resolveRestoreTenant(ctx context.Context, store *db.PostgresDb, userID string, cred *repo.GoogleBackupCredentialDB, tenantID, method, refreshFallback string) (*mstenant.Context, error) {
+	if cred == nil {
+		return nil, fmt.Errorf("microsoft write credential missing")
 	}
-	rt := strings.TrimSpace(refreshFallback)
-	if rt == "" && cred != nil {
-		rt = strings.TrimSpace(cred.RefreshToken)
-	}
-	if rt == "" {
-		return "", "", fmt.Errorf("microsoft refresh token missing")
-	}
-	tokRes, err := outlook.AuthTokenResponseUsingRefreshToken(rt)
+	tc, err := resolveTenantFn(ctx, store, mstenant.Request{
+		UserID:       userID,
+		CredentialID: cred.ID,
+		TenantID:     tenantID,
+		Capability:   mstenant.CapabilityForService(method),
+		RefreshToken: refreshFallback,
+	})
 	if err != nil {
-		return "", "", fmt.Errorf("microsoft token refresh: %w", err)
+		return nil, fmt.Errorf("microsoft token: %w", err)
 	}
-	return tokRes.AccessToken, tokRes.Scope, nil
+	return tc, nil
 }
 
 func RequireToken(deps *restore.RestoreDeps) error {

@@ -162,7 +162,7 @@ type graphSiteRow struct {
 
 // systemSharePointSitePaths are hidden/system site collections returned by getAllSites that are not
 // user content sites.
-var systemSharePointSitePaths = []string{"/contentstorage/", "/search/", "/portals/", "/sites/appcatalog/"}
+var systemSharePointSitePaths = []string{"/contentstorage/", "/search/", "/portals/", "/sites/appcatalog/", "/sites/contenttypehub/"}
 
 // isSystemSharePointSite reports getAllSites rows that are not user sites: unnamed system sites,
 // personal OneDrive sites (backed up as onedrive) and known system paths.

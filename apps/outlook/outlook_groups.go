@@ -125,19 +125,19 @@ func SanitizeGroupsGroupKey(groupID string) string {
 	return s
 }
 
-// GroupConversationPostKey is {groupKey}/conversations/{threadId}/posts/{postId}.json
-func GroupConversationPostKey(groupKey, threadID, postID string) string {
+// GroupConversationPostKey is {prefix}/conversations/{threadId}/posts/{postId}.json (prefix: ResourceKeyPrefix).
+func GroupConversationPostKey(prefix, threadID, postID string) string {
 	return fmt.Sprintf("%s/conversations/%s/posts/%s.json",
-		SanitizeGroupsGroupKey(groupKey),
+		strings.Trim(strings.TrimSpace(prefix), "/"),
 		url.PathEscape(strings.TrimSpace(threadID)),
 		url.PathEscape(strings.TrimSpace(postID)),
 	)
 }
 
-// GroupCalendarEventKey is {groupKey}/calendar/events/{eventId}.json
-func GroupCalendarEventKey(groupKey, eventID string) string {
+// GroupCalendarEventKey is {prefix}/calendar/events/{eventId}.json (prefix: ResourceKeyPrefix).
+func GroupCalendarEventKey(prefix, eventID string) string {
 	return fmt.Sprintf("%s/calendar/events/%s.json",
-		SanitizeGroupsGroupKey(groupKey),
+		strings.Trim(strings.TrimSpace(prefix), "/"),
 		url.PathEscape(strings.TrimSpace(eventID)),
 	)
 }
@@ -146,6 +146,30 @@ func GroupCalendarEventKey(groupKey, eventID string) string {
 func GroupDriveRootURL(groupID string) string {
 	groupID = strings.TrimSpace(groupID)
 	return graphBaseURL + "/groups/" + url.PathEscape(groupID) + "/drive"
+}
+
+// GroupRootSiteID returns the ID of the group's SharePoint site ({host},{site},{web}), whose
+// default document library is the group's drive.
+func GroupRootSiteID(ctx context.Context, accessToken, groupID string) (string, error) {
+	groupID = strings.TrimSpace(groupID)
+	if groupID == "" {
+		return "", fmt.Errorf("group id is required")
+	}
+	body, status, err := graphDoJSON(ctx, accessToken, http.MethodGet,
+		graphBaseURL+"/groups/"+url.PathEscape(groupID)+"/sites/root?$select=id", nil)
+	if err != nil {
+		return "", err
+	}
+	if status < 200 || status >= 300 {
+		return "", fmt.Errorf("group root site http %d: %s", status, truncateForErr(body))
+	}
+	var row struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &row); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(row.ID), nil
 }
 
 // GroupDriveInitialDeltaURL is GET /groups/{id}/drive/root/delta for baseline.

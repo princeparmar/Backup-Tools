@@ -215,6 +215,7 @@ func uploadObjectWithMetadataAndSync(
 		return uploadObjectWithMetadataAndSync(ctx, database, grant, bucketName, objectKey, data, meta, userID, r, attempt+1)
 	}
 
+	logObjectBackedUp(ctx, bucketName, objectKey, int64(len(data)), r)
 	source := deriveSource(bucketName)
 	objectType := deriveType(bucketName)
 	if err := database.SyncedObjectRepo.CreateSyncedObject(userID, bucketName, objectKey, source, objectType); err != nil {
@@ -226,6 +227,20 @@ func uploadObjectWithMetadataAndSync(
 		return nil
 	}
 	return nil
+}
+
+// logObjectBackedUp is the per-file backup log line shared by every service.
+func logObjectBackedUp(ctx context.Context, bucketName, objectKey string, size int64, r *StorxRecovery) {
+	fields := []logger.Field{
+		logger.String("source", deriveSource(bucketName)),
+		logger.String("bucket", bucketName),
+		logger.String("object_key", objectKey),
+		logger.Int64("bytes", size),
+	}
+	if r != nil && r.Job != nil {
+		fields = append(fields, logger.Int64("job_id", int64(r.Job.ID)), logger.String("method", r.Job.Method))
+	}
+	logger.Info(ctx, "Backed up object", fields...)
 }
 
 // GetSyncedObjectsWithPrefix ensures bucket exists, then gets synced objects from database instead of Satellite

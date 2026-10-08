@@ -44,6 +44,8 @@ type RestoreJobListingDB struct {
 	AccountType    string `json:"account_type" gorm:"column:account_type;not null;default:personal"`
 	CredentialID   uint   `json:"credential_id" gorm:"column:credential_id;index"`
 	CronJobID      uint   `json:"cron_job_id" gorm:"column:cron_job_id;index"`
+	// TenantID is the Microsoft tenant selected for the restore target (empty for Google).
+	TenantID string `json:"tenant_id,omitempty" gorm:"column:tenant_id;not null;default:''"`
 
 	Status string `json:"status" gorm:"not null;default:queued;index"`
 

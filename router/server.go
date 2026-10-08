@@ -138,6 +138,12 @@ func StartServer(db *db.PostgresDb, address string) {
 	microsoft.GET("/directory/users", handler.HandleMicrosoftDirectoryUsers)
 	microsoft.GET("/workspace", handler.HandleMicrosoftWorkspace)
 
+	msAccountTenants := microsoft.Group("/accounts/tenants")
+	msAccountTenants.GET("", handler.HandleMicrosoftAccountTenants)
+	msAccountTenants.POST("/:tid/connect", handler.HandleMicrosoftConnectAccountTenant)
+	msAccountTenants.POST("/:tid/disconnect", handler.HandleMicrosoftDisconnectAccountTenant)
+	msAccountTenants.POST("/:tid/roles/refresh", handler.HandleMicrosoftRefreshAccountTenantRoles)
+
 	msTenants := microsoft.Group("/tenants/:tid")
 	msTenants.POST("/consent", handler.HandleMicrosoftTenantConsent)
 	msTenants.POST("/capabilities/refresh", handler.HandleMicrosoftTenantCapabilitiesRefresh)
@@ -170,8 +176,9 @@ func StartServer(db *db.PostgresDb, address string) {
 	microsoft.GET("/teams/list", handler.HandleMicrosoftTeamsList)
 	microsoft.GET("/teams/channels", handler.HandleMicrosoftTeamChannels)
 	microsoft.GET("/teams/flat-messages", handler.HandleMicrosoftTeamsFlatMessages)
-	microsoft.GET("/groups/list", handler.HandleMicrosoftGroupsList)
-	microsoft.GET("/groups/flat-conversations", handler.HandleMicrosoftGroupsFlatConversations)
+	// Groups backup is hidden for now.
+	// microsoft.GET("/groups/list", handler.HandleMicrosoftGroupsList)
+	// microsoft.GET("/groups/flat-conversations", handler.HandleMicrosoftGroupsFlatConversations)
 
 	google := e.Group("/google")
 
@@ -290,7 +297,7 @@ func StartServer(db *db.PostgresDb, address string) {
 	office365.POST("/satellite-to-onedrive", handler.HandleOneDriveDownloadAndInsert)
 	office365.POST("/satellite-to-sharepoint", handler.HandleSharePointDownloadAndInsert)
 	office365.POST("/satellite-to-teams", handler.HandleTeamsDownloadAndInsert)
-	office365.POST("/satellite-to-groups", handler.HandleGroupsDownloadAndInsert)
+	// office365.POST("/satellite-to-groups", handler.HandleGroupsDownloadAndInsert) // Groups restore is hidden for now.
 	// AWS S3
 	aws := e.Group("/aws")
 	aws.GET("/list-files-in-bucket/:bucketName", handler.HandleListAWSs3BucketFiles)

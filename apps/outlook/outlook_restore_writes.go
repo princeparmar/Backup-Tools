@@ -116,10 +116,10 @@ func ParseRestoreContact(raw []byte) (*RestoreContactInput, error) {
 	}, nil
 }
 
-// CreateCalendarEvent posts a new event to the signed-in user's default calendar.
-func CreateCalendarEvent(ctx context.Context, accessToken string, in *RestoreCalendarEventInput) error {
+// calendarEventPayload is the Graph create body for a minimal event.
+func calendarEventPayload(in *RestoreCalendarEventInput) (map[string]interface{}, error) {
 	if in == nil || strings.TrimSpace(in.Subject) == "" {
-		return fmt.Errorf("calendar event subject is required")
+		return nil, fmt.Errorf("calendar event subject is required")
 	}
 	tz := calendarRestoreTimeZone(in.TimeZone)
 	body := map[string]interface{}{
@@ -135,21 +135,13 @@ func CreateCalendarEvent(ctx context.Context, accessToken string, in *RestoreCal
 	if strings.TrimSpace(in.End) != "" {
 		body["end"] = map[string]string{"dateTime": in.End, "timeZone": tz}
 	}
-	payload, _ := json.Marshal(body)
-	_, status, err := graphDoJSONWrite(ctx, accessToken, http.MethodPost, graphBaseURL+"/me/events", payload)
-	if err != nil {
-		return err
-	}
-	if status < 200 || status >= 300 {
-		return fmt.Errorf("create calendar event http %d", status)
-	}
-	return nil
+	return body, nil
 }
 
-// CreateContact posts a new contact to the signed-in user's default contacts folder.
-func CreateContact(ctx context.Context, accessToken string, in *RestoreContactInput) error {
+// contactPayload is the Graph create body for a minimal contact.
+func contactPayload(in *RestoreContactInput) (map[string]interface{}, error) {
 	if in == nil || strings.TrimSpace(in.DisplayName) == "" {
-		return fmt.Errorf("contact display name is required")
+		return nil, fmt.Errorf("contact display name is required")
 	}
 	body := map[string]interface{}{
 		"displayName": in.DisplayName,
@@ -182,28 +174,16 @@ func CreateContact(ctx context.Context, accessToken string, in *RestoreContactIn
 			body["emailAddresses"] = addrs
 		}
 	}
-	if len(in.Phones) > 0 {
-		phones := make([]map[string]string, 0, len(in.Phones))
-		for _, p := range in.Phones {
-			p = strings.TrimSpace(p)
-			if p == "" {
-				continue
-			}
-			phones = append(phones, map[string]string{"number": p})
-		}
-		if len(phones) > 0 {
-			body["businessPhones"] = phones
+	phones := make([]string, 0, len(in.Phones))
+	for _, p := range in.Phones {
+		if p = strings.TrimSpace(p); p != "" {
+			phones = append(phones, p)
 		}
 	}
-	payload, _ := json.Marshal(body)
-	_, status, err := graphDoJSONWrite(ctx, accessToken, http.MethodPost, graphBaseURL+"/me/contacts", payload)
-	if err != nil {
-		return err
+	if len(phones) > 0 {
+		body["businessPhones"] = phones
 	}
-	if status < 200 || status >= 300 {
-		return fmt.Errorf("create contact http %d", status)
-	}
-	return nil
+	return body, nil
 }
 
 // UploadDriveFile uploads bytes to the signed-in user's OneDrive root via a single PUT.
@@ -298,12 +278,15 @@ func ExtractTeamsMessageBody(raw []byte) string {
 	return "(restored message)"
 }
 
-// ParseTeamsIDsFromKey extracts StorX path segments only ({teamKey}/channels/{channelId}/...).
-// teamKey is sanitized and must NOT be treated as a Graph team ID. Prefer ResolveTeamsGraphIDs.
+// ParseTeamsIDsFromKey extracts StorX path segments only ({prefix}/channels/{channelId}/...).
+// teamKey is the storage prefix of the team (holding _team.json) and must NOT be treated as a
+// Graph team ID. Prefer ResolveTeamsGraphIDs.
 func ParseTeamsIDsFromKey(objectKey string) (teamKey, channelKeySegment string) {
 	parts := strings.Split(strings.Trim(objectKey, "/"), "/")
-	if len(parts) >= 3 && parts[1] == "channels" {
-		return parts[0], parts[2]
+	for i := 1; i+1 < len(parts); i++ {
+		if parts[i] == "channels" {
+			return strings.Join(parts[:i], "/"), parts[i+1]
+		}
 	}
 	return "", ""
 }
@@ -426,8 +409,11 @@ func CreateGroupCalendarEvent(ctx context.Context, accessToken, groupID string, 
 	return nil
 }
 
-// GroupKeyFromObjectKey returns the StorX group key prefix (may be sanitized; not always a Graph GUID).
+// GroupKeyFromObjectKey returns the StorX storage prefix of the group (holding _group.json).
 func GroupKeyFromObjectKey(objectKey string) string {
+	if prefix, _, _, _, _, ok := SplitResourceKey(objectKey); ok {
+		return prefix
+	}
 	parts := strings.Split(strings.Trim(objectKey, "/"), "/")
 	if len(parts) == 0 {
 		return ""
@@ -475,6 +461,9 @@ func ResolveGroupGraphID(objectKey string, objectJSON []byte, groupSnap *GroupsG
 		}
 	}
 	key := GroupKeyFromObjectKey(objectKey)
+	if _, _, _, id, _, ok := SplitResourceKey(objectKey); ok {
+		key = id
+	}
 	if key != "" && SanitizeGroupsGroupKey(key) == key {
 		// Sanitize did not alter the prefix — typically a GUID; safe enough as last resort.
 		return key, nil

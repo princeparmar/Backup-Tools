@@ -3,9 +3,7 @@ package crons
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
@@ -53,7 +51,10 @@ func runOutlookGroupsAutosync(input ProcessorInput) error {
 	if groupID == "" {
 		return fmt.Errorf("group_id is required on job for groups backup")
 	}
-	groupKey := outlook.SanitizeGroupsGroupKey(groupID)
+	groupKey, err := microsoftJobKeyPrefix(input.Job)
+	if err != nil {
+		return err
+	}
 
 	task := scheduledTaskShellFromCronJob(input.Job, accessToken, storx)
 	task.LoginId = groupKey
@@ -84,14 +85,18 @@ func runOutlookGroupsAutosync(input ProcessorInput) error {
 		input.Job.TaskMemory.GroupsSync.Calendar = calState
 	}
 
-	driveState, driveErr := syncGroupDrive(ctx, input, task, accessToken, groupID, groupKey, input.Job.TaskMemory.GroupsSync.Drive)
-	if driveErr != nil {
-		logger.Warn(ctx, "groups drive sync failed", logger.ErrorField(driveErr))
-	} else {
-		input.Job.TaskMemory.GroupsSync.Drive = driveState
+	filesCovered := groupFilesCoveredBySharePoint(ctx, input, accessToken, groupID)
+	if !filesCovered {
+		var driveState repo.GroupsDriveSyncState
+		driveState, driveErr = syncGroupDrive(ctx, input, task, accessToken, groupID, groupKey, input.Job.TaskMemory.GroupsSync.Drive)
+		if driveErr != nil {
+			logger.Warn(ctx, "groups drive sync failed", logger.ErrorField(driveErr))
+		} else {
+			input.Job.TaskMemory.GroupsSync.Drive = driveState
+		}
 	}
 
-	if convErr != nil && calErr != nil && driveErr != nil {
+	if convErr != nil && calErr != nil && (filesCovered || driveErr != nil) {
 		return fmt.Errorf("groups sync failed: conversations=%v calendar=%v drive=%v", convErr, calErr, driveErr)
 	}
 
@@ -196,6 +201,7 @@ func syncGroupCalendar(
 	return state, nil
 }
 
+// syncGroupDrive backs up the group's document library in the OneDrive folder layout.
 func syncGroupDrive(
 	ctx context.Context,
 	input ProcessorInput,
@@ -203,130 +209,34 @@ func syncGroupDrive(
 	accessToken, groupID, groupKey string,
 	state repo.GroupsDriveSyncState,
 ) (repo.GroupsDriveSyncState, error) {
-	deltaLink := ""
-	if state.DeltaLink != nil {
-		deltaLink = strings.TrimSpace(*state.DeltaLink)
-	}
-	startURL := outlook.GroupDriveInitialDeltaURL(groupID)
-	if state.BaselineDone && deltaLink != "" {
-		startURL = deltaLink
-	}
-	newLink, err := runGroupDriveDeltaSync(ctx, input, task, accessToken, groupID, groupKey, startURL)
-	if errors.Is(err, outlook.ErrOneDriveDeltaInvalid) {
-		state.DeltaLink = nil
-		state.BaselineDone = false
-		newLink, err = runGroupDriveDeltaSync(ctx, input, task, accessToken, groupID, groupKey, outlook.GroupDriveInitialDeltaURL(groupID))
-	}
+	driveRoot := outlook.GroupDriveRootURL(groupID)
+	driveID, err := outlook.FetchDriveID(ctx, accessToken, driveRoot)
 	if err != nil {
+		return state, fmt.Errorf("group drive: %w", err)
+	}
+	if err := runLibraryDriveSync(ctx, input, libraryDrive{
+		storx: task.StorxToken, token: accessToken,
+		bucket: satellite.ReserveBucket_OutlookGroups, service: "outlook_groups",
+		driveRoot: driveRoot, driveID: driveID, prefix: groupKey,
+	}, &state.DeltaLink, &state.Layout); err != nil {
 		return state, err
 	}
-	state.DeltaLink = &newLink
 	state.BaselineDone = true
 	return state, nil
 }
 
-func runGroupDriveDeltaSync(
-	ctx context.Context,
-	input ProcessorInput,
-	task *repo.ScheduledTasks,
-	accessToken, groupID, groupKey, startURL string,
-) (string, error) {
-	requestURL := strings.TrimSpace(startURL)
-	if requestURL == "" {
-		return "", fmt.Errorf("group drive delta start url is empty")
-	}
-	driveRoot := outlook.GroupDriveRootURL(groupID)
-	for {
-		if err := input.HeartBeatFunc(); err != nil {
-			return "", err
-		}
-		page, err := outlook.FetchOneDriveDeltaPage(ctx, accessToken, requestURL)
-		if err != nil {
-			return "", err
-		}
-		for i := range page.Items {
-			if err := input.HeartBeatFunc(); err != nil {
-				return "", err
-			}
-			if err := syncGroupDriveItem(ctx, input, task, accessToken, driveRoot, groupKey, groupID, &page.Items[i]); err != nil {
-				logger.Warn(ctx, "group drive item sync failed",
-					logger.String("group_id", groupID),
-					logger.String("item_id", page.Items[i].ID),
-					logger.ErrorField(err),
-				)
-			}
-		}
-		if strings.TrimSpace(page.NextLink) != "" {
-			requestURL = strings.TrimSpace(page.NextLink)
-			continue
-		}
-		final := strings.TrimSpace(page.DeltaLink)
-		if final == "" {
-			return "", fmt.Errorf("group drive delta finished without @odata.deltaLink")
-		}
-		return final, nil
-	}
-}
+// msGroupRootSiteFn finds a group's SharePoint site (overridden in tests).
+var msGroupRootSiteFn = outlook.GroupRootSiteID
 
-func syncGroupDriveItem(
-	ctx context.Context,
-	input ProcessorInput,
-	task *repo.ScheduledTasks,
-	accessToken, driveRoot, groupKey, groupID string,
-	item *outlook.OneDriveItem,
-) error {
-	if item == nil || strings.TrimSpace(item.ID) == "" {
-		return nil
+// groupFilesCoveredBySharePoint reports whether the group's files are already backed up by an
+// active SharePoint job for the group's site; that job owns the files so they are not stored twice.
+// Any lookup failure keeps the drive in the groups job.
+func groupFilesCoveredBySharePoint(ctx context.Context, input ProcessorInput, accessToken, groupID string) bool {
+	siteID, err := msGroupRootSiteFn(ctx, accessToken, groupID)
+	if err != nil || siteID == "" {
+		return false
 	}
-	if item.IsDeleted {
-		displayName := outlook.SanitizeOneDrivePathSegment(item.Name)
-		if displayName == "" {
-			displayName = item.ID
-		}
-		metaKey := outlook.SharePointIDBasedMetaKey(groupKey, item.ID, displayName, item.CreatedDateTime)
-		meta := outlook.SharePointCronBackupMeta{
-			ItemID:                item.ID,
-			Name:                  item.Name,
-			RemovedFromSharePoint: true,
-			DeletedAt:             time.Now().UTC().Format(time.RFC3339),
-			UpdatedAt:             time.Now().UTC().Format(time.RFC3339),
-		}
-		b, _ := json.Marshal(meta)
-		return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_OutlookGroups, metaKey, b, task.UserID, input.StorxRecovery)
-	}
-	if item.IsFolder || (item.MimeType == "" && item.Size == 0 && item.Name == "") {
-		return nil
-	}
-
-	displayName := outlook.SanitizeOneDrivePathSegment(item.Name)
-	created := item.CreatedDateTime
-	metaKey := outlook.SharePointIDBasedMetaKey(groupKey, item.ID, displayName, created)
-	dataKey := outlook.SharePointIDBasedDataKey(groupKey, item.ID, displayName, created)
-
-	meta := outlook.SharePointCronBackupMeta{
-		ItemID:               item.ID,
-		Name:                 item.Name,
-		MimeType:             item.MimeType,
-		Size:                 item.Size,
-		CreatedDateTime:      item.CreatedDateTime,
-		LastModifiedDateTime: item.LastModifiedDateTime,
-		ETag:                 item.ETag,
-		DataObjectKey:        dataKey,
-		UpdatedAt:            time.Now().UTC().Format(time.RFC3339),
-	}
-
-	body, _, err := outlook.OpenOneDriveItemContentStream(ctx, accessToken, driveRoot, item.ID)
-	if err != nil {
-		return err
-	}
-	content, err := io.ReadAll(body)
-	_ = body.Close()
-	if err != nil {
-		return err
-	}
-	if err := handler.UploadBufferedObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_OutlookGroups, dataKey, content, task.UserID, input.StorxRecovery); err != nil {
-		return err
-	}
-	b, _ := json.Marshal(meta)
-	return handler.UploadObjectAndSync(ctx, input.Database, task.StorxToken, satellite.ReserveBucket_OutlookGroups, metaKey, b, task.UserID, input.StorxRecovery)
+	job, err := input.Database.CronJobRepo.FindMicrosoftResourceJob(input.Job.UserID, input.Job.TenantID,
+		repo.ResourceTypeSite, siteID, "outlook_sharepoint", input.Job.SyncType)
+	return err == nil && job != nil && job.Active
 }

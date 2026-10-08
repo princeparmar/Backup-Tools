@@ -1,14 +1,15 @@
 package microsoft
 
 import (
-	"github.com/StorX2-0/Backup-Tools/restore"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/repo"
+	"github.com/StorX2-0/Backup-Tools/restore"
 	storxrefresh "github.com/StorX2-0/Backup-Tools/storx"
 )
 
@@ -17,43 +18,38 @@ func EvaluateReadiness(
 	ctx context.Context,
 	store *db.PostgresDb,
 	out *restore.ReadinessResult,
-	userID, projectID, loginID, service, method, targetEmail string,
+	userID, projectID, loginID, service, method, targetEmail, tenantID string,
 ) (*restore.ReadinessResult, error) {
-	cronJob, jobOK, err := store.CronJobRepo.FindJobForRestore(userID, method, loginID)
+	cronJob, err := restore.FindMicrosoftRestoreJob(store, userID, method, tenantID, loginID)
+	if errors.Is(err, restore.ErrMicrosoftTenantRequired) {
+		out.Ready = false
+		out.Reason = restore.ReadinessReasonTenantRequired
+		out.Message = err.Error()
+		return out, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	if !jobOK {
+	if cronJob == nil {
 		out.Ready = false
 		out.Reason = restore.ReadinessReasonNoBackupJob
 		out.Message = restore.MsgReadinessNoBackupJob
 		return out, nil
 	}
 	out.CronJobID = cronJob.ID
+	out.TenantID = strings.ToLower(cronJob.TenantID)
 
-	var cred *repo.GoogleBackupCredentialDB
-	if credID := repo.JobCredentialID(cronJob); credID > 0 {
-		cred, err = store.CredentialRepo.GetByID(credID)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		credID, credOK, err := store.CredentialRepo.FindIDForUserProjectAndEmail(userID, projectID, loginID)
-		if err != nil {
-			return nil, err
-		}
-		if !credOK {
-			out.Ready = false
-			out.Reason = restore.ReadinessReasonNoCredential
-			out.Message = restore.MsgReadinessNoCredential
-			return out, nil
-		}
-		cred, err = store.CredentialRepo.GetByID(credID)
-		if err != nil {
-			return nil, err
-		}
+	credID := repo.JobCredentialID(cronJob)
+	if credID == 0 {
+		out.Ready = false
+		out.Reason = restore.ReadinessReasonNoCredential
+		out.Message = restore.MsgReadinessNoCredential
+		return out, nil
 	}
-	sourceCred := cred
+	sourceCred, err := store.CredentialRepo.GetByID(credID)
+	if err != nil {
+		return nil, err
+	}
 	out.AccountType = strings.TrimSpace(sourceCred.AccountType)
 	if out.AccountType == "" {
 		out.AccountType = outlook.AccountTypePersonal
@@ -65,7 +61,7 @@ func EvaluateReadiness(
 	if !ok {
 		return nil, fmt.Errorf("unknown method %s", method)
 	}
-	prefix := strings.TrimSuffix(loginID, "/") + "/"
+	prefix := restore.RestoreKeyPrefix(&repo.RestoreJobListingDB{Method: method, LoginID: loginID}, cronJob)
 	count, err := store.SyncedObjectRepo.CountSyncedObjectsForRestore(
 		userID, cfg.Bucket, cfg.Source, cfg.ObjectType, prefix)
 	if err != nil {
@@ -134,16 +130,28 @@ func EvaluateReadiness(
 	}
 
 	out.CredentialID = writeCred.ID
-	return evaluateCredentialReadiness(ctx, out, service, method, writeCred)
+	if err := restore.CheckMicrosoftTenantGuard(store, out.TenantID, cronJob, writeCred); err != nil {
+		if !errors.Is(err, restore.ErrMicrosoftTenantMismatch) {
+			return nil, err
+		}
+		out.Ready = false
+		out.Reason = restore.ReadinessReasonTenantMismatch
+		out.Message = err.Error()
+		out.ReconnectHint = "Microsoft restore stays inside the backup's tenant; connect the target account to that tenant"
+		return out, nil
+	}
+	return evaluateCredentialReadiness(ctx, store, out, userID, service, method, writeCred, out.TenantID)
 }
 
 func evaluateCredentialReadiness(
 	ctx context.Context,
+	store *db.PostgresDb,
 	out *restore.ReadinessResult,
-	service, method string,
+	userID, service, method string,
 	cred *repo.GoogleBackupCredentialDB,
+	tenantID string,
 ) (*restore.ReadinessResult, error) {
-	accessToken, endpointScope, err := mintMicrosoftTokenAndScopeFromCredential(ctx, cred, "")
+	tc, err := resolveRestoreTenant(ctx, store, userID, cred, tenantID, method, "")
 	if err != nil {
 		out.Ready = false
 		out.Reason = restore.ReadinessReasonTokenRefreshFailed
@@ -152,9 +160,13 @@ func evaluateCredentialReadiness(
 		return out, nil
 	}
 
+	if tc.Application {
+		out.Ready = true
+		return out, nil
+	}
 	required := microsoftRestoreScopesForMethod(method)
 	// Personal Outlook access tokens are often opaque (not JWT) — use token-endpoint scope.
-	granted := microsoftGrantedScopes(accessToken, endpointScope)
+	granted := microsoftGrantedScopes(tc.Token, tc.TokenScope)
 	out.GrantedScopes = granted
 	missing := microsoftMissingScopes(granted, required)
 	if len(missing) > 0 {

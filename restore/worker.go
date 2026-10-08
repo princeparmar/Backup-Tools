@@ -162,7 +162,7 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 	defer proc.Cleanup(ctx, deps)
 
 	cfg := deps.Config
-	prefix := strings.TrimSuffix(job.LoginID, "/") + "/"
+	prefix := RestoreKeyPrefix(job, deps.CronJob)
 
 	if job.TotalCount == 0 && job.CursorID == 0 {
 		total, err := store.SyncedObjectRepo.CountSyncedObjectsForRestore(

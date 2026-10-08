@@ -59,7 +59,8 @@ var restoreScopes = []string{
 	"Contacts.ReadWrite",
 	"Files.ReadWrite.All",
 	"ChannelMessage.Send",
-	"Group.ReadWrite.All",
+	// Groups restore is hidden for now; Group.ReadWrite.All is only used by it.
+	// "Group.ReadWrite.All",
 }
 
 // RestoreScopes returns Graph scopes for the restore OAuth consent screen.
@@ -171,75 +172,7 @@ func AuthTokenResponseForAccountDetection(refreshToken string) (*TokenResponse, 
 }
 
 func refreshTokenResponse(refreshToken, scope string) (*TokenResponse, error) {
-	refreshToken = strings.TrimSpace(refreshToken)
-	// Common Satellite/proxy artifacts that make AAD return AADSTS9002313.
-	refreshToken = strings.Trim(refreshToken, `"'`)
-
-	if refreshToken == "" {
-		return nil, fmt.Errorf("refresh token is empty")
-	}
-	// Access tokens are JWTs (three base64 segments); refresh tokens are opaque and usually not JWTs.
-	if strings.Count(refreshToken, ".") == 2 && strings.HasPrefix(refreshToken, "eyJ") {
-		return nil, fmt.Errorf("refresh token looks like an access token (JWT); store the OAuth refresh_token from the token response, not access_token")
-	}
-
-	// Prepare the form data
-	data := url.Values{}
-	clientID := utils.GetEnvWithKey("OUTLOOK_CLIENT_ID")
-	clientSecret := utils.GetEnvWithKey("OUTLOOK_CLIENT_SECRET")
-
-	if clientID == "" {
-		return nil, fmt.Errorf("OUTLOOK_CLIENT_ID environment variable is not set")
-	}
-	if clientSecret == "" {
-		return nil, fmt.Errorf("OUTLOOK_CLIENT_SECRET environment variable is not set")
-	}
-
-	data.Set("client_id", clientID)
-	data.Set("client_secret", clientSecret)
-	data.Set("refresh_token", refreshToken)
-	data.Set("grant_type", "refresh_token")
-	if scope != "" {
-		data.Set("scope", scope)
-	}
-
-	// Create the request
-	req, err := http.NewRequestWithContext(context.Background(), "POST", tokenEndpointURL, strings.NewReader(data.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("error creating request: %v", err)
-	}
-
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-
-	// Send the request
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("error sending request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// Read the response
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("error reading response: %v", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("error response from server: %s", string(body))
-	}
-
-	// Parse the response
-	var tokenResponse TokenResponse
-	if err := json.Unmarshal(body, &tokenResponse); err != nil {
-		return nil, fmt.Errorf("error parsing response: %v", err)
-	}
-
-	if tokenResponse.AccessToken == "" {
-		return nil, fmt.Errorf("received empty access token")
-	}
-
-	return &tokenResponse, nil
+	return refreshTokenAt(tokenEndpointURL, refreshToken, scope)
 }
 
 func AuthTokenUsingCode(code string) (*TokenResponse, error) {

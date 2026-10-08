@@ -3,8 +3,10 @@ package handler
 import (
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
+	"github.com/StorX2-0/Backup-Tools/mstenant"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/labstack/echo/v4"
@@ -21,7 +23,7 @@ func parseMicrosoftUsersGroupsServiceMethod(c echo.Context) (string, error) {
 		return "", nil
 	}
 	if _, ok := microsoftWorkspaceServiceMethods[method]; !ok {
-		return "", fmt.Errorf("method must be one of: outlook, outlook_calendar, outlook_contacts, outlook_onedrive, outlook_sharepoint, outlook_teams, outlook_groups")
+		return "", fmt.Errorf("method must be one of: outlook, outlook_calendar, outlook_contacts, outlook_onedrive, outlook_sharepoint, outlook_teams")
 	}
 	return method, nil
 }
@@ -108,6 +110,10 @@ func HandleMicrosoftAutosyncUsersGroupsList(c echo.Context) error {
 	}
 
 	jobs = filterUsersGroupsMicrosoftJobs(jobs)
+	selectedTenant, jobs, tenantErr := filterUsersGroupsMicrosoftTenant(c, jobs)
+	if tenantErr != nil {
+		return c.JSON(http.StatusBadRequest, tenantErr)
+	}
 	mailboxJobs, orgResourceJobs := splitMicrosoftUsersGroupsJobs(jobs)
 
 	policies := enrichUsersGroupsJobs(database, jobs)
@@ -126,16 +132,19 @@ func HandleMicrosoftAutosyncUsersGroupsList(c echo.Context) error {
 	sharepointJobs, teamsJobs, groupsJobs := splitMicrosoftOrgResourceJobs(orgResourceJobs)
 	sharepointSites := buildMicrosoftSharePointSiteResources(sharepointJobs, policies)
 	teamsResources := buildMicrosoftTeamsResources(teamsJobs, policies)
-	groupsResources := buildMicrosoftGroupsResources(groupsJobs, policies)
+	// Groups backup is hidden for now.
+	// groupsResources := buildMicrosoftGroupsResources(groupsJobs, policies)
+	_ = groupsJobs
+	groupsResources := []map[string]interface{}{}
 	if method != "" && method != "outlook_sharepoint" {
 		sharepointSites = nil
 	}
 	if method != "" && method != "outlook_teams" {
 		teamsResources = nil
 	}
-	if method != "" && method != "outlook_groups" {
-		groupsResources = nil
-	}
+	// if method != "" && method != "outlook_groups" {
+	// 	groupsResources = nil
+	// }
 
 	resp := map[string]interface{}{
 		"connected_as": "",
@@ -152,10 +161,69 @@ func HandleMicrosoftAutosyncUsersGroupsList(c echo.Context) error {
 	}
 	if connectedCred != nil {
 		resp["connected_as"] = strings.TrimSpace(connectedCred.Email)
+		tid := selectedTenant
+		if tid == "" {
+			tid = connectedCred.HomeTenantID()
+		}
+		resp["tenant_id"] = tid
 		resp["account_type"] = strings.TrimSpace(connectedCred.AccountType)
-		resp["tenant_id"] = strings.TrimSpace(connectedCred.TenantID)
+		if state, serr := mstenant.TenantAccessState(database, connectedCred.ID, tid); serr == nil {
+			resp["account_type"] = state.AccountType
+			resp["backup_mode"] = state.BackupMode
+			resp["connection_state"] = state.ConnectionState
+		}
 	}
 	return c.JSON(http.StatusOK, resp)
+}
+
+// filterUsersGroupsMicrosoftTenant keeps the jobs of the selected tenant (MICROSOFT_TENANT_ID or
+// tenant_id). Without a selection the jobs must all be in one tenant; jobs in several tenants
+// return tenant_id_required with the tenants so the UI can show one tab per tenant.
+func filterUsersGroupsMicrosoftTenant(c echo.Context, jobs []repo.CronJobListingDB) (string, []repo.CronJobListingDB, map[string]interface{}) {
+	selected := strings.ToLower(strings.TrimSpace(c.Request().Header.Get(headerMicrosoftTenantID)))
+	if selected == "" {
+		selected = strings.ToLower(strings.TrimSpace(c.QueryParam("tenant_id")))
+	}
+	if selected != "" {
+		out := make([]repo.CronJobListingDB, 0, len(jobs))
+		for i := range jobs {
+			if strings.EqualFold(strings.TrimSpace(jobs[i].TenantID), selected) {
+				out = append(out, jobs[i])
+			}
+		}
+		return selected, out, nil
+	}
+	var tenants []string
+	seen := map[string]bool{}
+	for i := range jobs {
+		tid := strings.ToLower(strings.TrimSpace(jobs[i].TenantID))
+		if tid != "" && !seen[tid] {
+			seen[tid] = true
+			tenants = append(tenants, tid)
+		}
+	}
+	switch len(tenants) {
+	case 0:
+		return "", jobs, nil
+	case 1:
+		return tenants[0], jobs, nil
+	}
+	sort.Strings(tenants)
+	return "", nil, map[string]interface{}{
+		"code":       "tenant_id_required",
+		"error":      "Microsoft backups exist in several tenants; select one with MICROSOFT_TENANT_ID or tenant_id",
+		"tenant_ids": tenants,
+	}
+}
+
+// addMicrosoftResourceIdentity adds the job's tenant, resource identity and vault folder to an
+// organization resource row.
+func addMicrosoftResourceIdentity(entry map[string]interface{}, job *repo.CronJobListingDB) {
+	tenantID, resourceType, resourceID, vaultPrefix := microsoftJobStorageIdentity(job)
+	entry["tenant_id"] = tenantID
+	entry["resource_type"] = resourceType
+	entry["resource_id"] = resourceID
+	entry["vault_prefix"] = vaultPrefix
 }
 
 func splitMicrosoftUsersGroupsJobs(jobs []repo.CronJobListingDB) (mailboxJobs, orgResourceJobs []repo.CronJobListingDB) {
@@ -225,6 +293,7 @@ func buildMicrosoftSharePointSiteResources(jobs []repo.CronJobListingDB, policie
 				entry["interval"] = p.Interval
 			}
 		}
+		addMicrosoftResourceIdentity(entry, job)
 		out = append(out, entry)
 	}
 	return out
@@ -262,6 +331,7 @@ func buildMicrosoftTeamsResources(jobs []repo.CronJobListingDB, policies map[uin
 				entry["interval"] = p.Interval
 			}
 		}
+		addMicrosoftResourceIdentity(entry, job)
 		out = append(out, entry)
 	}
 	return out
@@ -299,6 +369,7 @@ func buildMicrosoftGroupsResources(jobs []repo.CronJobListingDB, policies map[ui
 				entry["interval"] = p.Interval
 			}
 		}
+		addMicrosoftResourceIdentity(entry, job)
 		out = append(out, entry)
 	}
 	return out

@@ -219,12 +219,8 @@ func HandleAutomaticSyncServicesQuotaPrecheck(c echo.Context) error {
 	var holderEmail, providerLabel string
 	if body.isMicrosoft() {
 		holderEmail = strings.TrimSpace(body.MicrosoftEmail)
-		tenantID := ""
-		if c := credByEmail[strings.ToLower(holderEmail)]; c != nil {
-			tenantID = c.TenantID
-		}
 		providerLabel = "Microsoft 365"
-		tally = estimateMicrosoftServicesForPrecheck(ctx, resolveMicrosoftPrecheckAuth(ctx, body, tenantID), services, emails)
+		tally = estimateMicrosoftServicesForPrecheck(ctx, resolveMicrosoftPrecheckAuth(c, body), services, emails)
 	} else {
 		auth := resolvePrecheckAuth(body, credByEmail)
 		if auth.refreshToken == "" {
@@ -306,43 +302,30 @@ type microsoftPrecheckAuth struct {
 	err         error
 }
 
-// resolveMicrosoftPrecheckAuth prefers the app-only tenant token for admin_workspace accounts
-// (tenantID from the stored credential, else from the delegated token) and otherwise uses the
-// delegated token.
-func resolveMicrosoftPrecheckAuth(ctx context.Context, body servicesQuotaPrecheckRequest, tenantID string) microsoftPrecheckAuth {
+// resolveMicrosoftPrecheckAuth resolves the selected tenant (MICROSOFT_TENANT_ID, else home)
+// through the tenant resolver: app-only for organization links, delegated otherwise. A body
+// refresh_token overrides REFRESH_TOKEN.
+func resolveMicrosoftPrecheckAuth(c echo.Context, body servicesQuotaPrecheckRequest) microsoftPrecheckAuth {
 	auth := microsoftPrecheckAuth{holderEmail: strings.TrimSpace(body.MicrosoftEmail)}
-	orgBackup := outlook.NormalizeAccountType(body.AccountType) == outlook.AccountTypeAdminWorkspace
-	appOnly := func(tid string) bool {
-		if strings.TrimSpace(tid) == "" {
-			return false
-		}
-		appToken, _, err := outlook.AppOnlyToken(ctx, tid)
-		if err != nil || strings.TrimSpace(appToken) == "" {
-			return false
-		}
-		auth.accessToken, auth.application = appToken, true
-		return true
-	}
-	if orgBackup && appOnly(tenantID) {
-		return auth
-	}
-
-	refresh := strings.TrimSpace(body.RefreshToken)
-	if refresh == "" {
-		auth.err = fmt.Errorf("microsoft refresh token not found for estimate")
-		return auth
-	}
-	delegated, err := outlook.AuthTokenUsingRefreshToken(refresh)
+	id, err := microsoftIdentityFromRequest(c)
 	if err != nil {
 		auth.err = err
 		return auth
 	}
-	if orgBackup && strings.TrimSpace(tenantID) == "" {
-		if tid, terr := outlook.TenantIDFromAccessToken(delegated); terr == nil && appOnly(tid) {
-			return auth
+	if rt := strings.TrimSpace(body.RefreshToken); rt != "" {
+		id.RefreshToken = rt
+		if id.AccountID == "" {
+			if in, serr := msSignInFn(rt); serr == nil {
+				id.AccountID, id.HomeTenantID = in.ObjectID, in.HomeTenantID
+			}
 		}
 	}
-	auth.accessToken = delegated
+	tc, err := resolveMicrosoftTenant(c, id, "", false)
+	if err != nil {
+		auth.err = err
+		return auth
+	}
+	auth.accessToken, auth.application = tc.Token, tc.Application
 	return auth
 }
 

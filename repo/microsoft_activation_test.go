@@ -1,7 +1,6 @@
 package repo
 
 import (
-	"context"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,7 +15,7 @@ func newActivationTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := gdb.Migrate(&GoogleBackupCredentialDB{}, &AutosyncBackupPolicyDB{}); err != nil {
+	if err := gdb.Migrate(&GoogleBackupCredentialDB{}, &AutosyncBackupPolicyDB{}, &MicrosoftAccountTenantDB{}); err != nil {
 		t.Fatal(err)
 	}
 	return gdb
@@ -36,7 +35,7 @@ func TestValidateJobForActivation_microsoftApplicationSkipsRefreshToken(t *testi
 		t.Fatal(err)
 	}
 	job := &CronJobListingDB{
-		Name: "ann@contoso.com", Method: "outlook", PolicyID: policy.ID,
+		Name: "ann@contoso.com", Method: "outlook", PolicyID: policy.ID, TenantID: "tenant-1",
 		InputData: database.NewDbJsonFromValue(map[string]interface{}{"credential_id": float64(cred.ID), "email": "ann@contoso.com"}),
 	}
 
@@ -44,7 +43,11 @@ func TestValidateJobForActivation_microsoftApplicationSkipsRefreshToken(t *testi
 		t.Fatalf("delegated credential without refresh token must fail activation, got %v", err)
 	}
 
-	if err := creds.SetMicrosoftApplicationMode(context.Background(), cred.ID); err != nil {
+	links := NewMicrosoftAccountTenantRepository(gdb)
+	if _, err := links.UpsertDiscovered(cred.ID, MicrosoftTenantDiscovery{TenantID: "tenant-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := links.Connect(cred.ID, "tenant-1", MicrosoftBackupModeOrganization, MicrosoftAuthModeApplication); err != nil {
 		t.Fatal(err)
 	}
 	if err := jobs.validateJobForActivation(job); err != nil {

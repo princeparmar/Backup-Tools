@@ -41,6 +41,8 @@ type ReadinessResult struct {
 	Message            string              `json:"message,omitempty"`
 	TargetEmail        string              `json:"target_email,omitempty"`
 	Migration          bool                `json:"migration,omitempty"`
+	// TenantID is the Microsoft tenant of the backup and of the restore target (never different).
+	TenantID string `json:"tenant_id,omitempty"`
 }
 
 const (
@@ -57,6 +59,10 @@ const (
 	ReadinessReasonDWDNotConfigured   = "dwd_not_configured"
 	ReadinessReasonAPIProbeFailed     = "api_probe_failed"
 	ReadinessReasonStorxMissing       = "storx_missing"
+	// ReadinessReasonTenantRequired: the account has Microsoft backups in several tenants.
+	ReadinessReasonTenantRequired = "tenant_required"
+	// ReadinessReasonTenantMismatch: the restore would cross Microsoft tenants.
+	ReadinessReasonTenantMismatch = "tenant_mismatch"
 )
 
 // ReadinessRequest is the input for prepare and restore-all readiness checks.
@@ -66,6 +72,8 @@ type ReadinessRequest struct {
 	LoginID     string
 	Service     string
 	TargetEmail string // migration write mailbox (unique per user+project in creds table)
+	// TenantID is the selected Microsoft tenant (MICROSOFT_TENANT_ID); ignored for Google.
+	TenantID string
 }
 
 // EvaluateReadiness runs prepare checks for in-place restore-all.
@@ -98,7 +106,7 @@ func EvaluateReadinessWithOptions(ctx context.Context, store *db.PostgresDb, req
 	}
 
 	if IsMicrosoftRestoreMethod(method) {
-		return evaluateMicrosoftReadiness(ctx, store, out, userID, projectID, loginID, service, method, targetEmail)
+		return evaluateMicrosoftReadiness(ctx, store, out, userID, projectID, loginID, service, method, targetEmail, strings.ToLower(strings.TrimSpace(req.TenantID)))
 	}
 
 	cronJob, jobOK, err := store.CronJobRepo.FindJobForRestore(userID, method, loginID)
@@ -542,6 +550,7 @@ func CreateRestoreJobFromReadiness(ctx context.Context, store *db.PostgresDb, us
 		AccountType:    prep.AccountType,
 		CredentialID:   prep.CredentialID,
 		CronJobID:      prep.CronJobID,
+		TenantID:       prep.TenantID,
 		Status:         repo.RestoreJobStatusQueued,
 		Message:        "restore queued",
 		MessageStatus:  repo.JobMessageStatusInfo,

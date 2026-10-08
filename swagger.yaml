@@ -69,6 +69,22 @@ tags:
     description: |
       Tenant admin consent, capabilities, directory sync and org structure. Backup-Tools is the authority
       for consent/capability state; the directory is synced every 6 hours and on demand.
+
+      **Tenant context.** One Microsoft sign-in (home object ID) can reach several tenants (home, guest,
+      personal). Every Microsoft call is resolved for one tenant from these headers:
+      `MICROSOFT_ACCOUNT_ID` (home object ID), `MICROSOFT_HOME_TENANT_ID`, `MICROSOFT_TENANT_ID`
+      (selected tenant; defaults to the home tenant), `REFRESH_TOKEN`, `token_key`.
+      Jobs, storage keys (`{tenant_id}/{resource_type}/{resource_id}/...`) and restores never cross tenants.
+      Backup mode (personal / organization) is chosen per tenant on connect and never changed automatically.
+
+      **Error codes** (JSON `{"error": message, "code": code}`):
+      credential_not_found (404), credential_forbidden (403), tenant_not_linked (404),
+      tenant_disconnected (409), tenant_mismatch (403), tenant_unavailable (409),
+      organization_mode_required (403), consent_required (403), capability_denied (403),
+      signin_required (403), backup_mode_mismatch (409), app_secret_expired (503), temporary (503).
+
+      Removed: credential fields `microsoft_auth_mode`, `microsoft_app_client_id`,
+      `microsoft_app_client_secret` (auth mode now lives on the account↔tenant link).
   - name: AWS S3
     description: AWS S3 bucket and object operations
   - name: GitHub
@@ -96,6 +112,11 @@ tags:
       - `GET /restore/credentials` no longer accepts project_id; personal accounts only.
 
       **Unchanged:** `GET /restore/prepare`, `POST /restore/all`, job polling routes still use project_id + login_id + service.
+
+      **Microsoft:** the restore runs in one tenant, selected by the `MICROSOFT_TENANT_ID` header, else
+      `tenant_id` (query on prepare, body on restore-all). Without it, a login_id backed up in several
+      tenants returns reason `tenant_required`. Backup tenant, resource tenant, target tenant and the write
+      account's connected link must match, else reason `tenant_mismatch`; cross-tenant migration is not supported.
 
 paths:
   # Authentication Endpoints
@@ -188,17 +209,27 @@ paths:
       description: |
         Same handler as POST /microsoft/auto-sync/job.
         Body uses microsoft_email + services[] (outlook|mail|calendar|contacts|onedrive|sharepoint|teams|groups).
+        The tenant is MICROSOFT_TENANT_ID (or body tenant_id; both must match), defaulting to the home tenant.
+        A discovered tenant link is connected in the requested mode; a link already connected in the other
+        mode returns 409 backup_mode_mismatch, a disconnected link 409 tenant_disconnected.
         auth_mode=delegated (default) backs up only the signed-in mailbox and requires refresh_token;
-        other mailboxes, shared mailboxes, all_users and teams/groups/sharepoint return 403 organization_backup_required.
-        auth_mode=application uses the platform app-only token for tenant_id and requires granted admin consent
-        plus the per-service capability (403 consent_* / capability error, 503 temporary). Users are resolved
+        other mailboxes, shared mailboxes, all_users and teams/groups/sharepoint return 403 organization_mode_required.
+        auth_mode=application uses the platform app-only token for the tenant and requires effective admin consent
+        (granted and service principal present) plus the per-service capability (403 consent_required /
+        capability_denied, 503 temporary). Users are resolved
         live from Microsoft Graph (all_users, user_ids or emails; shared mailboxes may be disabled accounts);
         502 directory_unavailable when the tenant user list cannot be read.
         With all_users and no sites/teams/groups listed, sharepoint/teams/groups expand to every tenant resource.
-        Jobs store input_data.credential_id on google_backup_credential_dbs (table name unchanged).
+        Jobs store input_data.credential_id on google_backup_credential_dbs (table name unchanged) and the
+        identity (tenant_id, resource_type, resource_id). all_users creates a backup scope; new tenant users
+        get jobs from the 6-hourly reconcile.
       security:
         - bearerAuth: []
       parameters:
+        - $ref: '#/components/parameters/MicrosoftAccountIDHeader'
+        - $ref: '#/components/parameters/MicrosoftHomeTenantIDHeader'
+        - $ref: '#/components/parameters/MicrosoftSelectedTenantIDHeader'
+        - $ref: '#/components/parameters/MicrosoftRefreshTokenHeader'
         - name: sync_type
           in: query
           schema:
@@ -231,7 +262,7 @@ paths:
                   type: string
                 tenant_id:
                   type: string
-                  description: Required when auth_mode=application.
+                  description: Selected tenant when MICROSOFT_TENANT_ID is not sent (must match it when both are sent).
                 tenant_name:
                   type: string
                 refresh_token:
@@ -337,7 +368,11 @@ paths:
         '400':
           description: Validation error
         '403':
-          description: organization_backup_required, personal_account, consent_* or capability denied
+          description: organization_mode_required, tenant_mismatch, consent_required or capability_denied
+        '404':
+          description: credential_not_found or tenant_not_linked
+        '409':
+          description: backup_mode_mismatch, tenant_disconnected or tenant_unavailable
         '502':
           description: directory_unavailable
         '503':
@@ -785,6 +820,130 @@ paths:
                 $ref: '#/components/schemas/MicrosoftWorkspaceContract'
         '404':
           description: No Microsoft credential found for this user
+
+  /microsoft/accounts/tenants:
+    get:
+      tags:
+        - Microsoft Tenants
+      summary: List the tenants a Microsoft sign-in can reach
+      description: |
+        Discovers every tenant of the sign-in (home, guest, personal), checks a tenant-scoped token and
+        the user's roles in each and returns their access states. The home link always exists; a
+        discovery failure keeps known links and reports discovery_status. Creates the credential on first call.
+      parameters:
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - $ref: '#/components/parameters/MicrosoftAccountIDHeader'
+        - $ref: '#/components/parameters/MicrosoftHomeTenantIDHeader'
+        - $ref: '#/components/parameters/MicrosoftRefreshTokenHeader'
+        - in: query
+          name: project_id
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Account and its tenants
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MicrosoftAccountTenants'
+        '403':
+          description: credential_forbidden or signin_required
+        '404':
+          description: credential_not_found
+
+  /microsoft/accounts/tenants/{tid}/connect:
+    post:
+      tags:
+        - Microsoft Tenants
+      summary: Connect a tenant for backup
+      description: |
+        Connects the account's link to the tenant in the chosen backup mode (personal = delegated,
+        organization = application; organization needs effective consent and a work/school tenant).
+        Reconnecting reuses the same link and is the only way to change the backup mode.
+      parameters:
+        - $ref: '#/components/parameters/MicrosoftTenantID'
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - $ref: '#/components/parameters/MicrosoftAccountIDHeader'
+        - $ref: '#/components/parameters/MicrosoftHomeTenantIDHeader'
+        - $ref: '#/components/parameters/MicrosoftRefreshTokenHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [backup_mode]
+              properties:
+                backup_mode:
+                  type: string
+                  enum: [personal, organization]
+      responses:
+        '200':
+          description: Connected
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant:
+                    $ref: '#/components/schemas/MicrosoftTenantAccessState'
+        '403':
+          description: organization_mode_required, consent_required or capability_denied
+        '404':
+          description: credential_not_found or tenant_not_linked
+        '409':
+          description: tenant_unavailable
+
+  /microsoft/accounts/tenants/{tid}/disconnect:
+    post:
+      tags:
+        - Microsoft Tenants
+      summary: Disconnect a tenant
+      description: Marks the link disconnected and pauses the account's active jobs in the tenant. Backups are kept.
+      parameters:
+        - $ref: '#/components/parameters/MicrosoftTenantID'
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - $ref: '#/components/parameters/MicrosoftAccountIDHeader'
+        - $ref: '#/components/parameters/MicrosoftHomeTenantIDHeader'
+      responses:
+        '200':
+          description: Disconnected
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant:
+                    $ref: '#/components/schemas/MicrosoftTenantAccessState'
+                  paused_jobs:
+                    type: integer
+        '404':
+          description: credential_not_found or tenant_not_linked
+
+  /microsoft/accounts/tenants/{tid}/roles/refresh:
+    post:
+      tags:
+        - Microsoft Tenants
+      summary: Re-check the token and directory roles in a tenant
+      description: Role and token checks never grant or change admin state on failure (role_status / token_status record the error).
+      parameters:
+        - $ref: '#/components/parameters/MicrosoftTenantID'
+        - $ref: '#/components/parameters/tokenKeyHeader'
+        - $ref: '#/components/parameters/MicrosoftAccountIDHeader'
+        - $ref: '#/components/parameters/MicrosoftHomeTenantIDHeader'
+        - $ref: '#/components/parameters/MicrosoftRefreshTokenHeader'
+      responses:
+        '200':
+          description: Updated access state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant:
+                    $ref: '#/components/schemas/MicrosoftTenantAccessState'
+        '404':
+          description: credential_not_found or tenant_not_linked
 
   /microsoft/tenants/{tid}/consent:
     post:
@@ -3881,6 +4040,13 @@ paths:
           schema:
             type: string
           description: Google account to restore into (migration). Picked from GET /restore/credentials (personal) or GET /restore/workspaces?domain=... (workspace). Omit or same as login_id for in-place restore.
+        - in: query
+          name: tenant_id
+          required: false
+          schema:
+            type: string
+          description: Microsoft tenant of the restore when MICROSOFT_TENANT_ID is not sent. Ignored for Google.
+        - $ref: '#/components/parameters/MicrosoftSelectedTenantIDHeader'
       responses:
         '200':
           description: Readiness result (ready true or false with reason)
@@ -3893,6 +4059,10 @@ paths:
                     type: boolean
                   reason:
                     type: string
+                    description: Microsoft adds tenant_required and tenant_mismatch.
+                  tenant_id:
+                    type: string
+                    description: Microsoft tenant of the backup and of the restore target.
                   auth_mode:
                     type: string
                     enum: [oauth, dwd]
@@ -4065,8 +4235,10 @@ paths:
         Queue an async restore job for one Google service and account.
         Credentials (StorX + Google refresh) are resolved from google_backup_credentials by project_id.
         Re-runs the same checks as GET /restore/prepare. Satellite must send token_key only (no ACCESS_TOKEN headers).
+        Microsoft restore jobs store tenant_id and re-check the tenant guard when they start.
       parameters:
         - $ref: '#/components/parameters/tokenKeyHeader'
+        - $ref: '#/components/parameters/MicrosoftSelectedTenantIDHeader'
       requestBody:
         required: true
         content:
@@ -4087,6 +4259,9 @@ paths:
                 target_email:
                   type: string
                   description: Migration write mailbox (optional). From personal picker or workspace domain list. Omit for in-place restore.
+                tenant_id:
+                  type: string
+                  description: Microsoft tenant of the restore when MICROSOFT_TENANT_ID is not sent. Ignored for Google.
               required:
                 - service
                 - project_id
@@ -4219,6 +4394,30 @@ components:
       schema:
         type: string
       description: Microsoft Entra tenant ID (GUID).
+    MicrosoftAccountIDHeader:
+      name: MICROSOFT_ACCOUNT_ID
+      in: header
+      schema:
+        type: string
+      description: Home object ID (oid) of the Microsoft sign-in; identifies the backup credential.
+    MicrosoftHomeTenantIDHeader:
+      name: MICROSOFT_HOME_TENANT_ID
+      in: header
+      schema:
+        type: string
+      description: Home tenant of the sign-in; must match the stored credential.
+    MicrosoftSelectedTenantIDHeader:
+      name: MICROSOFT_TENANT_ID
+      in: header
+      schema:
+        type: string
+      description: Selected Microsoft tenant (defaults to the home tenant).
+    MicrosoftRefreshTokenHeader:
+      name: REFRESH_TOKEN
+      in: header
+      schema:
+        type: string
+      description: Microsoft refresh token of the sign-in (delegated access and first-time credential creation).
     MicrosoftTenantAPIKey:
       name: X-API-Key
       in: header
@@ -4322,6 +4521,119 @@ components:
                 type: string
               message:
                 type: string
+        access_state:
+          $ref: '#/components/schemas/MicrosoftTenantAccessState'
+    MicrosoftTenantAccessState:
+      type: object
+      description: One account↔tenant link with its tenant's consent and capabilities.
+      properties:
+        tenant_id:
+          type: string
+        tenant_name:
+          type: string
+        default_domain:
+          type: string
+        category:
+          type: string
+          enum: [home, guest, external_member, personal]
+        is_home:
+          type: boolean
+        identity_type:
+          type: string
+        user_type:
+          type: string
+        object_id:
+          type: string
+          description: The account's object ID in this tenant.
+        roles:
+          type: array
+          items:
+            type: object
+        is_admin:
+          type: boolean
+          description: Label only; never authorizes organization backup.
+        role_status:
+          type: string
+        token_status:
+          type: string
+        token_error:
+          type: string
+        connection_state:
+          type: string
+          enum: [discovered, connected, disconnected]
+        backup_mode:
+          type: string
+          enum: [personal, organization]
+        auth_mode:
+          type: string
+          enum: [delegated, application]
+        discovery_status:
+          type: string
+        availability:
+          type: string
+          description: available, or unavailable when Microsoft no longer knows the tenant (its jobs are paused).
+        consent:
+          type: object
+          properties:
+            status:
+              type: string
+            service_principal:
+              type: boolean
+            effective:
+              type: boolean
+              description: Granted and the service principal exists.
+            consented_by:
+              type: string
+            consented_at:
+              type: string
+              format: date-time
+            granted_roles:
+              type: array
+              items:
+                type: string
+            last_error:
+              type: string
+            capability_checked_at:
+              type: string
+              format: date-time
+        capabilities:
+          type: object
+          additionalProperties:
+            type: boolean
+        capability_errors:
+          type: object
+          additionalProperties:
+            type: object
+        can_personal_backup:
+          type: boolean
+        can_organization_backup:
+          type: boolean
+        account_type:
+          type: string
+        checked_at:
+          type: string
+          format: date-time
+    MicrosoftAccountTenants:
+      type: object
+      properties:
+        backup_credential_id:
+          type: integer
+        external_account_id:
+          type: string
+        email:
+          type: string
+        home_tenant_id:
+          type: string
+        identity_type:
+          type: string
+        discovery_status:
+          type: string
+        discovery_error:
+          type: string
+        tenants:
+          type: array
+          items:
+            $ref: '#/components/schemas/MicrosoftTenantAccessState'
     MicrosoftDirectoryUser:
       type: object
       properties:

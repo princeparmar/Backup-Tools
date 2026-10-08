@@ -4,14 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
+	msrestore "github.com/StorX2-0/Backup-Tools/restore/microsoft"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/labstack/echo/v4"
 )
@@ -41,6 +44,9 @@ func prepareMicrosoftManualRestore(c echo.Context) (*microsoftManualRestoreSessi
 	if len(keys) > microsoftManualRestoreMaxKeys {
 		return nil, nil, echo.NewHTTPError(http.StatusBadRequest, "maximum 10 keys allowed")
 	}
+	if err := checkMicrosoftManualRestoreKeys(c, accessToken, keys); err != nil {
+		return nil, nil, err
+	}
 	client, err := createOutlookClient(accessToken)
 	if err != nil {
 		return nil, nil, err
@@ -62,6 +68,33 @@ func prepareMicrosoftManualRestore(c echo.Context) (*microsoftManualRestoreSessi
 		loginID:     loginID,
 		userID:      userID,
 	}, keys, nil
+}
+
+// checkMicrosoftManualRestoreKeys keeps a manual restore inside one tenant: every key must be in the
+// {tenant}/{type}/{id}/ layout, in the access token's tenant and in MICROSOFT_TENANT_ID when sent.
+func checkMicrosoftManualRestoreKeys(c echo.Context, accessToken string, keys []string) error {
+	headerTenant := strings.ToLower(strings.TrimSpace(c.Request().Header.Get("MICROSOFT_TENANT_ID")))
+	claims, _ := outlook.IdentityClaimsFromTokens("", accessToken)
+	tokenTenant := strings.ToLower(strings.TrimSpace(claims.TenantID))
+	if tokenTenant == "" {
+		tokenTenant = headerTenant
+	}
+	if tokenTenant == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "cannot determine the access token's tenant; send MICROSOFT_TENANT_ID")
+	}
+	if headerTenant != "" && headerTenant != tokenTenant {
+		return echo.NewHTTPError(http.StatusForbidden, fmt.Sprintf("access token is for tenant %s, not %s", tokenTenant, headerTenant))
+	}
+	for _, key := range keys {
+		_, keyTenant, _, _, _, ok := outlook.SplitResourceKey(key)
+		if !ok {
+			return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("key %q is not a tenant-scoped Microsoft backup key", key))
+		}
+		if strings.ToLower(keyTenant) != tokenTenant {
+			return echo.NewHTTPError(http.StatusForbidden, fmt.Sprintf("key %q belongs to tenant %s, not %s", key, keyTenant, tokenTenant))
+		}
+	}
+	return nil
 }
 
 func notifyMicrosoftRestore(ctx context.Context, sess *microsoftManualRestoreSession, method, phase string, itemCount int, result *DownloadResult, restoreErr error) {
@@ -150,9 +183,13 @@ func HandleOutlookCalendarDownloadAndInsert(c echo.Context) error {
 	}
 	notifyMicrosoftRestore(ctx, sess, "outlook_calendar", "started", len(keys), nil, nil)
 
+	userBase, err := outlook.UserBaseURL("", "", "", false)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+	}
 	processed, failed := utils.NewLockedArray(), utils.NewLockedArray()
 	for _, key := range keys {
-		if strings.HasSuffix(key, "/_calendar.json") {
+		if !outlook.IsPIMItemKey(key) {
 			failed.Add(key)
 			continue
 		}
@@ -162,12 +199,8 @@ func HandleOutlookCalendarDownloadAndInsert(c echo.Context) error {
 			failed.Add(key)
 			continue
 		}
-		ev, perr := outlook.ParseRestoreCalendarEvent(raw)
-		if perr != nil {
-			failed.Add(key)
-			continue
-		}
-		if cerr := outlook.CreateCalendarEvent(ctx, sess.accessToken, ev); cerr != nil {
+		calendarID := msrestore.CalendarIDForEventKey(ctx, sess.accessGrant, key, nil)
+		if cerr := outlook.RestoreCalendarEvent(ctx, sess.accessToken, userBase, calendarID, raw); cerr != nil {
 			logger.Error(ctx, "calendar restore create failed", logger.ErrorField(cerr), logger.String("key", key))
 			failed.Add(key)
 			continue
@@ -191,19 +224,23 @@ func HandleOutlookContactsDownloadAndInsert(c echo.Context) error {
 	}
 	notifyMicrosoftRestore(ctx, sess, "outlook_contacts", "started", len(keys), nil, nil)
 
+	userBase, err := outlook.UserBaseURL("", "", "", false)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+	}
 	processed, failed := utils.NewLockedArray(), utils.NewLockedArray()
 	for _, key := range keys {
+		if !outlook.IsPIMItemKey(key) {
+			failed.Add(key)
+			continue
+		}
 		raw, derr := satellite.DownloadObject(ctx, sess.accessGrant, satellite.ReserveBucket_OutlookContacts, key)
 		if derr != nil {
 			failed.Add(key)
 			continue
 		}
-		contact, perr := outlook.ParseRestoreContact(raw)
-		if perr != nil {
-			failed.Add(key)
-			continue
-		}
-		if cerr := outlook.CreateContact(ctx, sess.accessToken, contact); cerr != nil {
+		folderID := msrestore.ContactFolderIDForKey(ctx, sess.accessGrant, key, nil)
+		if cerr := outlook.RestoreContact(ctx, sess.accessToken, userBase, folderID, raw); cerr != nil {
 			logger.Error(ctx, "contacts restore create failed", logger.ErrorField(cerr), logger.String("key", key))
 			failed.Add(key)
 			continue
@@ -227,20 +264,21 @@ func HandleOneDriveDownloadAndInsert(c echo.Context) error {
 	}
 	notifyMicrosoftRestore(ctx, sess, "outlook_onedrive", "started", len(keys), nil, nil)
 
+	userBase, err := outlook.UserBaseURL("", "", "", false)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+	}
+	src := msrestore.OneDriveRestoreSource(sess.accessGrant)
+	src.FolderNames = map[string]string{}
+	listed := map[string]bool{}
 	processed, failed := utils.NewLockedArray(), utils.NewLockedArray()
 	for _, key := range keys {
-		metaJSON, dataBytes, _, derr := downloadMetaFollowData(ctx, sess.accessGrant, satellite.ReserveBucket_OutlookOneDrive, key)
-		if derr != nil || len(dataBytes) == 0 {
+		if !outlook.IsOneDriveRestoreKey(key) {
 			failed.Add(key)
 			continue
 		}
-		var meta outlook.OneDriveCronBackupMeta
-		_ = json.Unmarshal(metaJSON, &meta)
-		name := strings.TrimSpace(meta.Name)
-		if name == "" {
-			name = path.Base(key)
-		}
-		if uerr := outlook.UploadDriveFile(ctx, sess.accessToken, name, dataBytes); uerr != nil {
+		addDriveFolderNames(ctx, sess.accessGrant, satellite.ReserveBucket_OutlookOneDrive, key, src.FolderNames, listed)
+		if uerr := outlook.RestoreOneDriveBackup(ctx, sess.accessToken, userBase, key, src); uerr != nil {
 			logger.Error(ctx, "onedrive restore upload failed", logger.ErrorField(uerr), logger.String("key", key))
 			failed.Add(key)
 			continue
@@ -250,6 +288,44 @@ func HandleOneDriveDownloadAndInsert(c echo.Context) error {
 	result := &DownloadResult{ProcessedIDs: processed.Get(), FailedIDs: failed.Get(), Message: "onedrive restore processed"}
 	notifyMicrosoftRestore(ctx, sess, "outlook_onedrive", "completed", len(keys), result, nil)
 	return c.JSON(http.StatusOK, result)
+}
+
+// addDriveFolderNames adds the folder names of key's drive backup to names, listing each resource once.
+func addDriveFolderNames(ctx context.Context, accessGrant, bucket, key string, names map[string]string, listed map[string]bool) {
+	p, ok := outlook.ParseOneDriveObjectKey(key)
+	if !ok || listed[p.Prefix] {
+		return
+	}
+	listed[p.Prefix] = true
+	folderKeys, err := satellite.ListObjectsWithPrefix(ctx, accessGrant, bucket, p.Prefix+"/"+outlook.OneDriveSectionMyDrive+"/")
+	if err != nil {
+		logger.Warn(ctx, "drive restore folder listing failed", logger.String("bucket", bucket), logger.ErrorField(err))
+	}
+	for id, name := range outlook.OneDriveFolderNames(slices.Collect(maps.Keys(folderKeys))) {
+		names[id] = name
+	}
+}
+
+// libraryRestore restores tree-layout SharePoint and group library backups into their library.
+type libraryRestore struct {
+	accessGrant, bucket string
+	src                 outlook.OneDriveRestoreSource
+	listed              map[string]bool
+}
+
+func newLibraryRestore(accessGrant, bucket string) *libraryRestore {
+	src := msrestore.DriveRestoreSource(accessGrant, bucket)
+	src.FolderNames = map[string]string{}
+	return &libraryRestore{accessGrant: accessGrant, bucket: bucket, src: src, listed: map[string]bool{}}
+}
+
+// restore reports handled=false for keys that are not in the folder layout.
+func (l *libraryRestore) restore(ctx context.Context, accessToken, key string) (handled bool, err error) {
+	if _, ok := outlook.ParseOneDriveObjectKey(key); !ok {
+		return false, nil
+	}
+	addDriveFolderNames(ctx, l.accessGrant, l.bucket, key, l.src.FolderNames, l.listed)
+	return true, outlook.RestoreSharePointBackup(ctx, accessToken, key, l.src)
 }
 
 // HandleSharePointDownloadAndInsert restores selected SharePoint library files (≤10 keys).
@@ -264,8 +340,18 @@ func HandleSharePointDownloadAndInsert(c echo.Context) error {
 	}
 	notifyMicrosoftRestore(ctx, sess, "outlook_sharepoint", "started", len(keys), nil, nil)
 
+	lib := newLibraryRestore(sess.accessGrant, satellite.ReserveBucket_OutlookSharePoint)
 	processed, failed := utils.NewLockedArray(), utils.NewLockedArray()
 	for _, key := range keys {
+		if handled, uerr := lib.restore(ctx, sess.accessToken, key); handled {
+			if uerr != nil {
+				logger.Error(ctx, "sharepoint restore failed", logger.ErrorField(uerr), logger.String("key", key))
+				failed.Add(key)
+			} else {
+				processed.Add(key)
+			}
+			continue
+		}
 		metaJSON, dataBytes, _, derr := downloadMetaFollowData(ctx, sess.accessGrant, satellite.ReserveBucket_OutlookSharePoint, key)
 		if derr != nil || len(dataBytes) == 0 {
 			failed.Add(key)
@@ -379,8 +465,18 @@ func HandleGroupsDownloadAndInsert(c echo.Context) error {
 	notifyMicrosoftRestore(ctx, sess, "outlook_groups", "started", len(keys), nil, nil)
 
 	groupSnapCache := map[string]*outlook.GroupsGroupSnapshot{}
+	lib := newLibraryRestore(sess.accessGrant, satellite.ReserveBucket_OutlookGroups)
 	processed, failed := utils.NewLockedArray(), utils.NewLockedArray()
 	for _, key := range keys {
+		if handled, uerr := lib.restore(ctx, sess.accessToken, key); handled {
+			if uerr != nil {
+				logger.Error(ctx, "groups file restore failed", logger.ErrorField(uerr), logger.String("key", key))
+				failed.Add(key)
+			} else {
+				processed.Add(key)
+			}
+			continue
+		}
 		groupKey := outlook.GroupKeyFromObjectKey(key)
 		var groupSnap *outlook.GroupsGroupSnapshot
 		if groupKey != "" {

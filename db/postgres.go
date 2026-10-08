@@ -20,6 +20,9 @@ type PostgresDb struct {
 	BackupRestoreLogsRepo *repo.BackupRestoreLogsRepository
 	AccountLifecycleRepo  *repo.AccountLifecycleRepository
 	MicrosoftTenantRepo   *repo.MicrosoftTenantRepository
+	MicrosoftLinkRepo     *repo.MicrosoftAccountTenantRepository
+	MicrosoftResourceRepo *repo.MicrosoftResourceRepository
+	MicrosoftScopeRepo    *repo.MicrosoftBackupScopeRepository
 }
 
 func NewPostgresStore(dsn string, queryLogging bool) (*PostgresDb, error) {
@@ -44,10 +47,16 @@ func NewPostgresStore(dsn string, queryLogging bool) (*PostgresDb, error) {
 		BackupRestoreLogsRepo: repo.NewBackupRestoreLogsRepository(db),
 		AccountLifecycleRepo:  repo.NewAccountLifecycleRepository(db),
 		MicrosoftTenantRepo:   repo.NewMicrosoftTenantRepository(db),
+		MicrosoftLinkRepo:     repo.NewMicrosoftAccountTenantRepository(db),
+		MicrosoftResourceRepo: repo.NewMicrosoftResourceRepository(db),
+		MicrosoftScopeRepo:    repo.NewMicrosoftBackupScopeRepository(db),
 	}, nil
 }
 
 func (s *PostgresDb) Migrate() error {
+	if err := repo.MigrateBackupIdentity(s.DB.DB); err != nil {
+		return err
+	}
 	if err := s.DB.Migrate(
 		&repo.GoogleAuthStorage{},
 		&repo.MicrosoftAuthStorage{},
@@ -65,7 +74,21 @@ func (s *PostgresDb) Migrate() error {
 		&repo.RestoreDeadItemDB{},
 		&repo.AccountTombstoneDB{},
 		&repo.MicrosoftTenantDB{},
+		&repo.MicrosoftAccountTenantDB{},
+		&repo.MicrosoftResourceDB{},
+		&repo.MicrosoftBackupScopeDB{},
 	); err != nil {
+		return err
+	}
+
+	// Auth mode moved to microsoft_account_tenants; customer-provided app secrets are not supported.
+	if err := s.DB.Exec(`ALTER TABLE google_backup_credential_dbs
+		DROP COLUMN IF EXISTS microsoft_auth_mode,
+		DROP COLUMN IF EXISTS microsoft_app_client_id,
+		DROP COLUMN IF EXISTS microsoft_app_client_secret`).Error; err != nil {
+		return err
+	}
+	if err := s.DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ms_account_tenant_object ON microsoft_account_tenants (tenant_id, object_id, credential_id) WHERE object_id IS NOT NULL`).Error; err != nil {
 		return err
 	}
 

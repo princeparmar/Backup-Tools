@@ -106,7 +106,8 @@ func TestListTenantSharePointSites_hidesSystemSites(t *testing.T) {
 			{"id":"csp","displayName":"CSP","webUrl":"https://contoso.sharepoint.com/contentstorage/CSP_1"},
 			{"id":"search","displayName":"Search","webUrl":"https://contoso.sharepoint.com/search"},
 			{"id":"my","displayName":"Ann","webUrl":"https://contoso-my.sharepoint.com/personal/ann"},
-			{"id":"apps","displayName":"Apps","webUrl":"https://contoso.sharepoint.com/sites/appcatalog"}
+			{"id":"apps","displayName":"Apps","webUrl":"https://contoso.sharepoint.com/sites/appcatalog"},
+			{"id":"cth","displayName":"Team Site","webUrl":"https://contoso.sharepoint.com/sites/contentTypeHub"}
 		]}`))
 	})
 	sites, err := ListTenantSharePointSites(context.Background(), "tok", "", 0)

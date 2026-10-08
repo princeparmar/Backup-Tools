@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
@@ -87,6 +88,9 @@ type UsersGroupsEntityServiceView struct {
 	Interval      string     `json:"interval,omitempty"`
 	On            string     `json:"on,omitempty"`
 	RetentionType string     `json:"retention_type,omitempty"`
+	// Microsoft jobs only: tenant and object key prefix inside the service bucket.
+	TenantID    string `json:"tenant_id,omitempty"`
+	VaultPrefix string `json:"vault_prefix,omitempty"`
 }
 
 // UsersGroupsBulkActiveRequest is PUT /users-groups/jobs/active.
@@ -427,6 +431,19 @@ func buildUsersGroupsEntityServices(jobs []repo.CronJobListingDB, policies map[u
 	return buildUsersGroupsEntityServicesForOrder(jobs, policies, autosyncServiceMethodsOrder)
 }
 
+// microsoftJobStorageIdentity returns the tenant/resource identity and vault prefix of a Microsoft
+// job; all empty for Google jobs.
+func microsoftJobStorageIdentity(job *repo.CronJobListingDB) (tenantID, resourceType, resourceID, vaultPrefix string) {
+	if job == nil || !repo.IsMicrosoftAutosyncMethod(job.Method) {
+		return "", "", "", ""
+	}
+	tenantID = strings.ToLower(strings.TrimSpace(job.TenantID))
+	resourceType = strings.ToLower(strings.TrimSpace(job.ResourceType))
+	resourceID = strings.TrimSpace(job.ResourceID)
+	vaultPrefix = outlook.ResourceKeyPrefix(tenantID, resourceType, resourceID)
+	return tenantID, resourceType, resourceID, vaultPrefix
+}
+
 func buildUsersGroupsEntityServicesForOrder(jobs []repo.CronJobListingDB, policies map[uint]*repo.AutosyncBackupPolicyDB, order []string) []UsersGroupsEntityServiceView {
 	byMethod := indexUsersGroupsJobsByMethod(jobs)
 	out := make([]UsersGroupsEntityServiceView, 0, len(order))
@@ -450,7 +467,10 @@ func buildUsersGroupsEntityServicesForOrder(jobs []repo.CronJobListingDB, polici
 			}
 		}
 		active := job.Active
+		tenantID, _, _, vaultPrefix := microsoftJobStorageIdentity(&job)
 		out = append(out, UsersGroupsEntityServiceView{
+			TenantID:      tenantID,
+			VaultPrefix:   vaultPrefix,
 			Method:        method,
 			Connected:     true,
 			JobID:         job.ID,
@@ -658,7 +678,7 @@ func buildUsersGroupsEntitiesForFamily(
 			CredentialStatus:   usersGroupsCredentialStatus(needsGoogle, needsStorx),
 			StorageDestination: usersGroupsStorageDestination(cronRepo, emailJobs),
 			Credential:         buildMailboxCredentialView(cronRepo, cred, emailJobs),
-			Services:           buildUsersGroupsEntityServices(emailJobs, policies),
+			Services:           buildUsersGroupsEntityServicesForOrder(emailJobs, policies, methodOrder),
 		})
 	}
 	return out

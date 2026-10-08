@@ -30,14 +30,16 @@ type OutlookMessageListJSON struct {
 type OutlookService struct {
 	client      *outlook.OutlookClient
 	accessGrant string
+	accessToken string
 	userEmail   string
 }
 
 // NewOutlookService creates a new OutlookService instance
-func NewOutlookService(client *outlook.OutlookClient, accessGrant, userEmail string) *OutlookService {
+func NewOutlookService(client *outlook.OutlookClient, accessGrant, accessToken, userEmail string) *OutlookService {
 	return &OutlookService{
 		client:      client,
 		accessGrant: accessGrant,
+		accessToken: accessToken,
 		userEmail:   userEmail,
 	}
 }
@@ -48,6 +50,21 @@ func (s *OutlookService) DownloadMessagesFromSatellite(ctx context.Context, keys
 
 	for _, key := range keys {
 		if key == "" {
+			continue
+		}
+
+		// Autosync mail backups restore into their original folder.
+		if outlook.IsOutlookMailBackupKey(key) {
+			userBase, _ := outlook.UserBaseURL("", "", "", false)
+			err := outlook.RestoreMailFromBackup(ctx, s.accessToken, userBase, key, func(k string) ([]byte, error) {
+				return satellite.DownloadObject(ctx, s.accessGrant, satellite.ReserveBucket_Outlook, k)
+			})
+			if err != nil {
+				logger.Error(ctx, "error restoring outlook message", logger.ErrorField(err), logger.String("key", key))
+				failedIDs.Add(key)
+			} else {
+				processedIDs.Add(key)
+			}
 			continue
 		}
 
@@ -401,7 +418,7 @@ func HandleOutlookDownloadAndInsert(c echo.Context) error {
 	satellite.SendNotificationAsync(ctx, userID, "Outlook Restore Started", fmt.Sprintf("Restore of %d messages for %s has started", len(allIDs), userDetails.Mail), &priority, startData, nil)
 
 	// Create Outlook service and download messages
-	outlookService := NewOutlookService(outlookClient, accessGrant, "")
+	outlookService := NewOutlookService(outlookClient, accessGrant, accessToken, "")
 	result, err := outlookService.DownloadMessagesFromSatellite(c.Request().Context(), allIDs)
 	if err != nil {
 		// Send failure notification

@@ -4,21 +4,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/db"
+	"github.com/StorX2-0/Backup-Tools/mstenant"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/repo"
 )
 
 // Graph seams (overridden in tests).
 var (
-	msAppOnlyTokenFn         = outlook.AppOnlyToken
+	msAppOnlyTokenFn         = mstenant.AppToken
 	msInvalidateAppOnlyFn    = outlook.InvalidateAppOnlyToken
 	msEvaluateCapabilitiesFn = outlook.EvaluateCapabilities
+	msServicePrincipalFn     = mstenant.ServicePrincipal
 )
 
 // AAD errors meaning the platform service principal is gone from the tenant.
@@ -33,8 +34,8 @@ type MicrosoftConsentContract struct {
 	LastError    string     `json:"last_error,omitempty"`
 }
 
-// MicrosoftWorkspaceContract is the shared Satellite ↔ Backup-Tools workspace contract.
-// account_type and is_admin are labels only; org backup is authorized by consent + capabilities.
+// MicrosoftWorkspaceContract is the shared Satellite ↔ Backup-Tools workspace contract for one
+// tenant. account_type and is_admin are labels only; org backup is authorized by consent + capabilities.
 type MicrosoftWorkspaceContract struct {
 	Email            string                                   `json:"email,omitempty"`
 	AccountType      string                                   `json:"account_type,omitempty"`
@@ -46,62 +47,43 @@ type MicrosoftWorkspaceContract struct {
 	Consent          MicrosoftConsentContract                 `json:"consent"`
 	Capabilities     map[string]bool                          `json:"capabilities"`
 	CapabilityErrors map[string]repo.MicrosoftCapabilityError `json:"capability_errors"`
+	AccessState      *mstenant.AccessState                    `json:"access_state,omitempty"`
 }
 
-// buildMicrosoftWorkspaceContract merges delegated account labels (acct may be nil) with the
-// tenant authority row (tenant may be nil). appTokenOK reports a usable app-only token.
-func buildMicrosoftWorkspaceContract(acct *outlook.MicrosoftAccountContext, tenant *repo.MicrosoftTenantDB, appTokenOK bool) MicrosoftWorkspaceContract {
+// buildMicrosoftWorkspaceContract builds the contract from the account's tenant access state
+// (state may be nil for tenant-only answers such as the consent callback).
+func buildMicrosoftWorkspaceContract(email string, state *mstenant.AccessState, tenant *repo.MicrosoftTenantDB) MicrosoftWorkspaceContract {
+	if state == nil {
+		link := &repo.MicrosoftAccountTenantDB{ConnectionState: repo.MicrosoftConnectionDiscovered, RoleStatus: repo.MicrosoftStatusUnknown, TokenStatus: repo.MicrosoftStatusUnknown}
+		if tenant != nil {
+			link.TenantID, link.TenantName, link.HomeTenantID = tenant.TenantID, tenant.TenantName, tenant.TenantID
+		}
+		s := mstenant.BuildAccessState(link, tenant)
+		s.AccountType = ""
+		state = &s
+	}
 	out := MicrosoftWorkspaceContract{
+		Email:            strings.TrimSpace(email),
+		AccountType:      state.AccountType,
+		WorkspaceKind:    outlook.WorkspaceKindOrganization,
+		TenantID:         state.TenantID,
+		TenantName:       state.TenantName,
+		IsAdmin:          state.IsAdmin,
 		AdminRoles:       []string{},
-		Consent:          MicrosoftConsentContract{Status: repo.MicrosoftConsentNotRequested, GrantedRoles: []string{}},
-		Capabilities:     map[string]bool{},
-		CapabilityErrors: map[string]repo.MicrosoftCapabilityError{},
+		Consent:          MicrosoftConsentContract{Status: state.Consent.Status, ConsentedBy: state.Consent.ConsentedBy, ConsentedAt: state.Consent.ConsentedAt, GrantedRoles: state.Consent.GrantedRoles, LastError: state.Consent.LastError},
+		Capabilities:     state.Capabilities,
+		CapabilityErrors: state.CapabilityErrors,
+		AccessState:      state,
 	}
-	for _, name := range outlook.CapabilityOrder {
-		out.Capabilities[name] = false
+	if outlook.IsMSATenant(state.TenantID) {
+		out.WorkspaceKind = outlook.WorkspaceKindPersonal
 	}
-	if acct != nil {
-		out.Email = acct.Email
-		out.AccountType = acct.AccountType
-		out.WorkspaceKind = acct.WorkspaceKind
-		out.TenantID = strings.ToLower(acct.TenantID)
-		out.TenantName = acct.TenantName
-		out.IsAdmin = acct.IsAdmin
-		if acct.AdminRoles != nil {
-			out.AdminRoles = acct.AdminRoles
+	for _, r := range state.Roles {
+		if r.Scope == "/" && r.Name != "" {
+			out.AdminRoles = append(out.AdminRoles, r.Name)
 		}
 	}
-	if tenant == nil {
-		return out
-	}
-	out.TenantID = tenant.TenantID
-	if out.TenantName == "" {
-		out.TenantName = tenant.TenantName
-	}
-	out.Consent = MicrosoftConsentContract{
-		Status:       tenant.ConsentStatus,
-		ConsentedBy:  tenant.ConsentedBy,
-		ConsentedAt:  tenant.ConsentedAt,
-		GrantedRoles: tenant.GrantedRoleList(),
-		LastError:    tenant.LastError,
-	}
-	granted := tenant.ConsentStatus == repo.MicrosoftConsentGranted
-	for name, v := range tenant.CapabilityMap() {
-		out.Capabilities[name] = v && granted
-	}
-	out.CapabilityErrors = tenant.CapabilityErrorMap()
-	if out.AccountType != outlook.AccountTypePersonal &&
-		granted && tenant.Capability(outlook.CapabilityListUsers) && appTokenOK {
-		out.AccountType = outlook.AccountTypeAdminWorkspace
-	}
 	return out
-}
-
-// microsoftAppTokenUsable reports whether the platform app can get a tenant token. Temporary
-// failures (429/5xx/network) count as usable so a Microsoft blip does not flip the label.
-func microsoftAppTokenUsable(ctx context.Context, tenantID string) bool {
-	_, _, err := msAppOnlyTokenFn(ctx, tenantID)
-	return err == nil || isTemporaryAppTokenError(err)
 }
 
 func isTemporaryAppTokenError(err error) bool {
@@ -188,7 +170,30 @@ func (s *microsoftTenantService) CheckConsent(ctx context.Context, tenantID, ten
 
 	msInvalidateAppOnlyFn(tenantID)
 	token, roles, tokErr := msAppOnlyTokenFn(ctx, tenantID)
+	if tokErr != nil {
+		mstenant.HandleAppTokenFailure(s.database, tenantID, tokErr)
+	}
 	outcome := classifyConsent(prev, roles, tokErr)
+	if tokErr == nil {
+		spID, found, spErr := msServicePrincipalFn(ctx, token)
+		switch {
+		case spErr != nil:
+			logger.Warn(ctx, "service principal lookup failed", logger.String("tenant_id", tenantID), logger.ErrorField(spErr))
+			spID = prev.ServicePrincipalID
+		case !found:
+			outcome = consentOutcome{Status: repo.MicrosoftConsentNotRequested, GrantedRoles: []string{}, LastError: "the StorX application is not installed in this tenant"}
+			if prev.ConsentedAt != nil || prev.ConsentStatus == repo.MicrosoftConsentGranted {
+				outcome.Status = repo.MicrosoftConsentRevoked
+			}
+		}
+		if err := s.tenants.SaveServicePrincipal(tenantID, spID); err != nil {
+			return nil, err
+		}
+	} else if outcome.Status == repo.MicrosoftConsentRevoked {
+		if err := s.tenants.SaveServicePrincipal(tenantID, ""); err != nil {
+			return nil, err
+		}
+	}
 
 	update := repo.MicrosoftConsentUpdate{
 		Status:       outcome.Status,
@@ -278,7 +283,8 @@ func (s *microsoftTenantService) clearCapabilities(tenantID, consentStatus strin
 	})
 }
 
-// MicrosoftOrgAccessError explains why org (application) access was refused.
+// MicrosoftOrgAccessError explains why an organization request was refused after authorization
+// (directory lookups, unknown users).
 type MicrosoftOrgAccessError struct {
 	HTTPStatus int
 	Code       string
@@ -297,75 +303,7 @@ func (e *MicrosoftOrgAccessError) Body() map[string]interface{} {
 	return body
 }
 
-// MicrosoftOrgAccess returns an app-only token when the tenant is authorized for org backup of
-// capability ("" checks only consent + list_users). This is the single org authorization rule:
-// consent granted, token obtainable, list_users true, capability true.
-func MicrosoftOrgAccess(ctx context.Context, database *db.PostgresDb, tenantID, capability string) (string, *repo.MicrosoftTenantDB, error) {
-	tenantID = strings.ToLower(strings.TrimSpace(tenantID))
-	if tenantID == "" || outlook.IsMSATenant(tenantID) {
-		return "", nil, &MicrosoftOrgAccessError{HTTPStatus: http.StatusForbidden, Code: "personal_account", Message: "organization backup requires a Microsoft 365 work or school tenant"}
-	}
-	tenant, err := database.MicrosoftTenantRepo.Get(tenantID)
-	if err != nil {
-		return "", nil, err
-	}
-	if tenant == nil || tenant.ConsentStatus != repo.MicrosoftConsentGranted {
-		status := repo.MicrosoftConsentNotRequested
-		if tenant != nil {
-			status = tenant.ConsentStatus
-		}
-		return "", tenant, &MicrosoftOrgAccessError{HTTPStatus: http.StatusForbidden, Code: "consent_" + status, Message: "tenant admin consent is not granted (status: " + status + ")"}
-	}
-	token, _, err := msAppOnlyTokenFn(ctx, tenantID)
-	if err != nil {
-		if isTemporaryAppTokenError(err) {
-			return "", tenant, &MicrosoftOrgAccessError{HTTPStatus: http.StatusServiceUnavailable, Code: "temporary", Message: "Microsoft is temporarily unavailable: " + err.Error()}
-		}
-		return "", tenant, &MicrosoftOrgAccessError{HTTPStatus: http.StatusForbidden, Code: "app_token_failed", Message: "tenant app-only token failed: " + err.Error()}
-	}
-	if !tenant.Capability(outlook.CapabilityListUsers) {
-		return "", tenant, capabilityDenied(tenant, outlook.CapabilityListUsers)
-	}
-	if capability != "" && !tenant.Capability(capability) {
-		return "", tenant, capabilityDenied(tenant, capability)
-	}
-	return token, tenant, nil
-}
-
-func capabilityDenied(tenant *repo.MicrosoftTenantDB, capability string) *MicrosoftOrgAccessError {
-	e := &MicrosoftOrgAccessError{HTTPStatus: http.StatusForbidden, Code: "capability_unavailable", Capability: capability,
-		Message: "tenant capability " + capability + " is not available"}
-	if ce, ok := tenant.CapabilityErrorMap()[capability]; ok {
-		e.Code = ce.Code
-		switch {
-		case ce.Role != "":
-			e.Message += ": missing application role " + ce.Role
-		case ce.Message != "":
-			e.Message += ": " + ce.Message
-		}
-	}
-	return e
-}
-
-// microsoftCapabilityForService maps an onboarding/job service to its capability.
-var microsoftCapabilityForService = map[string]string{
-	"outlook":            outlook.CapabilityMail,
-	"mail":               outlook.CapabilityMail,
-	"outlook_calendar":   outlook.CapabilityCalendar,
-	"calendar":           outlook.CapabilityCalendar,
-	"outlook_contacts":   outlook.CapabilityContacts,
-	"contacts":           outlook.CapabilityContacts,
-	"outlook_onedrive":   outlook.CapabilityOneDrive,
-	"onedrive":           outlook.CapabilityOneDrive,
-	"outlook_sharepoint": outlook.CapabilitySharePoint,
-	"sharepoint":         outlook.CapabilitySharePoint,
-	"outlook_teams":      outlook.CapabilityTeamsChannel,
-	"teams":              outlook.CapabilityTeamsChannel,
-	"outlook_groups":     outlook.CapabilityGroups,
-	"groups":             outlook.CapabilityGroups,
-}
-
 // MicrosoftCapabilityForService returns the capability required by a service or job method.
 func MicrosoftCapabilityForService(service string) string {
-	return microsoftCapabilityForService[strings.ToLower(strings.TrimSpace(service))]
+	return mstenant.CapabilityForService(service)
 }

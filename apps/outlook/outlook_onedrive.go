@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -35,11 +36,16 @@ type OneDriveItem struct {
 	ParentPath           string // optional path from parentReference.path when present; never fetched recursively
 	IsFolder             bool
 	IsDeleted            bool
-	ETag                 string
-	CTag                 string
+	// IsRoot marks the drive root; IsPackage marks items such as OneNote notebooks that have no
+	// downloadable content.
+	IsRoot    bool
+	IsPackage bool
+	ETag      string
+	CTag      string
 }
 
-// OneDriveCronBackupMeta is JSON stored at {email}/meta/.../{itemId}_{name}.json.
+// OneDriveCronBackupMeta is the legacy meta JSON at {prefix}/meta/.../{itemId}_{name}.json; the
+// SharePoint and Groups backups still write it.
 type OneDriveCronBackupMeta struct {
 	ItemID               string `json:"item_id"`
 	Name                 string `json:"name"`
@@ -94,6 +100,10 @@ type graphDriveItem struct {
 	Deleted *struct {
 		State string `json:"state"`
 	} `json:"deleted"`
+	Root    *struct{} `json:"root"`
+	Package *struct {
+		Type string `json:"type"`
+	} `json:"package"`
 }
 
 // OneDriveDriveRootURL returns the Graph drive root for mailbox.
@@ -168,6 +178,8 @@ func mapGraphDriveItem(it graphDriveItem) OneDriveItem {
 		CTag:                 strings.TrimSpace(it.CTag),
 		IsFolder:             it.Folder != nil,
 		IsDeleted:            it.Deleted != nil,
+		IsRoot:               it.Root != nil,
+		IsPackage:            it.Package != nil,
 	}
 	if it.File != nil {
 		item.MimeType = strings.TrimSpace(it.File.MimeType)
@@ -276,8 +288,14 @@ func graphHTTPDoWithRetry(ctx context.Context, req *http.Request) (*http.Respons
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		// Clone request for retries (body is nil for our GETs).
 		r := req.Clone(ctx)
+		if attempt > 0 && req.GetBody != nil {
+			body, err := req.GetBody()
+			if err != nil {
+				return nil, err
+			}
+			r.Body = body
+		}
 		resp, err := client.Do(r)
 		if err != nil {
 			lastErr = err
@@ -360,22 +378,59 @@ func objectKeyDatePath(created string) string {
 	return fallbackObjectKeyDatePath
 }
 
-// OneDriveIDBasedMetaKey is {email}/meta/{yyyy}/{mm}/{dd}/{itemId}_{name}.json
-func OneDriveIDBasedMetaKey(email, itemID, displayName, createdTime string) string {
-	return fmt.Sprintf("%s/meta/%s/%s_%s.json",
-		strings.TrimSpace(email),
-		objectKeyDatePath(createdTime),
-		strings.TrimSpace(itemID),
-		SanitizeOneDrivePathSegment(displayName),
-	)
+// FetchOneDriveItem GETs one drive item (used to resolve parent folders that are not in the delta).
+func FetchOneDriveItem(ctx context.Context, accessToken, driveRootURL, itemID string) (*OneDriveItem, error) {
+	itemID = strings.TrimSpace(itemID)
+	if itemID == "" {
+		return nil, fmt.Errorf("item id is required")
+	}
+	reqURL := strings.TrimRight(strings.TrimSpace(driveRootURL), "/") + "/items/" + url.PathEscape(itemID) +
+		"?$select=id,name,size,createdDateTime,lastModifiedDateTime,webUrl,eTag,cTag,file,folder,root,package,parentReference"
+	return fetchOneDriveItemURL(ctx, accessToken, reqURL)
 }
 
-// OneDriveIDBasedDataKey is {email}/data/{yyyy}/{mm}/{dd}/{itemId}_{name}
-func OneDriveIDBasedDataKey(email, itemID, displayName, createdTime string) string {
-	return fmt.Sprintf("%s/data/%s/%s_%s",
-		strings.TrimSpace(email),
-		objectKeyDatePath(createdTime),
-		strings.TrimSpace(itemID),
-		SanitizeOneDrivePathSegment(displayName),
-	)
+// FetchDriveID returns the Graph id of the drive at driveRootURL (".../drive" or ".../drives/{id}").
+func FetchDriveID(ctx context.Context, accessToken, driveRootURL string) (string, error) {
+	body, status, err := graphDoJSON(ctx, accessToken, http.MethodGet, strings.TrimRight(strings.TrimSpace(driveRootURL), "/")+"?$select=id", nil)
+	if err != nil {
+		return "", err
+	}
+	if status < 200 || status >= 300 {
+		return "", fmt.Errorf("drive http %d: %s", status, truncateForErr(body))
+	}
+	var d struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &d); err != nil || strings.TrimSpace(d.ID) == "" {
+		return "", fmt.Errorf("drive id missing in response")
+	}
+	return strings.TrimSpace(d.ID), nil
+}
+
+// FetchOneDriveRootID returns the item id of the drive root folder.
+func FetchOneDriveRootID(ctx context.Context, accessToken, driveRootURL string) (string, error) {
+	item, err := fetchOneDriveItemURL(ctx, accessToken, strings.TrimRight(strings.TrimSpace(driveRootURL), "/")+"/root?$select=id")
+	if err != nil {
+		return "", err
+	}
+	return item.ID, nil
+}
+
+func fetchOneDriveItemURL(ctx context.Context, accessToken, reqURL string) (*OneDriveItem, error) {
+	body, status, err := graphDoJSON(ctx, accessToken, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status < 200 || status >= 300 {
+		return nil, fmt.Errorf("onedrive item http %d: %s", status, truncateForErr(body))
+	}
+	var it graphDriveItem
+	if err := json.Unmarshal(body, &it); err != nil {
+		return nil, fmt.Errorf("decode onedrive item: %w", err)
+	}
+	item := mapGraphDriveItem(it)
+	if item.ID == "" {
+		return nil, fmt.Errorf("onedrive item has no id")
+	}
+	return &item, nil
 }

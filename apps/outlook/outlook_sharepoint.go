@@ -85,20 +85,21 @@ func SanitizeSharePointSiteKey(siteID string) string {
 	return s
 }
 
-// SharePointIDBasedMetaKey is {siteKey}/meta/{yyyy}/{mm}/{dd}/{itemId}_{name}.json
-func SharePointIDBasedMetaKey(siteKey, itemID, displayName, createdTime string) string {
+// SharePointIDBasedMetaKey is {prefix}/meta/{yyyy}/{mm}/{dd}/{itemId}_{name}.json (prefix: ResourceKeyPrefix
+// of the site or group).
+func SharePointIDBasedMetaKey(prefix, itemID, displayName, createdTime string) string {
 	return fmt.Sprintf("%s/meta/%s/%s_%s.json",
-		SanitizeSharePointSiteKey(siteKey),
+		strings.Trim(strings.TrimSpace(prefix), "/"),
 		objectKeyDatePath(createdTime),
 		strings.TrimSpace(itemID),
 		SanitizeOneDrivePathSegment(displayName),
 	)
 }
 
-// SharePointIDBasedDataKey is {siteKey}/data/{yyyy}/{mm}/{dd}/{itemId}_{name}
-func SharePointIDBasedDataKey(siteKey, itemID, displayName, createdTime string) string {
+// SharePointIDBasedDataKey is {prefix}/data/{yyyy}/{mm}/{dd}/{itemId}_{name} (prefix: ResourceKeyPrefix).
+func SharePointIDBasedDataKey(prefix, itemID, displayName, createdTime string) string {
 	return fmt.Sprintf("%s/data/%s/%s_%s",
-		SanitizeSharePointSiteKey(siteKey),
+		strings.Trim(strings.TrimSpace(prefix), "/"),
 		objectKeyDatePath(createdTime),
 		strings.TrimSpace(itemID),
 		SanitizeOneDrivePathSegment(displayName),

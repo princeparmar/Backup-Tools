@@ -10,6 +10,8 @@ import (
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
+	"github.com/StorX2-0/Backup-Tools/mstenant"
+	dbjson "github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/labstack/echo/v4"
@@ -220,28 +222,26 @@ type microsoftApplicationOnboarding struct {
 	Tenant      *repo.MicrosoftTenantDB
 	Emails      []string
 	OrgUnits    map[string]string
-	ObjectIDs   map[string]string
+	// Users maps lower-case email to the directory user (object ID is the job resource ID).
+	Users map[string]outlook.DirectoryUser
 }
 
-// authorizeMicrosoftApplicationOnboarding applies the org authorization rule for every requested
-// service and resolves target users from the live tenant directory.
+// authorizeMicrosoftApplicationOnboarding checks every requested service's capability on the
+// resolved tenant and resolves target users from the live tenant directory.
 func authorizeMicrosoftApplicationOnboarding(
-	ctx context.Context, database *db.PostgresDb, req *MicrosoftBackupOnboardingRequest, tenantID string, services []string,
+	ctx context.Context, tc *mstenant.Context, req *MicrosoftBackupOnboardingRequest, services []string,
 ) (*microsoftApplicationOnboarding, error) {
-	token, tenant, err := MicrosoftOrgAccess(ctx, database, tenantID, "")
-	if err != nil {
-		return nil, err
-	}
+	token, tenant := tc.Token, tc.Tenant
 	needsUsers := false
 	for _, svc := range services {
 		if microsoftUserServices[svc] {
 			needsUsers = true
 		}
 		if capName := MicrosoftCapabilityForService(svc); capName != "" && !tenant.Capability(capName) {
-			return nil, capabilityDenied(tenant, capName)
+			return nil, mstenant.CapabilityDenied(tenant, capName)
 		}
 	}
-	out := &microsoftApplicationOnboarding{AccessToken: token, Tenant: tenant, OrgUnits: map[string]string{}, ObjectIDs: map[string]string{}}
+	out := &microsoftApplicationOnboarding{AccessToken: token, Tenant: tenant, OrgUnits: map[string]string{}, Users: map[string]outlook.DirectoryUser{}}
 	if !needsUsers {
 		return out, nil
 	}
@@ -303,12 +303,12 @@ func authorizeMicrosoftApplicationOnboarding(
 		if email == "" {
 			continue
 		}
-		if _, dup := out.ObjectIDs[strings.ToLower(email)]; dup {
+		if _, dup := out.Users[strings.ToLower(email)]; dup {
 			continue
 		}
 		out.Emails = append(out.Emails, email)
 		out.OrgUnits[email] = u.OrgUnitPath()
-		out.ObjectIDs[strings.ToLower(email)] = u.ObjectID
+		out.Users[strings.ToLower(email)] = u
 	}
 	if len(out.Emails) == 0 {
 		return nil, &MicrosoftOrgAccessError{HTTPStatus: http.StatusBadRequest, Code: "no_users",
@@ -350,17 +350,18 @@ func expandMicrosoftApplicationResources(ctx context.Context, req *MicrosoftBack
 			for _, t := range teams {
 				req.Teams = append(req.Teams, TeamsOnboardingInput{TeamID: t.ID, TeamName: t.DisplayName})
 			}
-		case "groups":
-			if len(req.Groups) > 0 {
-				continue
-			}
-			groups, err := outlook.ListTenantGroups(ctx, token, 0)
-			if err != nil {
-				return err
-			}
-			for _, g := range groups {
-				req.Groups = append(req.Groups, GroupsOnboardingInput{GroupID: g.ID, GroupName: g.DisplayName})
-			}
+		// Groups backup is hidden for now.
+		// case "groups":
+		// 	if len(req.Groups) > 0 {
+		// 		continue
+		// 	}
+		// 	groups, err := outlook.ListTenantGroups(ctx, token, 0)
+		// 	if err != nil {
+		// 		return err
+		// 	}
+		// 	for _, g := range groups {
+		// 		req.Groups = append(req.Groups, GroupsOnboardingInput{GroupID: g.ID, GroupName: g.DisplayName})
+		// 	}
 		case "sharepoint":
 			if len(req.Sites) > 0 {
 				continue
@@ -415,42 +416,27 @@ func runMicrosoftOnboardingCreate(c echo.Context, ctx context.Context, userID st
 	}
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	services := normalizeOnboardingServices(req.Services)
+	application := req.applicationMode()
 
-	existingCred, found, findErr := database.CredentialRepo.FindByUserProjectAndEmail(userID, req.ProjectID, req.MicrosoftEmail)
-	if findErr != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": findErr.Error()})
+	tc, cred, err := resolveMicrosoftOnboardingTenant(c, ctx, database, userID, req, application)
+	if err != nil {
+		return microsoftErrorJSON(c, err)
 	}
-	effectiveTenantID := req.TenantID
-	effectiveTenantName := req.TenantName
-	if found && existingCred != nil {
-		if effectiveTenantID == "" {
-			effectiveTenantID = strings.ToLower(strings.TrimSpace(existingCred.TenantID))
-		}
-		if effectiveTenantName == "" {
-			effectiveTenantName = strings.TrimSpace(existingCred.TenantName)
-		}
-	}
+	tenantID := tc.TenantID
 
 	var emails []string
 	var effectiveAccountType string
 	var orgToken string
-	objectIDs := map[string]string{}
-	application := req.applicationMode()
+	users := map[string]outlook.DirectoryUser{}
 
 	if application {
-		if effectiveTenantID == "" {
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": "tenant_id is required for organization backup"})
-		}
-		appCtx, aerr := authorizeMicrosoftApplicationOnboarding(ctx, database, req, effectiveTenantID, services)
+		appCtx, aerr := authorizeMicrosoftApplicationOnboarding(ctx, tc, req, services)
 		if aerr != nil {
 			return orgAccessErrorJSON(c, aerr)
 		}
-		if effectiveTenantName == "" {
-			effectiveTenantName = appCtx.Tenant.TenantName
-		}
 		orgToken = appCtx.AccessToken
 		emails = appCtx.Emails
-		objectIDs = appCtx.ObjectIDs
+		users = appCtx.Users
 		if len(appCtx.OrgUnits) > 0 {
 			merged := make(map[string]string, len(appCtx.OrgUnits)+len(req.EmailOrgUnits))
 			for k, v := range appCtx.OrgUnits {
@@ -474,54 +460,25 @@ func runMicrosoftOnboardingCreate(c echo.Context, ctx context.Context, userID st
 		if he := validateMicrosoftDelegatedOnboarding(req, services, emails); he != nil {
 			return c.JSON(he.Code, he.Message)
 		}
-		effectiveAccountType = normalizeCredentialAccountTypeForMicrosoft(req.AccountType)
-		if found && existingCred != nil {
-			existingAccountType := normalizeCredentialAccountTypeForMicrosoft(existingCred.AccountType)
-			if effectiveAccountType != "" && effectiveAccountType != existingAccountType {
-				return c.JSON(http.StatusForbidden, map[string]interface{}{"error": "account_type mismatch with connected credential"})
-			}
-			effectiveAccountType = existingAccountType
+		self, serr := microsoftSelfDirectoryUser(ctx, database, tc, req.MicrosoftEmail)
+		if serr != nil {
+			return c.JSON(http.StatusBadGateway, map[string]interface{}{"error": serr.Error()})
 		}
-		if effectiveAccountType == "" {
-			effectiveAccountType = outlook.AccountTypePersonal
+		for _, e := range emails {
+			users[strings.ToLower(e)] = self
 		}
-		if effectiveAccountType == outlook.AccountTypeAdminWorkspace {
+		effectiveAccountType = normalizeCredentialAccountTypeForMicrosoft(cred.AccountType)
+		if effectiveAccountType == "" || effectiveAccountType == outlook.AccountTypeAdminWorkspace {
 			effectiveAccountType = outlook.AccountTypeWorkAccount
+		}
+		if outlook.IsMSATenant(tenantID) {
+			effectiveAccountType = outlook.AccountTypePersonal
 		}
 	}
 
 	gReq := req.toGoogleShapeWithAccountType(effectiveAccountType)
 	if err := validateOrgUnitOnboardingSchedules(gReq, emails); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
-	}
-
-	credRefresh := req.RefreshToken
-	if application {
-		credRefresh = ""
-	}
-	cred, err := database.CredentialRepo.FindOrCreateForUserWithTenant(
-		userID, req.MicrosoftEmail, req.ProjectID, effectiveAccountType,
-		effectiveTenantID, effectiveTenantName, credRefresh, req.StorxToken,
-	)
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
-	}
-	if storx := strings.TrimSpace(req.StorxToken); storx != "" {
-		if pid := extractProjectIDFromStorxGrant(ctx, storx); pid != "" {
-			if uerr := database.CredentialRepo.UpdateStorjProjectID(cred.ID, pid); uerr == nil {
-				if reloaded, rerr := database.CredentialRepo.GetByID(cred.ID); rerr == nil {
-					cred = reloaded
-				}
-			}
-		}
-	}
-	if application {
-		if uerr := database.CredentialRepo.SetMicrosoftApplicationMode(ctx, cred.ID); uerr != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": uerr.Error()})
-		}
-		if reloaded, rerr := database.CredentialRepo.GetByID(cred.ID); rerr == nil {
-			cred = reloaded
-		}
 	}
 
 	hasJobs, herr := database.CronJobRepo.HasLinkedJobsForCredential(userID, cred.ID)
@@ -579,35 +536,40 @@ func runMicrosoftOnboardingCreate(c echo.Context, ctx context.Context, userID st
 		}
 		switch method {
 		case "outlook_sharepoint":
-			j, f := createMicrosoftJobsForSharePointSites(c, ctx, userID, svc, syncType, schedule, gReq, cred, isFirstConnection, policyBatch, req.Sites, resourceToken, database)
+			j, f := createMicrosoftJobsForSharePointSites(c, ctx, userID, svc, syncType, schedule, gReq, cred, tenantID, isFirstConnection, policyBatch, req.Sites, resourceToken, database)
 			jobs = append(jobs, j...)
 			failed = append(failed, f...)
 			continue
 		case "outlook_teams":
-			j, f := createMicrosoftJobsForTeams(c, ctx, userID, svc, syncType, schedule, gReq, cred, isFirstConnection, policyBatch, req.Teams, resourceToken, database)
+			j, f := createMicrosoftJobsForTeams(c, ctx, userID, svc, syncType, schedule, gReq, cred, tenantID, isFirstConnection, policyBatch, req.Teams, resourceToken, database)
 			jobs = append(jobs, j...)
 			failed = append(failed, f...)
 			continue
-		case "outlook_groups":
-			j, f := createMicrosoftJobsForGroups(c, ctx, userID, svc, syncType, schedule, gReq, cred, isFirstConnection, policyBatch, req.Groups, resourceToken, database)
-			jobs = append(jobs, j...)
-			failed = append(failed, f...)
-			continue
+			// Groups backup is hidden for now.
+			// case "outlook_groups":
+			// 	j, f := createMicrosoftJobsForGroups(c, ctx, userID, svc, syncType, schedule, gReq, cred, tenantID, isFirstConnection, policyBatch, req.Groups, resourceToken, database)
+			// 	jobs = append(jobs, j...)
+			// 	failed = append(failed, f...)
+			// 	continue
 		}
 		targetEmails := emails
 		if gReq.isOrgUnitPolicyScope() {
 			targetEmails = emailsWithOrgUnitService(gReq, emails, svc)
 		}
-		j, f := createMicrosoftJobsForServiceEmails(c, userID, method, svc, syncType, schedule, gReq, cred, isFirstConnection, policyBatch, targetEmails, objectIDs, database)
+		j, f := createMicrosoftJobsForServiceEmails(c, userID, method, svc, syncType, schedule, gReq, cred, tenantID, isFirstConnection, policyBatch, targetEmails, users, database)
 		jobs = append(jobs, j...)
 		failed = append(failed, f...)
+	}
+	if application && syncType != "one_time" {
+		saveMicrosoftTenantScopes(database, userID, cred, tenantID, syncType, servicesOut, req.wantsAllUsers(), policyBatch.allID)
 	}
 
 	policies := onboardingPoliciesFromBatch(database, policyBatch)
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"success":   len(failed) == 0,
 		"message":   syncCreateMessage(syncType),
-		"auth_mode": cred.MicrosoftAuthMode,
+		"auth_mode": tc.Link.AuthMode,
+		"tenant_id": tenantID,
 		"jobs":      nullSliceJSON(jobs),
 		"failed":    nullSliceJSON(failed),
 		"services":  nullSliceJSON(servicesOut),
@@ -639,45 +601,60 @@ func emailsWithOrgUnitService(req *GoogleBackupOnboardingRequest, emails []strin
 
 func createMicrosoftJobsForServiceEmails(
 	c echo.Context, userID, method, svc, syncType string, schedule onboardingSchedule,
-	req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB, isFirstConnection bool, policyBatch *onboardingPolicyBatch,
-	emails []string, objectIDs map[string]string, database *db.PostgresDb,
+	req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB, tenantID string, isFirstConnection bool, policyBatch *onboardingPolicyBatch,
+	emails []string, users map[string]outlook.DirectoryUser, database *db.PostgresDb,
 ) ([]onboardingJobResult, []onboardingFailedResult) {
 	emails = dedupeEmailsPreservingOrder(emails)
 	var jobs []onboardingJobResult
 	var failed []onboardingFailedResult
 	for _, targetEmail := range emails {
-		extra := orgUnitInputData(req, targetEmail)
-		if oid := objectIDs[strings.ToLower(targetEmail)]; oid != "" {
-			if extra == nil {
-				extra = map[string]interface{}{}
-			}
-			extra["directory_user_id"] = oid
+		u, ok := users[strings.ToLower(targetEmail)]
+		if !ok || strings.TrimSpace(u.ObjectID) == "" {
+			failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: "user object ID is unknown in the tenant directory"})
+			continue
 		}
-		job, fail := onboardMicrosoftJob(c, database, userID, svc, targetEmail, method, syncType, extra,
-			schedule, req, cred, isFirstConnection, policyBatch)
+		if _, err := database.MicrosoftResourceRepo.Upsert(repo.MicrosoftResourceDB{
+			TenantID: tenantID, ResourceType: repo.ResourceTypeUser, ExternalID: u.ObjectID,
+			DisplayName: u.DisplayName, Mail: targetEmail, UPN: u.UPN,
+		}); err != nil {
+			failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: err.Error()})
+			continue
+		}
+		identity := repo.MicrosoftJobIdentity{TenantID: tenantID, ResourceType: repo.ResourceTypeUser, ResourceID: u.ObjectID}
+		job, fail := onboardMicrosoftJob(c, database, userID, svc, targetEmail, method, syncType, orgUnitInputData(req, targetEmail),
+			identity, schedule, req, cred, isFirstConnection, policyBatch)
 		jobs, failed = appendMicrosoftJobResult(jobs, failed, job, fail)
 	}
 	return jobs, failed
 }
 
-// onboardMicrosoftJob creates one job, applies its schedule, activates it and (one_time) queues a
-// task. A job that already exists for the same name, method and sync type is returned as existing
-// so a retried onboarding succeeds.
+// onboardMicrosoftJob creates one job keyed by tenant + resource, applies its schedule, activates it
+// and (one_time) queues a task. A job with the same identity is returned as existing so a retried
+// onboarding succeeds; the display name is only a label.
 func onboardMicrosoftJob(
 	c echo.Context, database *db.PostgresDb, userID, svc, name, method, syncType string, extra map[string]interface{},
-	schedule onboardingSchedule, req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB,
+	identity repo.MicrosoftJobIdentity, schedule onboardingSchedule, req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB,
 	isFirstConnection bool, policyBatch *onboardingPolicyBatch,
 ) (*onboardingJobResult, *onboardingFailedResult) {
 	fail := func(msg string) (*onboardingJobResult, *onboardingFailedResult) {
 		return nil, &onboardingFailedResult{Service: svc, Email: name, Error: msg}
 	}
 
-	cronJob, createErr := createSyncJobWithCredential(userID, name, method, syncType, cred.ID, extra, c)
-	if createErr != nil {
-		existing, _ := database.CronJobRepo.FindJobForUser(userID, name, method, syncType)
-		if existing == nil {
-			return fail(extractCreateJobError(createErr))
+	existing, err := database.CronJobRepo.FindMicrosoftResourceJob(userID, identity.TenantID, identity.ResourceType, identity.ResourceID, method, syncType)
+	if err != nil {
+		return fail(err.Error())
+	}
+	var cronJob *repo.CronJobListingDB
+	if existing == nil {
+		created, createErr := database.CronJobRepo.CreateMicrosoftResourceJob(userID, name, method, syncType, cred.ID, identity, extra)
+		if createErr != nil {
+			if existing, _ = database.CronJobRepo.FindMicrosoftResourceJob(userID, identity.TenantID, identity.ResourceType, identity.ResourceID, method, syncType); existing == nil {
+				return fail(extractCreateJobError(createErr))
+			}
 		}
+		cronJob = created
+	}
+	if existing != nil {
 		policyID := existing.PolicyID
 		if policyID == 0 {
 			// A previous attempt created the job but failed to assign its policy.
@@ -763,6 +740,7 @@ func createMicrosoftJobsForSharePointSites(
 	schedule onboardingSchedule,
 	req *GoogleBackupOnboardingRequest,
 	cred *repo.GoogleBackupCredentialDB,
+	tenantID string,
 	isFirstConnection bool,
 	policyBatch *onboardingPolicyBatch,
 	sites []SharePointSiteOnboardingInput,
@@ -815,8 +793,16 @@ func createMicrosoftJobsForSharePointSites(
 			"site_name": resolved.SiteName,
 			"site_url":  resolved.SiteURL,
 		}
+		if _, err := database.MicrosoftResourceRepo.Upsert(repo.MicrosoftResourceDB{
+			TenantID: tenantID, ResourceType: repo.ResourceTypeSite, ExternalID: resolved.SiteID, DisplayName: resolved.SiteName,
+			Metadata: dbjson.NewDbJsonFromValue(map[string]interface{}{"site_url": resolved.SiteURL, "drive_id": resolved.DriveID}),
+		}); err != nil {
+			failed = append(failed, onboardingFailedResult{Service: svc, Email: jobName, Error: err.Error()})
+			continue
+		}
+		identity := repo.MicrosoftJobIdentity{TenantID: tenantID, ResourceType: repo.ResourceTypeSite, ResourceID: resolved.SiteID}
 		job, fail := onboardMicrosoftJob(c, database, userID, svc, jobName, "outlook_sharepoint", syncType, extra,
-			schedule, req, cred, isFirstConnection, policyBatch)
+			identity, schedule, req, cred, isFirstConnection, policyBatch)
 		jobs, failed = appendMicrosoftJobResult(jobs, failed, job, fail)
 	}
 	return jobs, failed
@@ -829,6 +815,7 @@ func createMicrosoftJobsForTeams(
 	schedule onboardingSchedule,
 	req *GoogleBackupOnboardingRequest,
 	cred *repo.GoogleBackupCredentialDB,
+	tenantID string,
 	isFirstConnection bool,
 	policyBatch *onboardingPolicyBatch,
 	teams []TeamsOnboardingInput,
@@ -879,8 +866,16 @@ func createMicrosoftJobsForTeams(
 		if len(resolved.ChannelIDs) > 0 {
 			extra["channel_ids"] = resolved.ChannelIDs
 		}
+		if _, err := database.MicrosoftResourceRepo.Upsert(repo.MicrosoftResourceDB{
+			TenantID: tenantID, ResourceType: repo.ResourceTypeTeam, ExternalID: resolved.TeamID, DisplayName: resolved.TeamName,
+			Metadata: dbjson.NewDbJsonFromValue(map[string]interface{}{"web_url": resolved.TeamWebURL, "group_id": resolved.GroupID}),
+		}); err != nil {
+			failed = append(failed, onboardingFailedResult{Service: svc, Email: jobName, Error: err.Error()})
+			continue
+		}
+		identity := repo.MicrosoftJobIdentity{TenantID: tenantID, ResourceType: repo.ResourceTypeTeam, ResourceID: resolved.TeamID}
 		job, fail := onboardMicrosoftJob(c, database, userID, svc, jobName, "outlook_teams", syncType, extra,
-			schedule, req, cred, isFirstConnection, policyBatch)
+			identity, schedule, req, cred, isFirstConnection, policyBatch)
 		jobs, failed = appendMicrosoftJobResult(jobs, failed, job, fail)
 	}
 	return jobs, failed
@@ -893,6 +888,7 @@ func createMicrosoftJobsForGroups(
 	schedule onboardingSchedule,
 	req *GoogleBackupOnboardingRequest,
 	cred *repo.GoogleBackupCredentialDB,
+	tenantID string,
 	isFirstConnection bool,
 	policyBatch *onboardingPolicyBatch,
 	groups []GroupsOnboardingInput,
@@ -939,8 +935,15 @@ func createMicrosoftJobsForGroups(
 			"group_name": resolved.GroupName,
 			"group_mail": resolved.GroupMail,
 		}
+		if _, err := database.MicrosoftResourceRepo.Upsert(repo.MicrosoftResourceDB{
+			TenantID: tenantID, ResourceType: repo.ResourceTypeGroup, ExternalID: resolved.GroupID, DisplayName: resolved.GroupName, Mail: resolved.GroupMail,
+		}); err != nil {
+			failed = append(failed, onboardingFailedResult{Service: svc, Email: jobName, Error: err.Error()})
+			continue
+		}
+		identity := repo.MicrosoftJobIdentity{TenantID: tenantID, ResourceType: repo.ResourceTypeGroup, ResourceID: resolved.GroupID}
 		job, fail := onboardMicrosoftJob(c, database, userID, svc, jobName, "outlook_groups", syncType, extra,
-			schedule, req, cred, isFirstConnection, policyBatch)
+			identity, schedule, req, cred, isFirstConnection, policyBatch)
 		jobs, failed = appendMicrosoftJobResult(jobs, failed, job, fail)
 	}
 	return jobs, failed

@@ -47,6 +47,13 @@ type MicrosoftTenantDB struct {
 	ProbeVersion     int                                                   `json:"probe_version" gorm:"column:probe_version;not null;default:0"`
 	LastProbeAt      *time.Time                                            `json:"last_probe_at" gorm:"column:last_probe_at"`
 
+	// Cloud selects login/Graph/ARM hosts (global only today).
+	Cloud string `json:"cloud" gorm:"column:cloud;not null;default:global"`
+	// ServicePrincipalID is the platform app's enterprise application object in this tenant.
+	ServicePrincipalID    string     `json:"service_principal_id" gorm:"column:service_principal_id"`
+	Availability          string     `json:"availability" gorm:"column:availability;not null;default:available"`
+	AvailabilityCheckedAt *time.Time `json:"availability_checked_at" gorm:"column:availability_checked_at"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -179,6 +186,24 @@ func (r *MicrosoftTenantRepository) SaveConsent(tenantID string, u MicrosoftCons
 		patch["consented_at"] = &now
 	}
 	return r.db.Model(&MicrosoftTenantDB{}).Where("tenant_id = ?", tenantID).Updates(patch).Error
+}
+
+// SaveServicePrincipal records the platform app's service principal in the tenant ("" = missing).
+func (r *MicrosoftTenantRepository) SaveServicePrincipal(tenantID, servicePrincipalID string) error {
+	return r.db.Model(&MicrosoftTenantDB{}).Where("tenant_id = ?", normalizeTenantID(tenantID)).Updates(map[string]interface{}{
+		"service_principal_id": strings.TrimSpace(servicePrincipalID),
+		"updated_at":           time.Now().UTC(),
+	}).Error
+}
+
+// SetAvailability records whether the tenant still exists for Microsoft (available/unavailable/deleted).
+func (r *MicrosoftTenantRepository) SetAvailability(tenantID, availability string) error {
+	now := time.Now().UTC()
+	return r.db.Model(&MicrosoftTenantDB{}).Where("tenant_id = ?", normalizeTenantID(tenantID)).Updates(map[string]interface{}{
+		"availability":            availability,
+		"availability_checked_at": &now,
+		"updated_at":              now,
+	}).Error
 }
 
 // MicrosoftCapabilityUpdate is a capability engine result.

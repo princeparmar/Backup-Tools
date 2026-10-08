@@ -1,10 +1,12 @@
 package microsoft
 
 import (
-	"github.com/StorX2-0/Backup-Tools/restore"
 	"context"
-)
 
+	"github.com/StorX2-0/Backup-Tools/apps/outlook"
+	"github.com/StorX2-0/Backup-Tools/restore"
+	"github.com/StorX2-0/Backup-Tools/satellite"
+)
 
 type outlookMailProcessor struct{}
 
@@ -13,14 +15,18 @@ func (p *outlookMailProcessor) Config() restore.ServiceConfig {
 	cfg, _ := restore.ConfigForMethod("outlook")
 	return cfg
 }
-func (p *outlookMailProcessor) ShouldRestoreKey(key string) bool { return shouldRestoreOutlookMailKey(key) }
+func (p *outlookMailProcessor) ShouldRestoreKey(key string) bool {
+	return shouldRestoreOutlookMailKey(key)
+}
 func (p *outlookMailProcessor) Setup(ctx context.Context, deps *restore.RestoreDeps) error {
 	return RequireToken(deps)
 }
 func (p *outlookMailProcessor) RestoreKey(ctx context.Context, deps *restore.RestoreDeps, objectKey string) error {
-	return RestoreOutlookMailKey(ctx, deps.AccessGrant, deps.MicrosoftToken, objectKey)
+	return RestoreOutlookMailKey(ctx, deps.AccessGrant, deps.MicrosoftToken, deps.MicrosoftApplication, objectKey)
 }
-func (p *outlookMailProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error { return nil }
+func (p *outlookMailProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error {
+	return nil
+}
 
 type outlookCalendarProcessor struct{}
 
@@ -36,9 +42,11 @@ func (p *outlookCalendarProcessor) Setup(ctx context.Context, deps *restore.Rest
 	return RequireToken(deps)
 }
 func (p *outlookCalendarProcessor) RestoreKey(ctx context.Context, deps *restore.RestoreDeps, objectKey string) error {
-	return RestoreOutlookCalendarKey(ctx, deps.AccessGrant, deps.MicrosoftToken, objectKey)
+	return RestoreOutlookCalendarKey(ctx, deps, objectKey)
 }
-func (p *outlookCalendarProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error { return nil }
+func (p *outlookCalendarProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error {
+	return nil
+}
 
 type outlookContactsProcessor struct{}
 
@@ -54,9 +62,11 @@ func (p *outlookContactsProcessor) Setup(ctx context.Context, deps *restore.Rest
 	return RequireToken(deps)
 }
 func (p *outlookContactsProcessor) RestoreKey(ctx context.Context, deps *restore.RestoreDeps, objectKey string) error {
-	return RestoreOutlookContactKey(ctx, deps.AccessGrant, deps.MicrosoftToken, objectKey)
+	return RestoreOutlookContactKey(ctx, deps, objectKey)
 }
-func (p *outlookContactsProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error { return nil }
+func (p *outlookContactsProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error {
+	return nil
+}
 
 type outlookOneDriveProcessor struct{}
 
@@ -66,15 +76,17 @@ func (p *outlookOneDriveProcessor) Config() restore.ServiceConfig {
 	return cfg
 }
 func (p *outlookOneDriveProcessor) ShouldRestoreKey(key string) bool {
-	return shouldRestoreOutlookDriveMetaKey(key)
+	return shouldRestoreOutlookOneDriveKey(key)
 }
 func (p *outlookOneDriveProcessor) Setup(ctx context.Context, deps *restore.RestoreDeps) error {
 	return RequireToken(deps)
 }
 func (p *outlookOneDriveProcessor) RestoreKey(ctx context.Context, deps *restore.RestoreDeps, objectKey string) error {
-	return RestoreOutlookOneDriveKey(ctx, deps.AccessGrant, deps.MicrosoftToken, objectKey)
+	return RestoreOutlookOneDriveKey(ctx, deps, objectKey)
 }
-func (p *outlookOneDriveProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error { return nil }
+func (p *outlookOneDriveProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error {
+	return nil
+}
 
 type outlookSharePointProcessor struct{}
 
@@ -84,15 +96,20 @@ func (p *outlookSharePointProcessor) Config() restore.ServiceConfig {
 	return cfg
 }
 func (p *outlookSharePointProcessor) ShouldRestoreKey(key string) bool {
-	return shouldRestoreOutlookDriveMetaKey(key)
+	return shouldRestoreOutlookSharePointKey(key)
 }
 func (p *outlookSharePointProcessor) Setup(ctx context.Context, deps *restore.RestoreDeps) error {
 	return RequireToken(deps)
 }
 func (p *outlookSharePointProcessor) RestoreKey(ctx context.Context, deps *restore.RestoreDeps, objectKey string) error {
+	if _, ok := outlook.ParseOneDriveObjectKey(objectKey); ok {
+		return restoreLibraryKey(ctx, deps, satellite.ReserveBucket_OutlookSharePoint, "outlook_sharepoint", objectKey)
+	}
 	return RestoreOutlookSharePointKey(ctx, deps.AccessGrant, deps.MicrosoftToken, objectKey)
 }
-func (p *outlookSharePointProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error { return nil }
+func (p *outlookSharePointProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error {
+	return nil
+}
 
 type outlookTeamsProcessor struct{}
 
@@ -110,7 +127,9 @@ func (p *outlookTeamsProcessor) Setup(ctx context.Context, deps *restore.Restore
 func (p *outlookTeamsProcessor) RestoreKey(ctx context.Context, deps *restore.RestoreDeps, objectKey string) error {
 	return RestoreOutlookTeamsKey(ctx, deps.AccessGrant, deps.MicrosoftToken, objectKey)
 }
-func (p *outlookTeamsProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error { return nil }
+func (p *outlookTeamsProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error {
+	return nil
+}
 
 type outlookGroupsProcessor struct{}
 
@@ -126,9 +145,14 @@ func (p *outlookGroupsProcessor) Setup(ctx context.Context, deps *restore.Restor
 	return RequireToken(deps)
 }
 func (p *outlookGroupsProcessor) RestoreKey(ctx context.Context, deps *restore.RestoreDeps, objectKey string) error {
+	if _, ok := outlook.ParseOneDriveObjectKey(objectKey); ok {
+		return restoreLibraryKey(ctx, deps, satellite.ReserveBucket_OutlookGroups, "outlook_groups", objectKey)
+	}
 	return RestoreOutlookGroupsKey(ctx, deps.AccessGrant, deps.MicrosoftToken, objectKey)
 }
-func (p *outlookGroupsProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error { return nil }
+func (p *outlookGroupsProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error {
+	return nil
+}
 
 func init() {
 	restore.RegisterProcessor(&outlookMailProcessor{})
@@ -137,7 +161,8 @@ func init() {
 	restore.RegisterProcessor(&outlookOneDriveProcessor{})
 	restore.RegisterProcessor(&outlookSharePointProcessor{})
 	restore.RegisterProcessor(&outlookTeamsProcessor{})
-	restore.RegisterProcessor(&outlookGroupsProcessor{})
+	// Groups restore is hidden for now.
+	// restore.RegisterProcessor(&outlookGroupsProcessor{})
 	restore.RegisterMicrosoftAuth(MintAccessToken, RefreshAccessToken)
 	restore.RegisterMicrosoftReadiness(EvaluateReadiness)
 }

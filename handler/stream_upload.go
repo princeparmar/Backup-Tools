@@ -88,7 +88,8 @@ func uploadObjectStreamWithMetadataAndSync(
 	attempt int,
 ) error {
 	bucketName = satellite.BucketForAccess(accessGrant, bucketName)
-	if err := satellite.UploadObjectFromReaderWithMetadata(ctx, accessGrant, bucketName, objectKey, body, meta); err != nil {
+	counted := &countingReader{r: body}
+	if err := satellite.UploadObjectFromReaderWithMetadata(ctx, accessGrant, bucketName, objectKey, counted, meta); err != nil {
 		uploadErr := fmt.Errorf("failed to upload object to Satellite: %w", err)
 		logger.Error(ctx, "Failed to stream object to Satellite",
 			logger.String("bucket", bucketName),
@@ -104,6 +105,7 @@ func uploadObjectStreamWithMetadataAndSync(
 		return uploadErr
 	}
 
+	logObjectBackedUp(ctx, bucketName, objectKey, counted.n, rec)
 	source := deriveSource(bucketName)
 	objectType := deriveType(bucketName)
 	if err := database.SyncedObjectRepo.CreateSyncedObject(userID, bucketName, objectKey, source, objectType); err != nil {
@@ -114,4 +116,15 @@ func uploadObjectStreamWithMetadataAndSync(
 		)
 	}
 	return nil
+}
+
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }

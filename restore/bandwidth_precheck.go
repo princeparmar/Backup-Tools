@@ -16,14 +16,10 @@ import (
 const restoreBandwidthListTimeout = 20 * time.Second
 
 // estimateRestoreDownloadBytes sums ContentLength for objects under login prefix (capped by timeout).
-func estimateRestoreDownloadBytes(ctx context.Context, accessGrant, method, loginID string) (int64, error) {
+func estimateRestoreDownloadBytes(ctx context.Context, accessGrant, method, prefix string) (int64, error) {
 	bucket := bucketForRestoreMethod(method)
 	if bucket == "" || strings.TrimSpace(accessGrant) == "" {
 		return 0, nil
-	}
-	prefix := strings.TrimSpace(loginID)
-	if prefix != "" && !strings.HasSuffix(prefix, "/") {
-		prefix += "/"
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, restoreBandwidthListTimeout)
@@ -88,7 +84,11 @@ func EnforceRestoreBandwidthPrecheck(ctx context.Context, store *db.PostgresDb, 
 	if projectID == "" {
 		return nil
 	}
-	est, err := estimateRestoreDownloadBytes(ctx, accessGrant, job.Method, job.LoginID)
+	var cronJob *repo.CronJobListingDB
+	if job.CronJobID > 0 {
+		cronJob, _ = store.CronJobRepo.GetCronJobByID(job.CronJobID)
+	}
+	est, err := estimateRestoreDownloadBytes(ctx, accessGrant, job.Method, RestoreKeyPrefix(job, cronJob))
 	if err != nil {
 		logger.Warn(ctx, "restore bandwidth estimate failed; allowing start", logger.ErrorField(err))
 		return nil

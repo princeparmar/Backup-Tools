@@ -179,6 +179,12 @@ func buildRestoreDeps(ctx context.Context, store *db.PostgresDb, job *repo.Resto
 		}
 	}
 
+	if IsMicrosoftRestoreMethod(job.Method) {
+		if err := CheckMicrosoftTenantGuard(store, job.TenantID, cronJob, deps.WriteCred); err != nil {
+			return nil, err
+		}
+	}
+
 	if deps.AccessGrant == "" && deps.StorxRecovery != nil {
 		if err := checkJobContinuable(store, job.ID); err != nil {
 			return nil, err

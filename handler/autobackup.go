@@ -17,6 +17,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
+	"github.com/StorX2-0/Backup-Tools/mstenant"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/repo"
@@ -29,7 +30,9 @@ var (
 		"gmail": true, "outlook": true, "psql_database": true, "mysql_database": true,
 		"google_drive": true, "google_photos": true, "google_calendar": true, "google_contacts": true,
 		"outlook_calendar": true, "outlook_contacts": true, "outlook_onedrive": true, "outlook_sharepoint": true,
-		"outlook_teams": true, "outlook_groups": true,
+		"outlook_teams": true,
+		// Groups backup is hidden for now.
+		// "outlook_groups": true,
 	}
 	allowedSyncTypes = map[string]bool{
 		"one_time": true, "daily": true,
@@ -40,7 +43,8 @@ var (
 	}
 	// microsoftAutosyncServiceMethodsOrder is the stable listing order for GET /auto-sync/job/services (Microsoft rows).
 	microsoftAutosyncServiceMethodsOrder = []string{
-		"outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive", "outlook_sharepoint", "outlook_teams", "outlook_groups",
+		"outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive", "outlook_sharepoint", "outlook_teams",
+		// "outlook_groups", // Groups backup is hidden for now.
 	}
 )
 
@@ -79,7 +83,8 @@ var microsoftOnboardingServiceToMethod = map[string]string{
 	"outlook": "outlook", "mail": "outlook",
 	"calendar": "outlook_calendar", "contacts": "outlook_contacts",
 	"onedrive": "outlook_onedrive", "sharepoint": "outlook_sharepoint",
-	"teams": "outlook_teams", "groups": "outlook_groups",
+	"teams": "outlook_teams",
+	// "groups": "outlook_groups", // Groups backup is hidden for now.
 }
 
 // OrgUnitScheduleInput is one OU schedule when policy_scope=org_unit (separate interval per group).
@@ -378,10 +383,10 @@ type BackupOnboardingRequest = GoogleBackupOnboardingRequest
 // AutomaticBackupUpdateByProjectRequest is PUT /auto-sync/job/project — Google + Microsoft reconnect.
 type AutomaticBackupUpdateByProjectRequest struct {
 	AutomaticBackupUpdateRequest
-	ProjectID       string `json:"project_id"`
-	GoogleEmail     string `json:"google_email"`
-	MicrosoftEmail  string `json:"microsoft_email"`
-	CredentialID    uint   `json:"credential_id"`
+	ProjectID      string `json:"project_id"`
+	GoogleEmail    string `json:"google_email"`
+	MicrosoftEmail string `json:"microsoft_email"`
+	CredentialID   uint   `json:"credential_id"`
 }
 
 func (r *AutomaticBackupUpdateRequest) hasUpdateFields() bool {
@@ -2054,9 +2059,14 @@ func ProcessOutlookAccessToken(accessToken string) (string, map[string]interface
 		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid")
 	}
 
+	claims, err := outlook.IdentityClaimsFromTokens("", accessToken)
+	if err != nil || claims.TenantID == "" || claims.ObjectID == "" {
+		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Access token has no Microsoft tenant or object ID")
+	}
 	config := map[string]interface{}{
 		"access_token": accessToken,
 		"email":        userDetails.Mail,
+		"key_prefix":   outlook.ResourceKeyPrefix(claims.TenantID, repo.ResourceTypeUser, claims.ObjectID),
 	}
 
 	return userDetails.Mail, config, nil
@@ -2394,22 +2404,18 @@ func gmailInputDataAfterRefreshToken(database *db.PostgresDb, job *repo.CronJobL
 }
 
 func outlookInputDataAfterRefreshToken(database *db.PostgresDb, job *repo.CronJobListingDB, refreshToken string) (map[string]interface{}, error) {
-	authToken, err := outlook.AuthTokenUsingRefreshToken(refreshToken)
+	signIn, err := msSignInFn(refreshToken)
 	if err != nil {
 		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. Not able to generate auth token from refresh token", err.Error())
 	}
-	client, err := outlook.NewOutlookClientUsingToken(authToken)
-	if err != nil {
-		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err.Error())
+	var cred *repo.GoogleBackupCredentialDB
+	if id := repo.JobCredentialID(job); id != 0 {
+		cred, _ = database.CredentialRepo.GetByID(id)
 	}
-	userDetails, err := client.GetCurrentUser()
-	if err != nil {
-		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err.Error())
+	if cred != nil && microsoftSignInMatchesCredential(cred, signIn) {
+		return persistOAuthRefreshTokenOnJob(database, job, refreshToken)
 	}
-	tokenEmail := strings.TrimSpace(userDetails.Mail)
-	if tokenEmail == "" {
-		tokenEmail = strings.TrimSpace(userDetails.UserPrincipalName)
-	}
+	tokenEmail := strings.TrimSpace(signIn.Email)
 	if tokenEmail == "" {
 		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", "getting empty email id from outlook token")
 	}
@@ -2417,8 +2423,7 @@ func outlookInputDataAfterRefreshToken(database *db.PostgresDb, job *repo.CronJo
 	if mailbox == "" {
 		mailbox = strings.TrimSpace(job.Name)
 	}
-	credEmail := credentialEmailForJob(database, job)
-	if !strings.EqualFold(tokenEmail, mailbox) && (credEmail == "" || !strings.EqualFold(tokenEmail, credEmail)) {
+	if !strings.EqualFold(tokenEmail, mailbox) {
 		return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "email id mismatch"})
 	}
 	// Same as Gmail: persist on shared credential (prepare/restore-all mint from cred.refresh_token).
@@ -2585,6 +2590,19 @@ func activeStateUpdateFields(active bool) map[string]interface{} {
 	return update
 }
 
+// microsoftSignInMatchesCredential matches a Microsoft sign-in to a credential by home object ID,
+// falling back to email for credentials stored before the object ID was recorded.
+func microsoftSignInMatchesCredential(cred *repo.GoogleBackupCredentialDB, in mstenant.SignIn) bool {
+	if cred == nil {
+		return false
+	}
+	ext := strings.TrimSpace(cred.ExternalAccountID)
+	if ext != "" && !strings.Contains(ext, "@") {
+		return strings.EqualFold(ext, strings.TrimSpace(in.ObjectID))
+	}
+	return credentialEmailMatches(cred, in.Email)
+}
+
 func credentialEmailMatches(cred *repo.GoogleBackupCredentialDB, email string) bool {
 	if cred == nil {
 		return false
@@ -2642,15 +2660,11 @@ func validateRefreshTokenMatchesCredential(ctx context.Context, cred *repo.Googl
 		return fmt.Errorf("refresh token is empty")
 	}
 	if credentialIsMicrosoft(cred, jobs) {
-		accessToken, err := outlook.AuthTokenUsingRefreshToken(refreshToken)
+		signIn, err := msSignInFn(refreshToken)
 		if err != nil {
 			return fmt.Errorf("invalid refresh token: %w", err)
 		}
-		acctCtx, err := outlook.ResolveMicrosoftAccountContext(ctx, accessToken)
-		if err != nil {
-			return fmt.Errorf("invalid refresh token: %w", err)
-		}
-		if !credentialEmailMatches(cred, acctCtx.Email) {
+		if !microsoftSignInMatchesCredential(cred, signIn) {
 			return fmt.Errorf("email id mismatch")
 		}
 		return nil
@@ -2887,7 +2901,7 @@ func HandleAutomaticBackupUpdateByProject(c echo.Context) error {
 				"error":   err.Error(),
 			})
 		}
-		if tokRes, mintErr := outlook.AuthTokenResponseUsingRefreshToken(rt); mintErr == nil {
+		if tokRes, mintErr := mstenant.HomeToken(rt); mintErr == nil {
 			grantedScopes = scopesFromAccessTokenAndEndpointScope(tokRes.AccessToken, tokRes.Scope)
 		} else if at, mintErr := google.AuthTokenUsingRefreshToken(rt); mintErr == nil {
 			grantedScopes = scopesFromJWTAccessToken(at)

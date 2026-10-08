@@ -11,7 +11,7 @@ func TestMicrosoftOnboardingServiceToMethod(t *testing.T) {
 		"onedrive":   "outlook_onedrive",
 		"sharepoint": "outlook_sharepoint",
 		"teams":      "outlook_teams",
-		"groups":     "outlook_groups",
+		// "groups":     "outlook_groups", // Groups backup is hidden for now.
 	}
 	for ui, want := range cases {
 		got, ok := microsoftOnboardingServiceToMethod[ui]
@@ -32,7 +32,7 @@ func TestMicrosoftOnboardingServiceToMethod(t *testing.T) {
 }
 
 func TestAllowedMicrosoftMethods(t *testing.T) {
-	for _, m := range []string{"outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive", "outlook_sharepoint", "outlook_teams", "outlook_groups"} {
+	for _, m := range []string{"outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive", "outlook_sharepoint", "outlook_teams" /* , "outlook_groups" (hidden for now) */} {
 		if !allowedMethods[m] {
 			t.Fatalf("method %q must be allowed", m)
 		}

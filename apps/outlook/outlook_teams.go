@@ -150,20 +150,20 @@ func SanitizeTeamsTeamKey(teamID string) string {
 	return s
 }
 
-// TeamsIDBasedMetaKey is {teamKey}/channels/{channelId}/meta/{yyyy/mm/dd}/{messageId}.json
-func TeamsIDBasedMetaKey(teamKey, channelID, messageID, createdTime string) string {
+// TeamsIDBasedMetaKey is {prefix}/channels/{channelId}/meta/{yyyy/mm/dd}/{messageId}.json (prefix: ResourceKeyPrefix).
+func TeamsIDBasedMetaKey(prefix, channelID, messageID, createdTime string) string {
 	return fmt.Sprintf("%s/channels/%s/meta/%s/%s.json",
-		SanitizeTeamsTeamKey(teamKey),
+		strings.Trim(strings.TrimSpace(prefix), "/"),
 		url.PathEscape(strings.TrimSpace(channelID)),
 		objectKeyDatePath(createdTime),
 		strings.TrimSpace(messageID),
 	)
 }
 
-// TeamsIDBasedDataKey is {teamKey}/channels/{channelId}/data/{yyyy/mm/dd}/{messageId}.json
-func TeamsIDBasedDataKey(teamKey, channelID, messageID, createdTime string) string {
+// TeamsIDBasedDataKey is {prefix}/channels/{channelId}/data/{yyyy/mm/dd}/{messageId}.json (prefix: ResourceKeyPrefix).
+func TeamsIDBasedDataKey(prefix, channelID, messageID, createdTime string) string {
 	return fmt.Sprintf("%s/channels/%s/data/%s/%s.json",
-		SanitizeTeamsTeamKey(teamKey),
+		strings.Trim(strings.TrimSpace(prefix), "/"),
 		url.PathEscape(strings.TrimSpace(channelID)),
 		objectKeyDatePath(createdTime),
 		strings.TrimSpace(messageID),
@@ -171,9 +171,9 @@ func TeamsIDBasedDataKey(teamKey, channelID, messageID, createdTime string) stri
 }
 
 // TeamsHostedContentKey stores hosted content bytes.
-func TeamsHostedContentKey(teamKey, channelID, messageID, contentID string) string {
+func TeamsHostedContentKey(prefix, channelID, messageID, contentID string) string {
 	return fmt.Sprintf("%s/channels/%s/hosted/%s/%s",
-		SanitizeTeamsTeamKey(teamKey),
+		strings.Trim(strings.TrimSpace(prefix), "/"),
 		url.PathEscape(strings.TrimSpace(channelID)),
 		strings.TrimSpace(messageID),
 		strings.TrimSpace(contentID),

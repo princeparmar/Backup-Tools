@@ -9,6 +9,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
+	"github.com/StorX2-0/Backup-Tools/mstenant"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
@@ -24,10 +25,7 @@ const (
 // Seams (overridden in tests).
 var (
 	msSatelliteUserIDFn    = satellite.GetUserdetails
-	msDelegatedAccessFn    = outlookAccessTokenFromRefreshHeader
-	msResolveAccountFn     = outlook.ResolveMicrosoftAccountContextFromRefreshToken
-	msAuthTokenFromRefresh = outlook.AuthTokenUsingRefreshToken
-	msTenantIDFromAccessFn = outlook.TenantIDFromAccessToken
+	msRefreshReachesTenant = mstenant.RefreshTokenReachesTenant
 )
 
 func microsoftDB(c echo.Context) *db.PostgresDb {
@@ -40,8 +38,9 @@ func hasValidBackupToolsAPIKey(c echo.Context) bool {
 	return expected != "" && got != "" && got == expected
 }
 
-// authorizeMicrosoftTenantRequest allows tenant routes for Satellite server calls (X-API-Key), a
-// Satellite user owning a credential in the tenant, or a delegated REFRESH_TOKEN from the tenant.
+// authorizeMicrosoftTenantRequest allows tenant consent routes for Satellite server calls
+// (X-API-Key), a Satellite user with an account linked to the tenant, or a delegated REFRESH_TOKEN
+// that can mint a token in the tenant (admin consent during onboarding, before any link exists).
 func authorizeMicrosoftTenantRequest(c echo.Context, database *db.PostgresDb, tenantID string) (string, *echo.HTTPError) {
 	tenantID = strings.ToLower(strings.TrimSpace(tenantID))
 	if tenantID == "" {
@@ -55,19 +54,15 @@ func authorizeMicrosoftTenantRequest(c echo.Context, database *db.PostgresDb, te
 	if err != nil {
 		return "", echo.NewHTTPError(http.StatusUnauthorized, err.Error())
 	}
-	owns, err := database.CredentialRepo.UserHasTenant(userID, tenantID)
+	linked, err := database.MicrosoftLinkRepo.UserHasLink(userID, tenantID)
 	if err != nil {
 		return "", echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	if owns {
+	if linked {
 		return userID, nil
 	}
-	if refresh := strings.TrimSpace(c.Request().Header.Get("REFRESH_TOKEN")); refresh != "" {
-		if access, err := msAuthTokenFromRefresh(refresh); err == nil {
-			if tid, err := msTenantIDFromAccessFn(access); err == nil && strings.EqualFold(tid, tenantID) {
-				return userID, nil
-			}
-		}
+	if refresh := strings.TrimSpace(c.Request().Header.Get("REFRESH_TOKEN")); refresh != "" && msRefreshReachesTenant(refresh, tenantID) {
+		return userID, nil
 	}
 	return "", echo.NewHTTPError(http.StatusForbidden, "no access to this Microsoft tenant")
 }
@@ -85,96 +80,47 @@ func orgAccessErrorJSON(c echo.Context, err error) error {
 		}
 		return c.JSON(status, accessErr.Body())
 	}
-	return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+	return microsoftErrorJSON(c, err)
 }
 
-// HandleMicrosoftWorkspace returns the shared workspace contract.
-// GET /microsoft/workspace (REFRESH_TOKEN header, or tenant_id / email / project_id query).
+// HandleMicrosoftWorkspace returns the shared workspace contract for the selected tenant of the
+// caller's Microsoft account.
+// GET /microsoft/workspace (token_key, MICROSOFT_* headers, optional REFRESH_TOKEN; tenant_id / project_id query)
 func HandleMicrosoftWorkspace(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
 	database := microsoftDB(c)
-	var acct *outlook.MicrosoftAccountContext
-
-	if refresh := strings.TrimSpace(c.Request().Header.Get("REFRESH_TOKEN")); refresh != "" {
-		acct, err = msResolveAccountFn(ctx, refresh)
-		if err != nil {
-			return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
-		}
-	} else {
-		userID, uerr := msSatelliteUserIDFn(c)
-		if uerr != nil {
-			return c.JSON(http.StatusUnauthorized, map[string]interface{}{"error": uerr.Error()})
-		}
-		cred, cerr := findMicrosoftWorkspaceCredential(database, userID,
-			c.QueryParam("tenant_id"), c.QueryParam("email"), c.QueryParam("project_id"))
-		if cerr != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": cerr.Error()})
-		}
-		if cred == nil {
-			return c.JSON(http.StatusNotFound, map[string]interface{}{"error": "no Microsoft credential found for this user"})
-		}
-		acct = accountContextFromCredential(cred)
-		if strings.TrimSpace(cred.RefreshToken) != "" {
-			if live, lerr := msResolveAccountFn(ctx, cred.RefreshToken); lerr == nil {
-				acct = live
-			}
-		}
+	id, err := microsoftIdentityFromRequest(c)
+	if err != nil {
+		return microsoftErrorJSON(c, err)
 	}
-
-	var tenant *repo.MicrosoftTenantDB
-	if acct.TenantID != "" && !outlook.IsMSATenant(acct.TenantID) {
-		tenant, err = database.MicrosoftTenantRepo.Get(acct.TenantID)
-		if err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
-		}
+	cred, err := microsoftCredentialFromRequest(c, id, strings.TrimSpace(c.QueryParam("project_id")))
+	if err != nil {
+		return microsoftErrorJSON(c, err)
 	}
-	appTokenOK := tenant != nil && tenant.ConsentStatus == repo.MicrosoftConsentGranted &&
-		microsoftAppTokenUsable(ctx, tenant.TenantID)
-	return c.JSON(http.StatusOK, buildMicrosoftWorkspaceContract(acct, tenant, appTokenOK))
-}
-
-func findMicrosoftWorkspaceCredential(database *db.PostgresDb, userID, tenantID, email, projectID string) (*repo.GoogleBackupCredentialDB, error) {
-	var rows []repo.GoogleBackupCredentialDB
-	var err error
-	if strings.TrimSpace(tenantID) != "" {
-		rows, err = database.CredentialRepo.ListByUserAndTenant(userID, tenantID)
-	} else {
-		rows, err = database.CredentialRepo.ListMicrosoftByUser(userID)
+	tid := id.TenantID
+	if tid == "" {
+		tid = cred.HomeTenantID()
+	}
+	state, err := mstenant.TenantAccessState(database, cred.ID, tid)
+	if mstenant.IsCode(err, mstenant.CodeTenantNotLinked) && tid == cred.HomeTenantID() {
+		if lerr := ensureMicrosoftHomeLink(ctx, database, cred, id.RefreshToken); lerr != nil {
+			return microsoftErrorJSON(c, lerr)
+		}
+		state, err = mstenant.TenantAccessState(database, cred.ID, tid)
 	}
 	if err != nil {
-		return nil, err
+		return microsoftErrorJSON(c, err)
 	}
-	email = strings.TrimSpace(email)
-	projectID = strings.TrimSpace(projectID)
-	for i := range rows {
-		if email != "" && !strings.EqualFold(strings.TrimSpace(rows[i].Email), email) {
-			continue
+	var tenant *repo.MicrosoftTenantDB
+	if !outlook.IsMSATenant(tid) {
+		if tenant, err = database.MicrosoftTenantRepo.Get(tid); err != nil {
+			return microsoftErrorJSON(c, err)
 		}
-		if projectID != "" && strings.TrimSpace(rows[i].StorjProjectID) != projectID {
-			continue
-		}
-		return &rows[i], nil
 	}
-	return nil, nil
-}
-
-func accountContextFromCredential(cred *repo.GoogleBackupCredentialDB) *outlook.MicrosoftAccountContext {
-	acct := &outlook.MicrosoftAccountContext{
-		Email:         strings.TrimSpace(cred.Email),
-		AccountType:   outlook.AccountTypeWorkAccount,
-		WorkspaceKind: outlook.WorkspaceKindOrganization,
-		TenantID:      strings.ToLower(strings.TrimSpace(cred.TenantID)),
-		TenantName:    strings.TrimSpace(cred.TenantName),
-		AdminRoles:    []string{},
-	}
-	if outlook.IsMSATenant(acct.TenantID) {
-		acct.AccountType = outlook.AccountTypePersonal
-		acct.WorkspaceKind = outlook.WorkspaceKindPersonal
-	}
-	return acct
+	return c.JSON(http.StatusOK, buildMicrosoftWorkspaceContract(cred.Email, state, tenant))
 }
 
 type microsoftConsentRequest struct {
@@ -201,7 +147,7 @@ func HandleMicrosoftTenantConsent(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
 	}
-	return c.JSON(http.StatusOK, buildMicrosoftWorkspaceContract(nil, tenant, true))
+	return c.JSON(http.StatusOK, buildMicrosoftWorkspaceContract("", nil, tenant))
 }
 
 // HandleMicrosoftTenantCapabilitiesRefresh re-checks consent and re-probes capabilities.
@@ -223,7 +169,7 @@ func HandleMicrosoftTenantCapabilitiesRefresh(c echo.Context) error {
 	if tenant == nil {
 		return c.JSON(http.StatusNotFound, map[string]interface{}{"error": "tenant has not been onboarded; grant admin consent first"})
 	}
-	return c.JSON(http.StatusOK, buildMicrosoftWorkspaceContract(nil, tenant, tenant.ConsentStatus == repo.MicrosoftConsentGranted))
+	return c.JSON(http.StatusOK, buildMicrosoftWorkspaceContract("", nil, tenant))
 }
 
 // HandleMicrosoftTenantDirectoryUsers lists tenant users live from Microsoft Graph.
@@ -233,21 +179,16 @@ func HandleMicrosoftTenantDirectoryUsers(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	database := microsoftDB(c)
-	tid := strings.ToLower(strings.TrimSpace(c.Param("tid")))
-	if _, he := authorizeMicrosoftTenantRequest(c, database, tid); he != nil {
-		return httpErrorJSON(c, he)
+	tc, err := microsoftTenantContextFromRequest(c, "", true)
+	if err != nil {
+		return microsoftErrorJSON(c, err)
 	}
-	return respondMicrosoftDirectoryUsers(c, database, tid)
+	return respondMicrosoftDirectoryUsers(c, tc)
 }
 
-func respondMicrosoftDirectoryUsers(c echo.Context, database *db.PostgresDb, tid string) error {
+func respondMicrosoftDirectoryUsers(c echo.Context, tc *mstenant.Context) error {
 	ctx := c.Request().Context()
-	token, tenant, err := MicrosoftOrgAccess(ctx, database, tid, "")
-	if err != nil {
-		return orgAccessErrorJSON(c, err)
-	}
-	all, err := msListDirectoryUsersFn(ctx, token)
+	all, err := msListDirectoryUsersFn(ctx, tc.Token)
 	if err != nil {
 		return c.JSON(http.StatusBadGateway, map[string]interface{}{"error": err.Error()})
 	}
@@ -273,9 +214,9 @@ func respondMicrosoftDirectoryUsers(c echo.Context, database *db.PostgresDb, tid
 	})
 	start := min((page-1)*size, len(filtered))
 	end := min(start+size, len(filtered))
-	roles, rolesErr := microsoftTenantUserRoles(ctx, token)
+	roles, rolesErr := microsoftTenantUserRoles(ctx, tc.Token)
 	resp := map[string]interface{}{
-		"tenant_id": tenant.TenantID,
+		"tenant_id": tc.TenantID,
 		"users":     microsoftDirectoryUserViews(filtered[start:end], roles),
 		"page":      page,
 		"page_size": size,
@@ -294,23 +235,13 @@ func HandleMicrosoftTenantOrgStructure(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	database := microsoftDB(c)
-	tid := strings.ToLower(strings.TrimSpace(c.Param("tid")))
-	if _, he := authorizeMicrosoftTenantRequest(c, database, tid); he != nil {
-		return httpErrorJSON(c, he)
-	}
-	return respondMicrosoftOrgStructure(c, database, tid)
-}
-
-func respondMicrosoftOrgStructure(c echo.Context, database *db.PostgresDb, tid string) error {
-	ctx := c.Request().Context()
-	token, tenant, err := MicrosoftOrgAccess(ctx, database, tid, "")
+	tc, err := microsoftTenantContextFromRequest(c, "", true)
 	if err != nil {
-		return orgAccessErrorJSON(c, err)
+		return microsoftErrorJSON(c, err)
 	}
-	users, err := msListDirectoryUsersFn(ctx, token)
+	users, err := msListDirectoryUsersFn(ctx, tc.Token)
 	if err != nil {
 		return c.JSON(http.StatusBadGateway, map[string]interface{}{"error": err.Error()})
 	}
-	return c.JSON(http.StatusOK, map[string]interface{}{"tenant_id": tenant.TenantID, "org_units": microsoftOrgUnitViews(users)})
+	return c.JSON(http.StatusOK, map[string]interface{}{"tenant_id": tc.TenantID, "org_units": microsoftOrgUnitViews(users)})
 }

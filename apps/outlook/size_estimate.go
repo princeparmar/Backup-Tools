@@ -38,6 +38,18 @@ func EstimateMailboxBytes(ctx context.Context, accessToken, userBaseURL string) 
 	return items * averageMailMessageBytes, nil
 }
 
+// EstimateMailBytesFromFolders estimates a mailbox's backup size from the item counts of an
+// already listed folder tree (see ListMailFolders).
+func EstimateMailBytesFromFolders(folders []MailFolder) int64 {
+	var items int64
+	for _, f := range folders {
+		if f.TotalItems > 0 {
+			items += int64(f.TotalItems)
+		}
+	}
+	return items * averageMailMessageBytes
+}
+
 // EstimateOneDriveBytes returns the used bytes of the user's OneDrive. A user without a
 // provisioned drive reports 0.
 func EstimateOneDriveBytes(ctx context.Context, accessToken, userBaseURL string) (int64, error) {

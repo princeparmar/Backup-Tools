@@ -3,6 +3,7 @@ package repo
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,13 +56,20 @@ const (
 type CronJobListingDB struct {
 	gorm.GormModel
 
-	UserID string `json:"user_id" gorm:"column:user_id;uniqueIndex:idx_name_sync_type_user"`
+	// Job identity: (user_id, provider, tenant_id, resource_type, resource_id, method, sync_type).
+	// Google jobs: provider=google, tenant_id='', resource_type=user, resource_id=name.
+	UserID string `json:"user_id" gorm:"column:user_id;uniqueIndex:idx_cron_job_identity,priority:1"`
 	// StorjProjectID is API-only; persisted on google_backup_credentials (see EnrichCronJobFromCredential).
 	StorjProjectID string `json:"storj_project_id,omitempty" gorm:"-"`
 
-	// Name + Method + SyncType + UserID must be unique (one cron job per service per mailbox).
-	Name     string `json:"name" gorm:"uniqueIndex:idx_name_sync_type_user"`
-	Method   string `json:"method" gorm:"uniqueIndex:idx_name_sync_type_user"`
+	Provider     string `json:"provider" gorm:"column:provider;not null;default:google;uniqueIndex:idx_cron_job_identity,priority:2"`
+	TenantID     string `json:"tenant_id,omitempty" gorm:"column:tenant_id;not null;default:'';uniqueIndex:idx_cron_job_identity,priority:3;index:idx_cron_job_tenant"`
+	ResourceType string `json:"resource_type" gorm:"column:resource_type;not null;default:user;uniqueIndex:idx_cron_job_identity,priority:4"`
+	ResourceID   string `json:"resource_id" gorm:"column:resource_id;not null;default:'';uniqueIndex:idx_cron_job_identity,priority:5"`
+
+	// Name is the display label (mailbox email, site/team/group name).
+	Name     string `json:"name"`
+	Method   string `json:"method" gorm:"uniqueIndex:idx_cron_job_identity,priority:6"`
 	Interval string `json:"interval"`
 	On       string `json:"on" gorm:"-"` // API-only; canonical value from autosync_backup_policy_dbs
 	// PolicyID links to autosync_backup_policy_dbs.id.
@@ -85,7 +93,7 @@ type CronJobListingDB struct {
 	// Tasks associated with the cron job
 	Tasks []TaskListingDB `gorm:"foreignKey:CronJobID"`
 
-	SyncType string `json:"sync_type" gorm:"uniqueIndex:idx_name_sync_type_user"`
+	SyncType string `json:"sync_type" gorm:"uniqueIndex:idx_cron_job_identity,priority:7"`
 
 	Status string `json:"status" gorm:"default:created"`
 
@@ -111,6 +119,14 @@ type CronJobListingDB struct {
 	QuotaKind string `json:"quota_kind,omitempty" gorm:"column:quota_kind;type:varchar(32);default:''"`
 }
 
+// OutlookMailLayoutFiles is the mail layout with one Gmail-style object per message under its
+// folder path, keyed by immutable message id.
+const OutlookMailLayoutFiles = 2
+
+// OneDriveLayoutTree is the OneDrive layout with one object per file in a Google Drive-style
+// folder tree (MY_DRIVE / BIN).
+const OneDriveLayoutTree = 2
+
 // TaskMemory represents the memory state of a task
 type TaskMemory struct {
 	GmailNextToken *string `json:"gmail_next_token"`
@@ -128,24 +144,29 @@ type TaskMemory struct {
 	DrivePageToken    *string `json:"drive_page_token,omitempty"` // legacy single token; migrated into DriveUserPageToken
 	DriveBaselineDone bool    `json:"drive_baseline_done,omitempty"`
 
-	// OneDrive incremental sync state (Graph delta; do not reuse DrivePageToken)
-	OneDriveDeltaLink    *string `json:"onedrive_delta_link,omitempty"`
-	OneDriveBaselineDone bool    `json:"onedrive_baseline_done,omitempty"`
+	// OneDriveDeltaLink is the Graph drive delta cursor (do not reuse DrivePageToken).
+	OneDriveDeltaLink *string `json:"onedrive_delta_link,omitempty"`
+	// OneDriveLayout is the OneDrive layout version; below OneDriveLayoutTree the next run
+	// re-baselines and rewrites every meta/data pair as one object in its folder tree.
+	OneDriveLayout int `json:"onedrive_layout,omitempty"`
 
 	// SharePoint incremental sync state (Graph delta on /drives/{drive_id}; per job/site)
 	SharePointDeltaLink    *string `json:"sharepoint_delta_link,omitempty"`
 	SharePointBaselineDone bool    `json:"sharepoint_baseline_done,omitempty"`
+	// SharePointLayout is the SharePoint layout version (same values as OneDriveLayout); below
+	// OneDriveLayoutTree the next run rewrites every meta/data pair in the folder tree.
+	SharePointLayout int `json:"sharepoint_layout,omitempty"`
 
-	// Outlook mail incremental sync state (Graph mail delta on inbox messages)
-	OutlookMailDeltaLink    *string `json:"outlook_mail_delta_link,omitempty"`
-	OutlookMailBaselineDone bool    `json:"outlook_mail_baseline_done,omitempty"`
-	// OutlookMailFolderDeltas maps mailFolderId -> deltaLink (sentitems, archive, etc.).
+	// Outlook mail incremental sync state (Graph mail delta per mail folder).
+	// OutlookMailFolderDeltas maps mailFolderId -> deltaLink for every backed-up folder.
 	OutlookMailFolderDeltas map[string]string `json:"outlook_mail_folder_deltas,omitempty"`
+	// OutlookMailFolderPaths maps mailFolderId -> key folder path at the last sync; a changed path
+	// (rename or move) re-baselines the folder so its messages are re-keyed.
+	OutlookMailFolderPaths map[string]string `json:"outlook_mail_folder_paths,omitempty"`
+	// OutlookMailLayout is the mail layout version; below OutlookMailLayoutFiles the next run
+	// converts ids to immutable ids and rewrites every meta/data pair as one object in its folder.
+	OutlookMailLayout int `json:"outlook_mail_layout,omitempty"`
 
-	// Deprecated: legacy exchange_* task_memory keys (read-only fallback in outlook processor).
-	ExchangeDeltaLink    *string           `json:"exchange_delta_link,omitempty"`
-	ExchangeBaselineDone bool              `json:"exchange_baseline_done,omitempty"`
-	ExchangeFolderDeltas map[string]string `json:"exchange_folder_deltas,omitempty"`
 	// DriveUserPageToken is the USER change-log token (My Drive / shared-with-me).
 	DriveUserPageToken *string `json:"drive_user_page_token,omitempty"`
 	// DriveSharedDrives holds per-Shared-Drive baseline + change tokens.
@@ -199,6 +220,8 @@ type GroupsCalendarSyncState struct {
 type GroupsDriveSyncState struct {
 	DeltaLink    *string `json:"delta_link,omitempty"`
 	BaselineDone bool    `json:"baseline_done,omitempty"`
+	// Layout is the files layout version (same values as OneDriveLayout).
+	Layout int `json:"layout,omitempty"`
 }
 
 // CalendarCalendarState holds baseline + sync token for one Google calendar.
@@ -211,6 +234,15 @@ type CalendarCalendarState struct {
 type DriveSharedDriveState struct {
 	BaselineDone bool   `json:"baseline_done,omitempty"`
 	PageToken    string `json:"page_token,omitempty"`
+}
+
+// Value implements driver.Valuer (stored as JSON).
+func (t TaskMemory) Value() (driver.Value, error) {
+	b, err := json.Marshal(t)
+	if err != nil {
+		return nil, err
+	}
+	return string(b), nil
 }
 
 // Scan implements the sql.Scanner interface
@@ -1624,11 +1656,15 @@ func (r *CronJobRepository) jobUsesMicrosoftApplicationAuth(job *CronJobListingD
 	if credID == 0 {
 		return false
 	}
-	var cred GoogleBackupCredentialDB
-	if err := r.db.Select("id", "microsoft_auth_mode", "tenant_id").Where("id = ?", credID).First(&cred).Error; err != nil {
+	tenantID := normalizeTenantID(job.TenantID)
+	if tenantID == "" {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(cred.MicrosoftAuthMode), "application") && strings.TrimSpace(cred.TenantID) != ""
+	var link MicrosoftAccountTenantDB
+	if err := r.db.Select("auth_mode").Where("credential_id = ? AND tenant_id = ?", credID, tenantID).First(&link).Error; err != nil {
+		return false
+	}
+	return link.Application()
 }
 
 func (r *CronJobRepository) validateJobForActivation(job *CronJobListingDB) error {

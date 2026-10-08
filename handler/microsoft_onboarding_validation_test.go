@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
+	"github.com/StorX2-0/Backup-Tools/mstenant"
+	"github.com/StorX2-0/Backup-Tools/repo"
 )
 
 func delegatedReq(services ...string) *MicrosoftBackupOnboardingRequest {
@@ -76,69 +78,48 @@ func TestMicrosoftOnboardingRequestValidate_authModes(t *testing.T) {
 }
 
 func TestAuthorizeMicrosoftApplicationOnboarding(t *testing.T) {
-	database := newMicrosoftTestDB(t)
-	stub := &stubMicrosoftGraph{
-		roles: []string{"User.Read.All", "Mail.Read"},
-		caps: outlook.CapabilityResult{
-			Capabilities: map[string]bool{outlook.CapabilityListUsers: true, outlook.CapabilityMail: true},
-			Errors: map[string]outlook.CapabilityError{
-				outlook.CapabilitySharePoint: {Code: outlook.CapabilityErrMissingRole, Role: "Sites.Read.All"},
-			},
-		},
-	}
+	stub := &stubMicrosoftGraph{}
 	stub.install(t)
 	ctx := context.Background()
+	tenant := &repo.MicrosoftTenantDB{TenantID: testTenantID, ConsentStatus: repo.MicrosoftConsentGranted, ServicePrincipalID: "sp-1"}
+	tenant.Capabilities = dbJSON(map[string]bool{outlook.CapabilityListUsers: true, outlook.CapabilityMail: true})
+	tenant.CapabilityErrors = dbJSON(map[string]repo.MicrosoftCapabilityError{
+		outlook.CapabilitySharePoint: {Code: outlook.CapabilityErrMissingRole, Role: "Sites.Read.All"},
+	})
+	tc := &mstenant.Context{Tenant: tenant, TenantID: testTenantID, Token: "app-token", Application: true}
 	req := &MicrosoftBackupOnboardingRequest{AllUsers: true}
 
-	var accessErr *MicrosoftOrgAccessError
-	_, err := authorizeMicrosoftApplicationOnboarding(ctx, database, req, testTenantID, []string{"outlook"})
-	if !errors.As(err, &accessErr) || accessErr.HTTPStatus != http.StatusForbidden || accessErr.Code != "consent_not_requested" {
-		t.Fatalf("no consent: %v", err)
-	}
-
-	if _, err := newMicrosoftTenantService(database).CheckConsent(ctx, testTenantID, "Contoso", "a@b.c", true); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = authorizeMicrosoftApplicationOnboarding(ctx, database, req, testTenantID, []string{"sharepoint"})
-	if !errors.As(err, &accessErr) || accessErr.Code != outlook.CapabilityErrMissingRole || accessErr.Capability != outlook.CapabilitySharePoint {
-		t.Fatalf("sharepoint must be refused naming the missing role: %v", err)
+	var denied *mstenant.Error
+	_, err := authorizeMicrosoftApplicationOnboarding(ctx, tc, req, []string{"sharepoint"})
+	if !errors.As(err, &denied) || denied.Code != mstenant.CodeCapabilityDenied || denied.Capability != outlook.CapabilitySharePoint {
+		t.Fatalf("sharepoint must be refused naming the capability: %v", err)
 	}
 
 	stub.users = []outlook.DirectoryUser{
 		{ObjectID: "u1", UPN: "ann@contoso.com", Department: "Sales", AccountEnabled: true},
 		{ObjectID: "u2", UPN: "bob@contoso.com", AccountEnabled: false},
 	}
-	got, err := authorizeMicrosoftApplicationOnboarding(ctx, database, req, testTenantID, []string{"outlook"})
+	got, err := authorizeMicrosoftApplicationOnboarding(ctx, tc, req, []string{"outlook"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got.Emails) != 1 || got.Emails[0] != "ann@contoso.com" || got.OrgUnits["ann@contoso.com"] != "/Sales" {
 		t.Fatalf("all_users must expand enabled directory users with org units: %+v", got)
 	}
-	if got.AccessToken != "app-token" {
-		t.Fatalf("token = %q", got.AccessToken)
+	if got.AccessToken != "app-token" || got.Users["ann@contoso.com"].ObjectID != "u1" {
+		t.Fatalf("token/users = %q %+v", got.AccessToken, got.Users)
 	}
 
-	_, err = authorizeMicrosoftApplicationOnboarding(ctx, database,
-		&MicrosoftBackupOnboardingRequest{Emails: []string{"stranger@other.com"}}, testTenantID, []string{"outlook"})
+	var accessErr *MicrosoftOrgAccessError
+	_, err = authorizeMicrosoftApplicationOnboarding(ctx, tc,
+		&MicrosoftBackupOnboardingRequest{Emails: []string{"stranger@other.com"}}, []string{"outlook"})
 	if !errors.As(err, &accessErr) || accessErr.Code != "unknown_users" {
 		t.Fatalf("unknown mailbox must be rejected: %v", err)
 	}
-	shared, err := authorizeMicrosoftApplicationOnboarding(ctx, database,
-		&MicrosoftBackupOnboardingRequest{SharedMailboxes: []string{"BOB@contoso.com"}}, testTenantID, []string{"outlook"})
-	if err != nil || len(shared.Emails) != 1 || shared.ObjectIDs["bob@contoso.com"] != "u2" {
+	shared, err := authorizeMicrosoftApplicationOnboarding(ctx, tc,
+		&MicrosoftBackupOnboardingRequest{SharedMailboxes: []string{"BOB@contoso.com"}}, []string{"outlook"})
+	if err != nil || len(shared.Emails) != 1 || shared.Users["bob@contoso.com"].ObjectID != "u2" {
 		t.Fatalf("disabled shared mailbox must be allowed: %+v %v", shared, err)
-	}
-
-	// is_admin / account_type never authorize: same tenant, revoked consent, admin label irrelevant.
-	stub.roles = nil
-	if _, err := newMicrosoftTenantService(database).RefreshCapabilities(ctx, testTenantID); err != nil {
-		t.Fatal(err)
-	}
-	_, err = authorizeMicrosoftApplicationOnboarding(ctx, database, req, testTenantID, []string{"outlook"})
-	if !errors.As(err, &accessErr) || accessErr.Code != "consent_revoked" {
-		t.Fatalf("revoked consent must block org backup: %v", err)
 	}
 }
 
