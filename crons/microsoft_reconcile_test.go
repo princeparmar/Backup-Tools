@@ -153,8 +153,8 @@ func TestReconcile_allScopeClonesSiblingsForNewUsers(t *testing.T) {
 		bobMail.Name != "bob@contoso.com" || repo.JobCredentialID(&bobMail) != cred.ID {
 		t.Fatalf("clone must copy policy/interval/active/token: %+v", bobMail)
 	}
-	if path := (*bobMail.InputData.Json())["org_unit_path"]; path != "/Sales" {
-		t.Fatalf("org unit = %v", path)
+	if path, ok := (*bobMail.InputData.Json())["org_unit_path"]; ok {
+		t.Fatalf("template org_unit_path must not be copied: %v", path)
 	}
 	if _, ok := byKey["outlook_onedrive|oid-cat"]; !ok {
 		t.Fatal("cat onedrive job missing")

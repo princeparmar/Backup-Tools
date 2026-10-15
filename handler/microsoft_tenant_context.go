@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/mstenant"
 	"github.com/StorX2-0/Backup-Tools/repo"
@@ -126,16 +125,19 @@ func ensureMicrosoftHomeLink(ctx context.Context, database *db.PostgresDb, cred 
 	if err != nil || link != nil {
 		return err
 	}
-	category := repo.MicrosoftTenantCategoryHome
-	if outlook.IsMSATenant(tid) {
-		category = repo.MicrosoftTenantCategoryPersonal
-	}
+	return discoverMicrosoftLink(ctx, database, cred, tid, cred.TenantName, refresh)
+}
+
+// discoverMicrosoftLink stores a discovered link from the credential to tenantID and checks the
+// sign-in's access there.
+func discoverMicrosoftLink(ctx context.Context, database *db.PostgresDb, cred *repo.GoogleBackupCredentialDB, tenantID, tenantName, refresh string) error {
+	home := cred.HomeTenantID()
 	if _, err := database.MicrosoftLinkRepo.UpsertDiscovered(cred.ID, repo.MicrosoftTenantDiscovery{
-		TenantID: tid, TenantName: cred.TenantName, Category: category, HomeTenantID: tid,
+		TenantID: tenantID, TenantName: tenantName, Category: mstenant.CategoryFor(home, tenantID, ""), HomeTenantID: home,
 	}); err != nil {
 		return err
 	}
-	msCheckTenantAccessFn(ctx, database, cred, tid, refresh)
+	msCheckTenantAccessFn(ctx, database, cred, tenantID, refresh)
 	return nil
 }
 

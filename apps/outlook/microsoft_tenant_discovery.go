@@ -205,7 +205,7 @@ func roleAssignmentsForPrincipal(ctx context.Context, accessToken, objectID stri
 	return sortRoles(roles), nil
 }
 
-// memberOfDirectoryRolesStrict is memberOfDirectoryRoles but treats 403 as "could not read".
+// memberOfDirectoryRolesStrict lists the token user's directory roles; 403 means "could not read".
 func memberOfDirectoryRolesStrict(ctx context.Context, accessToken string) ([]directoryRoleRow, error) {
 	reqURL := graphBaseURL + "/me/memberOf/microsoft.graph.directoryRole?$select=roleTemplateId,displayName"
 	return graphListAll[directoryRoleRow](ctx, accessToken, reqURL, 0)

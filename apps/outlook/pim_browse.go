@@ -5,17 +5,19 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/users"
 )
 
-// FlatCalendar is a calendar summary for browse/autosync.
+// FlatCalendar is a calendar summary for browse/autosync. In a backup's _calendar.json RemovedAt
+// is set once the calendar is gone from Microsoft; its events are kept.
 type FlatCalendar struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Color     string `json:"color,omitempty"`
+	HexColor  string `json:"hex_color,omitempty"`
 	CanEdit   bool   `json:"can_edit"`
 	IsDefault bool   `json:"is_default"`
+	RemovedAt string `json:"removed_at,omitempty"`
 }
 
 // FlatEvent is a calendar event summary for browse/autosync.
@@ -143,20 +145,6 @@ func (client *OutlookClient) ListCalendarEvents(calendarID string, skip, top int
 		out = append(out, item)
 	}
 	return out, nil
-}
-
-// GetCalendarEvent returns full event JSON-friendly map fields via models.Event.
-func (client *OutlookClient) GetCalendarEvent(calendarID, eventID string) (models.Eventable, error) {
-	calendarID = strings.TrimSpace(calendarID)
-	eventID = strings.TrimSpace(eventID)
-	if calendarID == "" || eventID == "" {
-		return nil, fmt.Errorf("calendar_id and event_id are required")
-	}
-	ev, err := client.user().Calendars().ByCalendarId(calendarID).Events().ByEventId(eventID).Get(context.Background(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("get event: %w", err)
-	}
-	return ev, nil
 }
 
 // ListContacts lists contacts for the signed-in user.

@@ -12,7 +12,6 @@ func TestRegistry_processorsRegistered(t *testing.T) {
 	methods := []string{
 		"outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive",
 		"outlook_sharepoint", "outlook_teams",
-		// "outlook_groups", // Groups restore is hidden for now.
 		"gmail", "google_drive",
 	}
 	for _, method := range methods {

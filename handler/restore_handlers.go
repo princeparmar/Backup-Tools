@@ -96,8 +96,11 @@ func HandleRestoreWorkspaces(c echo.Context) error {
 	microsoftOnly := strings.EqualFold(strings.TrimSpace(c.QueryParam("provider")), "microsoft")
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	domain := strings.TrimSpace(c.QueryParam("domain"))
+	if microsoftOnly {
+		return handleMicrosoftRestoreWorkspaces(c, database, userID, domain)
+	}
 	if domain == "" {
-		domains, listErr := listRestoreAdminWorkspaceDomains(database, userID, microsoftOnly)
+		domains, listErr := listRestoreAdminWorkspaceDomains(database, userID, false)
 		if listErr != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": listErr.Error()})
 		}
@@ -109,14 +112,6 @@ func HandleRestoreWorkspaces(c echo.Context) error {
 	limit, offset, search, err := parseRestoreListParams(c)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
-	}
-
-	if microsoftOnly {
-		emails, listErr := listMicrosoftRestoreWorkspaceMailboxes(database, userID, domain)
-		if listErr != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": listErr.Error()})
-		}
-		return respondRestoreWorkspaceMailboxes(c, emails, limit, offset, search)
 	}
 
 	adminCred, err := findRestoreAdminWorkspaceCred(database, userID, domain, false)
@@ -173,38 +168,6 @@ func HandleRestoreWorkspaces(c echo.Context) error {
 	})
 }
 
-// HandleRestoreCredentials lists personal Google credentials for the restore list.
-// Auth via token_key → user_id; credentials are loaded from DB by user (no project_id).
-
-func listMicrosoftRestoreWorkspaceMailboxes(database *db.PostgresDb, userID, domain string) ([]string, error) {
-	domain = strings.ToLower(strings.TrimSpace(domain))
-	if domain == "" || restore.IsConsumerMailboxDomain(domain) {
-		return nil, fmt.Errorf("invalid workspace domain")
-	}
-	emails, err := database.CronJobRepo.ListBackupMailboxEmailsForUser(userID, "")
-	if err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(emails))
-	seen := make(map[string]struct{})
-	for _, email := range emails {
-		email = strings.TrimSpace(email)
-		if email == "" {
-			continue
-		}
-		if strings.ToLower(strings.TrimSpace(restore.EmailDomain(email))) != domain {
-			continue
-		}
-		key := strings.ToLower(email)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, email)
-	}
-	return out, nil
-}
-
 func respondRestoreWorkspaceMailboxes(c echo.Context, emails []string, limit, offset int, search string) error {
 	loginID := strings.TrimSpace(c.QueryParam("login_id"))
 	loginExclude := strings.ToLower(loginID)
@@ -227,6 +190,9 @@ func respondRestoreWorkspaceMailboxes(c echo.Context, emails []string, limit, of
 	})
 }
 
+// HandleRestoreCredentials lists the user's own sign-ins as restore destinations (Personal tab):
+// Google personal accounts, or Microsoft sign-ins connected with delegated access (personal and
+// work accounts alike). Auth via token_key → user_id; credentials are loaded by user.
 func HandleRestoreCredentials(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
@@ -263,15 +229,23 @@ func HandleRestoreCredentials(c echo.Context) error {
 	for i := range rows {
 		row := &rows[i]
 		email := strings.TrimSpace(row.Email)
-		// Same as Google: personal credentials only (workspace accounts use /restore/workspaces).
-		if restoreAccountKind(strings.TrimSpace(row.AccountType)) != "personal" {
+		if provider == "microsoft" {
+			usable, linkErr := microsoftRestoreCredentialUsable(database, row)
+			if linkErr != nil {
+				return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": linkErr.Error()})
+			}
+			if !usable {
+				continue
+			}
+		} else if row.IsMicrosoft() || restoreAccountKind(strings.TrimSpace(row.AccountType)) != "personal" {
+			// Google personal credentials only (workspace accounts use /restore/workspaces).
 			continue
 		}
 		jobs, jobsErr := database.CronJobRepo.ListJobsByCredentialID(userID, row.ID)
 		if jobsErr != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": jobsErr.Error()})
 		}
-		if !restoreCredentialMatchesProvider(provider, jobs) {
+		if provider != "microsoft" && !restoreCredentialMatchesProvider(provider, jobs) {
 			continue
 		}
 		needsReconnect, _ := credentialReconnectFlagsFromJobs(database.CronJobRepo, row, jobs)

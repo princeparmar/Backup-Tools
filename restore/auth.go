@@ -165,7 +165,7 @@ func buildRestoreDeps(ctx context.Context, store *db.PostgresDb, job *repo.Resto
 	}
 
 	if job.CredentialID > 0 {
-		if !(isMigration && migrationDWDJobTarget(store, job)) {
+		if IsMicrosoftRestoreMethod(job.Method) || !(isMigration && migrationDWDJobTarget(store, job)) {
 			writeCred, err := store.CredentialRepo.GetByID(job.CredentialID)
 			if err != nil {
 				return nil, fmt.Errorf("credential not found: %w", err)
@@ -180,7 +180,7 @@ func buildRestoreDeps(ctx context.Context, store *db.PostgresDb, job *repo.Resto
 	}
 
 	if IsMicrosoftRestoreMethod(job.Method) {
-		if err := CheckMicrosoftTenantGuard(store, job.TenantID, cronJob, deps.WriteCred); err != nil {
+		if err := CheckMicrosoftTenantGuard(store, job.TenantID, cronJob, deps.WriteCred, isMigration); err != nil {
 			return nil, err
 		}
 	}

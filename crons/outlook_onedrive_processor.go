@@ -230,6 +230,10 @@ func newOneDriveRun(input ProcessorInput, store oneDriveStore, token, driveRoot,
 	}
 	for key := range r.keys {
 		if p, ok := outlook.ParseOneDriveObjectKey(key); ok {
+			// A site's other libraries are listed under its prefix too; they are not this drive.
+			if p.Prefix != strings.TrimSuffix(strings.TrimSpace(prefix), "/") {
+				continue
+			}
 			// A file restored in OneDrive after deletion may still have its BIN copy; MY_DRIVE wins.
 			if cur, exists := r.index[p.ItemID]; !exists || oneDriveInBin(cur) {
 				r.index[p.ItemID] = key
@@ -304,6 +308,13 @@ func (r *oneDriveRun) collect(ctx context.Context, start string) ([]outlook.OneD
 	if start == "" {
 		start = initial
 	}
+	if start != initial {
+		if err := outlook.NewDriveDeltaGuard(r.driveRoot).Start(start); err != nil {
+			logger.Warn(ctx, "onedrive saved delta link rejected; re-baselining",
+				logger.String("prefix", r.prefix), logger.ErrorField(err))
+			start = initial
+		}
+	}
 	items, link, err := r.readDelta(ctx, start)
 	if errors.Is(err, outlook.ErrOneDriveDeltaInvalid) && start != initial {
 		logger.Warn(ctx, "onedrive delta invalid; re-baselining", logger.String("prefix", r.prefix))
@@ -315,6 +326,10 @@ func (r *oneDriveRun) collect(ctx context.Context, start string) ([]outlook.OneD
 }
 
 func (r *oneDriveRun) readDelta(ctx context.Context, requestURL string) ([]outlook.OneDriveItem, string, error) {
+	guard := outlook.NewDriveDeltaGuard(r.driveRoot)
+	if err := guard.Start(requestURL); err != nil {
+		return nil, "", err
+	}
 	var items []outlook.OneDriveItem
 	for {
 		if err := r.heartbeat(); err != nil {
@@ -326,12 +341,18 @@ func (r *oneDriveRun) readDelta(ctx context.Context, requestURL string) ([]outlo
 		}
 		items = append(items, page.Items...)
 		if next := strings.TrimSpace(page.NextLink); next != "" {
+			if err := guard.Next(next); err != nil {
+				return nil, "", err
+			}
 			requestURL = next
 			continue
 		}
 		final := strings.TrimSpace(page.DeltaLink)
 		if final == "" {
 			return nil, "", fmt.Errorf("onedrive delta finished without @odata.deltaLink")
+		}
+		if err := guard.Final(final); err != nil {
+			return nil, "", err
 		}
 		return items, final, nil
 	}

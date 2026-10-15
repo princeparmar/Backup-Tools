@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	gormio "gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Job message status constants
@@ -156,6 +158,9 @@ type TaskMemory struct {
 	// SharePointLayout is the SharePoint layout version (same values as OneDriveLayout); below
 	// OneDriveLayoutTree the next run rewrites every meta/data pair in the folder tree.
 	SharePointLayout int `json:"sharepoint_layout,omitempty"`
+	// SharePointLibraries is every document library of the site seen by a backup, by drive id.
+	// The default library's cursor stays in SharePointDeltaLink / SharePointLayout.
+	SharePointLibraries map[string]SharePointLibraryState `json:"sharepoint_libraries,omitempty"`
 
 	// Outlook mail incremental sync state (Graph mail delta per mail folder).
 	// OutlookMailFolderDeltas maps mailFolderId -> deltaLink for every backed-up folder.
@@ -184,6 +189,18 @@ type TaskMemory struct {
 	// Teams incremental sync state (per-channel; delta OR re-enumeration+dedup)
 	TeamsChannels map[string]TeamsChannelSyncState `json:"teams_channels,omitempty"`
 
+	// Teams tenant job state (outlook_teams with resource_type tenant). Kept small: per-user and
+	// per-team cursors live in StorX under the job's own _state/ prefix.
+	TeamsLayout   int                     `json:"teams_layout,omitempty"`
+	TeamsCursor   *TeamsCursor            `json:"teams_cursor,omitempty"`
+	TeamsCalls    *TeamsWindowState       `json:"teams_calls,omitempty"`
+	TeamsPstn     *TeamsWindowState       `json:"teams_pstn,omitempty"`
+	TeamsDirect   *TeamsWindowState       `json:"teams_direct_routing,omitempty"`
+	TeamsFailures map[string]TeamsFailure `json:"teams_failures,omitempty"`
+	TeamsMerge    *TeamsMergeState        `json:"teams_merge,omitempty"`
+	// TeamsLastRun is the outcome of the last tenant run (counts per status, warnings).
+	TeamsLastRun *TeamsRunSummary `json:"teams_last_run,omitempty"`
+
 	// Groups incremental sync state (independent sub-syncs)
 	GroupsSync GroupsSyncState `json:"groups_sync,omitempty"`
 }
@@ -194,6 +211,79 @@ type TeamsChannelSyncState struct {
 	DeltaLink    string     `json:"delta_link,omitempty"`
 	LastSyncAt   *time.Time `json:"last_sync_at,omitempty"`
 	BaselineDone bool       `json:"baseline_done,omitempty"`
+}
+
+// TeamsLayoutFiles is the Teams layout with one .teams object per message (no meta/data pairs).
+const TeamsLayoutFiles = 2
+
+// TeamsCursor is where the tenant run resumes: per phase, the last resource it finished.
+type TeamsCursor struct {
+	Phase     string            `json:"phase,omitempty"`
+	Positions map[string]string `json:"positions,omitempty"`
+	// Round counts runs; the start of each phase's resource list rotates with it.
+	Round int `json:"round,omitempty"`
+}
+
+// TeamsWindow is one closed time range of a windowed stream. PageLink is the page being
+// processed; it moves only after every item of that page is written or recorded.
+type TeamsWindow struct {
+	From     time.Time `json:"from"`
+	To       time.Time `json:"to"`
+	PageLink string    `json:"page_link,omitempty"`
+	// Dirty is set when an item of the current pass failed; the window is then replayed.
+	Dirty bool `json:"dirty,omitempty"`
+	// Held counts runs that replayed this window because an item of it could not be stored.
+	Held      int        `json:"held,omitempty"`
+	HeldSince *time.Time `json:"held_since,omitempty"`
+}
+
+// TeamsWindowState is a windowed stream (call records, PSTN or Direct Routing chunks): open
+// windows plus the end of the newest closed one.
+type TeamsWindowState struct {
+	Windows       []TeamsWindow `json:"windows,omitempty"`
+	HighWater     *time.Time    `json:"high_water,omitempty"`
+	LastSuccessAt *time.Time    `json:"last_success_at,omitempty"`
+	Status        string        `json:"status,omitempty"`
+	StatusCode    string        `json:"status_code,omitempty"`
+	SkipUntil     *time.Time    `json:"skip_until,omitempty"`
+}
+
+// TeamsFailure is one failed item, window or stream of the tenant job. Keys end in the item's
+// own id so two failures never overwrite each other. No content is stored here.
+type TeamsFailure struct {
+	Phase        string            `json:"phase"`
+	Kind         string            `json:"kind"`
+	ResourceType string            `json:"resource_type,omitempty"`
+	ResourceID   string            `json:"resource_id,omitempty"`
+	ItemIDs      map[string]string `json:"item_ids,omitempty"`
+	HTTPStatus   int               `json:"http_status,omitempty"`
+	ErrorCode    string            `json:"error_code,omitempty"`
+	ErrorMessage string            `json:"error_message,omitempty"`
+	Since        time.Time         `json:"since"`
+	LastAt       time.Time         `json:"last_at"`
+	Attempts     int               `json:"attempts"`
+	SkipUntil    *time.Time        `json:"skip_until,omitempty"`
+	Status       string            `json:"status,omitempty"`
+}
+
+// TeamsMergeState records the merge of old per-team jobs into the tenant job, step by step.
+type TeamsMergeState struct {
+	Imported map[string]TeamsMergeImport `json:"imported,omitempty"`
+	Paused   map[string]time.Time        `json:"paused,omitempty"`
+}
+
+// TeamsMergeImport is one old per-team job imported into the tenant job's selection.
+type TeamsMergeImport struct {
+	TeamID     string    `json:"team_id"`
+	ImportedAt time.Time `json:"imported_at"`
+}
+
+// TeamsRunSummary is the outcome of the last tenant run.
+type TeamsRunSummary struct {
+	FinishedAt time.Time      `json:"finished_at"`
+	Statuses   map[string]int `json:"statuses,omitempty"`
+	Warnings   []string       `json:"warnings,omitempty"`
+	Stopped    string         `json:"stopped,omitempty"`
 }
 
 // GroupsSyncState holds independent cursors for group conversations, calendar, and drive.
@@ -228,6 +318,23 @@ type GroupsDriveSyncState struct {
 type CalendarCalendarState struct {
 	BaselineDone bool   `json:"baseline_done,omitempty"`
 	SyncToken    string `json:"sync_token,omitempty"`
+}
+
+// SharePointLibraryState is the backup state of one document library of a SharePoint site.
+type SharePointLibraryState struct {
+	Name   string `json:"name,omitempty"`
+	WebURL string `json:"web_url,omitempty"`
+	// Default marks the site's default library, backed up at the site prefix.
+	Default bool `json:"default,omitempty"`
+	// DeltaLink and Layout are the library's cursor (unused for the default library).
+	DeltaLink    *string `json:"delta_link,omitempty"`
+	Layout       int     `json:"layout,omitempty"`
+	BaselineDone bool    `json:"baseline_done,omitempty"`
+	LastSyncAt   string  `json:"last_sync_at,omitempty"`
+	LastError    string  `json:"last_error,omitempty"`
+	// RemovedAt is set once a complete library listing no longer had the library and its backup
+	// moved to BIN.
+	RemovedAt string `json:"removed_at,omitempty"`
 }
 
 // DriveSharedDriveState holds baseline + change token for one Shared Drive.
@@ -770,7 +877,7 @@ var GoogleAutosyncMethods = []string{
 
 // MicrosoftAutosyncMethods is the ordered set of Microsoft autosync job methods.
 var MicrosoftAutosyncMethods = []string{
-	"outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive", "outlook_sharepoint", "outlook_teams", "outlook_groups",
+	"outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive", "outlook_sharepoint", "outlook_teams",
 }
 
 // AllAutosyncMethods returns Google + Microsoft methods for shared dashboard queries
@@ -795,7 +902,7 @@ func IsGoogleAutosyncMethod(method string) bool {
 // IsMicrosoftAutosyncMethod is true for Microsoft autosync methods that use shared credentials.
 func IsMicrosoftAutosyncMethod(method string) bool {
 	switch strings.TrimSpace(method) {
-	case "outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive", "outlook_sharepoint", "outlook_teams", "outlook_groups":
+	case "outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive", "outlook_sharepoint", "outlook_teams":
 		return true
 	default:
 		return false
@@ -1531,6 +1638,158 @@ func (r *CronJobRepository) UpdateCronJobFieldsForCron(ID uint, fields map[strin
 	return nil
 }
 
+// ErrJobOwnershipLost means the run's task is no longer the running task of its job (another
+// worker took the job over after a missed heartbeat); the run must stop without writing.
+var ErrJobOwnershipLost = errors.New("job run lost ownership: its task is no longer running")
+
+// taskOwnsJobClause is true while taskID is the running task of the job.
+const taskOwnsJobClause = "EXISTS (SELECT 1 FROM task_listing_dbs WHERE task_listing_dbs.id = ? AND task_listing_dbs.cron_job_id = ? AND task_listing_dbs.status = ?)"
+
+// CheckpointTaskMemory saves task_memory only while taskID is still the job's running task.
+// taskID 0 (no task row, e.g. a manual run) saves unconditionally.
+func (r *CronJobRepository) CheckpointTaskMemory(jobID, taskID uint, mem TaskMemory) error {
+	q := r.db.Model(&CronJobListingDB{}).Where("id = ?", jobID)
+	if taskID != 0 {
+		q = q.Where(taskOwnsJobClause, taskID, jobID, TaskStatusRunning)
+	}
+	res := q.Update("task_memory", mem)
+	if res.Error != nil {
+		return fmt.Errorf("checkpoint task memory: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return ErrJobOwnershipLost
+	}
+	return nil
+}
+
+// TaskOwnsJob reports whether taskID is still the job's running task (taskID 0 always owns).
+func (r *CronJobRepository) TaskOwnsJob(jobID, taskID uint) (bool, error) {
+	if taskID == 0 {
+		return true, nil
+	}
+	var n int64
+	err := r.db.Model(&TaskListingDB{}).
+		Where("id = ? AND cron_job_id = ? AND status = ?", taskID, jobID, TaskStatusRunning).
+		Count(&n).Error
+	if err != nil {
+		return false, fmt.Errorf("check job ownership: %w", err)
+	}
+	return n > 0, nil
+}
+
+// UpdateJobInputData changes a job's input_data with the job row locked, so two concurrent
+// selection changes never lose each other's additions.
+func (r *CronJobRepository) UpdateJobInputData(jobID uint, change func(map[string]interface{}) map[string]interface{}) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		var job CronJobListingDB
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", jobID).First(&job).Error; err != nil {
+			return fmt.Errorf("lock job %d: %w", jobID, err)
+		}
+		in := map[string]interface{}{}
+		if job.InputData != nil && job.InputData.Json() != nil {
+			for k, v := range *job.InputData.Json() {
+				in[k] = v
+			}
+		}
+		out := change(in)
+		return tx.Model(&CronJobListingDB{}).Where("id = ?", jobID).
+			Update("input_data", database.NewDbJsonFromValue(out)).Error
+	})
+}
+
+// TeamsMergedJobMessage is the message of an old per-team Teams job paused after the tenant job
+// imported it.
+const TeamsMergedJobMessage = "Merged into the Teams tenant job; backups are kept"
+
+// TeamsSelectionAddTeam adds a team (and optional channels) to a Teams job selection. Union only:
+// an empty team_ids list means all teams and stays all; an absent or empty channel list for a
+// team means all of its channels and wins over any list.
+func TeamsSelectionAddTeam(in map[string]interface{}, teamID string, channelIDs []string) map[string]interface{} {
+	teamID = strings.TrimSpace(teamID)
+	if in == nil {
+		in = map[string]interface{}{}
+	}
+	if teamID == "" {
+		return in
+	}
+	teams := InputStringList(in["team_ids"])
+	listed := len(teams) == 0 || slices.Contains(teams, teamID)
+	perTeam := map[string][]string{}
+	if raw, ok := in["team_channel_ids"].(map[string]interface{}); ok {
+		for k, v := range raw {
+			perTeam[k] = InputStringList(v)
+		}
+	} else if raw, ok := in["team_channel_ids"].(map[string][]string); ok {
+		for k, v := range raw {
+			perTeam[k] = v
+		}
+	}
+	channels := compactStrings(channelIDs)
+	if listed {
+		if cur, ok := perTeam[teamID]; ok && len(cur) > 0 {
+			if len(channels) == 0 {
+				delete(perTeam, teamID)
+			} else {
+				perTeam[teamID] = compactStrings(append(cur, channels...))
+			}
+		}
+	} else {
+		in["team_ids"] = append(teams, teamID)
+		if len(channels) > 0 {
+			perTeam[teamID] = channels
+		}
+	}
+	if len(perTeam) > 0 {
+		in["team_channel_ids"] = perTeam
+	} else {
+		delete(in, "team_channel_ids")
+	}
+	return in
+}
+
+// TeamsSelectionAddUsers adds users to a Teams job selection (empty user_ids = all users).
+func TeamsSelectionAddUsers(in map[string]interface{}, userIDs []string) map[string]interface{} {
+	if in == nil {
+		in = map[string]interface{}{}
+	}
+	cur := InputStringList(in["user_ids"])
+	if len(cur) == 0 {
+		return in
+	}
+	in["user_ids"] = compactStrings(append(cur, userIDs...))
+	return in
+}
+
+// InputStringList reads a string list from decoded input_data JSON.
+func InputStringList(v interface{}) []string {
+	var out []string
+	switch t := v.(type) {
+	case []string:
+		out = append(out, t...)
+	case []interface{}:
+		for _, item := range t {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+	}
+	return compactStrings(out)
+}
+
+func compactStrings(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
 // DeleteAllJobsAndTasksByEmail deletes all jobs and related tasks for a user by email
 // Returns the list of deleted job IDs and task IDs
 func (r *CronJobRepository) DeleteAllJobsAndTasksByEmail(email string) ([]uint, []uint, error) {
@@ -1711,7 +1970,7 @@ func (r *CronJobRepository) validateJobForActivation(job *CronJobListingDB) erro
 		if emailVal == "" {
 			return fmt.Errorf("email is required in input_data or job name for gmail method")
 		}
-	case "outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive", "outlook_sharepoint", "outlook_teams", "outlook_groups",
+	case "outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive", "outlook_sharepoint", "outlook_teams",
 		"google_drive", "google_photos", "google_calendar", "google_contacts":
 		if strings.HasPrefix(job.Method, "outlook") && r.jobUsesMicrosoftApplicationAuth(job) {
 			if strings.TrimSpace(job.Name) == "" {
@@ -1720,14 +1979,9 @@ func (r *CronJobRepository) validateJobForActivation(job *CronJobListingDB) erro
 		} else if strings.TrimSpace(r.ResolvedRefreshToken(job)) == "" {
 			return fmt.Errorf("refresh_token is required in input_data for %s method", job.Method)
 		}
-		if job.Method == "outlook_teams" {
+		if job.Method == "outlook_teams" && job.ResourceType != ResourceTypeTenant {
 			if JobTeamsTeamID(job) == "" {
 				return fmt.Errorf("team_id is required in input_data for outlook_teams method")
-			}
-		}
-		if job.Method == "outlook_groups" {
-			if JobGroupsGroupID(job) == "" {
-				return fmt.Errorf("group_id is required in input_data for outlook_groups method")
 			}
 		}
 		if job.Method == "outlook_sharepoint" {
@@ -1847,17 +2101,6 @@ func JobTeamsTeamID(job *CronJobListingDB) string {
 		return ""
 	}
 	if v, ok := (*job.InputData.Json())["team_id"].(string); ok {
-		return strings.TrimSpace(v)
-	}
-	return ""
-}
-
-// JobGroupsGroupID returns input_data.group_id for outlook_groups jobs.
-func JobGroupsGroupID(job *CronJobListingDB) string {
-	if job == nil || job.InputData == nil || job.InputData.Json() == nil {
-		return ""
-	}
-	if v, ok := (*job.InputData.Json())["group_id"].(string); ok {
 		return strings.TrimSpace(v)
 	}
 	return ""

@@ -100,13 +100,13 @@ func TestCreateMicrosoftResourceJob_identityNotName(t *testing.T) {
 	migrateIdentityModels(t, gdb)
 	jobs := NewCronJobRepository(gdb)
 
-	// Same display name in two tenants, and a team and its group sharing one ID.
+	// Same display name in two tenants, and a team and a site sharing one ID.
 	cases := []struct {
 		tenant, typ, id, method string
 	}{
 		{"tenant-a", ResourceTypeTeam, "id-1", "outlook_teams"},
 		{"tenant-b", ResourceTypeTeam, "id-1", "outlook_teams"},
-		{"tenant-a", ResourceTypeGroup, "id-1", "outlook_groups"},
+		{"tenant-a", ResourceTypeSite, "id-1", "outlook_sharepoint"},
 		{"tenant-a", ResourceTypeTeam, "id-2", "outlook_teams"},
 	}
 	for _, c := range cases {

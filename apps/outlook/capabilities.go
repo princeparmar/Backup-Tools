@@ -18,7 +18,6 @@ const (
 	CapabilityOneDrive     = "onedrive_backup"
 	CapabilitySharePoint   = "sharepoint_backup"
 	CapabilityTeamsChannel = "teams_channel_backup"
-	CapabilityGroups       = "groups_backup"
 )
 
 // Capability error codes (shared contract capability_errors[*].code).
@@ -44,7 +43,7 @@ const MaxCapabilitySampleUsers = 3
 // CapabilityOrder is the stable capability list.
 var CapabilityOrder = []string{
 	CapabilityListUsers, CapabilityMail, CapabilityCalendar, CapabilityContacts,
-	CapabilityOneDrive, CapabilitySharePoint, CapabilityTeamsChannel, CapabilityGroups,
+	CapabilityOneDrive, CapabilitySharePoint, CapabilityTeamsChannel,
 }
 
 // CapabilityRequiredRoles lists the Graph application permissions each capability needs.
@@ -56,23 +55,228 @@ var CapabilityRequiredRoles = map[string][]string{
 	CapabilityOneDrive:     {"Files.Read.All"},
 	CapabilitySharePoint:   {"Sites.Read.All"},
 	CapabilityTeamsChannel: {"Group.Read.All", "Channel.ReadBasic.All", "ChannelMessage.Read.All"},
-	CapabilityGroups:       {"Group.Read.All"},
 }
 
-// ConsentRequiredRoles decide granted vs insufficient at consent time.
+// ConsentRequiredRoles decide granted vs insufficient at consent time. Optional roles (Teams
+// features) are not listed, so tenants consented before they were added keep working.
 var ConsentRequiredRoles = []string{"User.Read.All", "Mail.Read"}
 
 // roleSupersets lists granted roles that also satisfy a required role.
 var roleSupersets = map[string][]string{
-	"user.read.all":           {"user.readwrite.all", "directory.read.all", "directory.readwrite.all"},
-	"mail.read":               {"mail.readwrite"},
-	"calendars.read":          {"calendars.readwrite"},
-	"contacts.read":           {"contacts.readwrite"},
-	"files.read.all":          {"files.readwrite.all"},
-	"sites.read.all":          {"sites.readwrite.all", "sites.fullcontrol.all"},
-	"group.read.all":          {"group.readwrite.all", "directory.read.all", "directory.readwrite.all"},
-	"channel.readbasic.all":   {"channel.readwrite.all"},
-	"channelmessage.read.all": {},
+	"user.read.all":                 {"user.readwrite.all", "directory.read.all", "directory.readwrite.all"},
+	"mail.read":                     {"mail.readwrite"},
+	"calendars.read":                {"calendars.readwrite"},
+	"contacts.read":                 {"contacts.readwrite"},
+	"files.read.all":                {"files.readwrite.all"},
+	"files.readwrite.all":           {"sites.readwrite.all", "sites.fullcontrol.all"},
+	"sites.read.all":                {"sites.readwrite.all", "sites.fullcontrol.all"},
+	"sites.readwrite.all":           {"sites.fullcontrol.all"},
+	"group.read.all":                {"group.readwrite.all", "directory.read.all", "directory.readwrite.all"},
+	"channel.readbasic.all":         {"channel.readwrite.all"},
+	"channelmessage.read.all":       {},
+	"chat.read.all":                 {"chat.readwrite.all"},
+	"team.readbasic.all":            {"teamsettings.read.all", "teamsettings.readwrite.all", "group.read.all", "group.readwrite.all", "directory.read.all", "directory.readwrite.all"},
+	"onlinemeetings.read.all":       {"onlinemeetings.readwrite.all"},
+	"callrecord-pstncalls.read.all": {"callrecords.read.all"},
+	"teammember.read.all":           {"teammember.readwrite.all"},
+	"channelmember.read.all":        {"channelmember.readwrite.all"},
+	"teamworktag.read.all":          {"teamworktag.readwrite.all"},
+	"teamsappinstallation.readforteam.all": {"teamsappinstallation.read.all", "teamsappinstallation.readwriteforteam.all",
+		"teamsappinstallation.readwriteandconsentforteam.all", "group.read.all", "group.readwrite.all", "directory.read.all", "directory.readwrite.all"},
+	"teamstab.read.all": {"teamstab.readwrite.all", "teamstab.readwriteforteam.all", "group.read.all", "group.readwrite.all",
+		"directory.read.all", "directory.readwrite.all"},
+}
+
+// Teams features of the tenant Teams job, recorded per feature in its _status.json.
+const (
+	TeamsFeatureChannelMessages = "teams_channel_messages"
+	TeamsFeatureChats           = "teams_chat_backup"
+	TeamsFeatureMeetings        = "teams_meetings_backup"
+	TeamsFeatureAttendance      = "teams_meeting_attendance"
+	TeamsFeatureTranscripts     = "teams_meeting_transcripts"
+	TeamsFeatureRecordings      = "teams_meeting_recordings"
+	TeamsFeatureCalendar        = "teams_calendar"
+	TeamsFeatureCallRecords     = "teams_call_records"
+	TeamsFeaturePSTN            = "teams_pstn_calls"
+	TeamsFeatureDirectRouting   = "teams_direct_routing_calls"
+	TeamsFeatureConfig          = "teams_config"
+	TeamsFeatureQA              = "teams_meeting_qa"
+)
+
+// TeamsFeatureRoles lists the application roles each Teams feature needs.
+var TeamsFeatureRoles = map[string][]string{
+	TeamsFeatureChannelMessages: {"Team.ReadBasic.All", "Channel.ReadBasic.All", "ChannelMessage.Read.All"},
+	TeamsFeatureChats:           {"User.Read.All", "Chat.Read.All"},
+	TeamsFeatureMeetings:        {"User.Read.All", "Calendars.Read", "OnlineMeetings.Read.All"},
+	TeamsFeatureAttendance:      {"OnlineMeetingArtifact.Read.All"},
+	TeamsFeatureTranscripts:     {"OnlineMeetingTranscript.Read.All"},
+	TeamsFeatureRecordings:      {"OnlineMeetingRecording.Read.All"},
+	TeamsFeatureCalendar:        {"User.Read.All", "Calendars.Read"},
+	TeamsFeatureCallRecords:     {"CallRecords.Read.All"},
+	TeamsFeaturePSTN:            {"CallRecord-PstnCalls.Read.All"},
+	TeamsFeatureDirectRouting:   {"CallRecord-PstnCalls.Read.All"},
+	TeamsFeatureConfig:          {"Team.ReadBasic.All", "Channel.ReadBasic.All"},
+}
+
+// TeamsConfigPartRoles lists the application role each part of a team's config needs (the team
+// settings come with the team itself). Channel parts are prefixed with "channel_".
+var TeamsConfigPartRoles = map[string]string{
+	"members":         "TeamMember.Read.All",
+	"apps":            "TeamsAppInstallation.ReadForTeam.All",
+	"tags":            "TeamworkTag.Read.All",
+	"channel_members": "ChannelMember.Read.All",
+	"channel_tabs":    "TeamsTab.Read.All",
+}
+
+// TeamsConfigPartsNotConsented returns, per config part whose role is not granted, that role. A
+// nil granted list (a token without a roles claim) reports nothing.
+func TeamsConfigPartsNotConsented(granted []string) map[string]string {
+	if granted == nil {
+		return nil
+	}
+	out := map[string]string{}
+	for part, role := range TeamsConfigPartRoles {
+		if len(MissingApplicationRoles(granted, role)) > 0 {
+			out[part] = role
+		}
+	}
+	return out
+}
+
+// Requests of the meeting attendance backup (TeamsFeatureAttendance).
+const (
+	// TeamsAttendanceLookup: GET /users/{id}/onlineMeetings?$filter=JoinWebUrl eq '{joinWebUrl}'.
+	TeamsAttendanceLookup = "lookup"
+	// TeamsAttendanceReports: GET /users/{id}/onlineMeetings/{meetingId}/attendanceReports and
+	// GET …/attendanceReports/{reportId}?$expand=attendanceRecords.
+	TeamsAttendanceReports = "reports"
+)
+
+// TeamsPermission is the permission of one request: any of App in an app-only token's roles, or
+// any of Delegated in a delegated token's scp (documented least and higher privileged).
+type TeamsPermission struct {
+	App       []string
+	Delegated []string
+}
+
+// TeamsAttendancePermissions lists the permission of each attendance request. Application
+// calls also need an application access policy granted to the organizer, which no token shows.
+var TeamsAttendancePermissions = map[string]TeamsPermission{
+	TeamsAttendanceLookup: {
+		App:       []string{"OnlineMeetings.Read.All", "OnlineMeetings.ReadWrite.All"},
+		Delegated: []string{"OnlineMeetings.Read", "OnlineMeetings.ReadWrite"},
+	},
+	// OnlineMeetingArtifact.Read.Chat (resource-specific consent) only covers town hall and
+	// webinar reports, so it doesn't count here.
+	TeamsAttendanceReports: {
+		App:       []string{"OnlineMeetingArtifact.Read.All"},
+		Delegated: []string{"OnlineMeetingArtifact.Read.All"},
+	},
+}
+
+// TeamsAttendanceNotConsented returns, per attendance request the token can't make, the least
+// privileged permission it lacks. A delegated token (scp claim) is checked by its scopes, any
+// other readable token as app-only by its roles (none granted when the claim is absent). A token
+// whose claims can't be read reports nothing: Graph's answer decides.
+func TeamsAttendanceNotConsented(accessToken string) map[string]string {
+	var c struct {
+		Roles []string `json:"roles"`
+		Scp   *string  `json:"scp"`
+	}
+	if decodeJWTClaims(accessToken, &c) != nil {
+		return nil
+	}
+	granted, delegated := c.Roles, c.Scp != nil
+	if delegated {
+		granted = strings.Fields(*c.Scp)
+	}
+	have := make(map[string]bool, len(granted))
+	for _, g := range granted {
+		have[strings.ToLower(strings.TrimSpace(g))] = true
+	}
+	out := map[string]string{}
+	for req, p := range TeamsAttendancePermissions {
+		accepted := p.App
+		if delegated {
+			accepted = p.Delegated
+		}
+		ok := false
+		for _, a := range accepted {
+			ok = ok || have[strings.ToLower(a)]
+		}
+		if !ok {
+			out[req] = accepted[0]
+		}
+	}
+	return out
+}
+
+// Retained message history (getAllRetainedMessages): earlier versions of edited messages kept by
+// a Teams retention policy. Application permission only; it uses the role of the message backup
+// it belongs to, so it adds no consent.
+const (
+	TeamsFeatureChannelHistory = "teams_channel_message_history"
+	TeamsFeatureChatHistory    = "teams_chat_message_history"
+)
+
+var TeamsHistoryRoles = map[string]string{
+	TeamsFeatureChannelHistory: "ChannelMessage.Read.All",
+	TeamsFeatureChatHistory:    "Chat.Read.All",
+}
+
+// TeamsHistoryNotConsented returns, per history feature the token can't use, why: the missing
+// application role, or that delegated tokens aren't supported. The API is application-only, so
+// only a token whose roles claim shows the role counts as consented; an unreadable token too is
+// reported (no roles to show).
+func TeamsHistoryNotConsented(accessToken string) map[string]string {
+	var c struct {
+		Roles []string `json:"roles"`
+		Scp   *string  `json:"scp"`
+	}
+	readable := decodeJWTClaims(accessToken, &c) == nil
+	out := map[string]string{}
+	for feature, role := range TeamsHistoryRoles {
+		switch {
+		case !readable:
+			out[feature] = "application role " + role + " not shown by the token"
+		case c.Scp != nil:
+			out[feature] = "delegated tokens are not supported"
+		case len(MissingApplicationRoles(c.Roles, role)) > 0:
+			out[feature] = "missing role " + role
+		}
+	}
+	return out
+}
+
+// TeamsQARoles are the roles of meeting Q&A (TeamsFeatureQA). They join TeamsFeatureRoles when
+// the feature is released, so until then no tenant reports it as not consented.
+var TeamsQARoles = []string{"User.Read.All", "EngagementMeetingConversation.Read.All"}
+
+// TeamsFeaturesNotConsented returns, per Teams feature whose roles are not all granted, the first
+// missing role. A nil granted list (a token without a roles claim) reports nothing.
+func TeamsFeaturesNotConsented(granted []string) map[string]string {
+	if granted == nil {
+		return nil
+	}
+	out := map[string]string{}
+	for feature, roles := range TeamsFeatureRoles {
+		if missing := MissingApplicationRoles(granted, roles...); len(missing) > 0 {
+			out[feature] = missing[0]
+		}
+	}
+	return out
+}
+
+// TokenRoles returns the application roles of an app-only access token (nil when the token has
+// no readable roles claim, for example a delegated token).
+func TokenRoles(accessToken string) []string {
+	var c struct {
+		Roles []string `json:"roles"`
+	}
+	if decodeJWTClaims(accessToken, &c) != nil || c.Roles == nil {
+		return nil
+	}
+	return c.Roles
 }
 
 // MissingApplicationRoles returns required roles not satisfied by granted (supersets count).
@@ -163,8 +367,6 @@ func EvaluateCapabilities(ctx context.Context, in CapabilityInput) CapabilityRes
 			outcome, msg = probeTenantPath(ctx, in.AccessToken, "/sites/root?$select=id")
 		case CapabilityTeamsChannel:
 			outcome, msg = probeTeamsChannel(ctx, in.AccessToken)
-		case CapabilityGroups:
-			outcome, msg = probeGroups(ctx, in.AccessToken)
 		default:
 			if !res.Probed {
 				// Roles present but no directory users to probe yet; re-run after directory sync.
@@ -357,20 +559,4 @@ func probeTeamsChannel(ctx context.Context, token string) (probeOutcome, string)
 		}
 		return probeNotProvisioned, lastMsg
 	}
-}
-
-func probeGroups(ctx context.Context, token string) (probeOutcome, string) {
-	groupsURL := graphBaseURL + "/groups?$filter=" + url.QueryEscape("groupTypes/any(c:c eq 'Unified')") + "&$select=id&$top=1"
-	body, status, err := graphDoJSON(ctx, token, http.MethodGet, groupsURL, nil)
-	if outcome, msg := classifyProbe(status, body, err); outcome != probeOK {
-		return outcome, msg
-	}
-	var parsed struct {
-		Value []json.RawMessage `json:"value"`
-	}
-	_ = json.Unmarshal(body, &parsed)
-	if len(parsed.Value) == 0 {
-		return probeNotProvisioned, "no Microsoft 365 groups in tenant"
-	}
-	return probeOK, ""
 }

@@ -6,7 +6,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/mstenant"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/labstack/echo/v4"
@@ -103,7 +105,6 @@ func HandleMicrosoftAutosyncUsersGroupsList(c echo.Context) error {
 	jobs, err := database.CronJobRepo.ListJobsForUsersGroups(userID, &repo.UsersGroupsJobFilter{
 		Domain:      strings.TrimSpace(c.QueryParam("domain")),
 		EmailSearch: strings.TrimSpace(c.QueryParam("search")),
-		OrgUnitPath: parseUsersGroupsOrgUnitPath(c),
 	})
 	if err != nil {
 		return usersGroupsInternalError(c, ctx, "Failed to list microsoft jobs for users-groups", err)
@@ -125,26 +126,26 @@ func HandleMicrosoftAutosyncUsersGroupsList(c echo.Context) error {
 	allEntities = filterUsersGroupsEntitiesByActive(allEntities, mailboxJobs, activeFilter)
 	allEntities = filterUsersGroupsEntitiesByAccountType(allEntities, accountType)
 	allEntities = filterUsersGroupsEntitiesByCredentialStatus(allEntities, credentialStatus)
-	allEntities = filterUsersGroupsEntitiesByOrgUnitPath(allEntities, parseUsersGroupsOrgUnitPath(c))
-	orgUnits := uniqueUsersGroupsOrgUnitPaths(allEntities)
 	entities, pagination := paginateUsersGroupsEntities(allEntities, limit, offset)
 
-	sharepointJobs, teamsJobs, groupsJobs := splitMicrosoftOrgResourceJobs(orgResourceJobs)
+	sharepointJobs, teamsJobs := splitMicrosoftOrgResourceJobs(orgResourceJobs)
 	sharepointSites := buildMicrosoftSharePointSiteResources(sharepointJobs, policies)
-	teamsResources := buildMicrosoftTeamsResources(teamsJobs, policies)
-	// Groups backup is hidden for now.
-	// groupsResources := buildMicrosoftGroupsResources(groupsJobs, policies)
-	_ = groupsJobs
-	groupsResources := []map[string]interface{}{}
+	teamsResources := buildMicrosoftTeamsResources(teamsJobs, policies, func(tenantID string) []repo.MicrosoftResourceDB {
+		if database.MicrosoftResourceRepo == nil {
+			return nil
+		}
+		rows, err := database.MicrosoftResourceRepo.ListByTenantAndType(tenantID, repo.ResourceTypeTeam)
+		if err != nil {
+			logger.Warn(ctx, "list tenant teams", logger.ErrorField(err))
+		}
+		return rows
+	})
 	if method != "" && method != "outlook_sharepoint" {
 		sharepointSites = nil
 	}
 	if method != "" && method != "outlook_teams" {
 		teamsResources = nil
 	}
-	// if method != "" && method != "outlook_groups" {
-	// 	groupsResources = nil
-	// }
 
 	resp := map[string]interface{}{
 		"connected_as": "",
@@ -154,9 +155,7 @@ func HandleMicrosoftAutosyncUsersGroupsList(c echo.Context) error {
 		"organization_resources": map[string]interface{}{
 			"sharepoint_sites": sharepointSites,
 			"teams":            teamsResources,
-			"groups":           groupsResources,
 		},
-		"org_units":  orgUnits,
 		"pagination": pagination,
 	}
 	if connectedCred != nil {
@@ -229,7 +228,7 @@ func addMicrosoftResourceIdentity(entry map[string]interface{}, job *repo.CronJo
 func splitMicrosoftUsersGroupsJobs(jobs []repo.CronJobListingDB) (mailboxJobs, orgResourceJobs []repo.CronJobListingDB) {
 	for i := range jobs {
 		switch strings.TrimSpace(jobs[i].Method) {
-		case "outlook_sharepoint", "outlook_teams", "outlook_groups":
+		case "outlook_sharepoint", "outlook_teams":
 			orgResourceJobs = append(orgResourceJobs, jobs[i])
 		default:
 			mailboxJobs = append(mailboxJobs, jobs[i])
@@ -238,18 +237,16 @@ func splitMicrosoftUsersGroupsJobs(jobs []repo.CronJobListingDB) (mailboxJobs, o
 	return mailboxJobs, orgResourceJobs
 }
 
-func splitMicrosoftOrgResourceJobs(jobs []repo.CronJobListingDB) (sharepointJobs, teamsJobs, groupsJobs []repo.CronJobListingDB) {
+func splitMicrosoftOrgResourceJobs(jobs []repo.CronJobListingDB) (sharepointJobs, teamsJobs []repo.CronJobListingDB) {
 	for i := range jobs {
 		switch strings.TrimSpace(jobs[i].Method) {
 		case "outlook_sharepoint":
 			sharepointJobs = append(sharepointJobs, jobs[i])
 		case "outlook_teams":
 			teamsJobs = append(teamsJobs, jobs[i])
-		case "outlook_groups":
-			groupsJobs = append(groupsJobs, jobs[i])
 		}
 	}
-	return sharepointJobs, teamsJobs, groupsJobs
+	return sharepointJobs, teamsJobs
 }
 
 func primaryMicrosoftUsersGroupsCredential(credByID map[uint]*repo.GoogleBackupCredentialDB) *repo.GoogleBackupCredentialDB {
@@ -294,15 +291,71 @@ func buildMicrosoftSharePointSiteResources(jobs []repo.CronJobListingDB, policie
 			}
 		}
 		addMicrosoftResourceIdentity(entry, job)
+		if libs := sharePointLibraryRows(job, entry["vault_prefix"]); len(libs) > 0 {
+			entry["libraries"] = libs
+		}
 		out = append(out, entry)
 	}
 	return out
 }
 
-func buildMicrosoftTeamsResources(jobs []repo.CronJobListingDB, policies map[uint]*repo.AutosyncBackupPolicyDB) []map[string]interface{} {
+// sharePointLibraryRows lists the document libraries a site job has backed up, default library
+// first, each with its vault prefix. Jobs from before library tracking have none.
+func sharePointLibraryRows(job *repo.CronJobListingDB, sitePrefix interface{}) []map[string]interface{} {
+	libs := job.TaskMemory.SharePointLibraries
+	if len(libs) == 0 {
+		return nil
+	}
+	site, _ := sitePrefix.(string)
+	ids := make([]string, 0, len(libs))
+	for id := range libs {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		a, b := libs[ids[i]], libs[ids[j]]
+		if a.Default != b.Default {
+			return a.Default
+		}
+		if !strings.EqualFold(a.Name, b.Name) {
+			return strings.ToLower(a.Name) < strings.ToLower(b.Name)
+		}
+		return ids[i] < ids[j]
+	})
+	out := make([]map[string]interface{}, 0, len(ids))
+	for _, id := range ids {
+		st := libs[id]
+		prefix := site
+		if !st.Default && site != "" {
+			prefix = outlook.SharePointLibraryPrefix(site, id)
+		}
+		out = append(out, map[string]interface{}{
+			"drive_id":     id,
+			"name":         st.Name,
+			"web_url":      st.WebURL,
+			"default":      st.Default,
+			"removed":      st.RemovedAt != "",
+			"removed_at":   st.RemovedAt,
+			"last_sync_at": st.LastSyncAt,
+			"failed":       st.LastError != "",
+			"vault_prefix": prefix,
+		})
+	}
+	return out
+}
+
+// buildMicrosoftTeamsResources lists one row per team. A tenant Teams job gives a row per selected
+// team (every known team of the tenant when the selection is "all"), each pointing to the team's
+// vault prefix; knownTeams returns the tenant's team rows (names live there, not in the job).
+// Old per-team jobs paused by the merge are marked merged.
+func buildMicrosoftTeamsResources(jobs []repo.CronJobListingDB, policies map[uint]*repo.AutosyncBackupPolicyDB,
+	knownTeams func(tenantID string) []repo.MicrosoftResourceDB) []map[string]interface{} {
 	out := make([]map[string]interface{}, 0, len(jobs))
 	for i := range jobs {
 		job := &jobs[i]
+		if job.ResourceType == repo.ResourceTypeTenant {
+			out = append(out, buildMicrosoftTenantTeamsRows(job, policies, knownTeams)...)
+			continue
+		}
 		teamName := strings.TrimSpace(job.Name)
 		teamID, teamWebURL := "", ""
 		if job.InputData != nil && job.InputData.Json() != nil {
@@ -332,36 +385,63 @@ func buildMicrosoftTeamsResources(jobs []repo.CronJobListingDB, policies map[uin
 			}
 		}
 		addMicrosoftResourceIdentity(entry, job)
+		if !job.Active && strings.TrimSpace(job.Message) == repo.TeamsMergedJobMessage {
+			entry["merged"] = true
+		}
 		out = append(out, entry)
 	}
 	return out
 }
 
-func buildMicrosoftGroupsResources(jobs []repo.CronJobListingDB, policies map[uint]*repo.AutosyncBackupPolicyDB) []map[string]interface{} {
-	out := make([]map[string]interface{}, 0, len(jobs))
-	for i := range jobs {
-		job := &jobs[i]
-		groupName := strings.TrimSpace(job.Name)
-		groupID, groupMail := "", ""
-		if job.InputData != nil && job.InputData.Json() != nil {
-			raw := *job.InputData.Json()
-			if v, ok := raw["group_id"].(string); ok {
-				groupID = strings.TrimSpace(v)
+func buildMicrosoftTenantTeamsRows(job *repo.CronJobListingDB, policies map[uint]*repo.AutosyncBackupPolicyDB,
+	knownTeams func(tenantID string) []repo.MicrosoftResourceDB) []map[string]interface{} {
+	tenantID, _, _, _ := microsoftJobStorageIdentity(job)
+	var in map[string]interface{}
+	if job.InputData != nil && job.InputData.Json() != nil {
+		in = *job.InputData.Json()
+	}
+	known := map[string]repo.MicrosoftResourceDB{}
+	var all []string
+	if knownTeams != nil {
+		for _, t := range knownTeams(tenantID) {
+			known[t.ExternalID] = t
+			if t.State == "" || t.State == "active" {
+				all = append(all, t.ExternalID)
 			}
-			if v, ok := raw["group_mail"].(string); ok {
-				groupMail = strings.TrimSpace(v)
-			}
-			if v, ok := raw["group_name"].(string); ok && strings.TrimSpace(v) != "" {
-				groupName = strings.TrimSpace(v)
+		}
+	}
+	teamIDs := repo.InputStringList(in["team_ids"])
+	allTeams := len(teamIDs) == 0
+	if allTeams {
+		teamIDs = all
+	}
+	perTeam, _ := in["team_channel_ids"].(map[string]interface{})
+	out := make([]map[string]interface{}, 0, len(teamIDs))
+	for _, teamID := range teamIDs {
+		t := known[teamID]
+		webURL := ""
+		if t.Metadata != nil && t.Metadata.Json() != nil {
+			if v, ok := (*t.Metadata.Json())["web_url"].(string); ok {
+				webURL = strings.TrimSpace(v)
 			}
 		}
 		entry := map[string]interface{}{
-			"name":       groupName,
-			"group_id":   groupID,
-			"group_mail": groupMail,
-			"job_id":     job.ID,
-			"method":     job.Method,
-			"active":     job.Active,
+			"name":          strings.TrimSpace(t.DisplayName),
+			"team_id":       teamID,
+			"team_web_url":  webURL,
+			"job_id":        job.ID,
+			"method":        job.Method,
+			"active":        job.Active,
+			"tenant_job":    true,
+			"all_teams":     allTeams,
+			"tenant_id":     tenantID,
+			"resource_type": repo.ResourceTypeTeam,
+			"resource_id":   teamID,
+			"vault_prefix":  outlook.ResourceKeyPrefix(tenantID, repo.ResourceTypeTeam, teamID),
+			"job_vault":     outlook.ResourceKeyPrefix(tenantID, repo.ResourceTypeTenant, tenantID),
+		}
+		if ch := repo.InputStringList(perTeam[teamID]); len(ch) > 0 {
+			entry["channel_ids"] = ch
 		}
 		if job.PolicyID > 0 {
 			if p, ok := policies[job.PolicyID]; ok && p != nil {
@@ -369,7 +449,6 @@ func buildMicrosoftGroupsResources(jobs []repo.CronJobListingDB, policies map[ui
 				entry["interval"] = p.Interval
 			}
 		}
-		addMicrosoftResourceIdentity(entry, job)
 		out = append(out, entry)
 	}
 	return out

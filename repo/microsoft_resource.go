@@ -19,7 +19,8 @@ const (
 	ResourceTypeDrive   = "drive"
 	ResourceTypeSite    = "site"
 	ResourceTypeTeam    = "team"
-	ResourceTypeGroup   = "group"
+	// ResourceTypeTenant is a job over a whole tenant (the Teams job; resource_id = tenant id).
+	ResourceTypeTenant = "tenant"
 )
 
 // Microsoft resource lifecycle states.
@@ -195,6 +196,33 @@ func (r *MicrosoftResourceRepository) AddUnavailableService(tenantID, resourceTy
 		}
 	}
 	meta["unavailable_services"] = append(services, service)
+	return r.db.Model(&MicrosoftResourceDB{}).
+		Where("tenant_id = ? AND resource_type = ? AND external_id = ?", row.TenantID, row.ResourceType, row.ExternalID).
+		Updates(map[string]interface{}{"metadata": database.NewDbJsonFromValue(meta), "updated_at": time.Now().UTC()}).Error
+}
+
+// RemoveUnavailableService clears a service recorded by AddUnavailableService once it backs up again.
+func (r *MicrosoftResourceRepository) RemoveUnavailableService(tenantID, resourceType, externalID, service string) error {
+	row, err := r.Get(tenantID, resourceType, externalID)
+	if err != nil || row == nil {
+		return err
+	}
+	services := row.UnavailableServices()
+	kept := make([]string, 0, len(services))
+	for _, s := range services {
+		if s != service {
+			kept = append(kept, s)
+		}
+	}
+	if len(kept) == len(services) {
+		return nil
+	}
+	meta := row.MetadataMap()
+	if len(kept) == 0 {
+		delete(meta, "unavailable_services")
+	} else {
+		meta["unavailable_services"] = kept
+	}
 	return r.db.Model(&MicrosoftResourceDB{}).
 		Where("tenant_id = ? AND resource_type = ? AND external_id = ?", row.TenantID, row.ResourceType, row.ExternalID).
 		Updates(map[string]interface{}{"metadata": database.NewDbJsonFromValue(meta), "updated_at": time.Now().UTC()}).Error

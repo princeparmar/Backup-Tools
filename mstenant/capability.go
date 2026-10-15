@@ -19,8 +19,6 @@ var capabilityForService = map[string]string{
 	"sharepoint":         outlook.CapabilitySharePoint,
 	"outlook_teams":      outlook.CapabilityTeamsChannel,
 	"teams":              outlook.CapabilityTeamsChannel,
-	"outlook_groups":     outlook.CapabilityGroups,
-	"groups":             outlook.CapabilityGroups,
 }
 
 // CapabilityForService returns the capability required by a service or job method ("" if none).

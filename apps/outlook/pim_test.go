@@ -205,10 +205,10 @@ func TestRestoreContactReportsGraphError(t *testing.T) {
 	}
 }
 
-func TestListPIMPageSkipsCancelledAndFollowsNextLink(t *testing.T) {
+func TestListPIMPageKeepsCancelledAndFollowsNextLink(t *testing.T) {
 	var srvURL string
 	srv, _ := newPIMGraph(t, func(string) int { return http.StatusOK }, func(p string) string {
-		return `{"value":[{"id":"e1","changeKey":"a"},{"id":"e2","changeKey":"b","isCancelled":true},{"changeKey":"noid"}],
+		return `{"value":[{"id":"e1","changeKey":"a","type":"seriesMaster"},{"id":"e2","changeKey":"b","isCancelled":true},{"changeKey":"noid"}],
 		  "@odata.nextLink":"` + srvURL + `/next"}`
 	})
 	srvURL = srv.URL
@@ -216,7 +216,8 @@ func TestListPIMPageSkipsCancelledAndFollowsNextLink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 1 || items[0].ID != "e1" || items[0].ChangeKey != "a" || next != srv.URL+"/next" {
+	if len(items) != 2 || items[0].ID != "e1" || items[0].ChangeKey != "a" || !items[0].SeriesMaster ||
+		items[1].ID != "e2" || items[1].SeriesMaster || next != srv.URL+"/next" {
 		t.Fatalf("items=%+v next=%q", items, next)
 	}
 }

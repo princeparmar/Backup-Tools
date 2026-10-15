@@ -38,8 +38,6 @@ const (
 	APIServiceSharePoint        APIService = "sharepoint"
 	APIServiceOutlookTeams      APIService = "outlook_teams"
 	APIServiceTeams             APIService = "teams"
-	APIServiceOutlookGroups     APIService = "outlook_groups"
-	APIServiceGroups            APIService = "groups"
 )
 
 const (
@@ -111,15 +109,12 @@ var serviceConfigs = map[string]ServiceConfig{
 		Source: "outlook", ObjectType: "outlook_sharepoint", Provider: RestoreProviderMicrosoft,
 		BatchSize: 25, MaxConcurrency: 10, VaultConcurrency: 5, RateLimitPerSec: 20,
 	},
+	// Teams posts run one at a time so a thread root is reposted before the replies stored after
+	// it, which then go under the reposted root.
 	"outlook_teams": {
 		Method: "outlook_teams", Bucket: satellite.ReserveBucket_OutlookTeams,
 		Source: "outlook", ObjectType: "outlook_teams", Provider: RestoreProviderMicrosoft,
-		BatchSize: 50, MaxConcurrency: 10, VaultConcurrency: 10, RateLimitPerSec: 20,
-	},
-	"outlook_groups": {
-		Method: "outlook_groups", Bucket: satellite.ReserveBucket_OutlookGroups,
-		Source: "outlook", ObjectType: "outlook_groups", Provider: RestoreProviderMicrosoft,
-		BatchSize: 50, MaxConcurrency: 10, VaultConcurrency: 10, RateLimitPerSec: 20,
+		BatchSize: 50, MaxConcurrency: 1, VaultConcurrency: 1, RateLimitPerSec: 20,
 	},
 }
 
@@ -140,8 +135,6 @@ var APIServiceToMethod = map[APIService]string{
 	APIServiceSharePoint:        "outlook_sharepoint",
 	APIServiceOutlookTeams:      "outlook_teams",
 	APIServiceTeams:             "outlook_teams",
-	APIServiceOutlookGroups:     "outlook_groups",
-	APIServiceGroups:            "outlook_groups",
 }
 
 // IsMicrosoftRestoreMethod reports whether method is a Microsoft restore-all method.
@@ -172,11 +165,14 @@ type RestoreDeps struct {
 	MicrosoftToken string
 	// MicrosoftApplication is true when MicrosoftToken is an app-only token (no /me; target /users/{id}).
 	MicrosoftApplication bool
-	RefreshToken         string
-	AuthMode             string
-	LoginID              string
-	GoogleWriteSubject   string // DWD impersonation target (migration cross-mailbox); defaults to LoginID
-	Config               ServiceConfig
+	// MicrosoftTargetUser is the directory id an app-only restore into another account writes to
+	// ("" restores into the backed-up user).
+	MicrosoftTargetUser string
+	RefreshToken        string
+	AuthMode            string
+	LoginID             string
+	GoogleWriteSubject  string // DWD impersonation target (migration cross-mailbox); defaults to LoginID
+	Config              ServiceConfig
 	// WriteCred is the credential used to mint provider tokens (Google or Microsoft).
 	WriteCred *repo.GoogleBackupCredentialDB
 

@@ -22,15 +22,14 @@ func IsMicrosoftMethod(method string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(method)), "outlook")
 }
 
-// MicrosoftResourceTypeForMethod returns the resource type a Microsoft job method backs up.
+// MicrosoftResourceTypeForMethod returns the resource type new jobs of a Microsoft method back up.
+// Teams is one job per tenant; older per-team rows keep their stored "team".
 func MicrosoftResourceTypeForMethod(method string) string {
 	switch strings.ToLower(strings.TrimSpace(method)) {
 	case "outlook_sharepoint":
 		return ResourceTypeSite
 	case "outlook_teams":
-		return ResourceTypeTeam
-	case "outlook_groups":
-		return ResourceTypeGroup
+		return ResourceTypeTenant
 	default:
 		return ResourceTypeUser
 	}
@@ -164,6 +163,30 @@ func (r *CronJobRepository) ListMicrosoftResourceJobs(userID, tenantID, resource
 		return nil, fmt.Errorf("list microsoft resource jobs: %w", err)
 	}
 	return rows, nil
+}
+
+// ListTeamJobsForMerge returns the per-team outlook_teams jobs (active or paused) with exactly
+// the identity of a Teams tenant job: same StorX user, tenant, sync type and credential.
+func (r *CronJobRepository) ListTeamJobsForMerge(tenantJob *CronJobListingDB) ([]CronJobListingDB, error) {
+	if tenantJob == nil {
+		return nil, nil
+	}
+	var rows []CronJobListingDB
+	err := r.db.Where("user_id = ? AND provider = ? AND tenant_id = ? AND method = ? AND sync_type = ? AND resource_type = ? AND id <> ?",
+		tenantJob.UserID, CredentialProviderMicrosoft, normalizeTenantID(tenantJob.TenantID), "outlook_teams",
+		tenantJob.SyncType, ResourceTypeTeam, tenantJob.ID).
+		Order("id ASC").Find(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("list team jobs for merge: %w", err)
+	}
+	cred := JobCredentialID(tenantJob)
+	out := rows[:0]
+	for _, j := range rows {
+		if JobCredentialID(&j) == cred {
+			out = append(out, j)
+		}
+	}
+	return out, nil
 }
 
 // ListActiveMicrosoftJobsByTenant returns every active Microsoft job of a tenant (all users).

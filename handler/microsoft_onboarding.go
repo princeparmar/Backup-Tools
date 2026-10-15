@@ -30,14 +30,8 @@ type TeamsOnboardingInput struct {
 	ChannelIDs []string `json:"channel_ids,omitempty"`
 }
 
-// GroupsOnboardingInput selects an M365 Group for outlook_groups jobs.
-type GroupsOnboardingInput struct {
-	GroupID   string `json:"group_id"`
-	GroupName string `json:"group_name,omitempty"`
-}
-
-// MicrosoftBackupOnboardingRequest is the Satellite → Backup-Tools MS job create body.
-// Both POST /microsoft/auto-sync/job and POST /microsoft/backup/onboarding/jobs use this.
+// MicrosoftBackupOnboardingRequest is the Satellite → Backup-Tools MS job create body
+// (POST /microsoft/auto-sync/job).
 //
 // auth_mode=delegated (backup_mode=self): the caller's own mailbox with their refresh token.
 // auth_mode=application (backup_mode=organization): tenant app-only token; authorized only by tenant
@@ -54,6 +48,7 @@ type MicrosoftBackupOnboardingRequest struct {
 	SatelliteUserID string                          `json:"satellite_user_id"`
 	RefreshToken    string                          `json:"refresh_token"`
 	StorxToken      string                          `json:"storx_token,omitempty"`
+	Active          *bool                           `json:"active,omitempty"`
 	AuthMode        string                          `json:"auth_mode"`
 	BackupMode      string                          `json:"backup_mode"`
 	AllUsers        bool                            `json:"all_users"`
@@ -63,13 +58,12 @@ type MicrosoftBackupOnboardingRequest struct {
 	BackupScope     string                          `json:"backup_scope"`
 	Sites           []SharePointSiteOnboardingInput `json:"sites"`
 	Teams           []TeamsOnboardingInput          `json:"teams"`
-	Groups          []GroupsOnboardingInput         `json:"groups"`
 	PolicyID        *uint                           `json:"policy_id,omitempty"`
 	PolicyName      string                          `json:"policy_name,omitempty"`
-	PolicyScope     string                          `json:"policy_scope,omitempty"`
-	// EmailOrgUnits overrides the directory org unit per mailbox (application mode fills it from the directory).
-	EmailOrgUnits    map[string]string               `json:"email_org_units,omitempty"`
-	OrgUnitSchedules map[string]OrgUnitScheduleInput `json:"org_unit_schedules,omitempty"`
+
+	// allSites is set when every tenant site was selected (no site named); reconcile then adds
+	// jobs for new sites.
+	allSites bool
 }
 
 const (
@@ -95,7 +89,6 @@ func (r *MicrosoftBackupOnboardingRequest) trim() {
 	r.BackupScope = strings.TrimSpace(r.BackupScope)
 	r.AuthMode = strings.ToLower(strings.TrimSpace(r.AuthMode))
 	r.BackupMode = strings.ToLower(strings.TrimSpace(r.BackupMode))
-	r.PolicyScope = strings.TrimSpace(r.PolicyScope)
 }
 
 func (r *MicrosoftBackupOnboardingRequest) hasPolicyID() bool {
@@ -110,8 +103,30 @@ func (r *MicrosoftBackupOnboardingRequest) applicationMode() bool {
 	return r.BackupMode == microsoftBackupModeOrganization
 }
 
+// wantsAllUsers reports whether every directory user is selected. backup_scope=all_tenant only
+// means all users when the request names no users; with user_ids, emails or shared mailboxes it
+// covers tenant resources (teams, sites) and the named users stay the only mailboxes.
 func (r *MicrosoftBackupOnboardingRequest) wantsAllUsers() bool {
+	if r.AllUsers {
+		return true
+	}
+	return r.wantsAllTenantResources() && !r.namesUsers()
+}
+
+// wantsAllTenantResources reports whether teams and sites expand to every tenant resource.
+func (r *MicrosoftBackupOnboardingRequest) wantsAllTenantResources() bool {
 	return r.AllUsers || strings.EqualFold(r.BackupScope, "all_tenant")
+}
+
+func (r *MicrosoftBackupOnboardingRequest) namesUsers() bool {
+	for _, list := range [][]string{r.UserIDs, r.Emails, r.SharedMailboxes} {
+		for _, s := range list {
+			if strings.TrimSpace(s) != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (r *MicrosoftBackupOnboardingRequest) validate(userID string) error {
@@ -141,7 +156,7 @@ func (r *MicrosoftBackupOnboardingRequest) validate(userID string) error {
 	if err := validateMicrosoftOnboardingServiceNames(r.Services); err != nil {
 		return err
 	}
-	if !r.hasPolicyID() && r.Interval == "" && !strings.EqualFold(r.PolicyScope, OnboardingPolicyScopeOrgUnit) {
+	if !r.hasPolicyID() && r.Interval == "" {
 		return errors.New("interval is required")
 	}
 	if r.ProjectID == "" {
@@ -162,31 +177,25 @@ func validateMicrosoftOnboardingServiceNames(raw []string) error {
 	return nil
 }
 
-func (r *MicrosoftBackupOnboardingRequest) toGoogleShape() *GoogleBackupOnboardingRequest {
-	return r.toGoogleShapeWithAccountType(r.AccountType)
-}
-
 func (r *MicrosoftBackupOnboardingRequest) toGoogleShapeWithAccountType(accountType string) *GoogleBackupOnboardingRequest {
 	acct := strings.TrimSpace(accountType)
 	if acct == "" {
 		acct = "personal"
 	}
 	return &GoogleBackupOnboardingRequest{
-		Services:         r.Services,
-		Interval:         r.Interval,
-		On:               r.On,
-		GoogleEmail:      r.MicrosoftEmail,
-		AccountType:      acct,
-		ProjectID:        r.ProjectID,
-		SatelliteUserID:  r.SatelliteUserID,
-		RefreshToken:     r.RefreshToken,
-		StorxToken:       r.StorxToken,
-		Emails:           r.Emails,
-		EmailOrgUnits:    r.EmailOrgUnits,
-		PolicyID:         r.PolicyID,
-		PolicyName:       r.PolicyName,
-		PolicyScope:      r.PolicyScope,
-		OrgUnitSchedules: r.OrgUnitSchedules,
+		Services:        r.Services,
+		Interval:        r.Interval,
+		On:              r.On,
+		GoogleEmail:     r.MicrosoftEmail,
+		AccountType:     acct,
+		ProjectID:       r.ProjectID,
+		SatelliteUserID: r.SatelliteUserID,
+		RefreshToken:    r.RefreshToken,
+		StorxToken:      r.StorxToken,
+		Active:          r.Active,
+		Emails:          r.Emails,
+		PolicyID:        r.PolicyID,
+		PolicyName:      r.PolicyName,
 	}
 }
 
@@ -221,7 +230,6 @@ type microsoftApplicationOnboarding struct {
 	AccessToken string
 	Tenant      *repo.MicrosoftTenantDB
 	Emails      []string
-	OrgUnits    map[string]string
 	// Users maps lower-case email to the directory user (object ID is the job resource ID).
 	Users map[string]outlook.DirectoryUser
 }
@@ -241,7 +249,7 @@ func authorizeMicrosoftApplicationOnboarding(
 			return nil, mstenant.CapabilityDenied(tenant, capName)
 		}
 	}
-	out := &microsoftApplicationOnboarding{AccessToken: token, Tenant: tenant, OrgUnits: map[string]string{}, Users: map[string]outlook.DirectoryUser{}}
+	out := &microsoftApplicationOnboarding{AccessToken: token, Tenant: tenant, Users: map[string]outlook.DirectoryUser{}}
 	if !needsUsers {
 		return out, nil
 	}
@@ -307,7 +315,6 @@ func authorizeMicrosoftApplicationOnboarding(
 			continue
 		}
 		out.Emails = append(out.Emails, email)
-		out.OrgUnits[email] = u.OrgUnitPath()
 		out.Users[strings.ToLower(email)] = u
 	}
 	if len(out.Emails) == 0 {
@@ -331,10 +338,10 @@ func dedupeStrings(in []string) []string {
 	return out
 }
 
-// expandMicrosoftApplicationResources fills teams/groups/sites with every tenant resource when the
+// expandMicrosoftApplicationResources fills teams/sites with every tenant resource when the
 // request asks for all users and listed none (app-only, full pagination).
 func expandMicrosoftApplicationResources(ctx context.Context, req *MicrosoftBackupOnboardingRequest, token string, services []string) error {
-	if !req.wantsAllUsers() {
+	if !req.wantsAllTenantResources() {
 		return nil
 	}
 	for _, svc := range services {
@@ -350,18 +357,6 @@ func expandMicrosoftApplicationResources(ctx context.Context, req *MicrosoftBack
 			for _, t := range teams {
 				req.Teams = append(req.Teams, TeamsOnboardingInput{TeamID: t.ID, TeamName: t.DisplayName})
 			}
-		// Groups backup is hidden for now.
-		// case "groups":
-		// 	if len(req.Groups) > 0 {
-		// 		continue
-		// 	}
-		// 	groups, err := outlook.ListTenantGroups(ctx, token, 0)
-		// 	if err != nil {
-		// 		return err
-		// 	}
-		// 	for _, g := range groups {
-		// 		req.Groups = append(req.Groups, GroupsOnboardingInput{GroupID: g.ID, GroupName: g.DisplayName})
-		// 	}
 		case "sharepoint":
 			if len(req.Sites) > 0 {
 				continue
@@ -373,22 +368,14 @@ func expandMicrosoftApplicationResources(ctx context.Context, req *MicrosoftBack
 			for _, s := range sites {
 				req.Sites = append(req.Sites, SharePointSiteOnboardingInput{SiteID: s.ID})
 			}
+			req.allSites = true
 		}
 	}
 	return nil
 }
 
-// HandleMicrosoftAutomaticSyncCreate and HandleMicrosoftBackupOnboardingJobs share one create path.
+// HandleMicrosoftAutomaticSyncCreate creates Microsoft backup jobs (POST /microsoft/auto-sync/job).
 func HandleMicrosoftAutomaticSyncCreate(c echo.Context) error {
-	return handleMicrosoftOnboardingCreate(c)
-}
-
-// HandleMicrosoftBackupOnboardingJobs is an alias of HandleMicrosoftAutomaticSyncCreate.
-func HandleMicrosoftBackupOnboardingJobs(c echo.Context) error {
-	return handleMicrosoftOnboardingCreate(c)
-}
-
-func handleMicrosoftOnboardingCreate(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
@@ -437,16 +424,6 @@ func runMicrosoftOnboardingCreate(c echo.Context, ctx context.Context, userID st
 		orgToken = appCtx.AccessToken
 		emails = appCtx.Emails
 		users = appCtx.Users
-		if len(appCtx.OrgUnits) > 0 {
-			merged := make(map[string]string, len(appCtx.OrgUnits)+len(req.EmailOrgUnits))
-			for k, v := range appCtx.OrgUnits {
-				merged[k] = v
-			}
-			for k, v := range req.EmailOrgUnits {
-				merged[k] = v
-			}
-			req.EmailOrgUnits = merged
-		}
 		if err := expandMicrosoftApplicationResources(ctx, req, orgToken, services); err != nil {
 			return c.JSON(http.StatusBadGateway, map[string]interface{}{"error": err.Error()})
 		}
@@ -477,9 +454,6 @@ func runMicrosoftOnboardingCreate(c echo.Context, ctx context.Context, userID st
 	}
 
 	gReq := req.toGoogleShapeWithAccountType(effectiveAccountType)
-	if err := validateOrgUnitOnboardingSchedules(gReq, emails); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
-	}
 
 	hasJobs, herr := database.CronJobRepo.HasLinkedJobsForCredential(userID, cred.ID)
 	if herr != nil {
@@ -490,7 +464,7 @@ func runMicrosoftOnboardingCreate(c echo.Context, ctx context.Context, userID st
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": perr.Error()})
 	}
 	isFirstConnection := isFirstOnboardingConnection(cred, hasJobs, userHasPolicies)
-	if !isFirstConnection && !req.hasPolicyID() && req.PolicyName == "" && !gReq.isOrgUnitPolicyScope() {
+	if !isFirstConnection && !req.hasPolicyID() && req.PolicyName == "" {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{
 			"error": "policy_id or policy_name is required for subsequent connections",
 		})
@@ -511,7 +485,7 @@ func runMicrosoftOnboardingCreate(c echo.Context, ctx context.Context, userID st
 	resourceToken := orgToken
 
 	policyBatch := &onboardingPolicyBatch{}
-	if !gReq.isOrgUnitPolicyScope() && !req.hasPolicyID() {
+	if !req.hasPolicyID() {
 		policyBatch.allID = credentialPolicyIDByName(database, userID, cred.ID, req.PolicyName)
 	}
 	var jobs []onboardingJobResult
@@ -545,23 +519,14 @@ func runMicrosoftOnboardingCreate(c echo.Context, ctx context.Context, userID st
 			jobs = append(jobs, j...)
 			failed = append(failed, f...)
 			continue
-			// Groups backup is hidden for now.
-			// case "outlook_groups":
-			// 	j, f := createMicrosoftJobsForGroups(c, ctx, userID, svc, syncType, schedule, gReq, cred, tenantID, isFirstConnection, policyBatch, req.Groups, resourceToken, database)
-			// 	jobs = append(jobs, j...)
-			// 	failed = append(failed, f...)
-			// 	continue
 		}
-		targetEmails := emails
-		if gReq.isOrgUnitPolicyScope() {
-			targetEmails = emailsWithOrgUnitService(gReq, emails, svc)
-		}
-		j, f := createMicrosoftJobsForServiceEmails(c, userID, method, svc, syncType, schedule, gReq, cred, tenantID, isFirstConnection, policyBatch, targetEmails, users, database)
+		j, f := createMicrosoftJobsForServiceEmails(c, userID, method, svc, syncType, schedule, gReq, cred, tenantID, isFirstConnection, policyBatch, emails, users, database)
 		jobs = append(jobs, j...)
 		failed = append(failed, f...)
 	}
 	if application && syncType != "one_time" {
-		saveMicrosoftTenantScopes(database, userID, cred, tenantID, syncType, servicesOut, req.wantsAllUsers(), policyBatch.allID)
+		allTypes := map[string]bool{repo.ResourceTypeUser: req.wantsAllUsers(), repo.ResourceTypeSite: req.allSites}
+		saveMicrosoftTenantScopes(database, userID, cred, tenantID, syncType, servicesOut, allTypes, policyBatch.allID)
 	}
 
 	policies := onboardingPoliciesFromBatch(database, policyBatch)
@@ -575,28 +540,6 @@ func runMicrosoftOnboardingCreate(c echo.Context, ctx context.Context, userID st
 		"services":  nullSliceJSON(servicesOut),
 		"policies":  nullSliceJSON(policies),
 	})
-}
-
-// emailsWithOrgUnitService keeps mailboxes whose org unit schedule includes svc.
-func emailsWithOrgUnitService(req *GoogleBackupOnboardingRequest, emails []string, svc string) []string {
-	out := make([]string, 0, len(emails))
-	for _, email := range emails {
-		path := orgUnitPathForEmail(req, email)
-		if path == "" {
-			path = "/"
-		}
-		svcs, err := servicesForOnboardingOrgUnit(req, path)
-		if err != nil {
-			continue
-		}
-		for _, s := range svcs {
-			if s == svc {
-				out = append(out, email)
-				break
-			}
-		}
-	}
-	return out
 }
 
 func createMicrosoftJobsForServiceEmails(
@@ -621,7 +564,7 @@ func createMicrosoftJobsForServiceEmails(
 			continue
 		}
 		identity := repo.MicrosoftJobIdentity{TenantID: tenantID, ResourceType: repo.ResourceTypeUser, ResourceID: u.ObjectID}
-		job, fail := onboardMicrosoftJob(c, database, userID, svc, targetEmail, method, syncType, orgUnitInputData(req, targetEmail),
+		job, fail := onboardMicrosoftJob(c, database, userID, svc, targetEmail, method, syncType, nil,
 			identity, schedule, req, cred, isFirstConnection, policyBatch)
 		jobs, failed = appendMicrosoftJobResult(jobs, failed, job, fail)
 	}
@@ -676,17 +619,24 @@ func onboardMicrosoftJob(
 		}
 		return fail(err.Error())
 	}
-	if syncType != "one_time" && hasStorxTokenAtJobCreate(req, cred) {
-		if err := database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(true)); err != nil {
-			return fail(fmt.Sprintf("job %d created but activation failed: %v", cronJob.ID, err))
+	entry := &onboardingJobResult{Service: svc, Email: name, JobID: cronJob.ID}
+	if syncType != "one_time" {
+		if shouldActivateOnboardingJob(req, cred) {
+			if err := database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(true)); err != nil {
+				return fail(fmt.Sprintf("job %d created but activation failed: %v", cronJob.ID, err))
+			}
+			entry.Active = true
+		} else if isForcedInactiveOnboarding(req) {
+			_ = database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(false))
 		}
 	}
-	entry := &onboardingJobResult{Service: svc, Email: name, JobID: cronJob.ID}
 	if latest, _ := database.CronJobRepo.GetCronJobByID(cronJob.ID); latest != nil {
 		entry.PolicyID = latest.PolicyID
 	}
 	if syncType == "one_time" {
-		if task, taskErr := database.TaskRepo.CreateTaskForCronJob(cronJob.ID); taskErr == nil {
+		if isForcedInactiveOnboarding(req) {
+			_ = database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(false))
+		} else if task, taskErr := database.TaskRepo.CreateTaskForCronJob(cronJob.ID); taskErr == nil {
 			entry.TaskID = task.ID
 		}
 	}
@@ -829,9 +779,9 @@ func createMicrosoftJobsForTeams(
 		return nil, []onboardingFailedResult{{Service: svc, Error: "organization resources require backup_mode=organization"}}
 	}
 
-	var jobs []onboardingJobResult
 	var failed []onboardingFailedResult
 	seen := make(map[string]struct{})
+	var resolvedTeams []*outlook.ResolvedTeam
 
 	for _, teamIn := range teams {
 		teamID := strings.TrimSpace(teamIn.TeamID)
@@ -853,101 +803,48 @@ func createMicrosoftJobsForTeams(
 		}
 		seen[resolved.TeamID] = struct{}{}
 
-		jobName := strings.TrimSpace(resolved.TeamName)
-		if jobName == "" {
-			jobName = outlook.SanitizeTeamsTeamKey(resolved.TeamID)
-		}
-		extra := map[string]interface{}{
-			"team_id":      resolved.TeamID,
-			"team_name":    resolved.TeamName,
-			"team_web_url": resolved.TeamWebURL,
-			"group_id":     resolved.GroupID,
-		}
-		if len(resolved.ChannelIDs) > 0 {
-			extra["channel_ids"] = resolved.ChannelIDs
-		}
 		if _, err := database.MicrosoftResourceRepo.Upsert(repo.MicrosoftResourceDB{
 			TenantID: tenantID, ResourceType: repo.ResourceTypeTeam, ExternalID: resolved.TeamID, DisplayName: resolved.TeamName,
 			Metadata: dbjson.NewDbJsonFromValue(map[string]interface{}{"web_url": resolved.TeamWebURL, "group_id": resolved.GroupID}),
 		}); err != nil {
-			failed = append(failed, onboardingFailedResult{Service: svc, Email: jobName, Error: err.Error()})
+			failed = append(failed, onboardingFailedResult{Service: svc, Email: resolved.TeamID, Error: err.Error()})
 			continue
 		}
-		identity := repo.MicrosoftJobIdentity{TenantID: tenantID, ResourceType: repo.ResourceTypeTeam, ResourceID: resolved.TeamID}
-		job, fail := onboardMicrosoftJob(c, database, userID, svc, jobName, "outlook_teams", syncType, extra,
-			identity, schedule, req, cred, isFirstConnection, policyBatch)
-		jobs, failed = appendMicrosoftJobResult(jobs, failed, job, fail)
+		resolvedTeams = append(resolvedTeams, resolved)
 	}
-	return jobs, failed
-}
-
-func createMicrosoftJobsForGroups(
-	c echo.Context,
-	ctx context.Context,
-	userID, svc, syncType string,
-	schedule onboardingSchedule,
-	req *GoogleBackupOnboardingRequest,
-	cred *repo.GoogleBackupCredentialDB,
-	tenantID string,
-	isFirstConnection bool,
-	policyBatch *onboardingPolicyBatch,
-	groups []GroupsOnboardingInput,
-	accessToken string,
-	database *db.PostgresDb,
-) ([]onboardingJobResult, []onboardingFailedResult) {
-	if len(groups) == 0 {
-		return nil, []onboardingFailedResult{{Service: svc, Error: "groups is required when groups service is selected"}}
-	}
-	if strings.TrimSpace(accessToken) == "" {
-		return nil, []onboardingFailedResult{{Service: svc, Error: "organization resources require backup_mode=organization"}}
+	if len(resolvedTeams) == 0 {
+		return nil, failed
 	}
 
-	var jobs []onboardingJobResult
-	var failed []onboardingFailedResult
-	seen := make(map[string]struct{})
-
-	for _, groupIn := range groups {
-		groupID := strings.TrimSpace(groupIn.GroupID)
-		if groupID == "" {
-			failed = append(failed, onboardingFailedResult{Service: svc, Error: "each group requires group_id"})
-			continue
-		}
-		resolved, rerr := outlook.ResolveGroup(ctx, accessToken, groupID)
-		if rerr != nil {
-			label := groupID
-			if strings.TrimSpace(groupIn.GroupName) != "" {
-				label = strings.TrimSpace(groupIn.GroupName)
+	// One Teams job per tenant: created with the first selection, or the selection of the
+	// existing job is extended (union only, row locked).
+	first := resolvedTeams[0]
+	extra := map[string]interface{}{"team_ids": []string{first.TeamID}}
+	if len(first.ChannelIDs) > 0 {
+		extra["team_channel_ids"] = map[string][]string{first.TeamID: first.ChannelIDs}
+	}
+	for _, t := range resolvedTeams[1:] {
+		extra = repo.TeamsSelectionAddTeam(extra, t.TeamID, t.ChannelIDs)
+	}
+	identity := repo.MicrosoftJobIdentity{TenantID: tenantID, ResourceType: repo.ResourceTypeTenant, ResourceID: tenantID}
+	job, fail := onboardMicrosoftJob(c, database, userID, svc, teamsTenantJobName, "outlook_teams", syncType, extra,
+		identity, schedule, req, cred, isFirstConnection, policyBatch)
+	if job != nil && job.Existing {
+		err := database.CronJobRepo.UpdateJobInputData(job.JobID, func(in map[string]interface{}) map[string]interface{} {
+			for _, t := range resolvedTeams {
+				in = repo.TeamsSelectionAddTeam(in, t.TeamID, t.ChannelIDs)
 			}
-			failed = append(failed, onboardingFailedResult{Service: svc, Email: label, Error: rerr.Error()})
-			continue
+			return in
+		})
+		if err != nil {
+			return nil, append(failed, onboardingFailedResult{Service: svc, Email: teamsTenantJobName, Error: err.Error()})
 		}
-		if _, dup := seen[resolved.GroupID]; dup {
-			continue
-		}
-		seen[resolved.GroupID] = struct{}{}
-
-		jobName := strings.TrimSpace(resolved.GroupName)
-		if jobName == "" {
-			jobName = outlook.SanitizeGroupsGroupKey(resolved.GroupID)
-		}
-		extra := map[string]interface{}{
-			"group_id":   resolved.GroupID,
-			"group_name": resolved.GroupName,
-			"group_mail": resolved.GroupMail,
-		}
-		if _, err := database.MicrosoftResourceRepo.Upsert(repo.MicrosoftResourceDB{
-			TenantID: tenantID, ResourceType: repo.ResourceTypeGroup, ExternalID: resolved.GroupID, DisplayName: resolved.GroupName, Mail: resolved.GroupMail,
-		}); err != nil {
-			failed = append(failed, onboardingFailedResult{Service: svc, Email: jobName, Error: err.Error()})
-			continue
-		}
-		identity := repo.MicrosoftJobIdentity{TenantID: tenantID, ResourceType: repo.ResourceTypeGroup, ResourceID: resolved.GroupID}
-		job, fail := onboardMicrosoftJob(c, database, userID, svc, jobName, "outlook_groups", syncType, extra,
-			identity, schedule, req, cred, isFirstConnection, policyBatch)
-		jobs, failed = appendMicrosoftJobResult(jobs, failed, job, fail)
 	}
-	return jobs, failed
+	return appendMicrosoftJobResult(nil, failed, job, fail)
 }
+
+// teamsTenantJobName labels the tenant Teams job (its identity is the tenant id).
+const teamsTenantJobName = "Microsoft Teams"
 
 func mergeOnboardingEmails(base, extra []string) []string {
 	seen := make(map[string]struct{}, len(base)+len(extra))

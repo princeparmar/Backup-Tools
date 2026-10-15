@@ -9,8 +9,6 @@ import (
 	"net/url"
 	"sort"
 	"strings"
-
-	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 )
 
 // entraAdminRoleTemplates maps built-in Microsoft Entra Administrator role template IDs to display names.
@@ -80,82 +78,8 @@ var entraAdminRoleTemplates = map[string]string{
 	"810a2642-a034-447f-a5e8-41982d6d4e8b": "Yammer Administrator",
 }
 
-// EntraAdminRoles is the result of administrator-role detection for the signed-in user.
-type EntraAdminRoles struct {
-	TemplateIDs []string
-	Names       []string
-}
-
-// IsAdmin reports whether any Entra Administrator role was detected.
-func (r EntraAdminRoles) IsAdmin() bool { return len(r.Names) > 0 }
-
-// DetectEntraAdminRoles collects every Entra Administrator role for the token's user from the
-// `wids` claim of the access token and id_token, and /me/memberOf directory roles (fallback).
-// The id_token carries `wids` only when the app manifest sets groupMembershipClaims to
-// "DirectoryRole" or "All". Source errors are logged and do not fail detection.
-func DetectEntraAdminRoles(ctx context.Context, accessToken, idToken string) EntraAdminRoles {
-	set := map[string]string{} // lower(template id) or "name:<name>" -> display name
-
-	accessWIDs, idWIDs := widsFromToken(accessToken), widsFromToken(idToken)
-	for _, wids := range [][]string{accessWIDs, idWIDs} {
-		for _, id := range wids {
-			if name, ok := entraAdminRoleTemplates[strings.ToLower(id)]; ok {
-				set[strings.ToLower(id)] = name
-			}
-		}
-	}
-
-	roles, err := memberOfDirectoryRoles(ctx, accessToken)
-	if err != nil {
-		logger.Warn(ctx, "microsoft role detection: memberOf directory roles failed", logger.ErrorField(err))
-	}
-	logger.Info(ctx, "microsoft role detection sources",
-		logger.Bool("access_token_jwt", isJWT(accessToken)),
-		logger.Any("access_token_wids", accessWIDs),
-		logger.Bool("id_token_present", strings.TrimSpace(idToken) != ""),
-		logger.Any("id_token_wids", idWIDs),
-		logger.Any("member_of_roles", roles))
-	for _, r := range roles {
-		tid := strings.ToLower(strings.TrimSpace(r.RoleTemplateID))
-		if name, ok := entraAdminRoleTemplates[tid]; ok {
-			set[tid] = name
-			continue
-		}
-		if isAdministratorRoleName(r.DisplayName) {
-			if tid == "" {
-				tid = "name:" + strings.ToLower(r.DisplayName)
-			}
-			set[tid] = strings.TrimSpace(r.DisplayName)
-		}
-	}
-
-	return buildEntraAdminRoles(set)
-}
-
-func buildEntraAdminRoles(set map[string]string) EntraAdminRoles {
-	out := EntraAdminRoles{}
-	names := map[string]struct{}{}
-	for key, name := range set {
-		if !strings.HasPrefix(key, "name:") {
-			out.TemplateIDs = append(out.TemplateIDs, key)
-		}
-		if _, dup := names[name]; !dup {
-			names[name] = struct{}{}
-			out.Names = append(out.Names, name)
-		}
-	}
-	sort.Strings(out.TemplateIDs)
-	sort.Strings(out.Names)
-	return out
-}
-
 func isAdministratorRoleName(name string) bool {
 	return strings.Contains(strings.ToLower(strings.TrimSpace(name)), "administrator")
-}
-
-func isJWT(token string) bool {
-	var claims map[string]interface{}
-	return decodeJWTClaims(token, &claims) == nil
 }
 
 func widsFromToken(token string) []string {
@@ -226,33 +150,6 @@ func ListTenantUserRoles(ctx context.Context, accessToken string) (map[string][]
 	}
 	for id := range out {
 		sort.Strings(out[id])
-	}
-	return out, nil
-}
-
-func memberOfDirectoryRoles(ctx context.Context, accessToken string) ([]directoryRoleRow, error) {
-	reqURL := graphBaseURL + "/me/memberOf/microsoft.graph.directoryRole?$select=roleTemplateId,displayName"
-	var out []directoryRoleRow
-	for reqURL != "" {
-		body, status, err := graphDoJSON(ctx, accessToken, http.MethodGet, reqURL, nil)
-		if err != nil {
-			return out, err
-		}
-		if status == http.StatusForbidden {
-			return out, nil
-		}
-		if status < 200 || status >= 300 {
-			return out, fmt.Errorf("graph directory roles: HTTP %d: %s", status, truncateForErr(body))
-		}
-		var parsed struct {
-			Value    []directoryRoleRow `json:"value"`
-			NextLink string             `json:"@odata.nextLink"`
-		}
-		if err := json.Unmarshal(body, &parsed); err != nil {
-			return out, err
-		}
-		out = append(out, parsed.Value...)
-		reqURL = parsed.NextLink
 	}
 	return out, nil
 }

@@ -92,7 +92,7 @@ func TestMicrosoftTenantGuard_sameTenantPasses(t *testing.T) {
 	cred := restoreCred(t, store, "oid-ann")
 	connectLink(t, store, cred, tenantA)
 	job := microsoftJob(t, store, cred, tenantA, "ann@contoso.com", "oid-ann")
-	if err := CheckMicrosoftTenantGuard(store, tenantA, job, cred); err != nil {
+	if err := CheckMicrosoftTenantGuard(store, tenantA, job, cred, false); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -103,7 +103,7 @@ func TestMicrosoftTenantGuard_jobWithoutTenant(t *testing.T) {
 	connectLink(t, store, cred, tenantA)
 	job := microsoftJob(t, store, cred, tenantA, "ann@contoso.com", "oid-ann")
 	job.TenantID = ""
-	wantMismatch(t, CheckMicrosoftTenantGuard(store, tenantA, job, cred))
+	wantMismatch(t, CheckMicrosoftTenantGuard(store, tenantA, job, cred, false))
 }
 
 func TestMicrosoftTenantGuard_resourceNotInJobTenant(t *testing.T) {
@@ -112,7 +112,7 @@ func TestMicrosoftTenantGuard_resourceNotInJobTenant(t *testing.T) {
 	connectLink(t, store, cred, tenantA)
 	job := microsoftJob(t, store, cred, tenantA, "ann@contoso.com", "oid-ann")
 	job.ResourceID = "oid-unknown"
-	wantMismatch(t, CheckMicrosoftTenantGuard(store, tenantA, job, cred))
+	wantMismatch(t, CheckMicrosoftTenantGuard(store, tenantA, job, cred, false))
 }
 
 func TestMicrosoftTenantGuard_targetTenantDiffers(t *testing.T) {
@@ -121,8 +121,27 @@ func TestMicrosoftTenantGuard_targetTenantDiffers(t *testing.T) {
 	connectLink(t, store, cred, tenantA)
 	connectLink(t, store, cred, tenantB)
 	job := microsoftJob(t, store, cred, tenantA, "ann@contoso.com", "oid-ann")
-	wantMismatch(t, CheckMicrosoftTenantGuard(store, tenantB, job, cred))
-	wantMismatch(t, CheckMicrosoftTenantGuard(store, "", job, cred))
+	wantMismatch(t, CheckMicrosoftTenantGuard(store, tenantB, job, cred, false))
+	wantMismatch(t, CheckMicrosoftTenantGuard(store, "", job, cred, false))
+}
+
+func TestMicrosoftTenantGuard_migrationWritesIntoTargetTenant(t *testing.T) {
+	store := newRestoreTestDB(t)
+	source := restoreCred(t, store, "oid-ann")
+	connectLink(t, store, source, tenantA)
+	job := microsoftJob(t, store, source, tenantA, "ann@contoso.com", "oid-ann")
+
+	target := restoreCred(t, store, "oid-bob")
+	connectLink(t, store, target, tenantB)
+	if err := CheckMicrosoftTenantGuard(store, tenantB, job, target, true); err != nil {
+		t.Fatalf("migration into the write account's tenant: %v", err)
+	}
+	// The write account must be connected to the target tenant, not just to the backup's.
+	wantMismatch(t, CheckMicrosoftTenantGuard(store, tenantB, job, source, true))
+	wantMismatch(t, CheckMicrosoftTenantGuard(store, "", job, target, true))
+
+	teams := teamsJob(t, store, source, tenantA, repo.ResourceTypeTenant, tenantA)
+	wantMismatch(t, CheckMicrosoftTenantGuard(store, tenantB, teams, target, true))
 }
 
 func TestMicrosoftTenantGuard_writeAccountNotConnectedToTenant(t *testing.T) {
@@ -133,13 +152,13 @@ func TestMicrosoftTenantGuard_writeAccountNotConnectedToTenant(t *testing.T) {
 
 	target := restoreCred(t, store, "oid-bob")
 	connectLink(t, store, target, tenantB)
-	wantMismatch(t, CheckMicrosoftTenantGuard(store, tenantA, job, target))
+	wantMismatch(t, CheckMicrosoftTenantGuard(store, tenantA, job, target, false))
 
 	if err := store.MicrosoftLinkRepo.Disconnect(source.ID, tenantA); err != nil {
 		t.Fatal(err)
 	}
-	wantMismatch(t, CheckMicrosoftTenantGuard(store, tenantA, job, source))
-	wantMismatch(t, CheckMicrosoftTenantGuard(store, tenantA, job, nil))
+	wantMismatch(t, CheckMicrosoftTenantGuard(store, tenantA, job, source, false))
+	wantMismatch(t, CheckMicrosoftTenantGuard(store, tenantA, job, nil, false))
 }
 
 func TestFindMicrosoftRestoreJob_sameMailboxInTwoTenants(t *testing.T) {
@@ -181,5 +200,52 @@ func TestRestoreKeyPrefix(t *testing.T) {
 	}
 	if got := RestoreKeyPrefix(google, nil); got != "ann@gmail.com/" {
 		t.Fatalf("google prefix without job = %q", got)
+	}
+}
+
+func teamsJob(t *testing.T, store *db.PostgresDb, cred *repo.GoogleBackupCredentialDB, tid, resourceType, resourceID string) *repo.CronJobListingDB {
+	t.Helper()
+	job := &repo.CronJobListingDB{
+		UserID: "u1", Name: resourceID, Method: "outlook_teams", SyncType: "daily",
+		Provider: repo.CredentialProviderMicrosoft, TenantID: tid, ResourceType: resourceType, ResourceID: resourceID,
+	}
+	job.InputData = database.NewDbJsonFromValue(map[string]interface{}{"credential_id": float64(cred.ID)})
+	if err := store.DB.Create(job).Error; err != nil {
+		t.Fatal(err)
+	}
+	return job
+}
+
+func TestTeamsRestoreUsesTenantJobPrefixAndGuard(t *testing.T) {
+	store := newRestoreTestDB(t)
+	cred := restoreCred(t, store, "oid-ann")
+	connectLink(t, store, cred, tenantA)
+	const teamID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+	old := teamsJob(t, store, cred, tenantA, repo.ResourceTypeTeam, teamID)
+
+	got, err := FindMicrosoftRestoreJob(store, "u1", "outlook_teams", tenantA, teamID)
+	if err != nil || got == nil || got.ID != old.ID {
+		t.Fatalf("without a tenant job the old team job is used: %+v, %v", got, err)
+	}
+	tenantJob := teamsJob(t, store, cred, tenantA, repo.ResourceTypeTenant, tenantA)
+	for _, tid := range []string{tenantA, ""} {
+		got, err = FindMicrosoftRestoreJob(store, "u1", "outlook_teams", tid, teamID)
+		if err != nil || got == nil || got.ID != tenantJob.ID {
+			t.Fatalf("tenant %q: the tenant job wins: %+v, %v", tid, got, err)
+		}
+	}
+	if err := CheckMicrosoftTenantGuard(store, tenantA, tenantJob, cred, false); err != nil {
+		t.Fatalf("tenant job guard: %v", err)
+	}
+	wantMismatch(t, CheckMicrosoftTenantGuard(store, tenantB, tenantJob, cred, false))
+
+	for login, want := range map[string]string{
+		teamID:              tenantA + "/team/" + teamID + "/",
+		"19:chat@thread.v2": outlook.ResourceKeyPrefix(tenantA, outlook.TeamsKeyChat, "19:chat@thread.v2") + "/",
+		tenantA:             tenantA + "/",
+	} {
+		if got := RestoreKeyPrefix(&repo.RestoreJobListingDB{Method: "outlook_teams", LoginID: login}, tenantJob); got != want {
+			t.Fatalf("prefix for %q = %q, want %q", login, got, want)
+		}
 	}
 }

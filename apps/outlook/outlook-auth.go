@@ -59,6 +59,7 @@ var restoreScopes = []string{
 	"Contacts.ReadWrite",
 	"Files.ReadWrite.All",
 	"ChannelMessage.Send",
+	"ChatMessage.Send",
 	// Groups restore is hidden for now; Group.ReadWrite.All is only used by it.
 	// "Group.ReadWrite.All",
 }

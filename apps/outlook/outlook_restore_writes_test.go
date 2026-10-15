@@ -2,54 +2,6 @@ package outlook
 
 import "testing"
 
-func TestParseRestoreCalendarEvent_table(t *testing.T) {
-	cases := []struct {
-		name   string
-		raw    string
-		wantSub string
-		wantTZ  string
-		wantErr bool
-	}{
-		{
-			name:    "flat event with timezone",
-			raw:     `{"id":"1","subject":"Standup","start":"2026-01-01T10:00:00","end":"2026-01-01T10:30:00","time_zone":"India Standard Time","body_preview":"daily"}`,
-			wantSub: "Standup",
-			wantTZ:  "India Standard Time",
-		},
-		{
-			name:    "graph shaped with timezone",
-			raw:     `{"subject":"Sync","body":{"content":"notes"},"start":{"dateTime":"2026-01-02T09:00:00","timeZone":"Pacific Standard Time"},"end":{"dateTime":"2026-01-02T10:00:00","timeZone":"Pacific Standard Time"}}`,
-			wantSub: "Sync",
-			wantTZ:  "Pacific Standard Time",
-		},
-		{
-			name:    "missing subject",
-			raw:     `{"id":"x"}`,
-			wantErr: true,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := ParseRestoreCalendarEvent([]byte(tc.raw))
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got.Subject != tc.wantSub {
-				t.Fatalf("subject=%q want %q", got.Subject, tc.wantSub)
-			}
-			if got.TimeZone != tc.wantTZ {
-				t.Fatalf("timezone=%q want %q", got.TimeZone, tc.wantTZ)
-			}
-		})
-	}
-}
-
 func TestParseTeamsIDsFromKey_table(t *testing.T) {
 	cases := []struct {
 		key         string
@@ -130,76 +82,22 @@ func TestResolveTeamsGraphIDs_table(t *testing.T) {
 	}
 }
 
-func TestResolveGroupGraphID_table(t *testing.T) {
-	cases := []struct {
-		name     string
-		key      string
-		raw      string
-		snap     *GroupsGroupSnapshot
-		override string
-		want     string
-		wantErr  bool
-	}{
-		{
-			name: "embedded group_id",
-			key:  "sanitized_group/conversations/t/posts/p.json",
-			raw:  `{"group_id":"guid-123","topic":"hi"}`,
-			want: "guid-123",
-		},
-		{
-			name: "from _group.json snapshot",
-			key:  "sanitized_group/calendar/events/e.json",
-			snap: &GroupsGroupSnapshot{GroupID: "guid-456"},
-			want: "guid-456",
-		},
-		{
-			name: "guid key unchanged by sanitize",
-			key:  "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/conversations/t/posts/p.json",
-			want: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-		},
-		{
-			name:    "sanitized non-guid key without metadata",
-			key:     "weird:group/conversations/t/posts/p.json",
-			wantErr: true,
-		},
-		{
-			name:     "override wins",
-			key:      "x/conversations/t/posts/p.json",
-			override: "ovr-g",
-			want:     "ovr-g",
-		},
+func TestParseTeamsReplyAndAttachmentSnapshots(t *testing.T) {
+	replyRaw := `{"parent_message_id":"msg-1","replies":[{"id":"reply-1","subject":"Re: hello"}]}`
+	replySnap, err := ParseTeamsReplySnapshot([]byte(replyRaw))
+	if err != nil {
+		t.Fatalf("ParseTeamsReplySnapshot() error = %v", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := ResolveGroupGraphID(tc.key, []byte(tc.raw), tc.snap, tc.override)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tc.want {
-				t.Fatalf("got %q want %q", got, tc.want)
-			}
-		})
+	if replySnap.ParentMessageID != "msg-1" || len(replySnap.Replies) != 1 || replySnap.Replies[0].ID != "reply-1" {
+		t.Fatalf("replySnap = %#v", replySnap)
 	}
-}
 
-func TestCalendarRestoreTimeZone_table(t *testing.T) {
-	cases := []struct {
-		in   string
-		want string
-	}{
-		{"", "UTC"},
-		{"  ", "UTC"},
-		{"India Standard Time", "India Standard Time"},
+	attachRaw := `{"message_id":"msg-1","attachments":[{"message_id":"msg-1","content_id":"hosted-42","attachment_type":"hosted_content","storage_key":"teamKey/channels/chan-1/hosted/msg-1/hosted-42"}]}`
+	attachSnap, err := ParseTeamsAttachmentSnapshot([]byte(attachRaw))
+	if err != nil {
+		t.Fatalf("ParseTeamsAttachmentSnapshot() error = %v", err)
 	}
-	for _, tc := range cases {
-		if got := calendarRestoreTimeZone(tc.in); got != tc.want {
-			t.Fatalf("in=%q got %q want %q", tc.in, got, tc.want)
-		}
+	if attachSnap.MessageID != "msg-1" || len(attachSnap.Attachments) != 1 || attachSnap.Attachments[0].ContentID != "hosted-42" {
+		t.Fatalf("attachSnap = %#v", attachSnap)
 	}
 }

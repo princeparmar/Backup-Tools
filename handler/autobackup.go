@@ -31,8 +31,6 @@ var (
 		"google_drive": true, "google_photos": true, "google_calendar": true, "google_contacts": true,
 		"outlook_calendar": true, "outlook_contacts": true, "outlook_onedrive": true, "outlook_sharepoint": true,
 		"outlook_teams": true,
-		// Groups backup is hidden for now.
-		// "outlook_groups": true,
 	}
 	allowedSyncTypes = map[string]bool{
 		"one_time": true, "daily": true,
@@ -44,7 +42,6 @@ var (
 	// microsoftAutosyncServiceMethodsOrder is the stable listing order for GET /auto-sync/job/services (Microsoft rows).
 	microsoftAutosyncServiceMethodsOrder = []string{
 		"outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive", "outlook_sharepoint", "outlook_teams",
-		// "outlook_groups", // Groups backup is hidden for now.
 	}
 )
 
@@ -84,7 +81,6 @@ var microsoftOnboardingServiceToMethod = map[string]string{
 	"calendar": "outlook_calendar", "contacts": "outlook_contacts",
 	"onedrive": "outlook_onedrive", "sharepoint": "outlook_sharepoint",
 	"teams": "outlook_teams",
-	// "groups": "outlook_groups", // Groups backup is hidden for now.
 }
 
 // OrgUnitScheduleInput is one OU schedule when policy_scope=org_unit (separate interval per group).
@@ -2244,8 +2240,6 @@ func getServiceName(method string) string {
 		return "SharePoint"
 	case "outlook_teams":
 		return "Teams"
-	case "outlook_groups":
-		return "Groups"
 	case "psql_database", "mysql_database":
 		return "database"
 	default:

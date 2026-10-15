@@ -9,6 +9,9 @@ import (
 	"github.com/StorX2-0/Backup-Tools/satellite"
 )
 
+// Graph seam (overridden in tests).
+var pimContactFoldersFn = outlook.ListPIMContactFolders
+
 type outlookContactsProcessor struct{}
 
 func NewOutlookContactsProcessor() *outlookContactsProcessor {

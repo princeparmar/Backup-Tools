@@ -141,52 +141,42 @@ func HandleMicrosoftListCalendarEvents(c echo.Context) error {
 	})
 }
 
-// HandleMicrosoftCorporateDomainUsers returns the workspace contract of the selected tenant for the
-// caller's Microsoft account (creating the credential and home link from REFRESH_TOKEN when needed).
-// Directory entities are listed live only when the tenant is connected for organization backup.
+// HandleMicrosoftAccountDetect classifies the caller's Microsoft account for sign-in: the workspace
+// contract of the selected tenant (default: home), without directory entities.
+// GET /microsoft/account/detect
+func HandleMicrosoftAccountDetect(c echo.Context) error {
+	ctx := c.Request().Context()
+	var err error
+	defer monitor.Mon.Task()(&ctx)(&err)
+
+	ws, err := microsoftWorkspaceFromRequest(c)
+	if err != nil {
+		return microsoftErrorJSON(c, err)
+	}
+	return c.JSON(http.StatusOK, microsoftDomainUsersBody(ws.contract, make([]map[string]interface{}, 0)))
+}
+
+// HandleMicrosoftCorporateDomainUsers is HandleMicrosoftAccountDetect plus the tenant's directory
+// users, listed live only when the tenant is connected for organization backup.
+// GET /microsoft/outlook/corporate/domain-users
 func HandleMicrosoftCorporateDomainUsers(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	database := microsoftDB(c)
-	id, err := microsoftIdentityFromRequest(c)
+	ws, err := microsoftWorkspaceFromRequest(c)
 	if err != nil {
 		return microsoftErrorJSON(c, err)
 	}
-	cred, err := microsoftCredentialFromRequest(c, id, strings.TrimSpace(c.QueryParam("project_id")))
-	if err != nil {
-		return microsoftErrorJSON(c, err)
-	}
-	tid := id.TenantID
-	if tid == "" {
-		tid = cred.HomeTenantID()
-	}
-	if _, serr := mstenant.TenantAccessState(database, cred.ID, tid); mstenant.IsCode(serr, mstenant.CodeTenantNotLinked) && tid == cred.HomeTenantID() {
-		if lerr := ensureMicrosoftHomeLink(ctx, database, cred, id.RefreshToken); lerr != nil {
-			return microsoftErrorJSON(c, lerr)
-		}
-	}
-	state, err := mstenant.TenantAccessState(database, cred.ID, tid)
-	if err != nil {
-		return microsoftErrorJSON(c, err)
-	}
-	var tenant *repo.MicrosoftTenantDB
-	if !outlook.IsMSATenant(tid) {
-		if tenant, err = database.MicrosoftTenantRepo.Get(tid); err != nil {
-			return microsoftErrorJSON(c, err)
-		}
-	}
-	contract := buildMicrosoftWorkspaceContract(cred.Email, state, tenant)
-
+	state := ws.state
 	entities := make([]map[string]interface{}, 0)
 	if state.CanOrganizationBackup && state.ConnectionState == repo.MicrosoftConnectionConnected && state.AuthMode == repo.MicrosoftAuthModeApplication {
 		top, _ := strconv.Atoi(c.QueryParam("top"))
 		if top <= 0 {
 			top = 200
 		}
-		id.TenantID = tid
-		if tc, rerr := resolveMicrosoftTenant(c, id, "", true); rerr == nil {
+		ws.id.TenantID = ws.tenantID
+		if tc, rerr := resolveMicrosoftTenant(c, ws.id, "", true); rerr == nil {
 			if users, lerr := msListDirectoryUsersFn(ctx, tc.Token); lerr == nil {
 				users = filterMicrosoftDirectoryUsers(users, microsoftDirectoryFilter{EnabledOnly: true})
 				roles, _ := microsoftTenantUserRoles(ctx, tc.Token)
@@ -194,9 +184,11 @@ func HandleMicrosoftCorporateDomainUsers(c echo.Context) error {
 			}
 		}
 	}
+	return c.JSON(http.StatusOK, microsoftDomainUsersBody(ws.contract, entities))
+}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"account":           contract.Email,
+func microsoftDomainUsersBody(contract MicrosoftWorkspaceContract, entities []map[string]interface{}) map[string]interface{} {
+	return map[string]interface{}{
 		"email":             contract.Email,
 		"account_type":      contract.AccountType,
 		"workspace_kind":    contract.WorkspaceKind,
@@ -209,7 +201,7 @@ func HandleMicrosoftCorporateDomainUsers(c echo.Context) error {
 		"capability_errors": contract.CapabilityErrors,
 		"access_state":      contract.AccessState,
 		"entities":          entities,
-	})
+	}
 }
 
 // HandleMicrosoftDirectoryUsers lists users of the selected tenant (organization mode only).
@@ -471,68 +463,5 @@ func HandleMicrosoftTeamsFlatMessages(c echo.Context) error {
 		"messages":   messages,
 		"skip":       skip,
 		"top":        top,
-	})
-}
-
-// HandleMicrosoftGroupsList lists M365 groups for group picker.
-func HandleMicrosoftGroupsList(c echo.Context) error {
-	ctx := c.Request().Context()
-	var err error
-	defer monitor.Mon.Task()(&ctx)(&err)
-
-	accessToken, respErr := microsoftOrgBrowseToken(c, outlook.CapabilityGroups)
-	if accessToken == "" {
-		return respErr
-	}
-
-	top, _ := strconv.Atoi(c.QueryParam("top"))
-	if top <= 0 {
-		top = 50
-	}
-
-	groups, err := outlook.ListTenantGroups(ctx, accessToken, top)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{
-			"error": err.Error(),
-			"hint":  "Groups listing requires the Group.Read.All application permission",
-		})
-	}
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message": "Groups",
-		"groups":  groups,
-		"top":     top,
-	})
-}
-
-// HandleMicrosoftGroupsFlatConversations lists group conversation threads for browse.
-func HandleMicrosoftGroupsFlatConversations(c echo.Context) error {
-	ctx := c.Request().Context()
-	var err error
-	defer monitor.Mon.Task()(&ctx)(&err)
-
-	accessToken, respErr := microsoftOrgBrowseToken(c, outlook.CapabilityGroups)
-	if accessToken == "" {
-		return respErr
-	}
-
-	groupID := strings.TrimSpace(c.QueryParam("group_id"))
-	if groupID == "" {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": "group_id is required"})
-	}
-
-	top, _ := strconv.Atoi(c.QueryParam("top"))
-	if top <= 0 {
-		top = 50
-	}
-
-	threads, err := outlook.ListGroupsFlatConversationsPage(ctx, accessToken, groupID, int32(top))
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
-	}
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":       "Groups flat conversations",
-		"group_id":      groupID,
-		"conversations": threads,
-		"top":           top,
 	})
 }

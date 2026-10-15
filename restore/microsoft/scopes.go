@@ -3,6 +3,7 @@ package microsoft
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -17,9 +18,7 @@ func microsoftRestoreScopesForMethod(method string) []string {
 	case "outlook_onedrive", "outlook_sharepoint":
 		return []string{"Files.ReadWrite.All"}
 	case "outlook_teams":
-		return []string{"ChannelMessage.Send"}
-	case "outlook_groups":
-		return []string{"Group.ReadWrite.All"}
+		return []string{"ChannelMessage.Send", "ChatMessage.Send"}
 	default:
 		return nil
 	}
@@ -67,6 +66,50 @@ func microsoftTokenGrantedScopes(accessToken string) []string {
 		}
 	}
 	return out
+}
+
+// microsoftTokenIsAppOnly reports an application (app-only) Graph token: idtyp "app", or roles
+// without scp. Opaque tokens are never app-only tokens.
+func microsoftTokenIsAppOnly(accessToken string) bool {
+	parts := strings.Split(strings.TrimSpace(accessToken), ".")
+	if len(parts) < 2 {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	var claims struct {
+		Idtyp string   `json:"idtyp"`
+		Scp   string   `json:"scp"`
+		Roles []string `json:"roles"`
+	}
+	if json.Unmarshal(payload, &claims) != nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(claims.Idtyp)) {
+	case "app":
+		return true
+	case "user":
+		return false
+	}
+	return strings.TrimSpace(claims.Scp) == "" && len(claims.Roles) > 0
+}
+
+// CheckTeamsRestoreToken refuses a Teams message write with an app-only token, or with a delegated
+// token whose scp lacks scope. Opaque tokens and tokens without scp are left to Graph.
+func CheckTeamsRestoreToken(accessToken, scope string) error {
+	if microsoftTokenIsAppOnly(accessToken) {
+		return ErrTeamsRestoreNeedsUser
+	}
+	granted := microsoftTokenGrantedScopes(accessToken)
+	if len(granted) == 0 || scope == "" {
+		return nil
+	}
+	if missing := microsoftMissingScopes(granted, []string{scope}); len(missing) > 0 {
+		return fmt.Errorf("%w: the signed-in user's token lacks %s", ErrTeamsRestoreMissingScope, strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 // microsoftGrantedScopes merges JWT scp/roles with the OAuth token-endpoint `scope` string.

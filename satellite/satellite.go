@@ -68,7 +68,6 @@ const (
 	ReserveBucket_OutlookOneDrive   = "outlook-onedrive"
 	ReserveBucket_OutlookSharePoint = "outlook-sharepoint"
 	ReserveBucket_OutlookTeams      = "outlook-teams"
-	ReserveBucket_OutlookGroups     = "outlook-groups"
 	ReserveBucket_Drive             = "google-drive"
 	ReserveBucket_Cloud             = "google-cloud"
 	ReserveBucket_Photos            = "google-photos"

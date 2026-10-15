@@ -18,15 +18,8 @@ func TestFilterMicrosoftDirectoryUsers(t *testing.T) {
 	if len(got) != 2 || got[0].ObjectID != "u1" || got[1].ObjectID != "u2" {
 		t.Fatalf("department filter/sort = %+v", got)
 	}
-	if got := filterMicrosoftDirectoryUsers(users, microsoftDirectoryFilter{OrgUnitPath: "Sales/"}); len(got) != 2 {
-		t.Fatalf("org unit filter = %+v", got)
-	}
 	if got := filterMicrosoftDirectoryUsers(users, microsoftDirectoryFilter{Search: "CY@"}); len(got) != 1 || got[0].ObjectID != "u3" {
 		t.Fatalf("search filter = %+v", got)
-	}
-	units := microsoftOrgUnitViews(users)
-	if len(units) != 2 || units[0]["org_unit_path"] != "/Sales" || units[0]["user_count"] != 1 {
-		t.Fatalf("org units = %+v", units)
 	}
 	if s := microsoftCapabilitySampleUsers(users, 5); len(s) != 1 || s[0] != "u2" {
 		t.Fatalf("samples = %v", s)

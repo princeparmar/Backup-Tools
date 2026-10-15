@@ -1,12 +1,9 @@
 package outlook
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
-	"net/http"
 	"testing"
-	"time"
 )
 
 func TestIsMSATenant(t *testing.T) {
@@ -41,7 +38,7 @@ func TestTenantIDFromAccessToken(t *testing.T) {
 	}
 }
 
-func TestTenantIDForAccountDetection_JWTPreferred(t *testing.T) {
+func TestTenantIDFromAccessToken_workTenantAndOpaque(t *testing.T) {
 	workTenant := "11111111-1111-1111-1111-111111111111"
 	token := fakeJWT(t, map[string]interface{}{"tid": workTenant})
 
@@ -51,44 +48,5 @@ func TestTenantIDForAccountDetection_JWTPreferred(t *testing.T) {
 	}
 	if _, err := TenantIDFromAccessToken("opaque-token-without-dots"); err == nil {
 		t.Fatal("opaque token must not parse as JWT")
-	}
-}
-
-func TestTenantIDForAccountDetection_opaqueToken(t *testing.T) {
-	cases := []struct {
-		name     string
-		status   int
-		body     string
-		wantTID  string
-		wantName string
-		wantErr  bool
-	}{
-		{name: "work org", status: 200, body: `{"value":[{"id":"contoso-tid","displayName":"Contoso"}]}`, wantTID: "contoso-tid", wantName: "Contoso"},
-		{name: "no org is personal", status: 200, body: `{"value":[]}`, wantTID: MSATenantID},
-		{name: "forbidden is personal", status: 403, body: `{}`, wantTID: MSATenantID},
-		{name: "not found is personal", status: 404, body: `{}`, wantTID: MSATenantID},
-		{name: "unauthorized is error", status: 401, body: `{}`, wantErr: true},
-		{name: "server error is error", status: 500, body: `{}`, wantErr: true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var g capabilityGraph
-			g.serve(t, func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(tc.status)
-				_, _ = w.Write([]byte(tc.body))
-			})
-			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-			defer cancel()
-			tid, name, err := tenantIDForAccountDetection(ctx, "opaque-access-token")
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got tid=%q", tid)
-				}
-				return
-			}
-			if err != nil || tid != tc.wantTID || name != tc.wantName {
-				t.Fatalf("got tid=%q name=%q err=%v", tid, name, err)
-			}
-		})
 	}
 }

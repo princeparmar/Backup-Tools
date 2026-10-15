@@ -3,188 +3,19 @@ package outlook
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
-
-// RestoreCalendarEventInput is a minimal event payload for Graph create.
-// Full fidelity (attendees, recurrence, etc.) is deferred; TimeZone must match backup.
-type RestoreCalendarEventInput struct {
-	Subject  string `json:"subject"`
-	Body     string `json:"body,omitempty"`
-	Start    string `json:"start,omitempty"`
-	End      string `json:"end,omitempty"`
-	TimeZone string `json:"time_zone,omitempty"`
-	IsAllDay bool   `json:"is_all_day,omitempty"`
-}
-
-// RestoreContactInput is a minimal contact payload for Graph create.
-type RestoreContactInput struct {
-	DisplayName string   `json:"display_name"`
-	GivenName   string   `json:"given_name,omitempty"`
-	Surname     string   `json:"surname,omitempty"`
-	Emails      []string `json:"emails,omitempty"`
-	Phones      []string `json:"phones,omitempty"`
-	CompanyName string   `json:"company_name,omitempty"`
-	JobTitle    string   `json:"job_title,omitempty"`
-}
-
-func calendarRestoreTimeZone(tz string) string {
-	tz = strings.TrimSpace(tz)
-	if tz == "" {
-		return "UTC"
-	}
-	return tz
-}
-
-// ParseRestoreCalendarEvent maps FlatEvent JSON or Graph-shaped JSON into a create payload.
-func ParseRestoreCalendarEvent(raw []byte) (*RestoreCalendarEventInput, error) {
-	var flat FlatEvent
-	if err := json.Unmarshal(raw, &flat); err == nil && strings.TrimSpace(flat.Subject) != "" {
-		return &RestoreCalendarEventInput{
-			Subject:  flat.Subject,
-			Body:     flat.BodyPreview,
-			Start:    flat.Start,
-			End:      flat.End,
-			TimeZone: flat.TimeZone,
-			IsAllDay: flat.IsAllDay,
-		}, nil
-	}
-	var graph struct {
-		Subject string `json:"subject"`
-		Body    *struct {
-			Content string `json:"content"`
-		} `json:"body"`
-		Start *struct {
-			DateTime string `json:"dateTime"`
-			TimeZone string `json:"timeZone"`
-		} `json:"start"`
-		End *struct {
-			DateTime string `json:"dateTime"`
-			TimeZone string `json:"timeZone"`
-		} `json:"end"`
-		IsAllDay bool `json:"isAllDay"`
-	}
-	if err := json.Unmarshal(raw, &graph); err != nil {
-		return nil, fmt.Errorf("parse calendar event: %w", err)
-	}
-	if strings.TrimSpace(graph.Subject) == "" {
-		return nil, fmt.Errorf("calendar event subject missing")
-	}
-	out := &RestoreCalendarEventInput{Subject: graph.Subject, IsAllDay: graph.IsAllDay}
-	if graph.Body != nil {
-		out.Body = graph.Body.Content
-	}
-	if graph.Start != nil {
-		out.Start = graph.Start.DateTime
-		out.TimeZone = graph.Start.TimeZone
-	}
-	if graph.End != nil {
-		out.End = graph.End.DateTime
-		if out.TimeZone == "" {
-			out.TimeZone = graph.End.TimeZone
-		}
-	}
-	return out, nil
-}
-
-// ParseRestoreContact maps FlatContact JSON into a create payload.
-func ParseRestoreContact(raw []byte) (*RestoreContactInput, error) {
-	var flat FlatContact
-	if err := json.Unmarshal(raw, &flat); err != nil {
-		return nil, fmt.Errorf("parse contact: %w", err)
-	}
-	if strings.TrimSpace(flat.DisplayName) == "" && strings.TrimSpace(flat.GivenName) == "" {
-		return nil, fmt.Errorf("contact display name missing")
-	}
-	name := strings.TrimSpace(flat.DisplayName)
-	if name == "" {
-		name = strings.TrimSpace(strings.TrimSpace(flat.GivenName) + " " + strings.TrimSpace(flat.Surname))
-	}
-	return &RestoreContactInput{
-		DisplayName: name,
-		GivenName:   flat.GivenName,
-		Surname:     flat.Surname,
-		Emails:      flat.Emails,
-		Phones:      flat.Phones,
-		CompanyName: flat.CompanyName,
-		JobTitle:    flat.JobTitle,
-	}, nil
-}
-
-// calendarEventPayload is the Graph create body for a minimal event.
-func calendarEventPayload(in *RestoreCalendarEventInput) (map[string]interface{}, error) {
-	if in == nil || strings.TrimSpace(in.Subject) == "" {
-		return nil, fmt.Errorf("calendar event subject is required")
-	}
-	tz := calendarRestoreTimeZone(in.TimeZone)
-	body := map[string]interface{}{
-		"subject":  in.Subject,
-		"isAllDay": in.IsAllDay,
-	}
-	if strings.TrimSpace(in.Body) != "" {
-		body["body"] = map[string]string{"contentType": "text", "content": in.Body}
-	}
-	if strings.TrimSpace(in.Start) != "" {
-		body["start"] = map[string]string{"dateTime": in.Start, "timeZone": tz}
-	}
-	if strings.TrimSpace(in.End) != "" {
-		body["end"] = map[string]string{"dateTime": in.End, "timeZone": tz}
-	}
-	return body, nil
-}
-
-// contactPayload is the Graph create body for a minimal contact.
-func contactPayload(in *RestoreContactInput) (map[string]interface{}, error) {
-	if in == nil || strings.TrimSpace(in.DisplayName) == "" {
-		return nil, fmt.Errorf("contact display name is required")
-	}
-	body := map[string]interface{}{
-		"displayName": in.DisplayName,
-	}
-	if in.GivenName != "" {
-		body["givenName"] = in.GivenName
-	}
-	if in.Surname != "" {
-		body["surname"] = in.Surname
-	}
-	if in.CompanyName != "" {
-		body["companyName"] = in.CompanyName
-	}
-	if in.JobTitle != "" {
-		body["jobTitle"] = in.JobTitle
-	}
-	if len(in.Emails) > 0 {
-		addrs := make([]map[string]interface{}, 0, len(in.Emails))
-		for _, e := range in.Emails {
-			e = strings.TrimSpace(e)
-			if e == "" {
-				continue
-			}
-			addrs = append(addrs, map[string]interface{}{
-				"address": e,
-				"name":    in.DisplayName,
-			})
-		}
-		if len(addrs) > 0 {
-			body["emailAddresses"] = addrs
-		}
-	}
-	phones := make([]string, 0, len(in.Phones))
-	for _, p := range in.Phones {
-		if p = strings.TrimSpace(p); p != "" {
-			phones = append(phones, p)
-		}
-	}
-	if len(phones) > 0 {
-		body["businessPhones"] = phones
-	}
-	return body, nil
-}
 
 // UploadDriveFile uploads bytes to the signed-in user's OneDrive root via a single PUT.
 // MVP: simple upload only. Large files should later use createUploadSession + chunked upload.
@@ -231,15 +62,52 @@ func putDriveContent(ctx context.Context, accessToken, reqURL string, data []byt
 }
 
 // PostTeamsChannelMessage posts a channel message as a *new* Graph message (restore-as-new;
-// original message IDs cannot be recreated). Replies and hosted content are not restored here.
+// original message IDs cannot be recreated). Replies are restored via PostTeamsChannelReply.
 func PostTeamsChannelMessage(ctx context.Context, accessToken, teamID, channelID, bodyContent string) error {
+	_, err := PostTeamsChannelMessageID(ctx, accessToken, teamID, channelID, bodyContent)
+	return err
+}
+
+// PostTeamsChannelMessageID posts a new channel message and returns its id. A Graph failure is
+// a *TeamsGraphError.
+func PostTeamsChannelMessageID(ctx context.Context, accessToken, teamID, channelID, bodyContent string) (string, error) {
 	teamID = strings.TrimSpace(teamID)
 	channelID = strings.TrimSpace(channelID)
 	if teamID == "" || channelID == "" {
-		return fmt.Errorf("team_id and channel_id are required")
+		return "", fmt.Errorf("team_id and channel_id are required")
 	}
+	reqURL := fmt.Sprintf("%s/teams/%s/channels/%s/messages", graphBaseURL, url.PathEscape(teamID), url.PathEscape(channelID))
+	return postTeamsMessage(ctx, accessToken, reqURL, bodyContent, "(restored message)")
+}
+
+// PostTeamsChannelReply creates a reply under an existing channel message. A Graph failure is a
+// *TeamsGraphError (404 when the parent no longer exists).
+func PostTeamsChannelReply(ctx context.Context, accessToken, teamID, channelID, parentMessageID, bodyContent string) error {
+	teamID = strings.TrimSpace(teamID)
+	channelID = strings.TrimSpace(channelID)
+	parentMessageID = strings.TrimSpace(parentMessageID)
+	if teamID == "" || channelID == "" || parentMessageID == "" {
+		return fmt.Errorf("team_id, channel_id, and parent_message_id are required")
+	}
+	reqURL := fmt.Sprintf("%s/teams/%s/channels/%s/messages/%s/replies", graphBaseURL, url.PathEscape(teamID), url.PathEscape(channelID), url.PathEscape(parentMessageID))
+	_, err := postTeamsMessage(ctx, accessToken, reqURL, bodyContent, "(restored reply)")
+	return err
+}
+
+// PostTeamsChatMessage posts a new message into an existing chat (ChatMessage.Send; the signed-in
+// user must be a member) and returns its id.
+func PostTeamsChatMessage(ctx context.Context, accessToken, chatID, bodyContent string) (string, error) {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return "", fmt.Errorf("chat_id is required")
+	}
+	reqURL := fmt.Sprintf("%s/chats/%s/messages", graphBaseURL, url.PathEscape(chatID))
+	return postTeamsMessage(ctx, accessToken, reqURL, bodyContent, "(restored message)")
+}
+
+func postTeamsMessage(ctx context.Context, accessToken, reqURL, bodyContent, empty string) (string, error) {
 	if strings.TrimSpace(bodyContent) == "" {
-		bodyContent = "(restored message)"
+		bodyContent = empty
 	}
 	payload, _ := json.Marshal(map[string]interface{}{
 		"body": map[string]string{
@@ -247,15 +115,120 @@ func PostTeamsChannelMessage(ctx context.Context, accessToken, teamID, channelID
 			"content":     bodyContent,
 		},
 	})
-	reqURL := fmt.Sprintf("%s/teams/%s/channels/%s/messages", graphBaseURL, url.PathEscape(teamID), url.PathEscape(channelID))
-	_, status, err := graphDoJSONWrite(ctx, accessToken, http.MethodPost, reqURL, payload)
+	b, err := teamsPostOnce(ctx, accessToken, reqURL, payload)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if status < 200 || status >= 300 {
-		return fmt.Errorf("post teams message http %d", status)
+	var created struct {
+		ID string `json:"id"`
 	}
-	return nil
+	_ = json.Unmarshal(b, &created)
+	return created.ID, nil
+}
+
+// ErrTeamsPostOutcomeUnknown means a Teams post may have been created: the connection failed after
+// the request was sent, or Graph answered with a server error. Posting it again can duplicate it.
+var ErrTeamsPostOutcomeUnknown = errors.New("teams post outcome unknown")
+
+// teamsPostOnce sends one Teams create request. A post is not idempotent, so it is repeated only
+// when Graph certainly did not act on it: throttling (429, or 503 with Retry-After) and
+// connections that were never opened.
+func teamsPostOnce(ctx context.Context, accessToken, reqURL string, payload []byte) ([]byte, error) {
+	client := &http.Client{}
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(payload))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			if !isDialError(err) {
+				return nil, fmt.Errorf("%w: %v", ErrTeamsPostOutcomeUnknown, err)
+			}
+			if attempt+1 >= maxGraphRetries {
+				return nil, err
+			}
+			time.Sleep(time.Duration(attempt+1) * 400 * time.Millisecond)
+			continue
+		}
+		b, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		retryAfter := resp.Header.Get("Retry-After")
+		throttled := resp.StatusCode == http.StatusTooManyRequests ||
+			(resp.StatusCode == http.StatusServiceUnavailable && strings.TrimSpace(retryAfter) != "")
+		switch {
+		case resp.StatusCode >= 200 && resp.StatusCode < 300:
+			if rerr != nil {
+				return nil, fmt.Errorf("%w: reading the response: %v", ErrTeamsPostOutcomeUnknown, rerr)
+			}
+			return b, nil
+		case throttled && attempt+1 < maxGraphRetries:
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(retryAfterDuration(retryAfter, attempt)):
+			}
+		case throttled || resp.StatusCode < 500:
+			return nil, parseTeamsGraphError(resp.StatusCode, b)
+		default:
+			return nil, fmt.Errorf("%w: %w", ErrTeamsPostOutcomeUnknown, parseTeamsGraphError(resp.StatusCode, b))
+		}
+	}
+}
+
+// isDialError reports a connection that was never opened, so no request reached the server.
+func isDialError(err error) bool {
+	var op *net.OpError
+	if errors.As(err, &op) && op.Op == "dial" {
+		return true
+	}
+	var dns *net.DNSError
+	return errors.As(err, &dns)
+}
+
+// TeamsRestoreRef is the reference added to a reposted message: the first 10 hex characters of
+// sha1(object key), searchable in Teams to spot a duplicate after a retried restore.
+func TeamsRestoreRef(objectKey string) string {
+	sum := sha1.Sum([]byte(objectKey))
+	return hex.EncodeToString(sum[:])[:10]
+}
+
+// TeamsRepostBody is the HTML of a reposted backup message: a note with the original sender,
+// time and ref, an "In reply to" line when the original thread root can't be used, then the body.
+func TeamsRepostBody(raw []byte, objectKey, inReplyTo string) string {
+	var m struct {
+		CreatedDateTime string `json:"createdDateTime"`
+		From            *struct {
+			User        *struct{ DisplayName string } `json:"user"`
+			Application *struct{ DisplayName string } `json:"application"`
+		} `json:"from"`
+	}
+	_ = json.Unmarshal(raw, &m)
+	who := "unknown sender"
+	if m.From != nil {
+		switch {
+		case m.From.User != nil && strings.TrimSpace(m.From.User.DisplayName) != "":
+			who = m.From.User.DisplayName
+		case m.From.Application != nil && strings.TrimSpace(m.From.Application.DisplayName) != "":
+			who = m.From.Application.DisplayName
+		}
+	}
+	when := strings.TrimSpace(m.CreatedDateTime)
+	if t, ok := ParseTeamsTime(when); ok {
+		when = t.Format("2006-01-02 15:04 UTC")
+	}
+	note := fmt.Sprintf("<p><em>Originally posted by %s on %s (ref %s)</em></p>",
+		html.EscapeString(strings.TrimSpace(who)), html.EscapeString(when), TeamsRestoreRef(objectKey))
+	if strings.TrimSpace(inReplyTo) != "" {
+		note += fmt.Sprintf("<p><em>In reply to message %s</em></p>", html.EscapeString(inReplyTo))
+	}
+	return note + ExtractTeamsMessageBody(raw)
 }
 
 // ExtractTeamsMessageBody pulls HTML/text body from Graph message JSON.
@@ -303,6 +276,210 @@ func ParseTeamsTeamSnapshot(raw []byte) (*TeamsTeamSnapshot, error) {
 	return &snap, nil
 }
 
+// ParseTeamsChatsSnapshot unmarshals {teamKey}/chats/_chats.json.
+func ParseTeamsChatsSnapshot(raw []byte) (*TeamsChatsSnapshot, error) {
+	var snap TeamsChatsSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return nil, err
+	}
+	if len(snap.Chats) == 0 {
+		return nil, fmt.Errorf("chats missing in _chats.json")
+	}
+	return &snap, nil
+}
+
+// ParseTeamsChatMessagesSnapshot unmarshals {teamKey}/chats/{chatId}/_messages.json.
+func ParseTeamsChatMessagesSnapshot(raw []byte) (*TeamsChatMessagesSnapshot, error) {
+	var snap TeamsChatMessagesSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(snap.ChatID) == "" {
+		return nil, fmt.Errorf("chat_id missing in _messages.json")
+	}
+	return &snap, nil
+}
+
+// ParseTeamsChatMessageReactionsSnapshot unmarshals a Teams chat-message reactions snapshot.
+func ParseTeamsChatMessageReactionsSnapshot(raw []byte) (*TeamsChatMessageReactionsSnapshot, error) {
+	var snap TeamsChatMessageReactionsSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(snap.ChatID) == "" || strings.TrimSpace(snap.MessageID) == "" {
+		return nil, fmt.Errorf("chat_id and message_id required in reactions snapshot")
+	}
+	return &snap, nil
+}
+
+// ParseTeamsMessageReactionsSnapshot unmarshals a Teams channel-message reactions snapshot.
+func ParseTeamsMessageReactionsSnapshot(raw []byte) (*TeamsMessageReactionsSnapshot, error) {
+	var snap TeamsMessageReactionsSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(snap.TeamID) == "" || strings.TrimSpace(snap.ChannelID) == "" || strings.TrimSpace(snap.MessageID) == "" {
+		return nil, fmt.Errorf("team_id, channel_id, and message_id required in reactions snapshot")
+	}
+	return &snap, nil
+}
+
+// ParseTeamsReplySnapshot unmarshals {teamKey}/channels/{channelId}/replies/{messageId}.json.
+func ParseTeamsReplySnapshot(raw []byte) (*TeamsReplySnapshot, error) {
+	var snap TeamsReplySnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(snap.ParentMessageID) == "" {
+		return nil, fmt.Errorf("parent_message_id missing in replies snapshot")
+	}
+	return &snap, nil
+}
+
+// ParseTeamsAttachmentSnapshot unmarshals {teamKey}/channels/{channelId}/attachments/{messageId}.json.
+func ParseTeamsAttachmentSnapshot(raw []byte) (*TeamsAttachmentSnapshot, error) {
+	var snap TeamsAttachmentSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(snap.MessageID) == "" {
+		return nil, fmt.Errorf("message_id missing in attachment snapshot")
+	}
+	return &snap, nil
+}
+
+// ParseTeamsCallRecordSessionsSnapshot unmarshals a Teams call-record session snapshot.
+func ParseTeamsCallRecordSessionsSnapshot(raw []byte) (*TeamsCallRecordSessionsSnapshot, error) {
+	var snap TeamsCallRecordSessionsSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(snap.CallRecordID) == "" {
+		return nil, fmt.Errorf("call_record_id missing in call-record session snapshot")
+	}
+	return &snap, nil
+}
+
+// ParseTeamsCallRecordSessionParticipantsSnapshot unmarshals a Teams call-record session participants snapshot.
+func ParseTeamsCallRecordSessionParticipantsSnapshot(raw []byte) (*TeamsCallRecordSessionParticipantsSnapshot, error) {
+	var snap TeamsCallRecordSessionParticipantsSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(snap.CallRecordID) == "" || strings.TrimSpace(snap.SessionID) == "" {
+		return nil, fmt.Errorf("call_record_id and session_id missing in call-record session participants snapshot")
+	}
+	return &snap, nil
+}
+
+// ParseTeamsCallRecordSessionSegmentsSnapshot unmarshals a Teams call-record session segments snapshot.
+func ParseTeamsCallRecordSessionSegmentsSnapshot(raw []byte) (*TeamsCallRecordSessionSegmentsSnapshot, error) {
+	var snap TeamsCallRecordSessionSegmentsSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(snap.CallRecordID) == "" || strings.TrimSpace(snap.SessionID) == "" {
+		return nil, fmt.Errorf("call_record_id and session_id missing in call-record session segments snapshot")
+	}
+	return &snap, nil
+}
+
+// ParseTeamsMeetingSnapshot unmarshals a Teams meeting metadata snapshot.
+func ParseTeamsMeetingSnapshot(raw []byte) (*TeamsMeetingSnapshot, error) {
+	var snap TeamsMeetingSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return nil, err
+	}
+	if len(snap.Meetings) == 0 {
+		return nil, fmt.Errorf("meetings missing in snapshot")
+	}
+	return &snap, nil
+}
+
+// ParseTeamsMeetingParticipantsSnapshot unmarshals a Teams meeting participant snapshot.
+func ParseTeamsMeetingParticipantsSnapshot(raw []byte) (*TeamsMeetingParticipantsSnapshot, error) {
+	var snap TeamsMeetingParticipantsSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(snap.MeetingID) == "" {
+		return nil, fmt.Errorf("meeting_id missing in participants snapshot")
+	}
+	return &snap, nil
+}
+
+// ParseTeamsMeetingAttendanceSnapshot unmarshals a Teams meeting attendance-report snapshot.
+func ParseTeamsMeetingAttendanceSnapshot(raw []byte) (*TeamsMeetingAttendanceSnapshot, error) {
+	var snap TeamsMeetingAttendanceSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(snap.MeetingID) == "" {
+		return nil, fmt.Errorf("meeting_id missing in attendance snapshot")
+	}
+	return &snap, nil
+}
+
+// ParseTeamsMeetingTranscriptSnapshot unmarshals a Teams meeting transcript snapshot.
+func ParseTeamsMeetingTranscriptSnapshot(raw []byte) (*TeamsMeetingTranscriptSnapshot, error) {
+	var snap TeamsMeetingTranscriptSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(snap.MeetingID) == "" {
+		return nil, fmt.Errorf("meeting_id missing in transcript snapshot")
+	}
+	return &snap, nil
+}
+
+// ParseTeamsMeetingRecordingSnapshot unmarshals a Teams meeting recording snapshot.
+func ParseTeamsMeetingRecordingSnapshot(raw []byte) (*TeamsMeetingRecordingSnapshot, error) {
+	var snap TeamsMeetingRecordingSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(snap.MeetingID) == "" {
+		return nil, fmt.Errorf("meeting_id missing in recording snapshot")
+	}
+	return &snap, nil
+}
+
+// ParseTeamsMeetingChatMessagesSnapshot unmarshals a Teams meeting chat message snapshot.
+func ParseTeamsMeetingChatMessagesSnapshot(raw []byte) (*TeamsMeetingChatMessagesSnapshot, error) {
+	var snap TeamsMeetingChatMessagesSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(snap.MeetingID) == "" {
+		return nil, fmt.Errorf("meeting_id missing in meeting chat messages snapshot")
+	}
+	return &snap, nil
+}
+
+// ResolveTeamsChatGraphID returns a real Graph chat ID for restore.
+func ResolveTeamsChatGraphID(objectKey string, chatSnap *TeamsChatsSnapshot, overrideChatID string) (string, error) {
+	chatID := strings.TrimSpace(overrideChatID)
+	if chatID == "" {
+		parts := strings.Split(strings.Trim(objectKey, "/"), "/")
+		for i := 0; i+2 < len(parts); i++ {
+			if parts[i] == "chats" {
+				chatID = strings.TrimSpace(parts[i+1])
+				if unesc, err := url.PathUnescape(chatID); err == nil {
+					chatID = strings.TrimSpace(unesc)
+				}
+				break
+			}
+		}
+	}
+	if chatID == "" && chatSnap != nil && len(chatSnap.Chats) == 1 {
+		chatID = strings.TrimSpace(chatSnap.Chats[0].ID)
+	}
+	if chatID == "" {
+		return "", fmt.Errorf("chat_id missing from backup snapshot or object key")
+	}
+	return chatID, nil
+}
+
 // ResolveTeamsGraphIDs returns real Graph team/channel IDs for restore.
 // Priority: explicit overrides → message meta → _team.json. Never invent team_id from sanitized object keys.
 func ResolveTeamsGraphIDs(meta TeamsCronBackupMeta, teamSnap *TeamsTeamSnapshot, objectKey, overrideTeamID, overrideChannelID string) (teamID, channelID string, err error) {
@@ -332,143 +509,6 @@ func ResolveTeamsGraphIDs(meta TeamsCronBackupMeta, teamSnap *TeamsTeamSnapshot,
 		return "", "", fmt.Errorf("channel_id missing from backup metadata")
 	}
 	return teamID, channelID, nil
-}
-
-// CreateGroupConversationThread creates a new group conversation (restore-as-new).
-// Requires Group.ReadWrite.All (delegated); application permission is not supported by Graph for this API.
-func CreateGroupConversationThread(ctx context.Context, accessToken, groupID, topic, bodyPreview string) error {
-	groupID = strings.TrimSpace(groupID)
-	if groupID == "" {
-		return fmt.Errorf("group_id is required")
-	}
-	if strings.TrimSpace(topic) == "" {
-		topic = "Restored conversation"
-	}
-	if strings.TrimSpace(bodyPreview) == "" {
-		bodyPreview = topic
-	}
-	payload, _ := json.Marshal(map[string]interface{}{
-		"topic": topic,
-		"threads": []map[string]interface{}{
-			{
-				"posts": []map[string]interface{}{
-					{
-						"body": map[string]string{
-							"contentType": "text",
-							"content":     bodyPreview,
-						},
-					},
-				},
-			},
-		},
-	})
-	reqURL := fmt.Sprintf("%s/groups/%s/conversations", graphBaseURL, url.PathEscape(groupID))
-	_, status, err := graphDoJSONWrite(ctx, accessToken, http.MethodPost, reqURL, payload)
-	if err != nil {
-		return err
-	}
-	if status < 200 || status >= 300 {
-		return fmt.Errorf("create group conversation http %d", status)
-	}
-	return nil
-}
-
-// CreateGroupCalendarEvent creates an event on the group's calendar (restore-as-new).
-// Requires Group.ReadWrite.All (delegated); application permission is not supported for this API.
-func CreateGroupCalendarEvent(ctx context.Context, accessToken, groupID string, in *RestoreCalendarEventInput) error {
-	groupID = strings.TrimSpace(groupID)
-	if groupID == "" {
-		return fmt.Errorf("group_id is required")
-	}
-	if in == nil || strings.TrimSpace(in.Subject) == "" {
-		return fmt.Errorf("calendar event subject is required")
-	}
-	tz := calendarRestoreTimeZone(in.TimeZone)
-	body := map[string]interface{}{
-		"subject":  in.Subject,
-		"isAllDay": in.IsAllDay,
-	}
-	if strings.TrimSpace(in.Body) != "" {
-		body["body"] = map[string]string{"contentType": "text", "content": in.Body}
-	}
-	if strings.TrimSpace(in.Start) != "" {
-		body["start"] = map[string]string{"dateTime": in.Start, "timeZone": tz}
-	}
-	if strings.TrimSpace(in.End) != "" {
-		body["end"] = map[string]string{"dateTime": in.End, "timeZone": tz}
-	}
-	payload, _ := json.Marshal(body)
-	reqURL := fmt.Sprintf("%s/groups/%s/events", graphBaseURL, url.PathEscape(groupID))
-	_, status, err := graphDoJSONWrite(ctx, accessToken, http.MethodPost, reqURL, payload)
-	if err != nil {
-		return err
-	}
-	if status < 200 || status >= 300 {
-		return fmt.Errorf("create group calendar event http %d", status)
-	}
-	return nil
-}
-
-// GroupKeyFromObjectKey returns the StorX storage prefix of the group (holding _group.json).
-func GroupKeyFromObjectKey(objectKey string) string {
-	if prefix, _, _, _, _, ok := SplitResourceKey(objectKey); ok {
-		return prefix
-	}
-	parts := strings.Split(strings.Trim(objectKey, "/"), "/")
-	if len(parts) == 0 {
-		return ""
-	}
-	return parts[0]
-}
-
-// GroupIDFromObjectKey is deprecated: prefer ResolveGroupGraphID. Kept for callers that already
-// verified the key prefix is an unsanitized GUID (SanitizeGroupsGroupKey(id) == id).
-func GroupIDFromObjectKey(objectKey string) string {
-	return GroupKeyFromObjectKey(objectKey)
-}
-
-// ParseGroupsGroupSnapshot unmarshals {groupKey}/_group.json.
-func ParseGroupsGroupSnapshot(raw []byte) (*GroupsGroupSnapshot, error) {
-	var snap GroupsGroupSnapshot
-	if err := json.Unmarshal(raw, &snap); err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(snap.GroupID) == "" {
-		return nil, fmt.Errorf("group_id missing in _group.json")
-	}
-	return &snap, nil
-}
-
-// ResolveGroupGraphID returns the real Graph group GUID for restore.
-// Priority: override → embedded JSON group_id → _group.json → key only if sanitize is identity.
-func ResolveGroupGraphID(objectKey string, objectJSON []byte, groupSnap *GroupsGroupSnapshot, overrideGroupID string) (string, error) {
-	if id := strings.TrimSpace(overrideGroupID); id != "" {
-		return id, nil
-	}
-	if len(objectJSON) > 0 {
-		var embedded struct {
-			GroupID string `json:"group_id"`
-		}
-		if json.Unmarshal(objectJSON, &embedded) == nil {
-			if id := strings.TrimSpace(embedded.GroupID); id != "" {
-				return id, nil
-			}
-		}
-	}
-	if groupSnap != nil {
-		if id := strings.TrimSpace(groupSnap.GroupID); id != "" {
-			return id, nil
-		}
-	}
-	key := GroupKeyFromObjectKey(objectKey)
-	if _, _, _, id, _, ok := SplitResourceKey(objectKey); ok {
-		key = id
-	}
-	if key != "" && SanitizeGroupsGroupKey(key) == key {
-		// Sanitize did not alter the prefix — typically a GUID; safe enough as last resort.
-		return key, nil
-	}
-	return "", fmt.Errorf("group_id missing from object/_group.json (cannot use sanitized object key)")
 }
 
 func graphDoJSONWrite(ctx context.Context, accessToken, method, reqURL string, payload []byte) ([]byte, int, error) {

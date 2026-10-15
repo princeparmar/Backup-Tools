@@ -63,10 +63,10 @@ func TestListTenantDirectoryUsers_followsNextLinkAndMaps(t *testing.T) {
 		t.Fatalf("users = %+v", users)
 	}
 	ann, bob := users[0], users[1]
-	if ann.Email() != "ann@contoso.com" || ann.AccountEnabled || !ann.HasLicense || ann.CreatedAt == nil || ann.OrgUnitPath() != "/" {
+	if ann.Email() != "ann@contoso.com" || ann.AccountEnabled || !ann.HasLicense || ann.CreatedAt == nil || ann.Department != "" {
 		t.Fatalf("ann = %+v", ann)
 	}
-	if bob.Email() != "bob@contoso.com" || !bob.AccountEnabled || bob.HasLicense || bob.OrgUnitPath() != "/Sales" {
+	if bob.Email() != "bob@contoso.com" || !bob.AccountEnabled || bob.HasLicense || bob.Department != "Sales" {
 		t.Fatalf("bob = %+v", bob)
 	}
 }

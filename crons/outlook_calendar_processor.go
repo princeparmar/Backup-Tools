@@ -2,22 +2,20 @@ package crons
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
+	"path"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
-	"github.com/StorX2-0/Backup-Tools/handler"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
-	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 )
 
-// Graph seams (overridden in tests).
-var (
-	pimCalendarsFn      = outlook.ListPIMCalendars
-	pimContactFoldersFn = outlook.ListPIMContactFolders
-)
+// Graph seam (overridden in tests).
+var pimCalendarsFn = outlook.ListPIMCalendars
 
 type outlookCalendarProcessor struct{}
 
@@ -30,7 +28,8 @@ func (p *outlookCalendarProcessor) Run(input ProcessorInput) error {
 }
 
 // syncOutlookCalendars backs up every calendar of the user. A calendar that cannot be listed is
-// skipped; the job fails only when none can be backed up.
+// skipped; the job fails only when none can be backed up. Backed-up calendars missing from the
+// listing are then marked removed.
 func syncOutlookCalendars(ctx context.Context, run *pimRun, userBase, keyPrefix string) error {
 	calendars, err := pimCalendarsFn(ctx, run.accessToken, userBase)
 	if err != nil {
@@ -42,114 +41,78 @@ func syncOutlookCalendars(ctx context.Context, run *pimRun, userBase, keyPrefix 
 		collections = append(collections, pimCollection{
 			name: cal.Name, dir: dir, listURL: outlook.PIMEventsURL(userBase, cal.ID),
 			metaKey: dir + outlook.PIMCalendarMetaName, meta: cal,
+			userBase: userBase, calendarID: cal.ID,
 		})
 	}
-	return run.syncCollections(ctx, collections)
+	if err := run.syncCollections(ctx, collections); err != nil {
+		return err
+	}
+	return run.markRemovedCalendars(ctx, keyPrefix, calendars)
 }
 
-// pimCollection is one calendar or contact folder to back up.
-type pimCollection struct {
-	name, dir, listURL string
-	metaKey            string
-	meta               any
-}
-
-func (r *pimRun) syncCollections(ctx context.Context, collections []pimCollection) error {
-	var firstErr error
-	failed := 0
-	for _, c := range collections {
-		if err := r.heartbeat(); err != nil {
-			return err
-		}
-		if c.metaKey != "" {
-			if err := r.putJSON(ctx, c.metaKey, c.meta); err != nil {
-				return err
-			}
-		}
-		err := r.syncCollection(ctx, c.listURL, c.dir)
-		if err == nil {
-			continue
-		}
-		if asErrStorageQuota(err) != nil {
-			return err
-		}
-		if hbErr := r.heartbeat(); hbErr != nil {
-			return hbErr
-		}
-		logger.Warn(ctx, "outlook collection backup failed", logger.String("method", r.method), logger.String("collection", c.name), logger.ErrorField(err))
-		failed++
-		if firstErr == nil {
-			firstErr = err
+// markRemovedCalendars sets removed_at on the _calendar.json of every backed-up calendar missing
+// from calendars, a complete listing, and marks its events removed in its index. The backup is
+// kept. A listing without the default calendar is not trusted.
+func (r *pimRun) markRemovedCalendars(ctx context.Context, keyPrefix string, calendars []outlook.FlatCalendar) error {
+	listed, hasDefault := map[string]bool{}, false
+	for _, cal := range calendars {
+		listed[outlook.PIMCalendarDir(keyPrefix, cal.ID)+outlook.PIMCalendarMetaName] = true
+		hasDefault = hasDefault || cal.IsDefault
+	}
+	if !hasDefault {
+		logger.Warn(ctx, "calendar listing has no default calendar; removed calendars not checked")
+		return nil
+	}
+	root := strings.TrimRight(keyPrefix, "/")
+	var gone []string
+	for key := range r.synced {
+		if path.Base(key) == outlook.PIMCalendarMetaName && path.Dir(path.Dir(key)) == root && !listed[key] {
+			gone = append(gone, key)
 		}
 	}
-	if failed > 0 && failed == len(collections) {
-		return firstErr
+	sort.Strings(gone)
+	for _, metaKey := range gone {
+		if err := r.markCalendarRemoved(ctx, metaKey); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-// runOutlookPIMJob resolves auth, the backed-up user and storage for a calendar or contacts job,
-// then runs sync and saves task memory.
-func runOutlookPIMJob(input ProcessorInput, method, bucket string, minEstimate int64, sync func(ctx context.Context, run *pimRun, userBase, keyPrefix string) error) error {
-	ctx := context.Background()
-	var err error
-	defer monitor.Mon.Task()(&ctx)(&err)
-
-	auth, err := microsoftJobAccessToken(input)
-	if err != nil {
-		return err
+func (r *pimRun) markCalendarRemoved(ctx context.Context, metaKey string) error {
+	raw, err := r.store.get(ctx, metaKey)
+	var cal outlook.FlatCalendar
+	if err == nil {
+		err = json.Unmarshal(raw, &cal)
 	}
-	storx := auth.StorxToken
-
-	go func() {
-		processCtx := context.Background()
-		if processErr := handler.ProcessWebhookEvents(processCtx, input.Database, storx, 100); processErr != nil {
-			logger.Warn(processCtx, "Failed to process webhook events from "+method+" auto-sync", logger.ErrorField(processErr))
+	if err != nil {
+		logger.Warn(ctx, "removed calendar not marked", logger.String("key", metaKey), logger.ErrorField(err))
+		return nil
+	}
+	if cal.RemovedAt != "" {
+		return nil
+	}
+	removedAt := r.now().UTC().Format(time.RFC3339)
+	indexKey := path.Dir(metaKey) + "/" + outlook.PIMIndexName
+	index, err := r.loadIndex(ctx, indexKey)
+	if err == nil && len(index.Items) > 0 {
+		for id, e := range index.Items {
+			if e.RemovedAt == "" {
+				e.RemovedAt = removedAt
+				index.Items[id] = e
+				r.removed++
+			}
 		}
-	}()
-
-	client, err := microsoftJobClient(auth, jobOutlookMailbox(input.Job))
+		err = r.saveIndex(ctx, indexKey, index)
+	}
 	if err != nil {
-		return err
+		if asErrStorageQuota(err) != nil {
+			return err
+		}
+		logger.Warn(ctx, "removed calendar not marked", logger.String("key", metaKey), logger.ErrorField(err))
+		return nil
 	}
-	mailbox, err := microsoftJobMailbox(auth, input.Job, client)
-	if err != nil {
-		return err
-	}
-	userBase, err := client.MailUserBaseURL(mailbox)
-	if err != nil {
-		return err
-	}
-	keyPrefix, err := microsoftJobKeyPrefix(input.Job)
-	if err != nil {
-		return err
-	}
-	if err := enforceStoragePrecheck(ctx, input, minEstimate); err != nil {
-		return err
-	}
-	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, bucket, keyPrefix+"/.file_placeholder", nil, input.Job.UserID, input.StorxRecovery); err != nil {
-		return mapUploadErr(method, fmt.Errorf("setup storage placeholder: %w", err))
-	}
-	synced, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Database, storx, bucket, keyPrefix+"/", input.Job.UserID, "outlook", method, input.StorxRecovery)
-	if err != nil {
-		return fmt.Errorf("load backed-up %s objects: %w", method, err)
-	}
-
-	run := &pimRun{
-		store:       &satellitePIMStore{input: input, storx: storx, bucket: bucket},
-		accessToken: auth.AccessToken,
-		method:      method,
-		synced:      synced,
-		heartbeat:   input.HeartBeatFunc,
-		now:         time.Now,
-	}
-	if err := sync(ctx, run, userBase, keyPrefix); err != nil {
-		return err
-	}
-	logger.Info(ctx, "outlook backup finished", logger.String("method", method),
-		logger.Int("uploaded", run.uploaded), logger.Int("unchanged", run.unchanged), logger.Int("removed", run.removed))
-
-	return input.Database.CronJobRepo.UpdateCronJobFieldsForCron(input.Job.ID, map[string]interface{}{
-		"task_memory": input.Job.TaskMemory,
-	})
+	cal.RemovedAt = removedAt
+	logger.Info(ctx, "calendar removed from Microsoft; backup kept", logger.String("key", metaKey))
+	return r.putJSON(ctx, metaKey, cal)
 }

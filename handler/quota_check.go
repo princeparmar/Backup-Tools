@@ -42,6 +42,17 @@ func HandleAutomaticSyncQuotaCheck(c echo.Context) error {
 		return sendJSONError(c, http.StatusNotFound, "Job not found", err)
 	}
 
+	// Microsoft 365 storage pre-checks are disabled for now; the job always passes.
+	if repo.IsMicrosoftMethod(job.Method) {
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"allowed":          true,
+			"failure_code":     "",
+			"quota_kind":       "storage",
+			"method":           job.Method,
+			"estimate_skipped": true,
+		})
+	}
+
 	estimate, estErr := estimateJobBackupBytes(ctx, database, job)
 	if estErr != nil {
 		estimate = 0

@@ -59,7 +59,7 @@ tags:
       Microsoft/Outlook autosync product APIs (method = outlook, outlook_calendar, outlook_contacts, outlook_onedrive, outlook_sharepoint).
       Same Postgres as Google; separate HTTP surface under /microsoft/*.
       Satellite should proxy as /api/v0/microsoft-backup/* without rewriting to Google routes.
-      Onboarding create only: POST /microsoft/auto-sync/job and POST /microsoft/backup/onboarding/jobs (same handler).
+      Onboarding create only: POST /microsoft/auto-sync/job.
       Shared job management (list, live, update, policy, backup-now): use /auto-sync/* (Google + Microsoft).
       Dashboard alerts: GET /autosync/dashboard-alerts (Google + Microsoft).
       OneDrive vault bucket: outlook-onedrive (Satellite must reserve). SharePoint vault bucket: outlook-sharepoint.
@@ -201,25 +201,25 @@ paths:
                 $ref: '#/components/schemas/SuccessResponse'
 
   # Microsoft Autosync (product twin of Google autosync; filter by outlook* methods)
-  /microsoft/backup/onboarding/jobs:
+  /microsoft/auto-sync/job:
     post:
       tags:
         - Microsoft Autosync
-      summary: Create Microsoft autosync jobs (onboarding alias)
+      summary: Create Microsoft autosync jobs
       description: |
-        Same handler as POST /microsoft/auto-sync/job.
-        Body uses microsoft_email + services[] (outlook|mail|calendar|contacts|onedrive|sharepoint|teams|groups).
+        Microsoft onboarding create only. List/live/update/policy/backup-now use shared /auto-sync/* (Google + Microsoft).
+        Body uses microsoft_email + services[] (outlook|mail|calendar|contacts|onedrive|sharepoint|teams).
         The tenant is MICROSOFT_TENANT_ID (or body tenant_id; both must match), defaulting to the home tenant.
         A discovered tenant link is connected in the requested mode; a link already connected in the other
         mode returns 409 backup_mode_mismatch, a disconnected link 409 tenant_disconnected.
         auth_mode=delegated (default) backs up only the signed-in mailbox and requires refresh_token;
-        other mailboxes, shared mailboxes, all_users and teams/groups/sharepoint return 403 organization_mode_required.
+        other mailboxes, shared mailboxes, all_users and teams/sharepoint return 403 organization_mode_required.
         auth_mode=application uses the platform app-only token for the tenant and requires effective admin consent
         (granted and service principal present) plus the per-service capability (403 consent_required /
         capability_denied, 503 temporary). Users are resolved
         live from Microsoft Graph (all_users, user_ids or emails; shared mailboxes may be disabled accounts);
         502 directory_unavailable when the tenant user list cannot be read.
-        With all_users and no sites/teams/groups listed, sharepoint/teams/groups expand to every tenant resource.
+        With all_users and no sites/teams listed, sharepoint/teams expand to every tenant resource.
         Jobs store input_data.credential_id on google_backup_credential_dbs (table name unchanged) and the
         identity (tenant_id, resource_type, resource_id). all_users creates a backup scope; new tenant users
         get jobs from the 6-hourly reconcile.
@@ -253,7 +253,7 @@ paths:
                   type: array
                   items:
                     type: string
-                    enum: [outlook, mail, calendar, contacts, onedrive, sharepoint, teams, groups]
+                    enum: [outlook, mail, calendar, contacts, onedrive, sharepoint, teams]
                 microsoft_email:
                   type: string
                 account_type:
@@ -307,39 +307,6 @@ paths:
                         type: array
                         items:
                           type: string
-                groups:
-                  type: array
-                  items:
-                    type: object
-                    properties:
-                      group_id:
-                        type: string
-                      group_name:
-                        type: string
-                policy_scope:
-                  type: string
-                  enum: [org_unit]
-                  description: One policy per org unit; jobs are created per user with org_unit_path.
-                email_org_units:
-                  type: object
-                  additionalProperties:
-                    type: string
-                  description: email -> org_unit_path override (defaults to the directory org_unit_path).
-                org_unit_schedules:
-                  type: object
-                  additionalProperties:
-                    type: object
-                    properties:
-                      policy_name:
-                        type: string
-                      interval:
-                        type: string
-                      "on":
-                        type: string
-                      services:
-                        type: array
-                        items:
-                          type: string
                 sites:
                   type: array
                   description: Required when services includes sharepoint; one job per site.
@@ -377,20 +344,6 @@ paths:
           description: directory_unavailable
         '503':
           description: Temporary Microsoft Graph failure
-
-  /microsoft/auto-sync/job:
-    post:
-      tags:
-        - Microsoft Autosync
-      summary: Create Microsoft autosync jobs
-      description: |
-        Microsoft onboarding create only (same handler as POST /microsoft/backup/onboarding/jobs).
-        List/live/update/policy/backup-now use shared /auto-sync/* (Google + Microsoft).
-      security:
-        - bearerAuth: []
-      responses:
-        '200':
-          description: Jobs created
 
   /microsoft/users-groups:
     get:
@@ -749,7 +702,7 @@ paths:
     get:
       tags:
         - Microsoft Autosync
-      summary: Alias of GET /microsoft/outlook/corporate/domain-users
+      summary: Same response as GET /microsoft/outlook/corporate/domain-users, with entities always empty (no directory listing)
       security:
         - bearerAuth: []
       responses:
@@ -771,7 +724,6 @@ paths:
         - $ref: '#/components/parameters/MicrosoftDirectoryPageSize'
         - $ref: '#/components/parameters/MicrosoftDirectorySearch'
         - $ref: '#/components/parameters/MicrosoftDirectoryDepartment'
-        - $ref: '#/components/parameters/MicrosoftDirectoryOrgUnit'
         - $ref: '#/components/parameters/MicrosoftDirectoryEnabledOnly'
       responses:
         '200':
@@ -1010,7 +962,6 @@ paths:
         - $ref: '#/components/parameters/MicrosoftDirectoryPageSize'
         - $ref: '#/components/parameters/MicrosoftDirectorySearch'
         - $ref: '#/components/parameters/MicrosoftDirectoryDepartment'
-        - $ref: '#/components/parameters/MicrosoftDirectoryOrgUnit'
         - $ref: '#/components/parameters/MicrosoftDirectoryEnabledOnly'
       responses:
         '200':
@@ -1023,22 +974,6 @@ paths:
           description: Consent not granted or caller not authorized
         '502':
           description: Microsoft Graph user listing failed
-
-  /microsoft/tenants/{tid}/org-structure:
-    get:
-      tags:
-        - Microsoft Tenants
-      summary: Org units derived live from user departments ("/" + department)
-      parameters:
-        - $ref: '#/components/parameters/MicrosoftTenantID'
-        - $ref: '#/components/parameters/MicrosoftTenantAPIKey'
-      responses:
-        '200':
-          description: Org units
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MicrosoftOrgStructureResponse'
 
   # Auto Sync Endpoints
   /auto-sync/live:
@@ -4447,11 +4382,6 @@ components:
       in: query
       schema:
         type: string
-    MicrosoftDirectoryOrgUnit:
-      name: org_unit_path
-      in: query
-      schema:
-        type: string
     MicrosoftDirectoryEnabledOnly:
       name: enabled_only
       in: query
@@ -4493,6 +4423,11 @@ components:
             status:
               type: string
               enum: [not_requested, granted, insufficient, revoked, auth_error]
+            service_principal:
+              type: boolean
+            effective:
+              type: boolean
+              description: Granted and the service principal exists.
             consented_by:
               type: string
             consented_at:
@@ -4504,6 +4439,9 @@ components:
                 type: string
             last_error:
               type: string
+            capability_checked_at:
+              type: string
+              format: date-time
         capabilities:
           type: object
           description: Keys list_users, mail_backup, calendar_backup, contacts_backup, onedrive_backup, sharepoint_backup, teams_backup, groups_backup.
@@ -4522,7 +4460,54 @@ components:
               message:
                 type: string
         access_state:
-          $ref: '#/components/schemas/MicrosoftTenantAccessState'
+          $ref: '#/components/schemas/MicrosoftWorkspaceAccessState'
+    MicrosoftWorkspaceAccessState:
+      type: object
+      description: Account↔tenant link state not already on the contract (tenant, is_admin, account_type, consent and capabilities are top-level fields).
+      properties:
+        default_domain:
+          type: string
+        category:
+          type: string
+          enum: [home, guest, external_member, personal]
+        is_home:
+          type: boolean
+        identity_type:
+          type: string
+        user_type:
+          type: string
+        object_id:
+          type: string
+        roles:
+          type: array
+          items:
+            type: object
+        role_status:
+          type: string
+        token_status:
+          type: string
+        token_error:
+          type: string
+        connection_state:
+          type: string
+          enum: [discovered, connected, disconnected]
+        backup_mode:
+          type: string
+          enum: [personal, organization]
+        auth_mode:
+          type: string
+          enum: [delegated, application]
+        discovery_status:
+          type: string
+        availability:
+          type: string
+        can_personal_backup:
+          type: boolean
+        can_organization_backup:
+          type: boolean
+        checked_at:
+          type: string
+          format: date-time
     MicrosoftTenantAccessState:
       type: object
       description: One account↔tenant link with its tenant's consent and capabilities.
@@ -4655,8 +4640,6 @@ components:
           type: boolean
         has_license:
           type: boolean
-        org_unit_path:
-          type: string
         roles:
           type: array
           description: |
@@ -4685,22 +4668,6 @@ components:
         roles_error:
           type: string
           description: Present when user roles could not be read (e.g. missing RoleManagement.Read.Directory).
-    MicrosoftOrgStructureResponse:
-      type: object
-      properties:
-        tenant_id:
-          type: string
-        org_units:
-          type: array
-          items:
-            type: object
-            properties:
-              org_unit_path:
-                type: string
-              name:
-                type: string
-              user_count:
-                type: integer
 
     # Common Response Schemas
     SuccessResponse:

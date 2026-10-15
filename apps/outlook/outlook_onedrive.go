@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -18,6 +19,8 @@ var graphBaseURL = "https://graph.microsoft.com/v1.0"
 const (
 	fallbackObjectKeyDatePath = "1970/01/01"
 	maxGraphRetries           = 5
+	// maxGraphFallbackWait caps the jittered wait used when Graph sends no Retry-After.
+	maxGraphFallbackWait = 60 * time.Second
 )
 
 // ErrOneDriveDeltaInvalid means the saved deltaLink can no longer be used; rebaseline required.
@@ -45,7 +48,7 @@ type OneDriveItem struct {
 }
 
 // OneDriveCronBackupMeta is the legacy meta JSON at {prefix}/meta/.../{itemId}_{name}.json; the
-// SharePoint and Groups backups still write it.
+// SharePoint backup still writes it.
 type OneDriveCronBackupMeta struct {
 	ItemID               string `json:"item_id"`
 	Name                 string `json:"name"`
@@ -336,7 +339,9 @@ func retryAfterDuration(header string, attempt int) time.Duration {
 			}
 		}
 	}
-	return time.Duration(attempt+1) * 500 * time.Millisecond
+	wait := time.Duration(attempt+1) * 500 * time.Millisecond
+	wait += time.Duration(rand.Int64N(int64(wait)/2 + 1))
+	return min(wait, maxGraphFallbackWait)
 }
 
 func truncateForErr(b []byte) string {

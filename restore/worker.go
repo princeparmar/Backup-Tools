@@ -183,7 +183,6 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 
 		deps.touchJobHeartbeat()
 
-
 		var rows []repo.SyncedObject
 		if retryTask != nil && retryTask.CursorEndID > retryTask.CursorStartID {
 			rows, err = store.SyncedObjectRepo.GetSyncedObjectsInIDRange(
@@ -266,12 +265,14 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 		}
 
 		if shouldOAuth401Retry(deps, batchResult) {
-			logger.Warn(ctx, "Restore batch hit OAuth 401, refreshing Google token",
+			logger.Warn(ctx, "Restore batch hit OAuth 401, refreshing token",
 				logger.Int("job_id", int(job.ID)),
-				logger.Int("task_id", int(batchTask.ID)))
-			if err := deps.RefreshGoogleAccessToken(ctx); err != nil {
+				logger.Int("task_id", int(batchTask.ID)),
+				logger.String("provider", restoreProviderName(deps)))
+			if err := deps.refreshAccessTokenForJob(ctx); err != nil {
 				logger.Warn(ctx, "Restore OAuth token refresh failed",
 					logger.Int("job_id", int(job.ID)),
+					logger.String("provider", restoreProviderName(deps)),
 					logger.ErrorField(err))
 				failOpenBatchTask(store, batchTaskID, batchCursorEnd)
 				return failJob(ctx, store, job, err)
@@ -494,8 +495,19 @@ func failJob(ctx context.Context, store *db.PostgresDb, job *repo.RestoreJobList
 	return processErr
 }
 
+// batchRetryable reports whether a fully failed batch may be run again: a write whose outcome is
+// unknown may already exist at the provider, so its batch goes to the dead-letter list instead.
+func batchRetryable(result BatchResult) bool {
+	for _, fk := range result.FailedKeys {
+		if fk.ErrorCode == ErrorCodeOutcomeUnknown {
+			return false
+		}
+	}
+	return true
+}
+
 func finishBatch(ctx context.Context, store *db.PostgresDb, job *repo.RestoreJobListingDB, batchTask *repo.RestoreTaskListingDB, batchResult BatchResult, cursorEndID uint) {
-	if batchResult.Failed > 0 && batchResult.Processed == 0 && batchTask.RetryCount < repo.RestoreMaxRetryCount {
+	if batchResult.Failed > 0 && batchResult.Processed == 0 && batchTask.RetryCount < repo.RestoreMaxRetryCount && batchRetryable(batchResult) {
 		logger.Warn(ctx, "Restore batch failed, scheduling retry",
 			logger.Int("job_id", int(job.ID)),
 			logger.Int("task_id", int(batchTask.ID)),

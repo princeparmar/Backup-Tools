@@ -33,15 +33,6 @@ func (u DirectoryUser) Email() string {
 	return strings.TrimSpace(u.UPN)
 }
 
-// OrgUnitPath maps the user's department to a StorX org unit ("/" + department, else "/").
-func (u DirectoryUser) OrgUnitPath() string {
-	department := strings.Trim(strings.TrimSpace(u.Department), "/")
-	if department == "" {
-		return "/"
-	}
-	return "/" + department
-}
-
 type graphDirectoryUserRow struct {
 	ID                string            `json:"id"`
 	UserPrincipalName string            `json:"userPrincipalName"`
@@ -85,8 +76,10 @@ func ListTenantDirectoryUsers(ctx context.Context, accessToken string) ([]Direct
 	return out, nil
 }
 
-// graphListAll follows @odata.nextLink and decodes every page's value array.
+// graphListAll follows @odata.nextLink and decodes every page's value array. A nextLink off the
+// Graph host, to another resource or already followed stops the listing with ErrTeamsPaging.
 func graphListAll[T any](ctx context.Context, accessToken, startURL string, limit int) ([]T, error) {
+	guard := newGraphListGuard(startURL)
 	var out []T
 	next := startURL
 	for next != "" {
@@ -108,9 +101,20 @@ func graphListAll[T any](ctx context.Context, accessToken, startURL string, limi
 		if limit > 0 && len(out) >= limit {
 			return out[:limit], nil
 		}
-		next = page.NextLink
+		next = strings.TrimSpace(page.NextLink)
+		if next != "" {
+			if err := guard.Next(next); err != nil {
+				return out, fmt.Errorf("graph list: %w", err)
+			}
+		}
 	}
 	return out, nil
+}
+
+type graphTeamRow struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName"`
+	Description string `json:"description"`
 }
 
 // ListTenantTeams lists every Teams-provisioned group in the tenant (app-only token).
@@ -118,7 +122,7 @@ func graphListAll[T any](ctx context.Context, accessToken, startURL string, limi
 func ListTenantTeams(ctx context.Context, accessToken string, limit int) ([]TeamSummary, error) {
 	reqURL := graphBaseURL + "/groups?$filter=" + url.QueryEscape("resourceProvisioningOptions/Any(x:x eq 'Team')") +
 		"&$select=id,displayName,description&$top=999"
-	rows, err := graphListAll[graphGroupRow](ctx, accessToken, reqURL, limit)
+	rows, err := graphListAll[graphTeamRow](ctx, accessToken, reqURL, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list tenant teams: %w", err)
 	}
@@ -127,26 +131,6 @@ func ListTenantTeams(ctx context.Context, accessToken string, limit int) ([]Team
 		out = append(out, TeamSummary{
 			ID:          strings.TrimSpace(r.ID),
 			DisplayName: strings.TrimSpace(r.DisplayName),
-			Description: strings.TrimSpace(r.Description),
-		})
-	}
-	return out, nil
-}
-
-// ListTenantGroups lists every Microsoft 365 (Unified) group in the tenant (app-only token).
-func ListTenantGroups(ctx context.Context, accessToken string, limit int) ([]GroupSummary, error) {
-	reqURL := graphBaseURL + "/groups?$filter=" + url.QueryEscape("groupTypes/any(c:c eq 'Unified')") +
-		"&$select=id,displayName,mail,description&$top=999"
-	rows, err := graphListAll[graphGroupRow](ctx, accessToken, reqURL, limit)
-	if err != nil {
-		return nil, fmt.Errorf("list tenant groups: %w", err)
-	}
-	out := make([]GroupSummary, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, GroupSummary{
-			ID:          strings.TrimSpace(r.ID),
-			DisplayName: strings.TrimSpace(r.DisplayName),
-			Mail:        strings.TrimSpace(r.Mail),
 			Description: strings.TrimSpace(r.Description),
 		})
 	}

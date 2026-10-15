@@ -59,8 +59,8 @@ func TestMicrosoftRunOutcome_existingUserWithoutServiceIsSkipped(t *testing.T) {
 	if err := (&AutosyncManager{store: store}).microsoftRunOutcome(context.Background(), job, errMailboxMissing); err != nil {
 		t.Fatalf("missing service must skip, got %v", err)
 	}
-	if !ProcessorLeftWarningOutcome(job) {
-		t.Fatalf("job message = %q (%s), want a warning", job.Message, job.MessageStatus)
+	if !ProcessorLeftWarningOutcome(job) || !strings.HasPrefix(job.Message, "Mail not backed up: this user has no Exchange Online mailbox.") {
+		t.Fatalf("job message = %q (%s), want the mailbox warning", job.Message, job.MessageStatus)
 	}
 	res, _ := store.MicrosoftResourceRepo.Get(reconcileTenant, repo.ResourceTypeUser, "oid-ann")
 	if got := res.UnavailableServices(); len(got) != 1 || got[0] != "outlook" {
@@ -69,6 +69,35 @@ func TestMicrosoftRunOutcome_existingUserWithoutServiceIsSkipped(t *testing.T) {
 	for _, j := range scopeJobsFor(t, store) {
 		if !j.Active {
 			t.Fatalf("job %d paused for a missing service", j.ID)
+		}
+	}
+
+	// A later successful run (the user got a mailbox) clears the record.
+	if err := store.MicrosoftResourceRepo.AddUnavailableService(reconcileTenant, repo.ResourceTypeUser, "oid-ann", "outlook_onedrive"); err != nil {
+		t.Fatal(err)
+	}
+	(&AutosyncManager{store: store}).microsoftRunSucceeded(job)
+	res, _ = store.MicrosoftResourceRepo.Get(reconcileTenant, repo.ResourceTypeUser, "oid-ann")
+	if got := res.UnavailableServices(); len(got) != 1 || got[0] != "outlook_onedrive" {
+		t.Fatalf("after success, unavailable services = %v", got)
+	}
+}
+
+func TestMicrosoftUnavailableMessageNamesServiceAndReason(t *testing.T) {
+	for method, want := range map[string]string{
+		"outlook":          "Mail not backed up: this user has no Exchange Online mailbox.",
+		"outlook_calendar": "Calendar not backed up: this user has no Exchange Online mailbox.",
+		"outlook_contacts": "Contacts not backed up: this user has no Exchange Online mailbox.",
+		"outlook_onedrive": "OneDrive not backed up: this user has no OneDrive.",
+		"outlook_teams":    "Teams not backed up: Microsoft 365 has no Teams data for this team.",
+	} {
+		resourceType := repo.ResourceTypeUser
+		if method == "outlook_teams" {
+			resourceType = repo.ResourceTypeTeam
+		}
+		got := microsoftUnavailableMessage(&repo.CronJobListingDB{Method: method, ResourceType: resourceType})
+		if !strings.HasPrefix(got, want) || !strings.HasSuffix(got, "It is checked again on every run.") {
+			t.Errorf("%s: %q", method, got)
 		}
 	}
 }

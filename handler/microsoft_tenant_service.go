@@ -27,11 +27,60 @@ var microsoftServicePrincipalMissingCodes = []string{"AADSTS700016", "AADSTS7000
 
 // MicrosoftConsentContract is the shared contract consent block.
 type MicrosoftConsentContract struct {
-	Status       string     `json:"status"`
-	ConsentedBy  string     `json:"consented_by,omitempty"`
-	ConsentedAt  *time.Time `json:"consented_at,omitempty"`
-	GrantedRoles []string   `json:"granted_roles"`
-	LastError    string     `json:"last_error,omitempty"`
+	Status              string     `json:"status"`
+	ServicePrincipal    bool       `json:"service_principal"`
+	Effective           bool       `json:"effective"`
+	ConsentedBy         string     `json:"consented_by,omitempty"`
+	ConsentedAt         *time.Time `json:"consented_at,omitempty"`
+	GrantedRoles        []string   `json:"granted_roles"`
+	LastError           string     `json:"last_error,omitempty"`
+	CapabilityCheckedAt *time.Time `json:"capability_checked_at,omitempty"`
+}
+
+// MicrosoftAccessStateContract is the account↔tenant link state not already on the contract
+// (tenant, admin label, account type, consent and capabilities live at the top level).
+type MicrosoftAccessStateContract struct {
+	DefaultDomain         string                         `json:"default_domain,omitempty"`
+	Category              string                         `json:"category"`
+	IsHome                bool                           `json:"is_home"`
+	IdentityType          string                         `json:"identity_type"`
+	UserType              string                         `json:"user_type,omitempty"`
+	ObjectID              string                         `json:"object_id,omitempty"`
+	Roles                 []repo.MicrosoftRoleAssignment `json:"roles"`
+	RoleStatus            string                         `json:"role_status"`
+	TokenStatus           string                         `json:"token_status"`
+	TokenError            string                         `json:"token_error,omitempty"`
+	ConnectionState       string                         `json:"connection_state"`
+	BackupMode            string                         `json:"backup_mode"`
+	AuthMode              string                         `json:"auth_mode"`
+	DiscoveryStatus       string                         `json:"discovery_status,omitempty"`
+	Availability          string                         `json:"availability"`
+	CanPersonalBackup     bool                           `json:"can_personal_backup"`
+	CanOrganizationBackup bool                           `json:"can_organization_backup"`
+	CheckedAt             *time.Time                     `json:"checked_at,omitempty"`
+}
+
+func microsoftAccessStateContract(s *mstenant.AccessState) *MicrosoftAccessStateContract {
+	return &MicrosoftAccessStateContract{
+		DefaultDomain:         s.DefaultDomain,
+		Category:              s.Category,
+		IsHome:                s.IsHome,
+		IdentityType:          s.IdentityType,
+		UserType:              s.UserType,
+		ObjectID:              s.ObjectID,
+		Roles:                 s.Roles,
+		RoleStatus:            s.RoleStatus,
+		TokenStatus:           s.TokenStatus,
+		TokenError:            s.TokenError,
+		ConnectionState:       s.ConnectionState,
+		BackupMode:            s.BackupMode,
+		AuthMode:              s.AuthMode,
+		DiscoveryStatus:       s.DiscoveryStatus,
+		Availability:          s.Availability,
+		CanPersonalBackup:     s.CanPersonalBackup,
+		CanOrganizationBackup: s.CanOrganizationBackup,
+		CheckedAt:             s.CheckedAt,
+	}
 }
 
 // MicrosoftWorkspaceContract is the shared Satellite ↔ Backup-Tools workspace contract for one
@@ -47,7 +96,7 @@ type MicrosoftWorkspaceContract struct {
 	Consent          MicrosoftConsentContract                 `json:"consent"`
 	Capabilities     map[string]bool                          `json:"capabilities"`
 	CapabilityErrors map[string]repo.MicrosoftCapabilityError `json:"capability_errors"`
-	AccessState      *mstenant.AccessState                    `json:"access_state,omitempty"`
+	AccessState      *MicrosoftAccessStateContract            `json:"access_state,omitempty"`
 }
 
 // buildMicrosoftWorkspaceContract builds the contract from the account's tenant access state
@@ -63,17 +112,26 @@ func buildMicrosoftWorkspaceContract(email string, state *mstenant.AccessState, 
 		state = &s
 	}
 	out := MicrosoftWorkspaceContract{
-		Email:            strings.TrimSpace(email),
-		AccountType:      state.AccountType,
-		WorkspaceKind:    outlook.WorkspaceKindOrganization,
-		TenantID:         state.TenantID,
-		TenantName:       state.TenantName,
-		IsAdmin:          state.IsAdmin,
-		AdminRoles:       []string{},
-		Consent:          MicrosoftConsentContract{Status: state.Consent.Status, ConsentedBy: state.Consent.ConsentedBy, ConsentedAt: state.Consent.ConsentedAt, GrantedRoles: state.Consent.GrantedRoles, LastError: state.Consent.LastError},
+		Email:         strings.TrimSpace(email),
+		AccountType:   state.AccountType,
+		WorkspaceKind: outlook.WorkspaceKindOrganization,
+		TenantID:      state.TenantID,
+		TenantName:    state.TenantName,
+		IsAdmin:       state.IsAdmin,
+		AdminRoles:    []string{},
+		Consent: MicrosoftConsentContract{
+			Status:              state.Consent.Status,
+			ServicePrincipal:    state.Consent.ServicePrincipal,
+			Effective:           state.Consent.Effective,
+			ConsentedBy:         state.Consent.ConsentedBy,
+			ConsentedAt:         state.Consent.ConsentedAt,
+			GrantedRoles:        state.Consent.GrantedRoles,
+			LastError:           state.Consent.LastError,
+			CapabilityCheckedAt: state.Consent.CapabilityCheckedAt,
+		},
 		Capabilities:     state.Capabilities,
 		CapabilityErrors: state.CapabilityErrors,
-		AccessState:      state,
+		AccessState:      microsoftAccessStateContract(state),
 	}
 	if outlook.IsMSATenant(state.TenantID) {
 		out.WorkspaceKind = outlook.WorkspaceKindPersonal

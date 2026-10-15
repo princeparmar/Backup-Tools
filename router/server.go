@@ -134,7 +134,7 @@ func StartServer(db *db.PostgresDb, address string) {
 	// Microsoft product surface (outlook / outlook_*). Job list/live/update/policy/backup-now use shared /auto-sync/* above.
 	microsoft := e.Group("/microsoft")
 	microsoft.GET("/outlook/corporate/domain-users", handler.HandleMicrosoftCorporateDomainUsers)
-	microsoft.GET("/account/detect", handler.HandleMicrosoftCorporateDomainUsers)
+	microsoft.GET("/account/detect", handler.HandleMicrosoftAccountDetect)
 	microsoft.GET("/directory/users", handler.HandleMicrosoftDirectoryUsers)
 	microsoft.GET("/workspace", handler.HandleMicrosoftWorkspace)
 
@@ -148,7 +148,6 @@ func StartServer(db *db.PostgresDb, address string) {
 	msTenants.POST("/consent", handler.HandleMicrosoftTenantConsent)
 	msTenants.POST("/capabilities/refresh", handler.HandleMicrosoftTenantCapabilitiesRefresh)
 	msTenants.GET("/directory/users", handler.HandleMicrosoftTenantDirectoryUsers)
-	msTenants.GET("/org-structure", handler.HandleMicrosoftTenantOrgStructure)
 
 	msUsersGroups := microsoft.Group("/users-groups")
 	msUsersGroups.GET("/domains", handler.HandleMicrosoftAutosyncUsersGroupsDomains)
@@ -158,9 +157,6 @@ func StartServer(db *db.PostgresDb, address string) {
 	msUsersGroups.GET("/mailbox/services", handler.HandleMicrosoftAutosyncUsersGroupsMailboxServices)
 	msUsersGroups.GET("/mailbox/schedule", handler.HandleMicrosoftAutosyncUsersGroupsMailboxSchedule)
 	msUsersGroups.GET("/mailbox/credentials", handler.HandleMicrosoftAutosyncUsersGroupsMailboxCredentials)
-
-	msBackup := microsoft.Group("/backup")
-	msBackup.POST("/onboarding/jobs", handler.HandleMicrosoftBackupOnboardingJobs)
 
 	msAutoSync := microsoft.Group("/auto-sync")
 	msAutoSync.POST("/job", handler.HandleMicrosoftAutomaticSyncCreate)
@@ -176,9 +172,6 @@ func StartServer(db *db.PostgresDb, address string) {
 	microsoft.GET("/teams/list", handler.HandleMicrosoftTeamsList)
 	microsoft.GET("/teams/channels", handler.HandleMicrosoftTeamChannels)
 	microsoft.GET("/teams/flat-messages", handler.HandleMicrosoftTeamsFlatMessages)
-	// Groups backup is hidden for now.
-	// microsoft.GET("/groups/list", handler.HandleMicrosoftGroupsList)
-	// microsoft.GET("/groups/flat-conversations", handler.HandleMicrosoftGroupsFlatConversations)
 
 	google := e.Group("/google")
 
@@ -297,7 +290,7 @@ func StartServer(db *db.PostgresDb, address string) {
 	office365.POST("/satellite-to-onedrive", handler.HandleOneDriveDownloadAndInsert)
 	office365.POST("/satellite-to-sharepoint", handler.HandleSharePointDownloadAndInsert)
 	office365.POST("/satellite-to-teams", handler.HandleTeamsDownloadAndInsert)
-	// office365.POST("/satellite-to-groups", handler.HandleGroupsDownloadAndInsert) // Groups restore is hidden for now.
+	office365.POST("/satellite-to-teams-chats", handler.HandleTeamsChatsDownloadAndInsert)
 	// AWS S3
 	aws := e.Group("/aws")
 	aws.GET("/list-files-in-bucket/:bucketName", handler.HandleListAWSs3BucketFiles)

@@ -27,9 +27,9 @@ const (
 )
 
 var scopeCapability = map[string]string{
-	repo.ResourceTypeSite:  outlook.CapabilitySharePoint,
-	repo.ResourceTypeTeam:  outlook.CapabilityTeamsChannel,
-	repo.ResourceTypeGroup: outlook.CapabilityGroups,
+	repo.ResourceTypeSite:   outlook.CapabilitySharePoint,
+	repo.ResourceTypeTeam:   outlook.CapabilityTeamsChannel,
+	repo.ResourceTypeTenant: outlook.CapabilityTeamsChannel,
 }
 
 // reconcileMicrosoftScopes runs every active backup scope: the lifecycle check for its existing
@@ -71,6 +71,9 @@ func reconcileMicrosoftScope(ctx context.Context, store *db.PostgresDb, scope re
 	jobs, err := scopeJobs(store, scope)
 	if err != nil {
 		return 0, err
+	}
+	if scope.ResourceType == repo.ResourceTypeSite {
+		return reconcileMicrosoftSiteScope(ctx, store, tc, scope, jobs)
 	}
 	if scope.ResourceType != repo.ResourceTypeUser {
 		applyMicrosoftLifecycle(ctx, store, tc, scope.ResourceType, jobs, nil)
@@ -137,7 +140,7 @@ func addMicrosoftScopeUserJobs(store *db.PostgresDb, scope repo.MicrosoftBackupS
 				}
 				upserted = true
 			}
-			if err := cloneScopeJob(store, scope, pickScopeTemplate(templates[method], u.OrgUnitPath(), scope.PolicyID), u, email); err != nil {
+			if err := cloneScopeJob(store, scope, pickScopeTemplate(templates[method], scope.PolicyID), u, email); err != nil {
 				if firstErr == nil {
 					firstErr = fmt.Errorf("create %s job for %s: %w", method, email, err)
 				}
@@ -158,9 +161,8 @@ func cloneScopeJob(store *db.PostgresDb, scope repo.MicrosoftBackupScopeDB, tmpl
 		}
 	}
 	input["email"] = email
-	if _, ok := input["org_unit_path"]; ok {
-		input["org_unit_path"] = u.OrgUnitPath()
-	}
+	// Older jobs may still carry the template user's org_unit_path.
+	delete(input, "org_unit_path")
 	job, err := store.CronJobRepo.CreateMicrosoftResourceJob(scope.UserID, email, tmpl.Method, scope.SyncType, scope.CredentialID,
 		repo.MicrosoftJobIdentity{TenantID: scope.TenantID, ResourceType: repo.ResourceTypeUser, ResourceID: u.ObjectID}, input)
 	if err != nil {
@@ -174,18 +176,10 @@ func cloneScopeJob(store *db.PostgresDb, scope repo.MicrosoftBackupScopeDB, tmpl
 	})
 }
 
-// pickScopeTemplate prefers an active sibling in the same org unit, then an active sibling on the
-// scope policy, then any active sibling, then the first.
-func pickScopeTemplate(jobs []repo.CronJobListingDB, orgUnit string, policyID uint) repo.CronJobListingDB {
-	orgUnitOf := func(j repo.CronJobListingDB) string {
-		if j.InputData == nil || j.InputData.Json() == nil {
-			return ""
-		}
-		s, _ := (*j.InputData.Json())["org_unit_path"].(string)
-		return s
-	}
+// pickScopeTemplate prefers an active sibling on the scope policy, then any active sibling, then
+// the first.
+func pickScopeTemplate(jobs []repo.CronJobListingDB, policyID uint) repo.CronJobListingDB {
 	for _, match := range []func(repo.CronJobListingDB) bool{
-		func(j repo.CronJobListingDB) bool { return j.Active && orgUnitOf(j) != "" && orgUnitOf(j) == orgUnit },
 		func(j repo.CronJobListingDB) bool { return j.Active && policyID > 0 && j.PolicyID == policyID },
 		func(j repo.CronJobListingDB) bool { return j.Active },
 	} {
@@ -198,19 +192,15 @@ func pickScopeTemplate(jobs []repo.CronJobListingDB, orgUnit string, policyID ui
 	return jobs[0]
 }
 
-// applyMicrosoftLifecycle updates the resource state of each job's user or group. listed holds the
-// live directory users (nil = not listed); objects missing from it, and groups, are read one by one.
+// applyMicrosoftLifecycle updates the resource state of each job's user. listed holds the live
+// directory users (nil = not listed); users missing from it are read one by one.
 // Deleted objects pause their jobs with a warning; a restored object resumes the jobs this check
-// paused. Sites and teams are checked by their job runs instead.
+// paused. Sites are checked by applySiteLifecycle; teams by their job runs.
 func applyMicrosoftLifecycle(ctx context.Context, store *db.PostgresDb, tc *mstenant.Context, resourceType string, jobs []repo.CronJobListingDB, listed []outlook.DirectoryUser) {
-	kind := outlook.DirectoryKindUser
-	switch resourceType {
-	case repo.ResourceTypeUser:
-	case repo.ResourceTypeGroup:
-		kind = outlook.DirectoryKindGroup
-	default:
+	if resourceType != repo.ResourceTypeUser {
 		return
 	}
+	kind := outlook.DirectoryKindUser
 	live := make(map[string]outlook.DirectoryUser, len(listed))
 	for _, u := range listed {
 		live[u.ObjectID] = u

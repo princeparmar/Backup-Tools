@@ -232,6 +232,80 @@ func fetchSiteDefaultDriveID(ctx context.Context, accessToken, siteID string) (s
 	return "", fmt.Errorf("sharepoint default drive id missing")
 }
 
+// SharePointLibrary is one document library (Graph drive) of a site.
+type SharePointLibrary struct {
+	ID     string
+	Name   string
+	WebURL string
+}
+
+const sharePointDocumentLibrary = "documentLibrary"
+
+type graphSiteDrive struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	DriveType string `json:"driveType"`
+	WebURL    string `json:"webUrl"`
+}
+
+// ListSharePointSiteLibraries lists every document library of a site (app-only token). Every
+// page is read; a malformed, repeated or off-resource nextLink fails the whole listing, so a
+// returned list is complete.
+func ListSharePointSiteLibraries(ctx context.Context, accessToken, siteID string) ([]SharePointLibrary, error) {
+	rows, err := listSiteDrives(ctx, accessToken, siteID, "id,name,driveType,webUrl")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SharePointLibrary, 0, len(rows))
+	for _, r := range rows {
+		if id := strings.TrimSpace(r.ID); id != "" && r.DriveType == sharePointDocumentLibrary {
+			out = append(out, SharePointLibrary{ID: id, Name: strings.TrimSpace(r.Name), WebURL: strings.TrimSpace(r.WebURL)})
+		}
+	}
+	return out, nil
+}
+
+func listSiteDrives(ctx context.Context, accessToken, siteID, sel string) ([]graphSiteDrive, error) {
+	siteID = strings.TrimSpace(siteID)
+	if siteID == "" {
+		return nil, fmt.Errorf("site id is required")
+	}
+	raw, err := FetchTeamsAll(ctx, accessToken, graphBaseURL+"/sites/"+url.PathEscape(siteID)+"/drives?$select="+sel)
+	if err != nil {
+		return nil, fmt.Errorf("list sharepoint libraries: %w", err)
+	}
+	rows := make([]graphSiteDrive, 0, len(raw))
+	for _, item := range raw {
+		var r graphSiteDrive
+		if err := json.Unmarshal(item, &r); err != nil {
+			return nil, fmt.Errorf("list sharepoint libraries: %w: decode drive: %v", ErrTeamsPaging, err)
+		}
+		rows = append(rows, r)
+	}
+	return rows, nil
+}
+
+// SharePointSiteState reads a site (app-only token): ObjectStateActive when Graph returns it and
+// ObjectStateGone on 404. Any other answer (403, 429, 5xx, network) is an error and must not
+// change the stored state.
+func SharePointSiteState(ctx context.Context, appToken, siteID string) (string, error) {
+	siteID = strings.TrimSpace(siteID)
+	if siteID == "" {
+		return "", fmt.Errorf("site id is required")
+	}
+	body, status, err := graphDoJSON(ctx, appToken, http.MethodGet, graphBaseURL+"/sites/"+url.PathEscape(siteID)+"?$select=id", nil)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case status >= 200 && status < 300:
+		return ObjectStateActive, nil
+	case status == http.StatusNotFound:
+		return ObjectStateGone, nil
+	}
+	return "", fmt.Errorf("graph sites/%s: HTTP %d: %s", siteID, status, truncateForErr(body))
+}
+
 func parseSharePointSiteURL(raw string) (host, path string, err error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {

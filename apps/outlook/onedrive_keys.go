@@ -94,13 +94,34 @@ func escapeOneDriveKeyPart(s string) string {
 	return strings.ReplaceAll(s, "$", "$$")
 }
 
-// ParseOneDriveObjectKey parses a key written by OneDriveFileKey or OneDriveFolderKey.
+// SharePointLibrarySection holds a site's document libraries other than the default one. The
+// default library stays at the site prefix; every other library uses SharePointLibraryPrefix,
+// in the same MY_DRIVE / BIN layout.
+const SharePointLibrarySection = "library"
+
+// SharePointLibraryPrefix is the key prefix of a non-default library of the site at sitePrefix:
+// {sitePrefix}/library/{driveKey}. Returns "" when either part is missing.
+func SharePointLibraryPrefix(sitePrefix, driveID string) string {
+	sitePrefix = strings.TrimSuffix(strings.TrimSpace(sitePrefix), "/")
+	driveKey := resourceKeySegmentReplacer.Replace(strings.TrimSpace(driveID))
+	if sitePrefix == "" || driveKey == "" {
+		return ""
+	}
+	return sitePrefix + "/" + SharePointLibrarySection + "/" + driveKey
+}
+
+// ParseOneDriveObjectKey parses a key written by OneDriveFileKey or OneDriveFolderKey. Prefix is
+// the library prefix for keys of a non-default SharePoint library.
 func ParseOneDriveObjectKey(key string) (OneDriveObjectKey, bool) {
-	prefix, _, _, _, rest, ok := SplitResourceKey(strings.TrimSpace(key))
+	prefix, _, resourceType, _, rest, ok := SplitResourceKey(strings.TrimSpace(key))
 	if !ok {
 		return OneDriveObjectKey{}, false
 	}
 	parts := strings.Split(rest, "/")
+	if resourceType == "site" && len(parts) > 2 && parts[0] == SharePointLibrarySection && parts[1] != "" {
+		prefix += "/" + parts[0] + "/" + parts[1]
+		parts = parts[2:]
+	}
 	if len(parts) < 2 || (parts[0] != OneDriveSectionMyDrive && parts[0] != OneDriveSectionBin) {
 		return OneDriveObjectKey{}, false
 	}

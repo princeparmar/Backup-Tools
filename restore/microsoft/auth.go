@@ -13,8 +13,9 @@ import (
 
 var resolveTenantFn = mstenant.Resolve
 
-// MintAccessToken fills MicrosoftToken for the write credential in the restore job's tenant
-// (equal to the backup job's tenant; see restore.CheckMicrosoftTenantGuard).
+// MintAccessToken fills MicrosoftToken for the write credential in the restore job's tenant (see
+// restore.CheckMicrosoftTenantGuard). An app-only restore into another account also resolves the
+// destination's directory id.
 func MintAccessToken(ctx context.Context, d *restore.RestoreDeps) error {
 	if strings.TrimSpace(d.MicrosoftToken) != "" {
 		return nil
@@ -39,6 +40,13 @@ func MintAccessToken(ctx context.Context, d *restore.RestoreDeps) error {
 	}
 	d.MicrosoftToken = tc.Token
 	d.MicrosoftApplication = tc.Application
+	if tc.Application && d.MicrosoftTargetUser == "" && repo.IsRestoreJobMigration(d.Job) {
+		id, err := resolveTargetUserID(ctx, tc.Token, d.Job.TargetEmail)
+		if err != nil {
+			return err
+		}
+		d.MicrosoftTargetUser = id
+	}
 	return nil
 }
 

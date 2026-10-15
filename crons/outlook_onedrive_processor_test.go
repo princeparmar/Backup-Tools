@@ -36,7 +36,9 @@ func TestOutlookOneDriveProcessorRegistered(t *testing.T) {
 
 const (
 	driveTestPrefix = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/user/oid-1"
-	driveTestRoot   = "https://graph/users/u/drive"
+	driveTestRoot   = "https://graph.microsoft.com/v1.0/users/u/drive"
+	driveCursor1    = driveTestRoot + "/root/delta?token=1"
+	driveCursor2    = "https://graph.microsoft.com/v1.0/drives/b!u/root/delta?token=2"
 )
 
 type memDriveObject struct {
@@ -123,7 +125,7 @@ func driveDeleted(id string) outlook.OneDriveItem {
 }
 
 // driveGraph stubs the Graph seams: the delta returns items for the initial URL and for the
-// saved cursor "D1"; downloads return "v:{ctag}".
+// saved cursor driveCursor1; downloads return "v:{ctag}".
 type driveGraph struct {
 	baseline, incremental []outlook.OneDriveItem
 	items                 map[string]*outlook.OneDriveItem
@@ -143,9 +145,9 @@ func stubDriveGraph(t *testing.T, g *driveGraph) {
 	oneDriveDeltaPageFn = func(_ context.Context, _, url string) (*outlook.OneDriveDeltaPage, error) {
 		switch url {
 		case outlook.OneDriveInitialDeltaURL(driveTestRoot):
-			return &outlook.OneDriveDeltaPage{Items: g.baseline, DeltaLink: "D2"}, nil
-		case "D1":
-			return &outlook.OneDriveDeltaPage{Items: g.incremental, DeltaLink: "D2"}, nil
+			return &outlook.OneDriveDeltaPage{Items: g.baseline, DeltaLink: driveCursor2}, nil
+		case driveCursor1:
+			return &outlook.OneDriveDeltaPage{Items: g.incremental, DeltaLink: driveCursor2}, nil
 		}
 		return nil, fmt.Errorf("unexpected delta url %s", url)
 	}
@@ -176,7 +178,7 @@ func runDriveSync(t *testing.T, store *memDriveStore, tm *repo.TaskMemory) *oneD
 }
 
 func incrementalTM() *repo.TaskMemory {
-	link := "D1"
+	link := driveCursor1
 	return &repo.TaskMemory{OneDriveDeltaLink: &link, OneDriveLayout: repo.OneDriveLayoutTree}
 }
 
@@ -231,7 +233,7 @@ func TestOneDriveBaselineBuildsTree(t *testing.T) {
 	if store.objects[keyFolderB].meta[outlook.OneDriveMetaIsFolder] != "true" {
 		t.Fatalf("folder meta %v", store.objects[keyFolderB].meta)
 	}
-	if tm.OneDriveLayout != repo.OneDriveLayoutTree || tm.OneDriveDeltaLink == nil || *tm.OneDriveDeltaLink != "D2" {
+	if tm.OneDriveLayout != repo.OneDriveLayoutTree || tm.OneDriveDeltaLink == nil || *tm.OneDriveDeltaLink != driveCursor2 {
 		t.Fatalf("task memory %+v", tm)
 	}
 }
@@ -432,7 +434,7 @@ func TestOneDriveLegacyMigration(t *testing.T) {
 			t.Fatalf("legacy key left: %s", key)
 		}
 	}
-	if tm.OneDriveLayout != repo.OneDriveLayoutTree || *tm.OneDriveDeltaLink != "D2" {
+	if tm.OneDriveLayout != repo.OneDriveLayoutTree || *tm.OneDriveDeltaLink != driveCursor2 {
 		t.Fatalf("task memory %+v", tm)
 	}
 }
@@ -468,7 +470,7 @@ func TestSharePointLibraryMigratesToTree(t *testing.T) {
 	if _, ok := store.objects[dataKey]; ok {
 		t.Fatal("old data key left")
 	}
-	if tm.SharePointLayout != repo.OneDriveLayoutTree || *tm.SharePointDeltaLink != "D2" || tm.OneDriveDeltaLink != nil {
+	if tm.SharePointLayout != repo.OneDriveLayoutTree || *tm.SharePointDeltaLink != driveCursor2 || tm.OneDriveDeltaLink != nil {
 		t.Fatalf("task memory %+v", tm)
 	}
 }

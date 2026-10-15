@@ -164,6 +164,12 @@ func HandleAutomaticSyncServicesQuotaPrecheck(c echo.Context) error {
 		return sendJSONError(c, http.StatusBadRequest, "services is required", nil)
 	}
 
+	// Microsoft 365 size estimates and the storage pre-check are disabled for now; the Microsoft
+	// branches below are kept to turn them back on.
+	if body.isMicrosoft() {
+		return c.JSON(http.StatusOK, microsoftQuotaCheckDisabledResponse(body.MicrosoftEmail))
+	}
+
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 
 	emails := make([]string, 0, len(body.Emails))
@@ -268,6 +274,19 @@ func HandleAutomaticSyncServicesQuotaPrecheck(c echo.Context) error {
 		"mailbox_count":   mailboxCount,
 		"oauth_holder":    holderEmail,
 	})
+}
+
+// microsoftQuotaCheckDisabledResponse answers a Microsoft 365 quota check while Microsoft size
+// estimates are disabled: the check always allows and reports no estimate.
+func microsoftQuotaCheckDisabledResponse(holderEmail string) map[string]interface{} {
+	return map[string]interface{}{
+		"allowed":          true,
+		"failure_code":     "",
+		"quota_kind":       "storage",
+		"estimate_skipped": true,
+		"message":          "",
+		"oauth_holder":     strings.TrimSpace(holderEmail),
+	}
 }
 
 func estimateGoogleServicesForPrecheck(ctx context.Context, auth precheckAuth, services, emails []string) *precheckTally {
@@ -383,7 +402,7 @@ func microsoftFallbackEstimate(svc string) int64 {
 		return outlook.OneDriveFallbackEstimateBytes
 	case "sharepoint":
 		return 5 * 1024 * 1024 * 1024
-	case "teams", "groups":
+	case "teams":
 		return 1 * 1024 * 1024 * 1024
 	default:
 		return fallbackEstimate(svc)

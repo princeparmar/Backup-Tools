@@ -160,7 +160,6 @@ var policyServiceLabels = map[string]string{
 	"outlook_onedrive":   "OneDrive",
 	"outlook_sharepoint": "SharePoint",
 	"outlook_teams":      "Teams",
-	"outlook_groups":     "Groups",
 }
 
 func normalizeEmail(email string) string {

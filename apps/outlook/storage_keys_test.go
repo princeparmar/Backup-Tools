@@ -59,13 +59,11 @@ func TestKeyBuildersStartWithResourcePrefix(t *testing.T) {
 	user := ResourceKeyPrefix(keyTenant, "user", "oid-1")
 	site := ResourceKeyPrefix(keyTenant, "site", "site-1")
 	team := ResourceKeyPrefix(keyTenant, "team", "team-1")
-	group := ResourceKeyPrefix(keyTenant, "group", "group-1")
 	keys := map[string]string{
 		OutlookMailObjectKey(user, "Inbox", "2026-01-02T03:04:05Z", "a", "s", "c", "m"): user,
 		OneDriveFileKey(user, OneDriveSectionMyDrive, []string{"f"}, "i", "file.txt"):    user,
 		SharePointIDBasedDataKey(site, "i", "file.txt", "2026-01-02T03:04:05Z"):         site,
 		TeamsIDBasedDataKey(team, "chan", "m", "2026-01-02T03:04:05Z"):                  team,
-		GroupCalendarEventKey(group, "e"):                                               group,
 	}
 	for key, prefix := range keys {
 		got, _, _, _, _, ok := SplitResourceKey(key)
@@ -80,10 +78,5 @@ func TestParseKeysFromTenantLayout(t *testing.T) {
 	teamKey, channel := ParseTeamsIDsFromKey(TeamsIDBasedDataKey(team, "chan-1", "m", "2026-01-02T03:04:05Z"))
 	if teamKey != team || channel != "chan-1" {
 		t.Fatalf("ParseTeamsIDsFromKey = %q %q", teamKey, channel)
-	}
-
-	group := ResourceKeyPrefix(keyTenant, "group", "group-1")
-	if got := GroupKeyFromObjectKey(GroupCalendarEventKey(group, "e")); got != group {
-		t.Fatalf("GroupKeyFromObjectKey = %q, want %q", got, group)
 	}
 }

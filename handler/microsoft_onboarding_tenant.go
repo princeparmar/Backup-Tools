@@ -53,9 +53,9 @@ func resolveMicrosoftOnboardingTenant(
 			Message: "organization backup requires a Microsoft 365 work or school tenant"}
 	}
 
-	backupMode, authMode := repo.MicrosoftBackupModePersonal, repo.MicrosoftAuthModeDelegated
+	backupMode := repo.MicrosoftBackupModePersonal
 	if application {
-		backupMode, authMode = repo.MicrosoftBackupModeOrganization, repo.MicrosoftAuthModeApplication
+		backupMode = repo.MicrosoftBackupModeOrganization
 	}
 	links := database.MicrosoftLinkRepo
 	link, err := links.Get(cred.ID, tid)
@@ -63,24 +63,13 @@ func resolveMicrosoftOnboardingTenant(
 		return nil, nil, err
 	}
 	if link == nil {
-		home := cred.HomeTenantID()
-		category := repo.MicrosoftTenantCategoryGuest
-		switch {
-		case outlook.IsMSATenant(tid):
-			category = repo.MicrosoftTenantCategoryPersonal
-		case tid == home:
-			category = repo.MicrosoftTenantCategoryHome
-		}
-		name := ""
-		if tid == home {
+		name := req.TenantName
+		if tid == cred.HomeTenantID() {
 			name = cred.TenantName
-		} else if !application || req.TenantName != "" {
-			name = req.TenantName
 		}
-		if _, err := links.UpsertDiscovered(cred.ID, repo.MicrosoftTenantDiscovery{TenantID: tid, TenantName: name, Category: category, HomeTenantID: home}); err != nil {
+		if err := discoverMicrosoftLink(ctx, database, cred, tid, name, id.RefreshToken); err != nil {
 			return nil, nil, err
 		}
-		msCheckTenantAccessFn(ctx, database, cred, tid, id.RefreshToken)
 		if link, err = links.Get(cred.ID, tid); err != nil {
 			return nil, nil, err
 		}
@@ -95,7 +84,7 @@ func resolveMicrosoftOnboardingTenant(
 		return nil, nil, &mstenant.Error{HTTPStatus: http.StatusConflict, Code: mstenant.CodeTenantDisconnected,
 			Message: "tenant " + tid + " is disconnected for this Microsoft account; reconnect it first"}
 	default:
-		if err := links.Connect(cred.ID, tid, backupMode, authMode); err != nil {
+		if err := links.Connect(cred.ID, tid, backupMode, mstenant.AuthModeFor(backupMode)); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -182,10 +171,10 @@ func microsoftScopeResourceType(svc string) string {
 	return ""
 }
 
-// saveMicrosoftTenantScopes records what organization onboarding selected per resource type. all
-// (all_users) applies to the user resource type only and makes reconcile add jobs for new users;
-// selected scopes never replace an all scope.
-func saveMicrosoftTenantScopes(database *db.PostgresDb, userID string, cred *repo.GoogleBackupCredentialDB, tenantID, syncType string, services []string, allUsers bool, policyID uint) {
+// saveMicrosoftTenantScopes records what organization onboarding selected per resource type.
+// allTypes marks the types selected in full (all users, every tenant site); reconcile adds jobs
+// for new users or sites of those scopes. Selected scopes never replace an all scope.
+func saveMicrosoftTenantScopes(database *db.PostgresDb, userID string, cred *repo.GoogleBackupCredentialDB, tenantID, syncType string, services []string, allTypes map[string]bool, policyID uint) {
 	seen := map[string]bool{}
 	for _, svc := range services {
 		rt := microsoftScopeResourceType(svc)
@@ -197,7 +186,7 @@ func saveMicrosoftTenantScopes(database *db.PostgresDb, userID string, cred *rep
 			UserID: userID, StorjProjectID: strings.TrimSpace(cred.StorjProjectID), CredentialID: cred.ID,
 			TenantID: tenantID, ResourceType: rt, SyncType: syncType, PolicyID: policyID,
 		}
-		if allUsers && rt == repo.ResourceTypeUser {
+		if allTypes[rt] {
 			scope.SelectionMode = repo.MicrosoftScopeAll
 			_, _ = database.MicrosoftScopeRepo.Upsert(scope)
 		} else {

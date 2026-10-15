@@ -25,14 +25,22 @@ const microsoftManualRestoreMaxKeys = 10
 type microsoftManualRestoreSession struct {
 	accessGrant string
 	accessToken string
+	tenantID    string
 	loginID     string
 	userID      string
 }
 
-func prepareMicrosoftManualRestore(c echo.Context) (*microsoftManualRestoreSession, []string, error) {
+// prepareMicrosoftManualRestore checks the request before any write. checkToken refuses an
+// access token the restore can't write with.
+func prepareMicrosoftManualRestore(c echo.Context, checkToken ...func(accessToken string) error) (*microsoftManualRestoreSession, []string, error) {
 	accessGrant, accessToken, err := getAccessTokens(c)
 	if err != nil {
 		return nil, nil, err
+	}
+	for _, check := range checkToken {
+		if err := check(accessToken); err != nil {
+			return nil, nil, echo.NewHTTPError(http.StatusForbidden, err.Error())
+		}
 	}
 	keys, err := parseMessageIDs(c)
 	if err != nil {
@@ -44,7 +52,8 @@ func prepareMicrosoftManualRestore(c echo.Context) (*microsoftManualRestoreSessi
 	if len(keys) > microsoftManualRestoreMaxKeys {
 		return nil, nil, echo.NewHTTPError(http.StatusBadRequest, "maximum 10 keys allowed")
 	}
-	if err := checkMicrosoftManualRestoreKeys(c, accessToken, keys); err != nil {
+	tenantID, err := checkMicrosoftManualRestoreKeys(c, accessToken, keys)
+	if err != nil {
 		return nil, nil, err
 	}
 	client, err := createOutlookClient(accessToken)
@@ -65,6 +74,7 @@ func prepareMicrosoftManualRestore(c echo.Context) (*microsoftManualRestoreSessi
 	return &microsoftManualRestoreSession{
 		accessGrant: accessGrant,
 		accessToken: accessToken,
+		tenantID:    tenantID,
 		loginID:     loginID,
 		userID:      userID,
 	}, keys, nil
@@ -72,7 +82,8 @@ func prepareMicrosoftManualRestore(c echo.Context) (*microsoftManualRestoreSessi
 
 // checkMicrosoftManualRestoreKeys keeps a manual restore inside one tenant: every key must be in the
 // {tenant}/{type}/{id}/ layout, in the access token's tenant and in MICROSOFT_TENANT_ID when sent.
-func checkMicrosoftManualRestoreKeys(c echo.Context, accessToken string, keys []string) error {
+// It returns that tenant.
+func checkMicrosoftManualRestoreKeys(c echo.Context, accessToken string, keys []string) (string, error) {
 	headerTenant := strings.ToLower(strings.TrimSpace(c.Request().Header.Get("MICROSOFT_TENANT_ID")))
 	claims, _ := outlook.IdentityClaimsFromTokens("", accessToken)
 	tokenTenant := strings.ToLower(strings.TrimSpace(claims.TenantID))
@@ -80,21 +91,21 @@ func checkMicrosoftManualRestoreKeys(c echo.Context, accessToken string, keys []
 		tokenTenant = headerTenant
 	}
 	if tokenTenant == "" {
-		return echo.NewHTTPError(http.StatusBadRequest, "cannot determine the access token's tenant; send MICROSOFT_TENANT_ID")
+		return "", echo.NewHTTPError(http.StatusBadRequest, "cannot determine the access token's tenant; send MICROSOFT_TENANT_ID")
 	}
 	if headerTenant != "" && headerTenant != tokenTenant {
-		return echo.NewHTTPError(http.StatusForbidden, fmt.Sprintf("access token is for tenant %s, not %s", tokenTenant, headerTenant))
+		return "", echo.NewHTTPError(http.StatusForbidden, fmt.Sprintf("access token is for tenant %s, not %s", tokenTenant, headerTenant))
 	}
 	for _, key := range keys {
 		_, keyTenant, _, _, _, ok := outlook.SplitResourceKey(key)
 		if !ok {
-			return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("key %q is not a tenant-scoped Microsoft backup key", key))
+			return "", echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("key %q is not a tenant-scoped Microsoft backup key", key))
 		}
 		if strings.ToLower(keyTenant) != tokenTenant {
-			return echo.NewHTTPError(http.StatusForbidden, fmt.Sprintf("key %q belongs to tenant %s, not %s", key, keyTenant, tokenTenant))
+			return "", echo.NewHTTPError(http.StatusForbidden, fmt.Sprintf("key %q belongs to tenant %s, not %s", key, keyTenant, tokenTenant))
 		}
 	}
-	return nil
+	return tokenTenant, nil
 }
 
 func notifyMicrosoftRestore(ctx context.Context, sess *microsoftManualRestoreSession, method, phase string, itemCount int, result *DownloadResult, restoreErr error) {
@@ -199,7 +210,7 @@ func HandleOutlookCalendarDownloadAndInsert(c echo.Context) error {
 			failed.Add(key)
 			continue
 		}
-		calendarID := msrestore.CalendarIDForEventKey(ctx, sess.accessGrant, key, nil)
+		calendarID := msrestore.RestoreCalendarID(ctx, sess.accessGrant, sess.accessToken, userBase, key, nil)
 		if cerr := outlook.RestoreCalendarEvent(ctx, sess.accessToken, userBase, calendarID, raw); cerr != nil {
 			logger.Error(ctx, "calendar restore create failed", logger.ErrorField(cerr), logger.String("key", key))
 			failed.Add(key)
@@ -306,7 +317,7 @@ func addDriveFolderNames(ctx context.Context, accessGrant, bucket, key string, n
 	}
 }
 
-// libraryRestore restores tree-layout SharePoint and group library backups into their library.
+// libraryRestore restores tree-layout SharePoint library backups into their library.
 type libraryRestore struct {
 	accessGrant, bucket string
 	src                 outlook.OneDriveRestoreSource
@@ -380,198 +391,88 @@ func HandleSharePointDownloadAndInsert(c echo.Context) error {
 	return c.JSON(http.StatusOK, result)
 }
 
-// HandleTeamsDownloadAndInsert restores selected Teams channel messages by posting them as *new*
-// messages (≤10 keys). Graph cannot recreate original message IDs; replies/hosted content are not restored.
-// Optional query: team_id, channel_id. Otherwise IDs come from message meta / {teamKey}/_team.json.
-// Idempotency: callers should track restore_job_id + source key at the processor/DB layer — retries can duplicate posts.
+// HandleTeamsDownloadAndInsert restores selected Teams channel messages (≤10 keys) by posting them
+// as *new* messages as the signed-in user (ChannelMessage.Send, delegated only); a reply goes
+// under its reposted root, else the original root, else a new post. Optional query: team_id,
+// channel_id. Old channel keys keep their legacy restore.
 func HandleTeamsDownloadAndInsert(c echo.Context) error {
+	return handleTeamsManualRestore(c, outlook.TeamsKindChannelMessage, "ChannelMessage.Send")
+}
+
+// HandleTeamsChatsDownloadAndInsert restores selected Teams chat messages (≤10 keys) by posting
+// them as new messages into the existing chat (ChatMessage.Send, delegated only; the signed-in
+// user must be a member). Meetings, calendar events and call records are download only.
+func HandleTeamsChatsDownloadAndInsert(c echo.Context) error {
+	return handleTeamsManualRestore(c, outlook.TeamsKindChatMessage, "ChatMessage.Send")
+}
+
+// teamsRepostNotice is returned with every Teams restore result.
+const teamsRepostNotice = "Messages are reposted as new messages by the signed-in user, each with a note naming the original sender, time and ref. Original message ids, authors, times, reactions and inline images are not recreated. A message whose outcome is unknown may already be in Teams; search for its ref before restoring it again."
+
+// teamsManualRestoreResult is the manual Teams restore answer: the usual id lists (skipped keys
+// apart) and one outcome per key.
+type teamsManualRestoreResult struct {
+	DownloadResult
+	SkippedIDs []string                        `json:"skipped_ids"`
+	Items      []msrestore.TeamsRestoreOutcome `json:"items"`
+}
+
+func handleTeamsManualRestore(c echo.Context, kind, scope string) error {
 	ctx := c.Request().Context()
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	sess, keys, err := prepareMicrosoftManualRestore(c)
+	sess, keys, err := prepareMicrosoftManualRestore(c, func(accessToken string) error {
+		return msrestore.CheckTeamsRestoreToken(accessToken, scope)
+	})
 	if err != nil {
 		return microsoftManualRestoreHTTPError(c, err)
 	}
-	overrideTeamID := strings.TrimSpace(c.QueryParam("team_id"))
-	overrideChannelID := strings.TrimSpace(c.QueryParam("channel_id"))
 	notifyMicrosoftRestore(ctx, sess, "outlook_teams", "started", len(keys), nil, nil)
-
-	teamSnapCache := map[string]*outlook.TeamsTeamSnapshot{}
-	processed, failed := utils.NewLockedArray(), utils.NewLockedArray()
-	for _, key := range keys {
-		metaJSON, dataBytes, _, derr := downloadMetaFollowData(ctx, sess.accessGrant, satellite.ReserveBucket_OutlookTeams, key)
-		if derr != nil {
-			failed.Add(key)
-			continue
-		}
-		payload := dataBytes
-		if len(payload) == 0 {
-			payload = metaJSON
-		}
-		var meta outlook.TeamsCronBackupMeta
-		_ = json.Unmarshal(metaJSON, &meta)
-
-		teamKey, _ := outlook.ParseTeamsIDsFromKey(key)
-		var teamSnap *outlook.TeamsTeamSnapshot
-		if teamKey != "" {
-			if cached, ok := teamSnapCache[teamKey]; ok {
-				teamSnap = cached
-			} else {
-				snapRaw, serr := satellite.DownloadObject(ctx, sess.accessGrant, satellite.ReserveBucket_OutlookTeams, teamKey+"/_team.json")
-				if serr == nil {
-					if parsed, perr := outlook.ParseTeamsTeamSnapshot(snapRaw); perr == nil {
-						teamSnap = parsed
-						teamSnapCache[teamKey] = parsed
-					}
-				} else {
-					teamSnapCache[teamKey] = nil
-				}
-			}
-		}
-
-		tid, cid, rerr := outlook.ResolveTeamsGraphIDs(meta, teamSnap, key, overrideTeamID, overrideChannelID)
-		if rerr != nil {
-			logger.Error(ctx, "teams restore missing graph ids", logger.ErrorField(rerr), logger.String("key", key))
-			failed.Add(key)
-			continue
-		}
-		body := outlook.ExtractTeamsMessageBody(payload)
-		if perr := outlook.PostTeamsChannelMessage(ctx, sess.accessToken, tid, cid, body); perr != nil {
-			logger.Error(ctx, "teams restore-as-new post failed", logger.ErrorField(perr), logger.String("key", key))
-			failed.Add(key)
-			continue
-		}
-		processed.Add(key)
+	session := &msrestore.TeamsRestoreSession{AccessGrant: sess.accessGrant, Token: sess.accessToken, TenantID: sess.tenantID}
+	if kind == outlook.TeamsKindChannelMessage {
+		session.OverrideTeamID = strings.TrimSpace(c.QueryParam("team_id"))
+		session.OverrideChannelID = strings.TrimSpace(c.QueryParam("channel_id"))
 	}
-	result := &DownloadResult{ProcessedIDs: processed.Get(), FailedIDs: failed.Get(), Message: "teams restore-as-new processed (messages re-posted; original IDs not preserved)"}
-	notifyMicrosoftRestore(ctx, sess, "outlook_teams", "completed", len(keys), result, nil)
+	result := restoreTeamsManualKeys(ctx, session, keys, kind)
+	notifyMicrosoftRestore(ctx, sess, "outlook_teams", "completed", len(keys), &result.DownloadResult, nil)
 	return c.JSON(http.StatusOK, result)
 }
 
-// HandleGroupsDownloadAndInsert restores selected M365 Group items (conversations/calendar/drive) ≤10 keys.
-// Optional query: group_id. Otherwise IDs come from object JSON / {groupKey}/_group.json.
-// Conversation/calendar creates need Group.ReadWrite.All (delegated). Idempotency belongs at processor/DB layer.
-func HandleGroupsDownloadAndInsert(c echo.Context) error {
-	ctx := c.Request().Context()
-	var err error
-	defer monitor.Mon.Task()(&ctx)(&err)
-
-	sess, keys, err := prepareMicrosoftManualRestore(c)
-	if err != nil {
-		return microsoftManualRestoreHTTPError(c, err)
+// restoreTeamsManualKeys restores the keys an endpoint accepts (channel endpoint: channel messages
+// and old channel keys; chat endpoint: chat messages), thread roots first.
+func restoreTeamsManualKeys(ctx context.Context, session *msrestore.TeamsRestoreSession, keys []string, kind string) teamsManualRestoreResult {
+	result := teamsManualRestoreResult{
+		DownloadResult: DownloadResult{ProcessedIDs: []string{}, FailedIDs: []string{}, Message: teamsRepostNotice},
+		SkippedIDs:     []string{},
+		Items:          []msrestore.TeamsRestoreOutcome{},
 	}
-	overrideGroupID := strings.TrimSpace(c.QueryParam("group_id"))
-	notifyMicrosoftRestore(ctx, sess, "outlook_groups", "started", len(keys), nil, nil)
-
-	groupSnapCache := map[string]*outlook.GroupsGroupSnapshot{}
-	lib := newLibraryRestore(sess.accessGrant, satellite.ReserveBucket_OutlookGroups)
-	processed, failed := utils.NewLockedArray(), utils.NewLockedArray()
-	for _, key := range keys {
-		if handled, uerr := lib.restore(ctx, sess.accessToken, key); handled {
-			if uerr != nil {
-				logger.Error(ctx, "groups file restore failed", logger.ErrorField(uerr), logger.String("key", key))
-				failed.Add(key)
-			} else {
-				processed.Add(key)
-			}
-			continue
+	for _, key := range msrestore.OrderTeamsRestoreKeys(keys) {
+		var o msrestore.TeamsRestoreOutcome
+		if k, ok := outlook.ParseTeamsObjectKey(key); ok && !teamsManualKindAccepted(k.Kind, kind) {
+			o = msrestore.TeamsRestoreOutcome{Key: key, Status: msrestore.TeamsUnsupported,
+				Detail: fmt.Sprintf("this endpoint restores %s keys, not %s keys", strings.ReplaceAll(kind, "_", " "), strings.ReplaceAll(k.Kind, "_", " "))}
+		} else {
+			o = session.RestoreItem(ctx, key)
 		}
-		groupKey := outlook.GroupKeyFromObjectKey(key)
-		var groupSnap *outlook.GroupsGroupSnapshot
-		if groupKey != "" {
-			if cached, ok := groupSnapCache[groupKey]; ok {
-				groupSnap = cached
-			} else {
-				snapRaw, serr := satellite.DownloadObject(ctx, sess.accessGrant, satellite.ReserveBucket_OutlookGroups, groupKey+"/_group.json")
-				if serr == nil {
-					if parsed, perr := outlook.ParseGroupsGroupSnapshot(snapRaw); perr == nil {
-						groupSnap = parsed
-						groupSnapCache[groupKey] = parsed
-					}
-				} else {
-					groupSnapCache[groupKey] = nil
-				}
-			}
-		}
-
-		switch {
-		case strings.Contains(key, "/conversations/"):
-			raw, derr := satellite.DownloadObject(ctx, sess.accessGrant, satellite.ReserveBucket_OutlookGroups, key)
-			if derr != nil {
-				failed.Add(key)
-				continue
-			}
-			gid, gerr := outlook.ResolveGroupGraphID(key, raw, groupSnap, overrideGroupID)
-			if gerr != nil {
-				logger.Error(ctx, "groups restore missing group_id", logger.ErrorField(gerr), logger.String("key", key))
-				failed.Add(key)
-				continue
-			}
-			var post struct {
-				Topic       string `json:"topic"`
-				BodyPreview string `json:"body_preview"`
-				Body        string `json:"body"`
-			}
-			_ = json.Unmarshal(raw, &post)
-			topic := strings.TrimSpace(post.Topic)
-			body := strings.TrimSpace(post.Body)
-			if body == "" {
-				body = strings.TrimSpace(post.BodyPreview)
-			}
-			if cerr := outlook.CreateGroupConversationThread(ctx, sess.accessToken, gid, topic, body); cerr != nil {
-				failed.Add(key)
-				continue
-			}
-			processed.Add(key)
-		case strings.Contains(key, "/calendar/"):
-			raw, derr := satellite.DownloadObject(ctx, sess.accessGrant, satellite.ReserveBucket_OutlookGroups, key)
-			if derr != nil {
-				failed.Add(key)
-				continue
-			}
-			gid, gerr := outlook.ResolveGroupGraphID(key, raw, groupSnap, overrideGroupID)
-			if gerr != nil {
-				failed.Add(key)
-				continue
-			}
-			ev, perr := outlook.ParseRestoreCalendarEvent(raw)
-			if perr != nil {
-				failed.Add(key)
-				continue
-			}
-			if cerr := outlook.CreateGroupCalendarEvent(ctx, sess.accessToken, gid, ev); cerr != nil {
-				failed.Add(key)
-				continue
-			}
-			processed.Add(key)
+		switch o.Status {
+		case msrestore.TeamsRestored:
+			result.ProcessedIDs = append(result.ProcessedIDs, key)
+		case msrestore.TeamsSkipped:
+			result.SkippedIDs = append(result.SkippedIDs, key)
 		default:
-			metaJSON, dataBytes, _, derr := downloadMetaFollowData(ctx, sess.accessGrant, satellite.ReserveBucket_OutlookGroups, key)
-			if derr != nil || len(dataBytes) == 0 {
-				failed.Add(key)
-				continue
-			}
-			var meta outlook.SharePointCronBackupMeta
-			_ = json.Unmarshal(metaJSON, &meta)
-			name := strings.TrimSpace(meta.Name)
-			if name == "" {
-				name = path.Base(key)
-			}
-			driveID := strings.TrimSpace(meta.DriveID)
-			var uerr error
-			if driveID != "" {
-				uerr = outlook.UploadSharePointDriveFile(ctx, sess.accessToken, driveID, name, dataBytes)
-			} else {
-				uerr = outlook.UploadDriveFile(ctx, sess.accessToken, "group-restore-"+name, dataBytes)
-			}
-			if uerr != nil {
-				failed.Add(key)
-				continue
-			}
-			processed.Add(key)
+			logger.Error(ctx, "teams restore item not restored", logger.String("key", key),
+				logger.String("status", o.Status), logger.String("detail", o.Detail))
+			result.FailedIDs = append(result.FailedIDs, key)
 		}
+		result.Items = append(result.Items, o)
 	}
-	result := &DownloadResult{ProcessedIDs: processed.Get(), FailedIDs: failed.Get(), Message: "groups restore-as-new processed"}
-	notifyMicrosoftRestore(ctx, sess, "outlook_groups", "completed", len(keys), result, nil)
-	return c.JSON(http.StatusOK, result)
+	return result
+}
+
+func teamsManualKindAccepted(keyKind, kind string) bool {
+	if keyKind == kind {
+		return true
+	}
+	return kind == outlook.TeamsKindChannelMessage && (keyKind == outlook.TeamsKindLegacyMeta || keyKind == outlook.TeamsKindLegacyOther)
 }

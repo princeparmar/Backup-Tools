@@ -41,7 +41,8 @@ type ReadinessResult struct {
 	Message            string              `json:"message,omitempty"`
 	TargetEmail        string              `json:"target_email,omitempty"`
 	Migration          bool                `json:"migration,omitempty"`
-	// TenantID is the Microsoft tenant of the backup and of the restore target (never different).
+	// TenantID is the Microsoft tenant the restore writes into: the backup's tenant for an in-place
+	// restore, the destination's tenant for a restore into another account.
 	TenantID string `json:"tenant_id,omitempty"`
 }
 
@@ -63,6 +64,10 @@ const (
 	ReadinessReasonTenantRequired = "tenant_required"
 	// ReadinessReasonTenantMismatch: the restore would cross Microsoft tenants.
 	ReadinessReasonTenantMismatch = "tenant_mismatch"
+	// ReadinessReasonMigrationUnsupported: the service only restores to where it was backed up from.
+	ReadinessReasonMigrationUnsupported = "migration_unsupported"
+	// ReadinessReasonTargetUnavailable: the destination has no mailbox or drive for the service.
+	ReadinessReasonTargetUnavailable = "target_unavailable"
 )
 
 // ReadinessRequest is the input for prepare and restore-all readiness checks.

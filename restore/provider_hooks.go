@@ -109,3 +109,23 @@ func (d *RestoreDeps) RefreshGoogleAccessToken(ctx context.Context) error {
 	}
 	return refreshGoogleTokenFn(ctx, d)
 }
+
+// restoreProviderName names the token provider that serves the job's method.
+func restoreProviderName(d *RestoreDeps) string {
+	if d != nil && d.Job != nil && IsMicrosoftRestoreMethod(d.Job.Method) {
+		return "microsoft"
+	}
+	return "google"
+}
+
+// refreshAccessTokenForJob forces a new access token from the job's own provider (401 retry path).
+// Microsoft failures are wrapped so they are never reported as a Google refresh error.
+func (d *RestoreDeps) refreshAccessTokenForJob(ctx context.Context) error {
+	if restoreProviderName(d) == "microsoft" {
+		if err := d.RefreshMicrosoftAccessToken(ctx); err != nil {
+			return fmt.Errorf("microsoft token refresh: %w", err)
+		}
+		return nil
+	}
+	return d.RefreshGoogleAccessToken(ctx)
+}

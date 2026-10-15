@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -272,6 +273,37 @@ func TestBuildMicrosoftWorkspaceContract_accountTypeLabel(t *testing.T) {
 	}
 }
 
+func TestBuildMicrosoftWorkspaceContract_accessStateHasNoDuplicates(t *testing.T) {
+	tenant := &repo.MicrosoftTenantDB{TenantID: testTenantID, ConsentStatus: repo.MicrosoftConsentGranted, ServicePrincipalID: "sp-1"}
+	tenant.Capabilities = dbJSON(map[string]bool{outlook.CapabilityListUsers: true})
+	link := &repo.MicrosoftAccountTenantDB{TenantID: testTenantID, HomeTenantID: testTenantID, Category: repo.MicrosoftTenantCategoryHome,
+		RoleStatus: repo.MicrosoftStatusKnown, IsAdmin: true, TokenStatus: repo.MicrosoftStatusWorking}
+	state := mstenant.BuildAccessState(link, tenant)
+
+	raw, err := json.Marshal(buildMicrosoftWorkspaceContract("a@contoso.com", &state, tenant))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Consent     map[string]interface{} `json:"consent"`
+		AccessState map[string]interface{} `json:"access_state"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"tenant_id", "tenant_name", "is_admin", "account_type", "consent", "capabilities", "capability_errors"} {
+		if _, ok := got.AccessState[key]; ok {
+			t.Fatalf("access_state repeats top-level %q: %s", key, raw)
+		}
+	}
+	if got.AccessState["can_personal_backup"] != true || got.AccessState["token_status"] != repo.MicrosoftStatusWorking {
+		t.Fatalf("access_state lost link fields: %s", raw)
+	}
+	if got.Consent["effective"] != true || got.Consent["service_principal"] != true {
+		t.Fatalf("consent must carry effective and service_principal: %s", raw)
+	}
+}
+
 // Regression gate: detect must never write tenant consent or capabilities, and must not create a
 // tenant row.
 func TestDelegatedDetectDoesNotMutateTenant(t *testing.T) {
@@ -288,7 +320,7 @@ func TestDelegatedDetectDoesNotMutateTenant(t *testing.T) {
 		rec := httptest.NewRecorder()
 		c := e.NewContext(req, rec)
 		c.Set(middleware.DbContextKey, database)
-		if err := HandleMicrosoftCorporateDomainUsers(c); err != nil {
+		if err := HandleMicrosoftAccountDetect(c); err != nil {
 			t.Fatal(err)
 		}
 		return rec

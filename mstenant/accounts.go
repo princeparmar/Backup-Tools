@@ -150,7 +150,7 @@ func RefreshAccountTenants(ctx context.Context, database *db.PostgresDb, cred *r
 		f := tenants[tid]
 		d := repo.MicrosoftTenantDiscovery{
 			TenantID: tid, TenantName: f.name, DefaultDomain: f.domain,
-			Category: categoryFor(home, tid, ""), HomeTenantID: home,
+			Category: CategoryFor(home, tid, ""), HomeTenantID: home,
 		}
 		if tid == home {
 			d.DiscoveryStatus = out.DiscoveryStatus
@@ -211,7 +211,7 @@ func CheckTenantAccess(ctx context.Context, database *db.PostgresDb, cred *repo.
 		home := cred.HomeTenantID()
 		_, _ = links.UpsertDiscovered(cred.ID, repo.MicrosoftTenantDiscovery{
 			TenantID: tenantID, ObjectID: me.ObjectID, UserType: me.UserType,
-			Category: categoryFor(home, tenantID, me.UserType), HomeTenantID: home,
+			Category: CategoryFor(home, tenantID, me.UserType), HomeTenantID: home,
 		})
 	}
 	roles := readRolesFn(ctx, tok.AccessToken, tok.IDToken, me.ObjectID)
@@ -226,7 +226,9 @@ func CheckTenantAccess(ctx context.Context, database *db.PostgresDb, cred *repo.
 	_ = links.SaveRoles(cred.ID, tenantID, stored, status, roles.IsTenantWideAdmin())
 }
 
-func categoryFor(home, tenantID, userType string) string {
+// CategoryFor classifies tenantID for a sign-in whose home tenant is home. userType is the Graph
+// userType in that tenant; when unknown ("") a foreign tenant is a guest.
+func CategoryFor(home, tenantID, userType string) string {
 	switch {
 	case outlook.IsMSATenant(tenantID):
 		return repo.MicrosoftTenantCategoryPersonal
@@ -373,21 +375,28 @@ func AccessStates(database *db.PostgresDb, cred *repo.GoogleBackupCredentialDB) 
 
 // TenantAccessState returns one link's access state.
 func TenantAccessState(database *db.PostgresDb, credentialID uint, tenantID string) (*AccessState, error) {
+	state, _, err := TenantAccessStateWithTenant(database, credentialID, tenantID)
+	return state, err
+}
+
+// TenantAccessStateWithTenant is TenantAccessState plus the tenant row it was built from (nil for
+// personal accounts or a tenant without a row).
+func TenantAccessStateWithTenant(database *db.PostgresDb, credentialID uint, tenantID string) (*AccessState, *repo.MicrosoftTenantDB, error) {
 	link, err := database.MicrosoftLinkRepo.Get(credentialID, tenantID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if link == nil {
-		return nil, codeError(CodeTenantNotLinked, "this Microsoft account is not linked to tenant "+normalize(tenantID))
+		return nil, nil, codeError(CodeTenantNotLinked, "this Microsoft account is not linked to tenant "+normalize(tenantID))
 	}
 	var tenant *repo.MicrosoftTenantDB
 	if !outlook.IsMSATenant(link.TenantID) {
 		if tenant, err = database.MicrosoftTenantRepo.Get(link.TenantID); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	s := BuildAccessState(link, tenant)
-	return &s, nil
+	return &s, tenant, nil
 }
 
 // Connect connects the link with the user's backup mode. Organization mode authenticates with the
@@ -395,7 +404,6 @@ func TenantAccessState(database *db.PostgresDb, credentialID uint, tenantID stri
 // the link is used, not here, so admins can connect before consent completes.
 func Connect(database *db.PostgresDb, cred *repo.GoogleBackupCredentialDB, tenantID, backupMode string) (*AccessState, error) {
 	tenantID = normalize(tenantID)
-	authMode := repo.MicrosoftAuthModeDelegated
 	switch strings.ToLower(strings.TrimSpace(backupMode)) {
 	case repo.MicrosoftBackupModePersonal:
 		backupMode = repo.MicrosoftBackupModePersonal
@@ -403,7 +411,7 @@ func Connect(database *db.PostgresDb, cred *repo.GoogleBackupCredentialDB, tenan
 		if outlook.IsMSATenant(tenantID) {
 			return nil, newError(400, "invalid_backup_mode", "personal Microsoft accounts support personal backup only")
 		}
-		backupMode, authMode = repo.MicrosoftBackupModeOrganization, repo.MicrosoftAuthModeApplication
+		backupMode = repo.MicrosoftBackupModeOrganization
 	default:
 		return nil, newError(400, "invalid_backup_mode", fmt.Sprintf("unsupported backup_mode %q (personal or organization)", backupMode))
 	}
@@ -414,10 +422,19 @@ func Connect(database *db.PostgresDb, cred *repo.GoogleBackupCredentialDB, tenan
 	if link == nil {
 		return nil, codeError(CodeTenantNotLinked, "this Microsoft account is not linked to tenant "+tenantID+"; list tenants first")
 	}
-	if err := database.MicrosoftLinkRepo.Connect(cred.ID, tenantID, backupMode, authMode); err != nil {
+	if err := database.MicrosoftLinkRepo.Connect(cred.ID, tenantID, backupMode, AuthModeFor(backupMode)); err != nil {
 		return nil, err
 	}
 	return TenantAccessState(database, cred.ID, tenantID)
+}
+
+// AuthModeFor is the auth mode of a link connected in backupMode: organization backup uses the
+// tenant app-only token, personal backup the sign-in's delegated token.
+func AuthModeFor(backupMode string) string {
+	if backupMode == repo.MicrosoftBackupModeOrganization {
+		return repo.MicrosoftAuthModeApplication
+	}
+	return repo.MicrosoftAuthModeDelegated
 }
 
 // Disconnect disconnects the link and pauses this sign-in's jobs in the tenant. Backups are kept.

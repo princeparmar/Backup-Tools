@@ -11,8 +11,12 @@ var resourceKeySegmentReplacer = strings.NewReplacer(
 
 var tenantIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
-// keyResourceTypes are the resource types that appear in Microsoft storage keys.
-var keyResourceTypes = map[string]bool{"user": true, "site": true, "team": true, "group": true}
+// keyResourceTypes are the resource types that appear in Microsoft storage keys. The Teams tenant
+// job also writes chat, meeting, call and phone-log keys, and its own state under tenant.
+var keyResourceTypes = map[string]bool{
+	"user": true, "site": true, "team": true, "group": true,
+	"tenant": true, "chat": true, "meeting": true, "calls": true, "pstn": true, "direct-routing": true,
+}
 
 // ResourceKeyPrefix is the storage prefix of a Microsoft resource inside its service bucket:
 // {tenant_id}/{resource_type}/{resource_id}. Every Microsoft object key starts with it, so the

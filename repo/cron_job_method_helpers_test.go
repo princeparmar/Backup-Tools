@@ -50,12 +50,11 @@ func TestAutosyncMethodHelpers_FilterJobs(t *testing.T) {
 		{Method: "outlook_onedrive"},
 		{Method: "outlook_sharepoint"},
 		{Method: "outlook_teams"},
-		{Method: "outlook_groups"},
 		{Method: "google_drive"},
 	}
 	ms := FilterJobsByMethods(jobs, IsMicrosoftAutosyncMethod)
-	if len(ms) != 6 {
-		t.Fatalf("want 6 microsoft jobs, got %d", len(ms))
+	if len(ms) != 5 {
+		t.Fatalf("want 5 microsoft jobs, got %d", len(ms))
 	}
 	g := FilterJobsByMethods(jobs, IsGoogleAutosyncMethod)
 	if len(g) != 2 {

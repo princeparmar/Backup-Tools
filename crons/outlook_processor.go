@@ -102,9 +102,10 @@ func runOutlookMailAutosync(input ProcessorInput) error {
 		return err
 	}
 	run := newOutlookMailRun(input, &satelliteMailStore{input: input, storx: storx}, accessToken, userBase, keyPrefix, index)
-	run.precheck = func(ctx context.Context, estimateBytes int64) error {
-		return enforceStoragePrecheck(ctx, input, estimateBytes)
-	}
+	// The mailbox size pre-check is disabled for now, like the other Microsoft 365 quota checks.
+	// run.precheck = func(ctx context.Context, estimateBytes int64) error {
+	// 	return enforceStoragePrecheck(ctx, input, estimateBytes)
+	// }
 	if err := run.syncAll(ctx, &input.Job.TaskMemory); err != nil {
 		return err
 	}

@@ -2,6 +2,7 @@ package microsoft
 
 import (
 	"context"
+	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/restore"
@@ -22,7 +23,7 @@ func (p *outlookMailProcessor) Setup(ctx context.Context, deps *restore.RestoreD
 	return RequireToken(deps)
 }
 func (p *outlookMailProcessor) RestoreKey(ctx context.Context, deps *restore.RestoreDeps, objectKey string) error {
-	return RestoreOutlookMailKey(ctx, deps.AccessGrant, deps.MicrosoftToken, deps.MicrosoftApplication, objectKey)
+	return RestoreOutlookMailKey(ctx, deps, objectKey)
 }
 func (p *outlookMailProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error {
 	return nil
@@ -122,35 +123,31 @@ func (p *outlookTeamsProcessor) ShouldRestoreKey(key string) bool {
 	return shouldRestoreOutlookTeamsKey(key)
 }
 func (p *outlookTeamsProcessor) Setup(ctx context.Context, deps *restore.RestoreDeps) error {
-	return RequireToken(deps)
-}
-func (p *outlookTeamsProcessor) RestoreKey(ctx context.Context, deps *restore.RestoreDeps, objectKey string) error {
-	return RestoreOutlookTeamsKey(ctx, deps.AccessGrant, deps.MicrosoftToken, objectKey)
-}
-func (p *outlookTeamsProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error {
+	if err := RequireToken(deps); err != nil {
+		return err
+	}
+	if deps.MicrosoftApplication || microsoftTokenIsAppOnly(deps.MicrosoftToken) {
+		return ErrTeamsRestoreNeedsUser
+	}
 	return nil
 }
+func (p *outlookTeamsProcessor) RestoreKey(ctx context.Context, deps *restore.RestoreDeps, objectKey string) error {
+	s := &TeamsRestoreSession{AccessGrant: deps.AccessGrant, Token: deps.MicrosoftToken,
+		Application: deps.MicrosoftApplication, TenantID: teamsRestoreTenant(deps), State: &deps.ContainerIDs}
+	return s.Restore(ctx, objectKey)
+}
 
-type outlookGroupsProcessor struct{}
-
-func (p *outlookGroupsProcessor) Method() string { return "outlook_groups" }
-func (p *outlookGroupsProcessor) Config() restore.ServiceConfig {
-	cfg, _ := restore.ConfigForMethod("outlook_groups")
-	return cfg
-}
-func (p *outlookGroupsProcessor) ShouldRestoreKey(key string) bool {
-	return shouldRestoreOutlookGroupsKey(key)
-}
-func (p *outlookGroupsProcessor) Setup(ctx context.Context, deps *restore.RestoreDeps) error {
-	return RequireToken(deps)
-}
-func (p *outlookGroupsProcessor) RestoreKey(ctx context.Context, deps *restore.RestoreDeps, objectKey string) error {
-	if _, ok := outlook.ParseOneDriveObjectKey(objectKey); ok {
-		return restoreLibraryKey(ctx, deps, satellite.ReserveBucket_OutlookGroups, "outlook_groups", objectKey)
+// teamsRestoreTenant is the tenant of the restore job, else of its backup job.
+func teamsRestoreTenant(deps *restore.RestoreDeps) string {
+	if deps.Job != nil && strings.TrimSpace(deps.Job.TenantID) != "" {
+		return strings.TrimSpace(deps.Job.TenantID)
 	}
-	return RestoreOutlookGroupsKey(ctx, deps.AccessGrant, deps.MicrosoftToken, objectKey)
+	if deps.CronJob != nil {
+		return strings.TrimSpace(deps.CronJob.TenantID)
+	}
+	return ""
 }
-func (p *outlookGroupsProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error {
+func (p *outlookTeamsProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error {
 	return nil
 }
 
@@ -161,8 +158,6 @@ func init() {
 	restore.RegisterProcessor(&outlookOneDriveProcessor{})
 	restore.RegisterProcessor(&outlookSharePointProcessor{})
 	restore.RegisterProcessor(&outlookTeamsProcessor{})
-	// Groups restore is hidden for now.
-	// restore.RegisterProcessor(&outlookGroupsProcessor{})
 	restore.RegisterMicrosoftAuth(MintAccessToken, RefreshAccessToken)
 	restore.RegisterMicrosoftReadiness(EvaluateReadiness)
 }

@@ -45,13 +45,11 @@ var processorMap = map[string]Processor{
 	"outlook_onedrive":   NewOutlookOneDriveProcessor(),
 	"outlook_sharepoint": NewOutlookSharePointProcessor(),
 	"outlook_teams":      NewOutlookTeamsProcessor(),
-	// Groups backup is hidden for now; re-enable together with handler/autobackup.go allowedMethods.
-	// "outlook_groups":     NewOutlookGroupsProcessor(),
-	"psql_database":   NewPsqlDatabaseProcessor(),
-	"google_drive":    NewGoogleDriveProcessor(),
-	"google_photos":   NewGooglePhotosProcessor(),
-	"google_contacts": NewGoogleContactsProcessor(),
-	"google_calendar": NewGoogleCalendarProcessor(),
+	"psql_database":      NewPsqlDatabaseProcessor(),
+	"google_drive":       NewGoogleDriveProcessor(),
+	"google_photos":      NewGooglePhotosProcessor(),
+	"google_contacts":    NewGoogleContactsProcessor(),
+	"google_calendar":    NewGoogleCalendarProcessor(),
 }
 
 type AutosyncManager struct {

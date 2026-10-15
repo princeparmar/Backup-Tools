@@ -77,7 +77,7 @@ func deriveSource(bucketName string) string {
 	if bucketName == "cyberls-gmail" || bucketName == "gmail" || bucketName == "cyberls-drive" || bucketName == "google-drive" || bucketName == "google-photos" || bucketName == "cyberls-contacts" || bucketName == "google-contacts" || bucketName == "cyberls-calendar" || bucketName == "google-calendar" {
 		return "google"
 	}
-	if bucketName == "outlook" || bucketName == "outlook-calendar" || bucketName == "outlook-contacts" || bucketName == "outlook-sharepoint" || bucketName == "outlook-teams" || bucketName == "outlook-groups" {
+	if bucketName == "outlook" || bucketName == "outlook-calendar" || bucketName == "outlook-contacts" || bucketName == "outlook-sharepoint" || bucketName == "outlook-teams" {
 		return "outlook"
 	}
 	if strings.HasPrefix(bucketName, "google-") || strings.HasPrefix(bucketName, "cyberls-") {

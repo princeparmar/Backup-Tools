@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 )
 
 // Calendar and contacts backups store each Graph event or contact as its full JSON:
@@ -26,17 +27,74 @@ const (
 	pimFoldersSegment   = "folders"
 )
 
+// PIMIndexVersion 2 adds event summaries to calendar indexes. Older indexes have none.
+const PIMIndexVersion = 2
+
 // PIMIndex records the backed-up items of one calendar or contact folder by Graph id.
 type PIMIndex struct {
+	V     int                      `json:"v,omitempty"`
 	Items map[string]PIMIndexEntry `json:"items"`
 }
 
 // PIMIndexEntry is one backed-up item. RemovedAt is set once the item is gone from Microsoft;
-// its backup is kept.
+// its backup is kept. Occurrences is set when a series master was stored with its changed and
+// cancelled occurrences. Summary is set for calendar events.
 type PIMIndexEntry struct {
-	Key       string `json:"key"`
-	ChangeKey string `json:"change_key"`
-	RemovedAt string `json:"removed_at,omitempty"`
+	Key         string        `json:"key"`
+	ChangeKey   string        `json:"change_key"`
+	RemovedAt   string        `json:"removed_at,omitempty"`
+	Occurrences bool          `json:"occurrences,omitempty"`
+	Summary     *EventSummary `json:"s,omitempty"`
+}
+
+// EventSummary is what a calendar view needs of an event, so a month is drawn from the index
+// without reading every event. Times are UTC (RFC 3339); an all-day event spans the dates of
+// Start and End. For a series master, Instances holds the start and end of its occurrences from
+// From to Until, cancelled ones left out.
+type EventSummary struct {
+	Subject   string      `json:"subject,omitempty"`
+	Start     string      `json:"start,omitempty"`
+	End       string      `json:"end,omitempty"`
+	AllDay    bool        `json:"all_day,omitempty"`
+	Type      string      `json:"type,omitempty"`
+	Cancelled bool        `json:"cancelled,omitempty"`
+	Location  string      `json:"location,omitempty"`
+	Instances [][2]string `json:"instances,omitempty"`
+	From      string      `json:"from,omitempty"`
+	Until     string      `json:"until,omitempty"`
+}
+
+// EventSummaryOf summarizes a Graph event listed in UTC.
+func EventSummaryOf(raw []byte) *EventSummary {
+	var ev struct {
+		Subject     string        `json:"subject"`
+		Start       graphDateTime `json:"start"`
+		End         graphDateTime `json:"end"`
+		IsAllDay    bool          `json:"isAllDay"`
+		Type        string        `json:"type"`
+		IsCancelled bool          `json:"isCancelled"`
+		Location    struct {
+			DisplayName string `json:"displayName"`
+		} `json:"location"`
+	}
+	_ = json.Unmarshal(raw, &ev)
+	return &EventSummary{
+		Subject: ev.Subject, Start: ev.Start.utc(), End: ev.End.utc(), AllDay: ev.IsAllDay,
+		Type: ev.Type, Cancelled: ev.IsCancelled, Location: ev.Location.DisplayName,
+	}
+}
+
+// graphDateTime is a Graph dateTimeTimeZone read in UTC.
+type graphDateTime struct {
+	DateTime string `json:"dateTime"`
+}
+
+func (d graphDateTime) utc() string {
+	t, err := time.Parse("2006-01-02T15:04:05.9999999", strings.TrimSuffix(d.DateTime, "Z"))
+	if err != nil {
+		return d.DateTime
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 // PIMContactFolder is the stored description of a non-default contact folder.
@@ -48,9 +106,10 @@ type PIMContactFolder struct {
 
 // PIMItem is one Graph event or contact as returned by a list call.
 type PIMItem struct {
-	ID        string
-	ChangeKey string
-	Raw       json.RawMessage
+	ID           string
+	ChangeKey    string
+	SeriesMaster bool
+	Raw          json.RawMessage
 }
 
 func pimKeySegment(id string) string {
@@ -92,9 +151,10 @@ func ParsePIMContactKey(key string) (dir string, inFolder bool) {
 	return dir, parent == pimFoldersSegment
 }
 
-// ListPIMPage GETs one page of a Graph collection of events or contacts.
+// ListPIMPage GETs one page of a Graph collection of events (times in UTC) or contacts. Cancelled
+// events are kept so the backup holds their latest state; restore skips them.
 func ListPIMPage(ctx context.Context, accessToken, pageURL string) ([]PIMItem, string, error) {
-	body, status, err := graphDoJSON(ctx, accessToken, http.MethodGet, pageURL, nil)
+	body, status, err := graphRequest(ctx, accessToken, http.MethodGet, pageURL, nil, "UTC")
 	if err != nil {
 		return nil, "", err
 	}
@@ -111,14 +171,14 @@ func ListPIMPage(ctx context.Context, accessToken, pageURL string) ([]PIMItem, s
 	items := make([]PIMItem, 0, len(page.Value))
 	for _, raw := range page.Value {
 		var head struct {
-			ID          string `json:"id"`
-			ChangeKey   string `json:"changeKey"`
-			IsCancelled bool   `json:"isCancelled"`
+			ID        string `json:"id"`
+			ChangeKey string `json:"changeKey"`
+			Type      string `json:"type"`
 		}
-		if json.Unmarshal(raw, &head) != nil || head.ID == "" || head.IsCancelled {
+		if json.Unmarshal(raw, &head) != nil || head.ID == "" {
 			continue
 		}
-		items = append(items, PIMItem{ID: head.ID, ChangeKey: head.ChangeKey, Raw: raw})
+		items = append(items, PIMItem{ID: head.ID, ChangeKey: head.ChangeKey, SeriesMaster: head.Type == eventTypeSeriesMaster, Raw: raw})
 	}
 	return items, page.NextLink, nil
 }
@@ -139,7 +199,7 @@ func PIMContactsURL(userBase, folderID string) string {
 
 // ListPIMCalendars returns every calendar of the user.
 func ListPIMCalendars(ctx context.Context, accessToken, userBase string) ([]FlatCalendar, error) {
-	next := strings.TrimRight(userBase, "/") + "/calendars?$top=100&$select=id,name,color,canEdit,isDefaultCalendar"
+	next := strings.TrimRight(userBase, "/") + "/calendars?$top=100&$select=id,name,color,hexColor,canEdit,isDefaultCalendar"
 	var out []FlatCalendar
 	for next != "" {
 		var page struct {
@@ -147,6 +207,7 @@ func ListPIMCalendars(ctx context.Context, accessToken, userBase string) ([]Flat
 				ID                string `json:"id"`
 				Name              string `json:"name"`
 				Color             string `json:"color"`
+				HexColor          string `json:"hexColor"`
 				CanEdit           bool   `json:"canEdit"`
 				IsDefaultCalendar bool   `json:"isDefaultCalendar"`
 			} `json:"value"`
@@ -157,7 +218,7 @@ func ListPIMCalendars(ctx context.Context, accessToken, userBase string) ([]Flat
 		}
 		for _, c := range page.Value {
 			if c.ID != "" {
-				out = append(out, FlatCalendar{ID: c.ID, Name: c.Name, Color: c.Color, CanEdit: c.CanEdit, IsDefault: c.IsDefaultCalendar})
+				out = append(out, FlatCalendar{ID: c.ID, Name: c.Name, Color: c.Color, HexColor: c.HexColor, CanEdit: c.CanEdit, IsDefault: c.IsDefaultCalendar})
 			}
 		}
 		next = page.NextLink

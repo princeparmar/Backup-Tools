@@ -103,8 +103,8 @@ func TestAuthorizeMicrosoftApplicationOnboarding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Emails) != 1 || got.Emails[0] != "ann@contoso.com" || got.OrgUnits["ann@contoso.com"] != "/Sales" {
-		t.Fatalf("all_users must expand enabled directory users with org units: %+v", got)
+	if len(got.Emails) != 1 || got.Emails[0] != "ann@contoso.com" {
+		t.Fatalf("all_users must expand enabled directory users: %+v", got)
 	}
 	if got.AccessToken != "app-token" || got.Users["ann@contoso.com"].ObjectID != "u1" {
 		t.Fatalf("token/users = %q %+v", got.AccessToken, got.Users)
@@ -120,6 +120,21 @@ func TestAuthorizeMicrosoftApplicationOnboarding(t *testing.T) {
 		&MicrosoftBackupOnboardingRequest{SharedMailboxes: []string{"BOB@contoso.com"}}, []string{"outlook"})
 	if err != nil || len(shared.Emails) != 1 || shared.Users["bob@contoso.com"].ObjectID != "u2" {
 		t.Fatalf("disabled shared mailbox must be allowed: %+v %v", shared, err)
+	}
+
+	stub.users = append(stub.users, outlook.DirectoryUser{ObjectID: "u3", UPN: "cid@contoso.com", AccountEnabled: true})
+	oneUser := &MicrosoftBackupOnboardingRequest{BackupScope: "all_tenant", UserIDs: []string{"u1"}, Emails: []string{"ann@contoso.com"}}
+	if oneUser.wantsAllUsers() || !oneUser.wantsAllTenantResources() {
+		t.Fatal("all_tenant with named users covers tenant resources, not every user")
+	}
+	picked, err := authorizeMicrosoftApplicationOnboarding(ctx, tc, oneUser, []string{"outlook"})
+	if err != nil || len(picked.Emails) != 1 || picked.Emails[0] != "ann@contoso.com" {
+		t.Fatalf("all_tenant must keep only the selected mailbox: %+v %v", picked, err)
+	}
+	everyone, err := authorizeMicrosoftApplicationOnboarding(ctx, tc,
+		&MicrosoftBackupOnboardingRequest{BackupScope: "all_tenant"}, []string{"outlook"})
+	if err != nil || len(everyone.Emails) != 2 {
+		t.Fatalf("all_tenant without named users still means every enabled user: %+v %v", everyone, err)
 	}
 }
 

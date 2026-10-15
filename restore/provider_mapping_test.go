@@ -20,7 +20,6 @@ func TestAPIServiceToMethod_microsoftAliases(t *testing.T) {
 		{name: "onedrive alias", service: APIServiceOneDrive, method: "outlook_onedrive", wantOK: true},
 		{name: "sharepoint alias", service: APIServiceSharePoint, method: "outlook_sharepoint", wantOK: true},
 		{name: "teams alias", service: APIServiceTeams, method: "outlook_teams", wantOK: true},
-		{name: "groups alias", service: APIServiceGroups, method: "outlook_groups", wantOK: true},
 		{name: "google calendar unchanged", service: APIServiceCalendar, method: "google_calendar", wantOK: true},
 		{name: "google contacts unchanged", service: APIServiceContacts, method: "google_contacts", wantOK: true},
 	}

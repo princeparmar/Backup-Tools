@@ -92,8 +92,6 @@ func APIServiceFromMethod(method string) string {
 		return "outlook_sharepoint"
 	case "outlook_teams":
 		return "outlook_teams"
-	case "outlook_groups":
-		return "outlook_groups"
 	default:
 		return method
 	}
