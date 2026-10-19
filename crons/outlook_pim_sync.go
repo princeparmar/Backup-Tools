@@ -83,12 +83,7 @@ func runOutlookPIMJob(input ProcessorInput, method, bucket string, minEstimate i
 	}
 	storx := auth.StorxToken
 
-	go func() {
-		processCtx := context.Background()
-		if processErr := handler.ProcessWebhookEvents(processCtx, input.Database, storx, 100); processErr != nil {
-			logger.Warn(processCtx, "Failed to process webhook events from "+method+" auto-sync", logger.ErrorField(processErr))
-		}
-	}()
+	drainMicrosoftWebhooks(input, storx, method)
 
 	client, err := microsoftJobClient(auth, jobOutlookMailbox(input.Job))
 	if err != nil {
@@ -110,8 +105,8 @@ func runOutlookPIMJob(input ProcessorInput, method, bucket string, minEstimate i
 	// if err := enforceStoragePrecheck(ctx, input, minEstimate); err != nil {
 	// 	return err
 	// }
-	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, bucket, keyPrefix+"/.file_placeholder", nil, input.Job.UserID, input.StorxRecovery); err != nil {
-		return mapUploadErr(method, fmt.Errorf("setup storage placeholder: %w", err))
+	if err := ensureMicrosoftPlaceholder(ctx, input, storx, bucket, keyPrefix, method); err != nil {
+		return err
 	}
 	synced, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Database, storx, bucket, keyPrefix+"/", input.Job.UserID, "outlook", method, input.StorxRecovery)
 	if err != nil {
@@ -132,9 +127,7 @@ func runOutlookPIMJob(input ProcessorInput, method, bucket string, minEstimate i
 	logger.Info(ctx, "outlook backup finished", logger.String("method", method),
 		logger.Int("uploaded", run.uploaded), logger.Int("unchanged", run.unchanged), logger.Int("removed", run.removed))
 
-	return input.Database.CronJobRepo.UpdateCronJobFieldsForCron(input.Job.ID, map[string]interface{}{
-		"task_memory": input.Job.TaskMemory,
-	})
+	return saveMicrosoftTaskMemory(input)
 }
 
 // syncCollections backs up every collection after writing its descriptor. A collection that

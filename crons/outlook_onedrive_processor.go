@@ -50,12 +50,7 @@ func runOutlookOneDriveAutosync(input ProcessorInput) error {
 	}
 	accessToken, storx := auth.AccessToken, auth.StorxToken
 
-	go func() {
-		processCtx := context.Background()
-		if processErr := handler.ProcessWebhookEvents(processCtx, input.Database, storx, 100); processErr != nil {
-			logger.Warn(processCtx, "Failed to process webhook events from onedrive auto-sync", logger.ErrorField(processErr))
-		}
-	}()
+	drainMicrosoftWebhooks(input, storx, "onedrive")
 
 	if err := input.HeartBeatFunc(); err != nil {
 		return err
@@ -81,8 +76,8 @@ func runOutlookOneDriveAutosync(input ProcessorInput) error {
 		return err
 	}
 
-	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_OutlookOneDrive, keyPrefix+"/.file_placeholder", nil, input.Job.UserID, input.StorxRecovery); err != nil {
-		return mapUploadErr("outlook_onedrive", fmt.Errorf("setup storage placeholder: %w", err))
+	if err := ensureMicrosoftPlaceholder(ctx, input, storx, satellite.ReserveBucket_OutlookOneDrive, keyPrefix, "outlook_onedrive"); err != nil {
+		return err
 	}
 	keys, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Database, storx, satellite.ReserveBucket_OutlookOneDrive, keyPrefix+"/", input.Job.UserID, "outlook", "outlook_onedrive", input.StorxRecovery)
 	if err != nil {
@@ -97,9 +92,7 @@ func runOutlookOneDriveAutosync(input ProcessorInput) error {
 	if q := run.quota; q != nil && q.skippedQuota > 0 {
 		ApplyDriveStorageSkipMessage(input, q.synced, q.skippedQuota, q.skippedBytes, q.remaining)
 	}
-	return input.Database.CronJobRepo.UpdateCronJobFieldsForCron(input.Job.ID, map[string]interface{}{
-		"task_memory": input.Job.TaskMemory,
-	})
+	return saveMicrosoftTaskMemory(input)
 }
 
 // oneDriveStored is a backup object's custom metadata and size.

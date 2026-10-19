@@ -205,6 +205,16 @@ func TestMicrosoftResourceRepository_stateTransitions(t *testing.T) {
 	if s := got.UnavailableServices(); len(s) != 1 || s[0] != "onedrive" {
 		t.Fatalf("unavailable services = %v", s)
 	}
+	if err := res.AddUnavailableService("t", ResourceTypeUser, "oid-1", "outlook"); err != nil {
+		t.Fatal(err)
+	}
+	if err := res.RemoveUnavailableService("t", ResourceTypeUser, "oid-1", "onedrive"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = res.Get("t", ResourceTypeUser, "oid-1")
+	if s := got.UnavailableServices(); len(s) != 1 || s[0] != "outlook" {
+		t.Fatalf("after removing onedrive, unavailable services = %v", s)
+	}
 }
 
 func TestMicrosoftBackupScopeRepository_upsertIsUnique(t *testing.T) {

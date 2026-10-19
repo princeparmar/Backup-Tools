@@ -144,37 +144,6 @@ func notifyMicrosoftRestore(ctx context.Context, sess *microsoftManualRestoreSes
 	satellite.SendNotificationAsync(ctx, sess.userID, title, msg, &priority, data, nil)
 }
 
-func downloadMetaFollowData(ctx context.Context, accessGrant, bucket, key string) (metaJSON, dataBytes []byte, dataKey string, err error) {
-	metaJSON, err = satellite.DownloadObject(ctx, accessGrant, bucket, key)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	var meta struct {
-		DataObjectKey string `json:"data_object_key"`
-		RemovedOD     bool   `json:"removed_from_onedrive"`
-		RemovedSP     bool   `json:"removed_from_sharepoint"`
-		RemovedTeams  bool   `json:"removed_from_teams"`
-		IsFolder      bool   `json:"is_folder"`
-	}
-	_ = json.Unmarshal(metaJSON, &meta)
-	if meta.RemovedOD || meta.RemovedSP || meta.RemovedTeams || meta.IsFolder {
-		return metaJSON, nil, "", fmt.Errorf("object skipped (removed or folder)")
-	}
-	dataKey = strings.TrimSpace(meta.DataObjectKey)
-	if dataKey == "" && strings.Contains(key, "/meta/") {
-		dataKey = strings.Replace(key, "/meta/", "/data/", 1)
-		dataKey = strings.TrimSuffix(dataKey, ".json")
-	}
-	if dataKey == "" {
-		return metaJSON, metaJSON, key, nil
-	}
-	dataBytes, err = satellite.DownloadObject(ctx, accessGrant, bucket, dataKey)
-	if err != nil {
-		return metaJSON, nil, dataKey, err
-	}
-	return metaJSON, dataBytes, dataKey, nil
-}
-
 func microsoftManualRestoreHTTPError(c echo.Context, err error) error {
 	if he, ok := err.(*echo.HTTPError); ok {
 		return c.JSON(he.Code, map[string]interface{}{"error": he.Message})
@@ -363,7 +332,7 @@ func HandleSharePointDownloadAndInsert(c echo.Context) error {
 			}
 			continue
 		}
-		metaJSON, dataBytes, _, derr := downloadMetaFollowData(ctx, sess.accessGrant, satellite.ReserveBucket_OutlookSharePoint, key)
+		metaJSON, dataBytes, _, derr := msrestore.DownloadMetaFollowData(ctx, sess.accessGrant, satellite.ReserveBucket_OutlookSharePoint, key)
 		if derr != nil || len(dataBytes) == 0 {
 			failed.Add(key)
 			continue

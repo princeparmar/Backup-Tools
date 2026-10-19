@@ -15,9 +15,10 @@ import (
 
 // Graph seams (overridden in tests).
 var (
-	tenantOrganizationFn = outlook.GetTenantOrganization
-	findDirectoryUserFn  = outlook.FindDirectoryUser
-	checkRestoreTargetFn = outlook.CheckRestoreTarget
+	tenantOrganizationFn     = outlook.GetTenantOrganization
+	findDirectoryUserFn      = outlook.FindDirectoryUser
+	findOrganizationTargetFn = FindOrganizationTarget
+	checkRestoreTargetFn     = outlook.CheckRestoreTarget
 )
 
 // OrganizationTenant is a tenant the user connected for organization backup. Any user of it can

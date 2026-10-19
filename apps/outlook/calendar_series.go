@@ -272,29 +272,13 @@ func graphWrite(ctx context.Context, accessToken, method, reqURL string, payload
 // graphRequest sends one Graph request; tz, when set, is the time zone of returned event times.
 func graphRequest(ctx context.Context, accessToken, method, reqURL string, body []byte, tz string) ([]byte, int, error) {
 	var reader io.Reader
+	extra := make(http.Header)
 	if body != nil {
 		reader = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, reqURL, reader)
-	if err != nil {
-		return nil, 0, err
-	}
-	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		extra.Set("Content-Type", "application/json")
 	}
 	if tz != "" {
-		req.Header.Set("Prefer", `outlook.timezone="`+tz+`"`)
+		extra.Set("Prefer", `outlook.timezone="`+tz+`"`)
 	}
-	resp, err := graphHTTPDoWithRetry(ctx, req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
-	if err != nil {
-		return nil, resp.StatusCode, err
-	}
-	return b, resp.StatusCode, nil
+	return graphExchange(ctx, accessToken, method, reqURL, reader, extra, 32<<20)
 }

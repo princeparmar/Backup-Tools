@@ -133,7 +133,7 @@ func TestFetchSiteDefaultDriveID_noDocumentLibrary(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":{"code":"itemNotFound"}}`))
 	})
-	_, err := fetchSiteDefaultDriveID(context.Background(), "tok", "contoso.sharepoint.com,a,b")
+	_, err := SiteDefaultDriveID(context.Background(), "tok", "contoso.sharepoint.com,a,b")
 	if !errors.Is(err, ErrSharePointSiteNoDocumentLibrary) {
 		t.Fatalf("err = %v, want ErrSharePointSiteNoDocumentLibrary", err)
 	}

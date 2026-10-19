@@ -224,20 +224,14 @@ func TestContactFolderIDForDefaultFolderSkipsLookup(t *testing.T) {
 func TestRestoreUserBase(t *testing.T) {
 	t.Parallel()
 	key := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/user/oid-1/MY_DRIVE/ITEM1$a.txt"
-	got, err := restoreUserBase(true, "", key)
+	got, err := restoreUserBase(true, key)
 	if err != nil || !strings.HasSuffix(got, "/users/oid-1") {
 		t.Fatalf("app-only base = %q, %v", got, err)
 	}
-	if got, err := restoreUserBase(true, "oid-target", key); err != nil || !strings.HasSuffix(got, "/users/oid-target") {
-		t.Fatalf("app-only restore into another account = %q, %v", got, err)
-	}
-	if got, err := restoreUserBase(false, "", key); err != nil || !strings.HasSuffix(got, "/me") {
+	if got, err := restoreUserBase(false, key); err != nil || !strings.HasSuffix(got, "/me") {
 		t.Fatalf("delegated base = %q, %v", got, err)
 	}
-	if got, err := restoreUserBase(false, "oid-target", key); err != nil || !strings.HasSuffix(got, "/me") {
-		t.Fatalf("delegated restore into another account writes as the signed-in target = %q, %v", got, err)
-	}
-	if _, err := restoreUserBase(true, "", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/group/g1/x"); err == nil {
+	if _, err := restoreUserBase(true, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/group/g1/x"); err == nil {
 		t.Fatal("group key must not resolve to a user")
 	}
 }
@@ -321,7 +315,7 @@ func TestTeamsRestoreSessionRefusesOrgTokenAndDownloadOnly(t *testing.T) {
 	if len(*posts) != 0 {
 		t.Fatalf("nothing posted: %+v", *posts)
 	}
-	if (&outlookTeamsProcessor{}).Setup(context.Background(), &restore.RestoreDeps{MicrosoftToken: "tok", MicrosoftApplication: true}) == nil {
+	if outlookTeamsProcessor().Setup(context.Background(), &restore.RestoreDeps{MicrosoftToken: "tok", MicrosoftApplication: true}) == nil {
 		t.Fatal("processor setup refuses an organization token")
 	}
 }

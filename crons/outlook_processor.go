@@ -60,12 +60,7 @@ func runOutlookMailAutosync(input ProcessorInput) error {
 	}
 	accessToken, storx := auth.AccessToken, auth.StorxToken
 
-	go func() {
-		processCtx := context.Background()
-		if processErr := handler.ProcessWebhookEvents(processCtx, input.Database, storx, 100); processErr != nil {
-			logger.Warn(processCtx, "Failed to process webhook events from outlook auto-sync", logger.ErrorField(processErr))
-		}
-	}()
+	drainMicrosoftWebhooks(input, storx, "outlook")
 
 	if err := input.HeartBeatFunc(); err != nil {
 		return err
@@ -93,8 +88,8 @@ func runOutlookMailAutosync(input ProcessorInput) error {
 	if err != nil {
 		return err
 	}
-	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_Outlook, keyPrefix+"/.file_placeholder", nil, input.Job.UserID, input.StorxRecovery); err != nil {
-		return mapUploadErr("outlook", fmt.Errorf("setup storage placeholder: %w", err))
+	if err := ensureMicrosoftPlaceholder(ctx, input, storx, satellite.ReserveBucket_Outlook, keyPrefix, "outlook"); err != nil {
+		return err
 	}
 
 	index, err := loadOutlookMailIndex(ctx, input, storx, keyPrefix)
@@ -110,9 +105,7 @@ func runOutlookMailAutosync(input ProcessorInput) error {
 		return err
 	}
 
-	return input.Database.CronJobRepo.UpdateCronJobFieldsForCron(input.Job.ID, map[string]interface{}{
-		"task_memory": input.Job.TaskMemory,
-	})
+	return saveMicrosoftTaskMemory(input)
 }
 
 // outlookMailStore is the backup bucket for one mailbox job.

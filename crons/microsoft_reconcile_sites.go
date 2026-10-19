@@ -51,14 +51,7 @@ func applySiteLifecycle(ctx context.Context, store *db.PostgresDb, tc *mstenant.
 	for _, s := range listed {
 		live[strings.TrimSpace(s.ID)] = true
 	}
-	bySite := map[string][]repo.CronJobListingDB{}
-	var order []string
-	for _, j := range jobs {
-		if _, ok := bySite[j.ResourceID]; !ok {
-			order = append(order, j.ResourceID)
-		}
-		bySite[j.ResourceID] = append(bySite[j.ResourceID], j)
-	}
+	order, bySite := groupJobsByResource(jobs)
 	for _, siteID := range order {
 		state := outlook.ObjectStateActive
 		if !live[siteID] {
@@ -76,16 +69,7 @@ func applySiteLifecycle(ctx context.Context, store *db.PostgresDb, tc *mstenant.
 // addMicrosoftScopeSiteJobs creates, for every listed site without one, a job per method already
 // in the scope, copying the policy, interval, active state and settings of a sibling site job.
 func addMicrosoftScopeSiteJobs(ctx context.Context, store *db.PostgresDb, tc *mstenant.Context, scope repo.MicrosoftBackupScopeDB, sites []outlook.SharePointSiteSummary, jobs []repo.CronJobListingDB) (int, error) {
-	var methods []string
-	templates := map[string][]repo.CronJobListingDB{}
-	have := map[string]bool{}
-	for _, j := range jobs {
-		if _, ok := templates[j.Method]; !ok {
-			methods = append(methods, j.Method)
-		}
-		templates[j.Method] = append(templates[j.Method], j)
-		have[j.Method+"|"+j.ResourceID] = true
-	}
+	methods, templates, have := scopeJobIndex(jobs)
 	created := 0
 	var firstErr error
 	for _, s := range sites {
@@ -144,12 +128,7 @@ func addMicrosoftScopeSiteJobs(ctx context.Context, store *db.PostgresDb, tc *ms
 }
 
 func cloneScopeSiteJob(store *db.PostgresDb, scope repo.MicrosoftBackupScopeDB, tmpl repo.CronJobListingDB, site *outlook.SharePointResolvedSite) error {
-	input := map[string]interface{}{}
-	if tmpl.InputData != nil && tmpl.InputData.Json() != nil {
-		for k, v := range *tmpl.InputData.Json() {
-			input[k] = v
-		}
-	}
+	input := scopeTemplateInput(tmpl)
 	name := strings.TrimSpace(site.SiteName)
 	if name == "" {
 		name = outlook.SanitizeSharePointSiteKey(site.SiteID)
@@ -164,10 +143,5 @@ func cloneScopeSiteJob(store *db.PostgresDb, scope repo.MicrosoftBackupScopeDB, 
 	if err != nil {
 		return err
 	}
-	return store.CronJobRepo.UpdateCronJobByID(job.ID, map[string]interface{}{
-		"interval":    tmpl.Interval,
-		"policy_id":   tmpl.PolicyID,
-		"active":      tmpl.Active,
-		"storx_token": tmpl.StorxToken,
-	})
+	return saveScopeTemplateSchedule(store, job.ID, tmpl)
 }

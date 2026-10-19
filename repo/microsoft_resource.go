@@ -201,7 +201,8 @@ func (r *MicrosoftResourceRepository) AddUnavailableService(tenantID, resourceTy
 		Updates(map[string]interface{}{"metadata": database.NewDbJsonFromValue(meta), "updated_at": time.Now().UTC()}).Error
 }
 
-// RemoveUnavailableService clears a service recorded by AddUnavailableService once it backs up again.
+// RemoveUnavailableService clears a service from the resource's unavailable list, so a later
+// successful backup is no longer recorded as having no data for that service.
 func (r *MicrosoftResourceRepository) RemoveUnavailableService(tenantID, resourceType, externalID, service string) error {
 	row, err := r.Get(tenantID, resourceType, externalID)
 	if err != nil || row == nil {

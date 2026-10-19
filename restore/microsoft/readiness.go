@@ -113,196 +113,19 @@ func EvaluateReadiness(
 		return evaluateMigrationReadiness(ctx, store, out, userID, projectID, service, method, cronJob, targetEmail)
 	}
 
-	out.CredentialID = sourceCred.ID
-	if res, failed, err := tenantGuardResult(store, out, cronJob, sourceCred, false); failed || err != nil {
-		return res, err
-	}
-	return evaluateCredentialReadiness(ctx, store, out, userID, service, method, sourceCred, out.TenantID)
-}
-
-// findOrganizationTargetFn is FindOrganizationTarget (overridden in tests).
-var findOrganizationTargetFn = FindOrganizationTarget
-
-// evaluateMigrationReadiness picks how a restore into another account writes, as Google does:
-// first the destination's organization (app-only token of a tenant the user connected for
-// organization backup), then the destination's own Microsoft sign-in.
-func evaluateMigrationReadiness(
-	ctx context.Context,
-	store *db.PostgresDb,
-	out *restore.ReadinessResult,
-	userID, projectID, service, method string,
-	cronJob *repo.CronJobListingDB,
-	targetEmail string,
-) (*restore.ReadinessResult, error) {
-	if method == "outlook_teams" || method == "outlook_sharepoint" {
-		out.Ready = false
-		out.Reason = restore.ReadinessReasonMigrationUnsupported
-		out.Message = "Teams and SharePoint restore back to where they were backed up from; another destination is available for mail, calendar, contacts and OneDrive."
-		return out, nil
-	}
-
-	var orgResult *restore.ReadinessResult
-	org, user, err := findOrganizationTargetFn(ctx, store, userID, targetEmail)
-	if err != nil {
-		out.Ready = false
-		out.Reason = restore.ReadinessReasonAPIProbeFailed
-		out.Message = fmt.Sprintf("Could not look up %s in the connected Microsoft organizations: %v", targetEmail, err)
-		return out, nil
-	}
-	if org != nil {
-		res := *out
-		orgResult, err = evaluateOrganizationTarget(ctx, store, &res, service, method, cronJob, org, user)
-		if err != nil || orgResult.Ready {
-			return orgResult, err
-		}
-	}
-
-	targetCred, credOK, err := store.CredentialRepo.FindByUserProjectAndEmail(userID, projectID, targetEmail)
-	if err != nil {
-		return nil, err
-	}
-	if credOK && targetCred.IsMicrosoft() {
-		tenantID, err := delegatedRestoreTenant(store, targetCred)
-		if err != nil {
+	writeCred := sourceCred
+	out.CredentialID = writeCred.ID
+	if err := restore.CheckMicrosoftTenantGuard(store, out.TenantID, cronJob, writeCred); err != nil {
+		if !errors.Is(err, restore.ErrMicrosoftTenantMismatch) {
 			return nil, err
 		}
-		if tenantID != "" {
-			res := *out
-			res.CredentialID = targetCred.ID
-			res.TenantID = tenantID
-			res.AccountType = strings.TrimSpace(targetCred.AccountType)
-			if res.AccountType == "" {
-				res.AccountType = outlook.AccountTypePersonal
-			}
-			res.OAuthHolderEmail = strings.TrimSpace(targetCred.Email)
-			if r, failed, err := tenantGuardResult(store, &res, cronJob, targetCred, true); failed || err != nil {
-				return r, err
-			}
-			return evaluateCredentialReadiness(ctx, store, &res, userID, service, method, targetCred, tenantID)
-		}
-	}
-	if orgResult != nil {
-		return orgResult, nil
-	}
-	out.Ready = false
-	out.Reason = restore.ReadinessReasonNoCredential
-	out.Message = restore.MsgReadinessNoTargetCredential
-	out.ReconnectHint = "Connect " + targetEmail + " in StorX, or connect its Microsoft organization for organization backup"
-	return out, nil
-}
-
-// evaluateOrganizationTarget checks an app-only restore into user of org: the app has the write
-// role for the service and the user has the mailbox or OneDrive it restores into.
-func evaluateOrganizationTarget(
-	ctx context.Context,
-	store *db.PostgresDb,
-	out *restore.ReadinessResult,
-	service, method string,
-	cronJob *repo.CronJobListingDB,
-	org *OrganizationTenant,
-	user *outlook.DirectoryUser,
-) (*restore.ReadinessResult, error) {
-	cred, err := store.CredentialRepo.GetByID(org.CredentialID)
-	if err != nil {
-		return nil, err
-	}
-	out.CredentialID = cred.ID
-	out.TenantID = org.TenantID
-	out.AccountType = strings.TrimSpace(cred.AccountType)
-	out.OAuthHolderEmail = strings.TrimSpace(cred.Email)
-	if r, failed, err := tenantGuardResult(store, out, cronJob, cred, true); failed || err != nil {
-		return r, err
-	}
-	if missing := outlook.MissingRestoreWriteRoles(org.Token, method); len(missing) > 0 {
-		return missingWriteRolesResult(out, service, org.Name, missing), nil
-	}
-	userBase, err := outlook.UserBaseURL(user.ObjectID, "", "", true)
-	if err != nil {
-		return nil, err
-	}
-	if err := checkRestoreTargetFn(ctx, org.Token, userBase, method); err != nil {
 		out.Ready = false
-		if errors.Is(err, outlook.ErrRestoreTargetUnavailable) {
-			out.Reason = restore.ReadinessReasonTargetUnavailable
-			out.Message = targetUnavailableMessage(out.TargetEmail, method)
-		} else {
-			out.Reason = restore.ReadinessReasonAPIProbeFailed
-			out.Message = err.Error()
-		}
+		out.Reason = restore.ReadinessReasonTenantMismatch
+		out.Message = err.Error()
+		out.ReconnectHint = "Microsoft restore stays inside the backup's tenant; connect the target account to that tenant"
 		return out, nil
 	}
-	out.Ready = true
-	return out, nil
-}
-
-func targetUnavailableMessage(email, method string) string {
-	if method == "outlook_onedrive" {
-		return email + " has no OneDrive. Assign a license with OneDrive, or choose another destination."
-	}
-	return email + " has no Exchange Online mailbox. Assign a license with Exchange Online, or choose another destination."
-}
-
-// missingWriteRolesResult: the tenant consented to the read-only backup permissions only.
-func missingWriteRolesResult(out *restore.ReadinessResult, service, orgName string, missing []string) *restore.ReadinessResult {
-	out.Ready = false
-	out.Reason = restore.ReadinessReasonMissingPermissions
-	out.MissingPermissions = make([]restore.MissingPermission, 0, len(missing))
-	for _, role := range missing {
-		out.MissingPermissions = append(out.MissingPermissions, restore.MissingPermission{
-			Type: "application_role", Service: service, Scope: role,
-			Description: "Microsoft Graph application permission " + role,
-		})
-	}
-	where := "the organization"
-	if strings.TrimSpace(orgName) != "" {
-		where = orgName
-	}
-	out.Message = fmt.Sprintf("StorX can only read %s's data. Restoring needs the Microsoft Graph application permission %s.",
-		where, strings.Join(missing, ", "))
-	out.ReconnectHint = "A global administrator must grant admin consent for " + strings.Join(missing, ", ") +
-		" to the StorX app, then reconnect the organization in StorX."
-	return out
-}
-
-// tenantGuardResult runs CheckMicrosoftTenantGuard; failed is true when out now holds the refusal.
-func tenantGuardResult(store *db.PostgresDb, out *restore.ReadinessResult, cronJob *repo.CronJobListingDB, writeCred *repo.GoogleBackupCredentialDB, migration bool) (*restore.ReadinessResult, bool, error) {
-	err := restore.CheckMicrosoftTenantGuard(store, out.TenantID, cronJob, writeCred, migration)
-	if err == nil {
-		return out, false, nil
-	}
-	if !errors.Is(err, restore.ErrMicrosoftTenantMismatch) {
-		return nil, true, err
-	}
-	out.Ready = false
-	out.Reason = restore.ReadinessReasonTenantMismatch
-	out.Message = err.Error()
-	out.ReconnectHint = "Reconnect the Microsoft account that writes the restore to its tenant"
-	return out, true, nil
-}
-
-// delegatedRestoreTenant is the tenant a destination's own sign-in writes in: its home tenant
-// when connected with delegated access, else its first connected delegated tenant. "" when none.
-func delegatedRestoreTenant(store *db.PostgresDb, cred *repo.GoogleBackupCredentialDB) (string, error) {
-	links, err := store.MicrosoftLinkRepo.ListByCredential(cred.ID)
-	if err != nil {
-		return "", err
-	}
-	home := strings.ToLower(cred.HomeTenantID())
-	first := ""
-	for i := range links {
-		l := &links[i]
-		if !l.Connected() || l.Application() {
-			continue
-		}
-		tid := strings.ToLower(strings.TrimSpace(l.TenantID))
-		if tid == home {
-			return tid, nil
-		}
-		if first == "" {
-			first = tid
-		}
-	}
-	return first, nil
+	return evaluateCredentialReadiness(ctx, store, out, userID, service, method, writeCred, out.TenantID)
 }
 
 func evaluateCredentialReadiness(
@@ -330,13 +153,6 @@ func evaluateCredentialReadiness(
 			out.ReconnectHint = "Run Microsoft restore OAuth with a user account; Teams messages are reposted as that user."
 			return out, nil
 		}
-		if missing := outlook.MissingRestoreWriteRoles(tc.Token, method); len(missing) > 0 {
-			name := ""
-			if tc.Link != nil {
-				name = tc.Link.TenantName
-			}
-			return missingWriteRolesResult(out, service, name, missing), nil
-		}
 		out.Ready = true
 		return out, nil
 	}
@@ -355,5 +171,200 @@ func evaluateCredentialReadiness(
 	}
 
 	out.Ready = true
+	return out, nil
+}
+
+// evaluateMigrationReadiness checks a restore into another mailbox. A connected sign-in for that
+// address writes with its own token. Otherwise an organization the user connected in admin mode
+// can receive the restore for any enabled member, written with that tenant's app-only token.
+// Teams stays in the team it was backed up from. SharePoint can be written into another site.
+func evaluateMigrationReadiness(
+	ctx context.Context,
+	store *db.PostgresDb,
+	out *restore.ReadinessResult,
+	userID, projectID, service, method string,
+	job *repo.CronJobListingDB,
+	targetEmail string,
+) (*restore.ReadinessResult, error) {
+	if job == nil {
+		return nil, fmt.Errorf("microsoft migration restore has no source backup job")
+	}
+	out.Migration = true
+	out.TargetEmail = strings.TrimSpace(targetEmail)
+	if method == "outlook_sharepoint" {
+		return evaluateSharePointSiteReadiness(ctx, store, out, userID, job, targetEmail)
+	}
+	if method == "outlook_teams" {
+		out.Ready = false
+		out.Reason = restore.ReadinessReasonMigrationUnsupported
+		out.Message = "Teams only restores into the team it was backed up from"
+		return out, nil
+	}
+
+	targetCred, credOK, credErr := store.CredentialRepo.FindByUserProjectAndEmail(userID, projectID, targetEmail)
+	if credErr != nil {
+		return nil, credErr
+	}
+	if credOK && targetCred != nil && targetCred.IsMicrosoft() {
+		out.CredentialID = targetCred.ID
+		out.TenantID = strings.ToLower(strings.TrimSpace(targetCred.HomeTenantID()))
+		out.AccountType = strings.TrimSpace(targetCred.AccountType)
+		if out.AccountType == "" {
+			out.AccountType = outlook.AccountTypePersonal
+		}
+		out.OAuthHolderEmail = strings.TrimSpace(targetCred.Email)
+		out.AuthMode = restore.RestoreAuthModeOAuth
+		return evaluateCredentialReadiness(ctx, store, out, userID, service, method, targetCred, out.TenantID)
+	}
+
+	org, user, err := findOrganizationTargetFn(ctx, store, userID, targetEmail)
+	if err != nil {
+		return nil, err
+	}
+	if org == nil || user == nil || strings.TrimSpace(user.ObjectID) == "" {
+		out.Ready = false
+		out.Reason = restore.ReadinessReasonNoCredential
+		out.Message = restore.MsgReadinessNoTargetCredential
+		out.ReconnectHint = "Connect the target Microsoft account, or connect its organization with admin consent"
+		return out, nil
+	}
+	if !user.AccountEnabled {
+		out.Ready = false
+		out.Reason = restore.ReadinessReasonTargetUnavailable
+		out.Message = "the destination user is disabled"
+		return out, nil
+	}
+
+	out.CredentialID = org.CredentialID
+	out.TenantID = strings.ToLower(strings.TrimSpace(org.TenantID))
+	out.AuthMode = restore.RestoreAuthModeOAuth
+	missing := microsoftMissingScopes(microsoftGrantedScopes(org.Token, ""), microsoftRestoreScopesForMethod(method))
+	if len(missing) > 0 {
+		out.Ready = false
+		out.Reason = restore.ReadinessReasonMissingPermissions
+		out.MissingPermissions = restore.OAuthMissingList(service, missing)
+		out.Message = restore.MsgReadinessMissingScopes
+		out.ReconnectHint = "Grant the organization the Microsoft write permission for this service, then retry"
+		return out, nil
+	}
+	userBase, err := outlook.UserBaseURL(user.ObjectID, "", "", true)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkRestoreTargetFn(ctx, org.Token, userBase, method); err != nil {
+		if errors.Is(err, outlook.ErrRestoreTargetUnavailable) {
+			out.Ready = false
+			out.Reason = restore.ReadinessReasonTargetUnavailable
+			out.Message = err.Error()
+			out.ReconnectHint = "The destination user has no mailbox or OneDrive for this service"
+			return out, nil
+		}
+		return nil, err
+	}
+	out.Ready = true
+	return out, nil
+}
+
+// checkSharePointSiteFn confirms the destination site has a document library (overridden in tests).
+var checkSharePointSiteFn = outlook.SiteDefaultDriveID
+
+// evaluateSharePointSiteReadiness checks a restore of a site's libraries into another SharePoint
+// site. The destination site must belong to an organization connected with admin consent, and that
+// connection must be allowed to write site libraries.
+func evaluateSharePointSiteReadiness(
+	ctx context.Context,
+	store *db.PostgresDb,
+	out *restore.ReadinessResult,
+	userID string,
+	job *repo.CronJobListingDB,
+	siteID string,
+) (*restore.ReadinessResult, error) {
+	siteID = strings.TrimSpace(siteID)
+	if siteID == "" || strings.Contains(siteID, "@") {
+		out.Ready = false
+		out.Reason = restore.ReadinessReasonNoCredential
+		out.Message = "Choose a SharePoint site to restore into"
+		out.ReconnectHint = "Pick a site in an organization connected with admin consent"
+		return out, nil
+	}
+	tenants, err := ListOrganizationTenants(ctx, store, userID)
+	if err != nil {
+		return nil, err
+	}
+	var candidates []OrganizationTenant
+	for _, t := range tenants {
+		if job != nil && strings.EqualFold(t.TenantID, job.TenantID) {
+			candidates = append([]OrganizationTenant{t}, candidates...)
+			continue
+		}
+		candidates = append(candidates, t)
+	}
+	if len(candidates) == 0 {
+		out.Ready = false
+		out.Reason = restore.ReadinessReasonNoCredential
+		out.Message = restore.MsgReadinessNoTargetCredential
+		out.ReconnectHint = "Connect the destination organization with admin consent"
+		return out, nil
+	}
+	var (
+		lastErr       error
+		sawNotFound   bool
+		firstMissing  bool
+		missingTenant *OrganizationTenant
+		missingRoles  []string
+	)
+	for i := range candidates {
+		tenant := &candidates[i]
+		if missing := outlook.MissingRestoreWriteRoles(tenant.Token, "outlook_sharepoint"); len(missing) > 0 {
+			if missingTenant == nil {
+				firstMissing = i == 0
+				missingTenant = tenant
+				missingRoles = missing
+			}
+			continue
+		}
+		if _, err := checkSharePointSiteFn(ctx, tenant.Token, siteID); err != nil {
+			if errors.Is(err, outlook.ErrSharePointSiteNoDocumentLibrary) {
+				out.Ready = false
+				out.Reason = restore.ReadinessReasonTargetUnavailable
+				out.Message = "The destination site has no document library"
+				out.ReconnectHint = "Choose a SharePoint site that has a document library"
+				return out, nil
+			}
+			if strings.Contains(err.Error(), "http 404") {
+				sawNotFound = true
+				continue
+			}
+			lastErr = err
+			continue
+		}
+		out.Ready = true
+		out.Reason = ""
+		out.Message = ""
+		out.MissingPermissions = nil
+		out.CredentialID = tenant.CredentialID
+		out.TenantID = strings.ToLower(strings.TrimSpace(tenant.TenantID))
+		out.TargetEmail = siteID
+		out.AuthMode = restore.RestoreAuthModeOAuth
+		return out, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	// The organization that owns the backup is tried first. If that connection cannot write
+	// libraries, say so. A later 404 only means some other organization does not contain the site.
+	if missingTenant != nil && (firstMissing || !sawNotFound) {
+		out.Ready = false
+		out.CredentialID = missingTenant.CredentialID
+		out.TenantID = strings.ToLower(strings.TrimSpace(missingTenant.TenantID))
+		out.Reason = restore.ReadinessReasonMissingPermissions
+		out.MissingPermissions = restore.OAuthMissingList(out.Service, missingRoles)
+		out.Message = restore.MsgReadinessMissingScopes
+		out.ReconnectHint = "Grant the organization Sites.ReadWrite.All, then retry"
+		return out, nil
+	}
+	out.Ready = false
+	out.Reason = restore.ReadinessReasonTargetUnavailable
+	out.Message = "The destination site was not found in a connected organization"
 	return out, nil
 }

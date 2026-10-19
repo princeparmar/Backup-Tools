@@ -116,23 +116,35 @@ type teamsPendingAttendance struct {
 }
 
 func (s *teamsUserState) skipped(stream string, now time.Time) bool {
-	until, ok := s.SkipUntil[stream]
-	return ok && now.Before(until)
+	return teamsStreamSkipped(s.SkipUntil, stream, now)
 }
 
 func (s *teamsUserState) block(stream, status string, until time.Time) {
-	if s.SkipUntil == nil {
-		s.SkipUntil = map[string]time.Time{}
-	}
-	if s.Status == nil {
-		s.Status = map[string]string{}
-	}
-	s.SkipUntil[stream], s.Status[stream] = until, status
+	teamsStreamBlock(&s.SkipUntil, &s.Status, stream, status, until)
 }
 
 func (s *teamsUserState) unblock(stream string) {
-	delete(s.SkipUntil, stream)
-	delete(s.Status, stream)
+	teamsStreamClear(s.SkipUntil, s.Status, stream)
+}
+
+func teamsStreamSkipped(until map[string]time.Time, stream string, now time.Time) bool {
+	t, ok := until[stream]
+	return ok && now.Before(t)
+}
+
+func teamsStreamBlock(until *map[string]time.Time, status *map[string]string, stream, st string, at time.Time) {
+	if *until == nil {
+		*until = map[string]time.Time{}
+	}
+	if *status == nil {
+		*status = map[string]string{}
+	}
+	(*until)[stream], (*status)[stream] = at, st
+}
+
+func teamsStreamClear(until map[string]time.Time, status map[string]string, stream string) {
+	delete(until, stream)
+	delete(status, stream)
 }
 
 // teamsRound is the hold state of one round or window.

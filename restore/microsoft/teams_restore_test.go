@@ -113,7 +113,7 @@ func TestTeamsRestoreRefusesAppOnlyTokens(t *testing.T) {
 		if err := (&TeamsRestoreSession{Token: tok}).Restore(ctx, root); !errors.Is(err, ErrTeamsRestoreNeedsUser) {
 			t.Errorf("%s: session restore = %v", name, err)
 		}
-		if err := (&outlookTeamsProcessor{}).Setup(ctx, &restore.RestoreDeps{MicrosoftToken: tok}); !errors.Is(err, ErrTeamsRestoreNeedsUser) {
+		if err := outlookTeamsProcessor().Setup(ctx, &restore.RestoreDeps{MicrosoftToken: tok}); !errors.Is(err, ErrTeamsRestoreNeedsUser) {
 			t.Errorf("%s: scheduled processor setup = %v", name, err)
 		}
 		if err := CheckTeamsRestoreToken(tok, "ChannelMessage.Send"); !errors.Is(err, ErrTeamsRestoreNeedsUser) {
@@ -125,7 +125,7 @@ func TestTeamsRestoreRefusesAppOnlyTokens(t *testing.T) {
 	}
 
 	delegated := delegatedTeamsToken(t)
-	if err := (&outlookTeamsProcessor{}).Setup(ctx, &restore.RestoreDeps{MicrosoftToken: delegated}); err != nil {
+	if err := outlookTeamsProcessor().Setup(ctx, &restore.RestoreDeps{MicrosoftToken: delegated}); err != nil {
 		t.Fatalf("delegated setup: %v", err)
 	}
 	if err := CheckTeamsRestoreToken(delegated, "ChannelMessage.Send"); err != nil {
@@ -407,7 +407,7 @@ func TestTeamsScheduledRestoreRunsInOrderAndRetriesSafely(t *testing.T) {
 	}
 	deps := &restore.RestoreDeps{MicrosoftToken: delegatedTeamsToken(t), Config: cfg,
 		Job: &repo.RestoreJobListingDB{Method: "outlook_teams", TenantID: teamsTestTenant}}
-	proc := &outlookTeamsProcessor{}
+	proc := outlookTeamsProcessor()
 	if err := proc.Setup(context.Background(), deps); err != nil {
 		t.Fatal(err)
 	}

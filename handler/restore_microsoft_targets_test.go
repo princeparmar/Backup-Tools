@@ -72,4 +72,23 @@ func TestHandleMicrosoftRestoreWorkspaces(t *testing.T) {
 	if code, _ = call("domain=fabrikam.com"); code != http.StatusNotFound {
 		t.Fatalf("unknown organization: %d", code)
 	}
+
+	prevSites := listRestoreSharePointSites
+	t.Cleanup(func() { listRestoreSharePointSites = prevSites })
+	listRestoreSharePointSites = func(_ context.Context, token, search string, limit int) ([]outlook.SharePointSiteSummary, error) {
+		if token != "app-t1" || search != "legal" || limit != 0 {
+			t.Fatalf("sites query token=%q search=%q limit=%d", token, search, limit)
+		}
+		return []outlook.SharePointSiteSummary{{
+			ID: "site-1", DisplayName: "Legal", WebURL: "https://contoso.sharepoint.com/sites/legal",
+		}}, nil
+	}
+	code, body = call("domain=contoso.com&service=outlook_sharepoint&search=legal")
+	if code != http.StatusOK || string(body["sites"]) != `[{"id":"site-1","name":"Legal","web_url":"https://contoso.sharepoint.com/sites/legal"}]` {
+		t.Fatalf("sites: %d %s", code, body)
+	}
+	code, body = call("domain=contoso.com")
+	if code != http.StatusOK || string(body["mailboxes"]) != `["ann@contoso.com","bob@contoso.com"]` {
+		t.Fatalf("mailbox list must stay unchanged without service: %d %s", code, body)
+	}
 }

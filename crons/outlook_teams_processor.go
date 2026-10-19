@@ -450,12 +450,7 @@ func newTeamsRun(ctx context.Context, input ProcessorInput, singleTeam string) (
 	if err := teamsCheckTenant(tenant, auth); err != nil {
 		return nil, err
 	}
-	go func(storx string) {
-		processCtx := context.Background()
-		if err := handler.ProcessWebhookEvents(processCtx, input.Database, storx, 100); err != nil {
-			logger.Warn(processCtx, "Failed to process webhook events from teams auto-sync", logger.ErrorField(err))
-		}
-	}(auth.StorxToken)
+	drainMicrosoftWebhooks(input, auth.StorxToken, "teams")
 	now := teamsNowFn().UTC()
 	r := &teamsRun{
 		ctx:          ctx,

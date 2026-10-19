@@ -52,11 +52,7 @@ func HandleMicrosoftQueryMessages(c echo.Context) error {
 		return browseErrorJSON(c, err)
 	}
 
-	skip, _ := strconv.Atoi(c.QueryParam("skip"))
-	top, _ := strconv.Atoi(c.QueryParam("top"))
-	if top <= 0 {
-		top = 50
-	}
+	skip, top := microsoftBrowsePage(c, 50)
 	messages, err := client.GetMessageWithDetails(int32(skip), int32(top))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
@@ -77,11 +73,7 @@ func HandleMicrosoftListContacts(c echo.Context) error {
 	if err != nil {
 		return browseErrorJSON(c, err)
 	}
-	skip, _ := strconv.Atoi(c.QueryParam("skip"))
-	top, _ := strconv.Atoi(c.QueryParam("top"))
-	if top <= 0 {
-		top = 100
-	}
+	skip, top := microsoftBrowsePage(c, 100)
 	contacts, err := client.ListContacts(int32(skip), int32(top))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
@@ -126,11 +118,7 @@ func HandleMicrosoftListCalendarEvents(c echo.Context) error {
 	if calendarID == "" {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": "calendarId is required"})
 	}
-	skip, _ := strconv.Atoi(c.QueryParam("skip"))
-	top, _ := strconv.Atoi(c.QueryParam("top"))
-	if top <= 0 {
-		top = 50
-	}
+	skip, top := microsoftBrowsePage(c, 50)
 	events, err := client.ListCalendarEvents(calendarID, int32(skip), int32(top))
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
@@ -171,10 +159,7 @@ func HandleMicrosoftCorporateDomainUsers(c echo.Context) error {
 	state := ws.state
 	entities := make([]map[string]interface{}, 0)
 	if state.CanOrganizationBackup && state.ConnectionState == repo.MicrosoftConnectionConnected && state.AuthMode == repo.MicrosoftAuthModeApplication {
-		top, _ := strconv.Atoi(c.QueryParam("top"))
-		if top <= 0 {
-			top = 200
-		}
+		_, top := microsoftBrowsePage(c, 200)
 		ws.id.TenantID = ws.tenantID
 		if tc, rerr := resolveMicrosoftTenant(c, ws.id, "", true); rerr == nil {
 			if users, lerr := msListDirectoryUsersFn(ctx, tc.Token); lerr == nil {
@@ -206,15 +191,16 @@ func microsoftDomainUsersBody(contract MicrosoftWorkspaceContract, entities []ma
 
 // HandleMicrosoftDirectoryUsers lists users of the selected tenant (organization mode only).
 func HandleMicrosoftDirectoryUsers(c echo.Context) error {
-	ctx := c.Request().Context()
-	var err error
-	defer monitor.Mon.Task()(&ctx)(&err)
+	return HandleMicrosoftTenantDirectoryUsers(c)
+}
 
-	tc, err := microsoftTenantContextFromRequest(c, "", true)
-	if err != nil {
-		return microsoftErrorJSON(c, err)
+func microsoftBrowsePage(c echo.Context, defaultTop int) (skip, top int) {
+	skip, _ = strconv.Atoi(c.QueryParam("skip"))
+	top, _ = strconv.Atoi(c.QueryParam("top"))
+	if top <= 0 {
+		top = defaultTop
 	}
-	return respondMicrosoftDirectoryUsers(c, tc)
+	return skip, top
 }
 
 // HandleMicrosoftOneDriveFlatFiles lists non-folder OneDrive files (browse twin of Google drive-flat-files).
@@ -238,11 +224,7 @@ func HandleMicrosoftOneDriveFlatFiles(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
 	}
 
-	skip, _ := strconv.Atoi(c.QueryParam("skip"))
-	top, _ := strconv.Atoi(c.QueryParam("top"))
-	if top <= 0 {
-		top = 50
-	}
+	skip, top := microsoftBrowsePage(c, 50)
 
 	files, err := outlook.ListOneDriveFlatFilesPage(ctx, accessToken, driveRoot, int32(skip), int32(top))
 	if err != nil {
@@ -277,11 +259,7 @@ func HandleMicrosoftOutlookFlatFiles(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
 	}
 
-	skip, _ := strconv.Atoi(c.QueryParam("skip"))
-	top, _ := strconv.Atoi(c.QueryParam("top"))
-	if top <= 0 {
-		top = 50
-	}
+	skip, top := microsoftBrowsePage(c, 50)
 
 	messages, err := outlook.ListOutlookMailFlatMessagesPage(ctx, accessToken, userBase, int32(skip), int32(top))
 	if err != nil {
@@ -308,10 +286,7 @@ func HandleMicrosoftSharePointSites(c echo.Context) error {
 	}
 
 	search := strings.TrimSpace(c.QueryParam("search"))
-	top, _ := strconv.Atoi(c.QueryParam("top"))
-	if top <= 0 {
-		top = 50
-	}
+	_, top := microsoftBrowsePage(c, 50)
 
 	sites, err := outlook.ListTenantSharePointSites(ctx, accessToken, search, top)
 	if err != nil {
@@ -343,11 +318,7 @@ func HandleMicrosoftSharePointFlatFiles(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": "drive_id is required"})
 	}
 
-	skip, _ := strconv.Atoi(c.QueryParam("skip"))
-	top, _ := strconv.Atoi(c.QueryParam("top"))
-	if top <= 0 {
-		top = 50
-	}
+	skip, top := microsoftBrowsePage(c, 50)
 
 	files, err := outlook.ListSharePointFlatFilesPage(ctx, accessToken, driveID, int32(skip), int32(top))
 	if err != nil {
@@ -383,10 +354,7 @@ func HandleMicrosoftTeamsList(c echo.Context) error {
 		return respErr
 	}
 
-	top, _ := strconv.Atoi(c.QueryParam("top"))
-	if top <= 0 {
-		top = 50
-	}
+	_, top := microsoftBrowsePage(c, 50)
 
 	teams, err := outlook.ListTenantTeams(ctx, accessToken, top)
 	if err != nil {
@@ -446,11 +414,7 @@ func HandleMicrosoftTeamsFlatMessages(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": "team_id and channel_id are required"})
 	}
 
-	skip, _ := strconv.Atoi(c.QueryParam("skip"))
-	top, _ := strconv.Atoi(c.QueryParam("top"))
-	if top <= 0 {
-		top = 50
-	}
+	skip, top := microsoftBrowsePage(c, 50)
 
 	messages, err := outlook.ListTeamsFlatMessagesPage(ctx, accessToken, teamID, channelID, int32(skip), int32(top))
 	if err != nil {

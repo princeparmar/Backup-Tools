@@ -109,16 +109,7 @@ func scopeJobs(store *db.PostgresDb, scope repo.MicrosoftBackupScopeDB) ([]repo.
 // in the scope. Each new job copies the policy, interval, active state and settings of a sibling
 // job (same org unit first).
 func addMicrosoftScopeUserJobs(store *db.PostgresDb, scope repo.MicrosoftBackupScopeDB, users []outlook.DirectoryUser, jobs []repo.CronJobListingDB) (int, error) {
-	var methods []string
-	templates := map[string][]repo.CronJobListingDB{}
-	have := map[string]bool{}
-	for _, j := range jobs {
-		if _, ok := templates[j.Method]; !ok {
-			methods = append(methods, j.Method)
-		}
-		templates[j.Method] = append(templates[j.Method], j)
-		have[j.Method+"|"+j.ResourceID] = true
-	}
+	methods, templates, have := scopeJobIndex(jobs)
 	created := 0
 	var firstErr error
 	for _, u := range users {
@@ -154,12 +145,7 @@ func addMicrosoftScopeUserJobs(store *db.PostgresDb, scope repo.MicrosoftBackupS
 }
 
 func cloneScopeJob(store *db.PostgresDb, scope repo.MicrosoftBackupScopeDB, tmpl repo.CronJobListingDB, u outlook.DirectoryUser, email string) error {
-	input := map[string]interface{}{}
-	if tmpl.InputData != nil && tmpl.InputData.Json() != nil {
-		for k, v := range *tmpl.InputData.Json() {
-			input[k] = v
-		}
-	}
+	input := scopeTemplateInput(tmpl)
 	input["email"] = email
 	// Older jobs may still carry the template user's org_unit_path.
 	delete(input, "org_unit_path")
@@ -168,12 +154,52 @@ func cloneScopeJob(store *db.PostgresDb, scope repo.MicrosoftBackupScopeDB, tmpl
 	if err != nil {
 		return err
 	}
-	return store.CronJobRepo.UpdateCronJobByID(job.ID, map[string]interface{}{
+	return saveScopeTemplateSchedule(store, job.ID, tmpl)
+}
+
+// scopeJobIndex groups existing scope jobs by method and records which method already covers a resource.
+func scopeJobIndex(jobs []repo.CronJobListingDB) (methods []string, templates map[string][]repo.CronJobListingDB, have map[string]bool) {
+	templates = map[string][]repo.CronJobListingDB{}
+	have = map[string]bool{}
+	for _, j := range jobs {
+		if _, ok := templates[j.Method]; !ok {
+			methods = append(methods, j.Method)
+		}
+		templates[j.Method] = append(templates[j.Method], j)
+		have[j.Method+"|"+j.ResourceID] = true
+	}
+	return methods, templates, have
+}
+
+func scopeTemplateInput(tmpl repo.CronJobListingDB) map[string]interface{} {
+	input := map[string]interface{}{}
+	if tmpl.InputData != nil && tmpl.InputData.Json() != nil {
+		for k, v := range *tmpl.InputData.Json() {
+			input[k] = v
+		}
+	}
+	return input
+}
+
+func saveScopeTemplateSchedule(store *db.PostgresDb, jobID uint, tmpl repo.CronJobListingDB) error {
+	return store.CronJobRepo.UpdateCronJobByID(jobID, map[string]interface{}{
 		"interval":    tmpl.Interval,
 		"policy_id":   tmpl.PolicyID,
 		"active":      tmpl.Active,
 		"storx_token": tmpl.StorxToken,
 	})
+}
+
+// groupJobsByResource keeps the first-seen order of resource ids.
+func groupJobsByResource(jobs []repo.CronJobListingDB) (order []string, by map[string][]repo.CronJobListingDB) {
+	by = map[string][]repo.CronJobListingDB{}
+	for _, j := range jobs {
+		if _, ok := by[j.ResourceID]; !ok {
+			order = append(order, j.ResourceID)
+		}
+		by[j.ResourceID] = append(by[j.ResourceID], j)
+	}
+	return order, by
 }
 
 // pickScopeTemplate prefers an active sibling on the scope policy, then any active sibling, then
@@ -205,14 +231,7 @@ func applyMicrosoftLifecycle(ctx context.Context, store *db.PostgresDb, tc *mste
 	for _, u := range listed {
 		live[u.ObjectID] = u
 	}
-	byResource := map[string][]repo.CronJobListingDB{}
-	var order []string
-	for _, j := range jobs {
-		if _, ok := byResource[j.ResourceID]; !ok {
-			order = append(order, j.ResourceID)
-		}
-		byResource[j.ResourceID] = append(byResource[j.ResourceID], j)
-	}
+	order, byResource := groupJobsByResource(jobs)
 	for _, rid := range order {
 		state := ""
 		if u, ok := live[rid]; ok {

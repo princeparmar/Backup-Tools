@@ -180,8 +180,14 @@ func buildRestoreDeps(ctx context.Context, store *db.PostgresDb, job *repo.Resto
 	}
 
 	if IsMicrosoftRestoreMethod(job.Method) {
-		if err := CheckMicrosoftTenantGuard(store, job.TenantID, cronJob, deps.WriteCred, isMigration); err != nil {
-			return nil, err
+		var guard error
+		if isMigration {
+			guard = CheckMicrosoftMigrationWrite(store, job.TenantID, cronJob, deps.WriteCred)
+		} else {
+			guard = CheckMicrosoftTenantGuard(store, job.TenantID, cronJob, deps.WriteCred)
+		}
+		if guard != nil {
+			return nil, guard
 		}
 	}
 
@@ -223,4 +229,3 @@ func buildRestoreDeps(ctx context.Context, store *db.PostgresDb, job *repo.Resto
 	}
 	return deps, nil
 }
-

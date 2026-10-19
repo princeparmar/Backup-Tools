@@ -6,7 +6,9 @@ import (
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
+	"github.com/StorX2-0/Backup-Tools/handler"
 	"github.com/StorX2-0/Backup-Tools/mstenant"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/repo"
 )
 
@@ -80,4 +82,29 @@ func microsoftJobMailbox(auth *microsoftJobAuth, job *repo.CronJobListingDB, cli
 		return "", fmt.Errorf("resolve mailbox: %w", err)
 	}
 	return strings.TrimSpace(user.Mail), nil
+}
+
+// drainMicrosoftWebhooks processes queued webhook events beside a backup run.
+func drainMicrosoftWebhooks(input ProcessorInput, storx, source string) {
+	go func() {
+		processCtx := context.Background()
+		if err := handler.ProcessWebhookEvents(processCtx, input.Database, storx, 100); err != nil {
+			logger.Warn(processCtx, "Failed to process webhook events from "+source+" auto-sync", logger.ErrorField(err))
+		}
+	}()
+}
+
+// ensureMicrosoftPlaceholder creates the resource prefix so later objects have a parent.
+func ensureMicrosoftPlaceholder(ctx context.Context, input ProcessorInput, storx, bucket, prefix, method string) error {
+	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, bucket, prefix+"/.file_placeholder", nil, input.Job.UserID, input.StorxRecovery); err != nil {
+		return mapUploadErr(method, fmt.Errorf("setup storage placeholder: %w", err))
+	}
+	return nil
+}
+
+// saveMicrosoftTaskMemory writes the job's task memory after a successful run.
+func saveMicrosoftTaskMemory(input ProcessorInput) error {
+	return input.Database.CronJobRepo.UpdateCronJobFieldsForCron(input.Job.ID, map[string]interface{}{
+		"task_memory": input.Job.TaskMemory,
+	})
 }

@@ -67,52 +67,75 @@ func isGUID(s string) bool {
 	return true
 }
 
-// CheckMicrosoftTenantGuard checks the backup job is recorded in its tenant and the write
-// credential is connected to the restore's target tenant. An in-place restore and every Teams
-// restore stay in the backup's tenant; a restore into another account (migration) may write into
-// another tenant the user connected.
-func CheckMicrosoftTenantGuard(store *db.PostgresDb, targetTenantID string, cronJob *repo.CronJobListingDB, writeCred *repo.GoogleBackupCredentialDB, migration bool) error {
-	mismatch := func(format string, args ...interface{}) error {
-		return fmt.Errorf("%w: %s", ErrMicrosoftTenantMismatch, fmt.Sprintf(format, args...))
-	}
+func microsoftTenantMismatch(format string, args ...interface{}) error {
+	return fmt.Errorf("%w: %s", ErrMicrosoftTenantMismatch, fmt.Sprintf(format, args...))
+}
+
+// checkBackupTenant requires the backup job and its resource to belong to one tenant.
+func checkBackupTenant(store *db.PostgresDb, cronJob *repo.CronJobListingDB) (string, error) {
 	if cronJob == nil {
-		return mismatch("the restore has no source backup job")
+		return "", microsoftTenantMismatch("the restore has no source backup job")
 	}
 	tenant := strings.ToLower(strings.TrimSpace(cronJob.TenantID))
 	if tenant == "" {
-		return mismatch("backup job %d has no tenant", cronJob.ID)
+		return "", microsoftTenantMismatch("backup job %d has no tenant", cronJob.ID)
 	}
 	if cronJob.ResourceType == repo.ResourceTypeTenant {
 		if !strings.EqualFold(strings.TrimSpace(cronJob.ResourceID), tenant) {
-			return mismatch("tenant job %d is for %s, not %s", cronJob.ID, cronJob.ResourceID, tenant)
+			return "", microsoftTenantMismatch("tenant job %d is for %s, not %s", cronJob.ID, cronJob.ResourceID, tenant)
 		}
-	} else {
-		res, err := store.MicrosoftResourceRepo.Get(tenant, cronJob.ResourceType, cronJob.ResourceID)
-		if err != nil {
-			return err
-		}
-		if res == nil || strings.ToLower(strings.TrimSpace(res.TenantID)) != tenant {
-			return mismatch("the backed-up %s is not recorded in tenant %s", cronJob.ResourceType, tenant)
-		}
+		return tenant, nil
 	}
-	target := strings.ToLower(strings.TrimSpace(targetTenantID))
-	if target == "" {
-		return mismatch("the restore has no target tenant")
+	res, err := store.MicrosoftResourceRepo.Get(tenant, cronJob.ResourceType, cronJob.ResourceID)
+	if err != nil {
+		return "", err
 	}
-	if target != tenant && (!migration || cronJob.Method == "outlook_teams") {
-		return mismatch("restore target tenant %q differs from backup tenant %q", target, tenant)
+	if res == nil || strings.ToLower(strings.TrimSpace(res.TenantID)) != tenant {
+		return "", microsoftTenantMismatch("the backed-up %s is not recorded in tenant %s", cronJob.ResourceType, tenant)
 	}
+	return tenant, nil
+}
+
+func requireWriteLink(store *db.PostgresDb, writeCred *repo.GoogleBackupCredentialDB, tenant string) error {
 	if writeCred == nil {
-		return mismatch("the restore has no write account")
+		return microsoftTenantMismatch("the restore has no write account")
 	}
-	link, err := store.MicrosoftLinkRepo.Get(writeCred.ID, target)
+	link, err := store.MicrosoftLinkRepo.Get(writeCred.ID, tenant)
 	if err != nil {
 		return err
 	}
 	if !link.Connected() {
-		return mismatch("the write account is not connected to tenant %s", target)
+		return microsoftTenantMismatch("the write account is not connected to tenant %s", tenant)
 	}
 	return nil
+}
+
+// CheckMicrosoftTenantGuard requires one tenant across the backup job, its resource, the restore's
+// selected target tenant and the write credential's connected link. An in-place restore cannot
+// cross tenants; a restore into another account uses CheckMicrosoftMigrationWrite.
+func CheckMicrosoftTenantGuard(store *db.PostgresDb, targetTenantID string, cronJob *repo.CronJobListingDB, writeCred *repo.GoogleBackupCredentialDB) error {
+	tenant, err := checkBackupTenant(store, cronJob)
+	if err != nil {
+		return err
+	}
+	if target := strings.ToLower(strings.TrimSpace(targetTenantID)); target != tenant {
+		return microsoftTenantMismatch("restore target tenant %q differs from backup tenant %q", target, tenant)
+	}
+	return requireWriteLink(store, writeCred, tenant)
+}
+
+// CheckMicrosoftMigrationWrite checks a restore into another mailbox. The backup must still be a
+// coherent tenant resource. The write account must be connected to targetTenantID, which is the
+// destination tenant and may differ from the backup's tenant.
+func CheckMicrosoftMigrationWrite(store *db.PostgresDb, targetTenantID string, cronJob *repo.CronJobListingDB, writeCred *repo.GoogleBackupCredentialDB) error {
+	if _, err := checkBackupTenant(store, cronJob); err != nil {
+		return err
+	}
+	target := strings.ToLower(strings.TrimSpace(targetTenantID))
+	if target == "" {
+		return microsoftTenantMismatch("the restore has no destination tenant")
+	}
+	return requireWriteLink(store, writeCred, target)
 }
 
 // ErrMicrosoftTenantRequired: the login has Microsoft backups in several tenants and none was selected.

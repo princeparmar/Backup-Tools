@@ -167,7 +167,7 @@ func ResolveSharePointSite(ctx context.Context, accessToken, siteID, siteURL str
 		return nil, fmt.Errorf("sharepoint site id missing from graph response")
 	}
 
-	driveID, err := fetchSiteDefaultDriveID(ctx, accessToken, resolvedSiteID)
+	driveID, err := SiteDefaultDriveID(ctx, accessToken, resolvedSiteID)
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +193,55 @@ func ResolveSharePointSite(ctx context.Context, accessToken, siteID, siteURL str
 // (typically a hidden system site returned by getAllSites).
 var ErrSharePointSiteNoDocumentLibrary = errors.New("sharepoint site has no document library to back up")
 
-func fetchSiteDefaultDriveID(ctx context.Context, accessToken, siteID string) (string, error) {
+// EnsureSharePointLibrary returns the drive id of the site's document library named name,
+// creating the library when the site has none with that name.
+func EnsureSharePointLibrary(ctx context.Context, accessToken, siteID, name string) (string, error) {
+	name = strings.TrimSpace(name)
+	siteID = strings.TrimSpace(siteID)
+	if siteID == "" || name == "" {
+		return "", fmt.Errorf("site id and library name are required")
+	}
+	libs, err := ListSharePointSiteLibraries(ctx, accessToken, siteID)
+	if err != nil {
+		return "", err
+	}
+	for _, lib := range libs {
+		if strings.EqualFold(lib.Name, name) && lib.ID != "" {
+			return lib.ID, nil
+		}
+	}
+	body, err := json.Marshal(map[string]any{
+		"displayName": name,
+		"list":        map[string]string{"template": "documentLibrary"},
+	})
+	if err != nil {
+		return "", err
+	}
+	resp, status, err := graphDoJSONWrite(ctx, accessToken, http.MethodPost,
+		graphBaseURL+"/sites/"+url.PathEscape(siteID)+"/lists", body)
+	if err != nil {
+		return "", err
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if status < 200 || status >= 300 || json.Unmarshal(resp, &created) != nil || strings.TrimSpace(created.ID) == "" {
+		return "", fmt.Errorf("create sharepoint library http %d: %s", status, truncateForErr(resp))
+	}
+	driveURL := graphBaseURL + "/sites/" + url.PathEscape(siteID) + "/lists/" + url.PathEscape(created.ID) + "/drive?$select=id"
+	resp, status, err = graphDoJSON(ctx, accessToken, http.MethodGet, driveURL, nil)
+	if err != nil {
+		return "", err
+	}
+	var drive graphDriveResponse
+	if status < 200 || status >= 300 || json.Unmarshal(resp, &drive) != nil || strings.TrimSpace(drive.ID) == "" {
+		return "", fmt.Errorf("sharepoint library drive http %d: %s", status, truncateForErr(resp))
+	}
+	return strings.TrimSpace(drive.ID), nil
+}
+
+// SiteDefaultDriveID is the id of the site's default document library.
+func SiteDefaultDriveID(ctx context.Context, accessToken, siteID string) (string, error) {
 	reqURL := graphBaseURL + "/sites/" + url.PathEscape(siteID) + "/drive?$select=id"
 	body, status, err := graphDoJSON(ctx, accessToken, http.MethodGet, reqURL, nil)
 	if err != nil {

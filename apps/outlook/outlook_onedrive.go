@@ -266,18 +266,32 @@ func ListOneDriveFlatFilesPage(ctx context.Context, accessToken, driveRootURL st
 }
 
 func graphDoJSON(ctx context.Context, accessToken, method, url string, body io.Reader) ([]byte, int, error) {
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	return graphExchange(ctx, accessToken, method, url, body, nil, 32<<20)
+}
+
+// graphExchange is the one Graph JSON call. extra headers cover write content type, mail
+// immutable ids, and calendar time zones. limit is the response read cap.
+func graphExchange(ctx context.Context, accessToken, method, rawURL string, body io.Reader, extra http.Header, limit int64) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, body)
 	if err != nil {
 		return nil, 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
 	req.Header.Set("Accept", "application/json")
+	for key, values := range extra {
+		for _, value := range values {
+			req.Header.Set(key, value)
+		}
+	}
 	resp, err := graphHTTPDoWithRetry(ctx, req)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if limit <= 0 {
+		limit = 32 << 20
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}

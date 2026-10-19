@@ -58,12 +58,7 @@ func runOutlookSharePointAutosync(input ProcessorInput) error {
 	}
 	accessToken, storx := auth.AccessToken, auth.StorxToken
 
-	go func() {
-		processCtx := context.Background()
-		if processErr := handler.ProcessWebhookEvents(processCtx, input.Database, storx, 100); processErr != nil {
-			logger.Warn(processCtx, "Failed to process webhook events from sharepoint auto-sync", logger.ErrorField(processErr))
-		}
-	}()
+	drainMicrosoftWebhooks(input, storx, "sharepoint")
 
 	if err := input.HeartBeatFunc(); err != nil {
 		return err
@@ -79,8 +74,8 @@ func runOutlookSharePointAutosync(input ProcessorInput) error {
 		return err
 	}
 
-	if err := handler.UploadObjectAndSync(ctx, input.Database, storx, satellite.ReserveBucket_OutlookSharePoint, siteKey+"/.file_placeholder", nil, input.Job.UserID, input.StorxRecovery); err != nil {
-		return mapUploadErr("outlook_sharepoint", fmt.Errorf("setup storage placeholder: %w", err))
+	if err := ensureMicrosoftPlaceholder(ctx, input, storx, satellite.ReserveBucket_OutlookSharePoint, siteKey, "outlook_sharepoint"); err != nil {
+		return err
 	}
 
 	q := newDriveQuotaSession(ctx, input)
@@ -101,9 +96,7 @@ func saveSharePointMemory(input ProcessorInput) error {
 	if input.Database == nil {
 		return nil
 	}
-	return input.Database.CronJobRepo.UpdateCronJobFieldsForCron(input.Job.ID, map[string]interface{}{
-		"task_memory": input.Job.TaskMemory,
-	})
+	return saveMicrosoftTaskMemory(input)
 }
 
 // sharePointSite is one site job's run.

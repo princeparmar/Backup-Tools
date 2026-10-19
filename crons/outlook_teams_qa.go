@@ -45,23 +45,15 @@ type teamsQAState struct {
 }
 
 func (s *teamsQAState) skipped(stream string, now time.Time) bool {
-	until, ok := s.SkipUntil[stream]
-	return ok && now.Before(until)
+	return teamsStreamSkipped(s.SkipUntil, stream, now)
 }
 
 func (s *teamsQAState) block(stream, status string, until time.Time) {
-	if s.SkipUntil == nil {
-		s.SkipUntil = map[string]time.Time{}
-	}
-	if s.Status == nil {
-		s.Status = map[string]string{}
-	}
-	s.SkipUntil[stream], s.Status[stream] = until, status
+	teamsStreamBlock(&s.SkipUntil, &s.Status, stream, status, until)
 }
 
 func (s *teamsQAState) unblock(stream string) {
-	delete(s.SkipUntil, stream)
-	delete(s.Status, stream)
+	teamsStreamClear(s.SkipUntil, s.Status, stream)
 }
 
 // teamsQAMessage is the part of a Q&A message the backup reads.

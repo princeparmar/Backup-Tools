@@ -24,32 +24,16 @@ func graphMailDo(ctx context.Context, accessToken, method, reqURL string, payloa
 		ctx = context.Background()
 	}
 	var body io.Reader
+	extra := make(http.Header)
+	extra.Set("Prefer", preferImmutableID)
 	if payload != nil {
 		body = bytes.NewReader(payload)
+		extra.Set("Content-Type", "application/json")
 	}
-	req, err := http.NewRequestWithContext(ctx, method, reqURL, body)
-	if err != nil {
-		return nil, 0, err
-	}
-	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Prefer", preferImmutableID)
-	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := graphHTTPDoWithRetry(ctx, req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
 	if readLimit <= 0 {
 		readLimit = 32 << 20
 	}
-	b, err := io.ReadAll(io.LimitReader(resp.Body, readLimit))
-	if err != nil {
-		return nil, resp.StatusCode, err
-	}
-	return b, resp.StatusCode, nil
+	return graphExchange(ctx, accessToken, method, reqURL, body, extra, readLimit)
 }
 
 // MailFolder is one backed-up mail folder. Path is the folder's key segment(s), e.g. "Inbox/Clients".

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
@@ -180,16 +181,14 @@ func TestMigrationReadinessRefusals(t *testing.T) {
 	source := targetsCred(t, store, "ann@contoso.com", srcTenant, repo.MicrosoftAuthModeDelegated)
 	stubTargets(t, nil, nil, nil)
 
-	for _, method := range []string{"outlook_teams", "outlook_sharepoint"} {
-		job := targetsSourceJob(t, store, source, method)
-		res, err := evaluateMigrationReadiness(t.Context(), store, &restore.ReadinessResult{}, "u1", "p1", method, method, job, "bob@fabrikam.com")
-		if err != nil || res.Ready || res.Reason != restore.ReadinessReasonMigrationUnsupported {
-			t.Fatalf("%s: %+v, %v", method, res, err)
-		}
+	teamsJob := targetsSourceJob(t, store, source, "outlook_teams")
+	res, err := evaluateMigrationReadiness(t.Context(), store, &restore.ReadinessResult{}, "u1", "p1", "outlook_teams", "outlook_teams", teamsJob, "bob@fabrikam.com")
+	if err != nil || res.Ready || res.Reason != restore.ReadinessReasonMigrationUnsupported {
+		t.Fatalf("teams: %+v, %v", res, err)
 	}
 
 	job := targetsSourceJob(t, store, source, "outlook")
-	res, err := evaluateMigrationReadiness(t.Context(), store, &restore.ReadinessResult{}, "u1", "p1", "outlook", "outlook", job, "nobody@fabrikam.com")
+	res, err = evaluateMigrationReadiness(t.Context(), store, &restore.ReadinessResult{}, "u1", "p1", "outlook", "outlook", job, "nobody@fabrikam.com")
 	if err != nil || res.Ready || res.Reason != restore.ReadinessReasonNoCredential {
 		t.Fatalf("destination neither connected nor in a connected organization: %+v, %v", res, err)
 	}
@@ -237,5 +236,80 @@ func TestListOrganizationTenants(t *testing.T) {
 	searched = nil
 	if org, _, err := FindOrganizationTarget(t.Context(), store, "u1", "guest@gmail.com"); err != nil || org != nil || len(searched) != 0 {
 		t.Fatalf("an address outside the tenant's domains is never searched: %+v %v %v", org, err, searched)
+	}
+}
+
+func TestSharePointSiteReadiness(t *testing.T) {
+	store := newTargetsTestDB(t)
+	admin := targetsCred(t, store, "admin@contoso.com", srcTenant, repo.MicrosoftAuthModeApplication)
+	job := targetsSourceJob(t, store, admin, "outlook_sharepoint")
+	const siteID = "contoso.sharepoint.com,11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222"
+
+	prevResolve, prevOrg, prevSite := resolveTenantFn, tenantOrganizationFn, checkSharePointSiteFn
+	t.Cleanup(func() {
+		resolveTenantFn, tenantOrganizationFn, checkSharePointSiteFn = prevResolve, prevOrg, prevSite
+	})
+	token := fakeJWT(map[string]interface{}{"roles": []string{"Sites.ReadWrite.All"}})
+	resolveTenantFn = func(_ context.Context, _ *db.PostgresDb, req mstenant.Request) (*mstenant.Context, error) {
+		return &mstenant.Context{TenantID: req.TenantID, Token: token, Application: true}, nil
+	}
+	tenantOrganizationFn = func(context.Context, string) (outlook.TenantOrganization, error) {
+		return outlook.TenantOrganization{Name: "Contoso", DefaultDomain: "contoso.com", Domains: []string{"contoso.com"}}, nil
+	}
+	var probed string
+	checkSharePointSiteFn = func(_ context.Context, gotToken, site string) (string, error) {
+		if gotToken != token {
+			t.Fatalf("token %q", gotToken)
+		}
+		probed = site
+		return "drive-default", nil
+	}
+
+	run := func(target string) *restore.ReadinessResult {
+		t.Helper()
+		out := &restore.ReadinessResult{Service: "outlook_sharepoint"}
+		res, err := evaluateMigrationReadiness(t.Context(), store, out, "u1", "p1", "outlook_sharepoint", "outlook_sharepoint", job, target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+
+	res := run(siteID)
+	if !res.Ready || !res.Migration || res.CredentialID != admin.ID || res.TenantID != srcTenant || res.TargetEmail != siteID || probed != siteID {
+		t.Fatalf("ready site: %+v probed=%q", res, probed)
+	}
+
+	checkSharePointSiteFn = func(context.Context, string, string) (string, error) {
+		return "", outlook.ErrSharePointSiteNoDocumentLibrary
+	}
+	res = run(siteID)
+	if res.Ready || res.Reason != restore.ReadinessReasonTargetUnavailable || res.Message != "The destination site has no document library" {
+		t.Fatalf("site without a library: %+v", res)
+	}
+
+	checkSharePointSiteFn = func(context.Context, string, string) (string, error) {
+		return "", fmt.Errorf("sharepoint default drive http 404: missing")
+	}
+	res = run(siteID)
+	if res.Ready || res.Reason != restore.ReadinessReasonTargetUnavailable || !strings.Contains(res.Message, "not found") {
+		t.Fatalf("unknown site: %+v", res)
+	}
+
+	resolveTenantFn = func(_ context.Context, _ *db.PostgresDb, req mstenant.Request) (*mstenant.Context, error) {
+		return &mstenant.Context{
+			TenantID: req.TenantID, Application: true,
+			Token: fakeJWT(map[string]interface{}{"roles": []string{"Sites.Read.All"}}),
+		}, nil
+	}
+	res = run(siteID)
+	if res.Ready || res.Reason != restore.ReadinessReasonMissingPermissions ||
+		len(res.MissingPermissions) != 1 || res.MissingPermissions[0].Scope != "Sites.ReadWrite.All" {
+		t.Fatalf("missing write role: %+v", res)
+	}
+
+	res = run("someone@contoso.com")
+	if res.Ready || res.Reason != restore.ReadinessReasonNoCredential {
+		t.Fatalf("an email is not a SharePoint site: %+v", res)
 	}
 }

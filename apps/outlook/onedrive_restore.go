@@ -26,6 +26,9 @@ type OneDriveRestoreSource struct {
 	// FolderNames maps folder id -> name from the backed-up folder placeholders; see
 	// OneDriveFolderNames. Missing names fall back to the path saved with the file.
 	FolderNames map[string]string
+	// DriveRoot, when set, chooses the drive a SharePoint object is written into. Nil keeps the
+	// drive recorded on the backup.
+	DriveRoot func(ctx context.Context, objectKey string, meta map[string]string) (string, error)
 }
 
 // OneDriveFolderNames maps folder id -> name for every folder placeholder among keys.
@@ -56,18 +59,30 @@ func RestoreOneDriveBackup(ctx context.Context, accessToken, userBase, objectKey
 	return RestoreDriveBackup(ctx, accessToken, userDriveURL(userBase), objectKey, src)
 }
 
-// RestoreSharePointBackup restores one tree-layout SharePoint or group library backup into the
-// drive recorded on the object.
+// RestoreSharePointBackup restores one tree-layout SharePoint or group library backup. The file
+// goes back to the drive recorded on the object, unless src.DriveRoot names another drive.
 func RestoreSharePointBackup(ctx context.Context, accessToken, objectKey string, src OneDriveRestoreSource) error {
 	meta, _, err := src.Stat(ctx, objectKey)
 	if err != nil {
 		return fmt.Errorf("read backup %s: %w", objectKey, err)
 	}
-	driveID := strings.TrimSpace(meta[OneDriveMetaDriveID])
-	if driveID == "" {
-		return fmt.Errorf("sharepoint backup %s has no drive id", objectKey)
+	driveURL := ""
+	if src.DriveRoot != nil {
+		driveURL, err = src.DriveRoot(ctx, objectKey, meta)
+		if err != nil {
+			return err
+		}
+	} else {
+		driveID := strings.TrimSpace(meta[OneDriveMetaDriveID])
+		if driveID == "" {
+			return fmt.Errorf("sharepoint backup %s has no drive id", objectKey)
+		}
+		driveURL = DriveRootURLFromDriveID(driveID)
 	}
-	return RestoreDriveBackup(ctx, accessToken, DriveRootURLFromDriveID(driveID), objectKey, src)
+	if strings.TrimSpace(driveURL) == "" {
+		return fmt.Errorf("sharepoint backup %s has no destination drive", objectKey)
+	}
+	return RestoreDriveBackup(ctx, accessToken, driveURL, objectKey, src)
 }
 
 // RestoreDriveBackup is RestoreOneDriveBackup for the drive at driveURL (".../drive" or

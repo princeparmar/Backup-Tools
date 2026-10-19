@@ -165,14 +165,11 @@ type RestoreDeps struct {
 	MicrosoftToken string
 	// MicrosoftApplication is true when MicrosoftToken is an app-only token (no /me; target /users/{id}).
 	MicrosoftApplication bool
-	// MicrosoftTargetUser is the directory id an app-only restore into another account writes to
-	// ("" restores into the backed-up user).
-	MicrosoftTargetUser string
-	RefreshToken        string
-	AuthMode            string
-	LoginID             string
-	GoogleWriteSubject  string // DWD impersonation target (migration cross-mailbox); defaults to LoginID
-	Config              ServiceConfig
+	RefreshToken         string
+	AuthMode             string
+	LoginID              string
+	GoogleWriteSubject   string // DWD impersonation target (migration cross-mailbox); defaults to LoginID
+	Config               ServiceConfig
 	// WriteCred is the credential used to mint provider tokens (Google or Microsoft).
 	WriteCred *repo.GoogleBackupCredentialDB
 
