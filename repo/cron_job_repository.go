@@ -182,9 +182,15 @@ type TaskMemory struct {
 
 	// Contacts incremental sync state (ID-based autosync architecture)
 	ContactsBaselineDone bool `json:"contacts_baseline_done,omitempty"`
+	// ContactsDetailVersion below 2 means the next run rewrites each contact in place
+	// so the photo, the display labels, and the extra Google fields are stored.
+	ContactsDetailVersion int `json:"contacts_detail_version,omitempty"`
 
 	// Calendar incremental sync state (per-calendar syncToken; see CalendarCalendarState)
 	CalendarCalendars map[string]CalendarCalendarState `json:"calendar_calendars,omitempty"`
+	// CalendarIndexVersion below 1 means the next run writes one calendar/_index.json
+	// covering every calendar, then later runs only update that file.
+	CalendarIndexVersion int `json:"calendar_index_version,omitempty"`
 
 	// Teams incremental sync state (per-channel; delta OR re-enumeration+dedup)
 	TeamsChannels map[string]TeamsChannelSyncState `json:"teams_channels,omitempty"`

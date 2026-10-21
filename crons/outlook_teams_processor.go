@@ -671,8 +671,8 @@ func (r *teamsRun) graph(call func(token string) error) error {
 	case outlook.TeamsStatusOK:
 		r.consecutive429 = 0
 	}
-	return err
-}
+			return err
+		}
 
 func (r *teamsRun) page(u string) (outlook.TeamsPage, error) {
 	var p outlook.TeamsPage
@@ -737,8 +737,8 @@ func (r *teamsRun) loadKeys() error {
 	for _, k := range keys {
 		r.keys[k] = true
 	}
-	return nil
-}
+		return nil
+	}
 
 func (r *teamsRun) keysWithPrefix(prefix string) []string {
 	var out []string
@@ -748,7 +748,7 @@ func (r *teamsRun) keysWithPrefix(prefix string) []string {
 		}
 	}
 	sort.Strings(out)
-	return out
+		return out
 }
 
 // put writes one object: ownership checked, key in the job's tenant, write retried in memory,
@@ -1184,7 +1184,7 @@ func (r *teamsRun) finish() error {
 		}
 		r.input.Job.Message, r.input.Job.MessageStatus = msg, repo.JobMessageStatusWarning
 	}
-	return nil
+		return nil
 }
 
 // mergeTeamJobs imports old per-team jobs of the same connection into the tenant job's selection
@@ -1379,8 +1379,8 @@ func (r *teamsRun) markOutOfScope(kind string, inScope map[string]bool) {
 	for _, key := range r.keysWithPrefix(prefix) {
 		id, err := url.PathUnescape(strings.TrimSuffix(strings.TrimPrefix(key, prefix), ".json"))
 		if err != nil {
-			continue
-		}
+				continue
+			}
 		if inScope[id] {
 			continue
 		}
@@ -1617,8 +1617,8 @@ func (r *teamsRun) writeTeamMeta(st *teamsTeamState, team teamsTeamInfo, teamPre
 		}
 		st.Channels[ch.ID] = cs
 	}
-	return nil
-}
+		return nil
+	}
 
 // syncTeamConfig stores settings, members, apps and tags of the team and members and tabs of each
 // channel, each part on its own. A part without its role is skipped, and one Graph refuses for

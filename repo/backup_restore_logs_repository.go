@@ -3,6 +3,7 @@ package repo
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/gorm"
 )
@@ -14,6 +15,7 @@ type BackupRestoreLogEntry struct {
 	Method        string `json:"method"`
 	Message       string `json:"message"`
 	MessageStatus string `json:"message_status"`
+	Timestamp     string `json:"timestamp,omitempty"`
 }
 
 // BackupRestoreLogsFilter query options for ListBackupRestoreLogs.
@@ -187,7 +189,7 @@ FROM (
 	limitArg := fmt.Sprintf("$%d", len(args)+1)
 	offsetArg := fmt.Sprintf("$%d", len(args)+2)
 
-	listSQL := fmt.Sprintf(`SELECT log_type, subject, method, message, message_status
+	listSQL := fmt.Sprintf(`SELECT log_type, subject, method, message, message_status, sort_ts
 FROM (%s) merged
 ORDER BY sort_ts DESC
 LIMIT %s OFFSET %s`, merged, limitArg, offsetArg)
@@ -198,6 +200,7 @@ LIMIT %s OFFSET %s`, merged, limitArg, offsetArg)
 		Method        string
 		Message       string
 		MessageStatus string
+		SortTS        *time.Time
 	}
 	var rows []row
 	if err := r.db.Raw(listSQL, listArgs...).Scan(&rows).Error; err != nil {
@@ -206,13 +209,17 @@ LIMIT %s OFFSET %s`, merged, limitArg, offsetArg)
 
 	logs := make([]BackupRestoreLogEntry, 0, len(rows))
 	for i := range rows {
-		logs = append(logs, BackupRestoreLogEntry{
+		entry := BackupRestoreLogEntry{
 			Type:          rows[i].LogType,
 			Subject:       rows[i].Subject,
 			Method:        rows[i].Method,
 			Message:       rows[i].Message,
 			MessageStatus: rows[i].MessageStatus,
-		})
+		}
+		if rows[i].SortTS != nil && !rows[i].SortTS.IsZero() {
+			entry.Timestamp = rows[i].SortTS.UTC().Format(time.RFC3339)
+		}
+		logs = append(logs, entry)
 	}
 
 	return &BackupRestoreLogsResult{

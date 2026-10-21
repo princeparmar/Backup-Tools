@@ -3,6 +3,8 @@ package google
 import (
 	"encoding/json"
 	"testing"
+
+	people "google.golang.org/api/people/v1"
 )
 
 func TestContactsIDFromResourceName(t *testing.T) {
@@ -218,5 +220,97 @@ func TestPersonFromContactsBackup_parsesVaultJSON(t *testing.T) {
 	person := personFromContactsBackup(backup)
 	if person == nil || person.Names[0].UnstructuredName != "Sales Desk" {
 		t.Fatalf("got %+v", person)
+	}
+}
+
+func TestFlatContactFromPerson_keepsRemainingFields(t *testing.T) {
+	person := &people.Person{
+		ResourceName: "people/c1",
+		Names: []*people.Name{{
+			DisplayName: "tst3 fsdgd", GivenName: "tst3", FamilyName: "fsdgd", PhoneticFullName: "gdgdgdf",
+		}},
+		Nicknames:      []*people.Nickname{{Value: "gdgdgdf"}},
+		FileAses:       []*people.FileAs{{Value: "fgdfg"}},
+		EmailAddresses: []*people.EmailAddress{{Value: "ada@example.com", Type: "home"}},
+		PhoneNumbers:   []*people.PhoneNumber{{Value: "08460248842", Type: "mobile"}},
+		Addresses: []*people.Address{{
+			FormattedValue: "53, Dharmiyan Raw House", Type: "work",
+			StreetAddress: "53, Dharmiyan Raw House", City: "Surat", Region: "Himachal Pradesh", PostalCode: "39101", Country: "IN",
+		}},
+		Birthdays:     []*people.Birthday{{Date: &people.Date{Year: 2005, Month: 12, Day: 4}}},
+		Events:        []*people.Event{{Date: &people.Date{Year: 2009, Month: 12, Day: 8}, Type: "other"}},
+		Urls:          []*people.Url{{Value: "https://contacts.google.com/new", Type: "blog"}},
+		Organizations: []*people.Organization{{Name: "888", Title: "Assistant"}},
+		UserDefined:   []*people.UserDefined{{Key: "cccc", Value: "88888"}},
+		Relations:     []*people.Relation{{Person: "fbcbcvbfgggdfg", Type: "friend"}},
+		Memberships:   []*people.Membership{{ContactGroupMembership: &people.ContactGroupMembership{ContactGroupResourceName: "contactGroups/label1"}}},
+		Photos:        []*people.Photo{{Url: "https://lh3.googleusercontent.com/photo", Default: false}, {Url: "https://lh3.googleusercontent.com/default", Default: true}},
+		Biographies:   []*people.Biography{{Value: "a note"}},
+	}
+	flat := flatContactFromPerson(person)
+	ApplyContactGroupNames(&flat, map[string]string{"contactGroups/label1": "tesff", "contactGroups/myContacts": "myContacts"})
+	if flat.Name != "tst3 fsdgd" || flat.Names[0].Given != "tst3" || flat.Names[0].PhoneticFull != "gdgdgdf" {
+		t.Fatalf("name = %+v %q", flat.Names, flat.Name)
+	}
+	if flat.Nicknames[0].Value != "gdgdgdf" || flat.FileAs[0] != "fgdfg" {
+		t.Fatalf("nickname/file-as = %+v %+v", flat.Nicknames, flat.FileAs)
+	}
+	if flat.Addresses[0].City != "Surat" || flat.Addresses[0].PostalCode != "39101" || flat.Addresses[0].Type != "work" {
+		t.Fatalf("address = %+v", flat.Addresses[0])
+	}
+	if flat.Birthday != "2005-12-04" || flat.Events[0].Date != "2009-12-08" || flat.Events[0].Type != "other" {
+		t.Fatalf("dates = %q %+v", flat.Birthday, flat.Events)
+	}
+	if flat.Websites[0].Value != "https://contacts.google.com/new" || flat.Websites[0].Type != "blog" {
+		t.Fatalf("website = %+v", flat.Websites)
+	}
+	if flat.CustomFields[0].Key != "cccc" || flat.Relations[0].Value != "fbcbcvbfgggdfg" || len(flat.Labels) != 1 || flat.Labels[0] != "tesff" {
+		t.Fatalf("custom/relation/label = %+v %+v %+v", flat.CustomFields, flat.Relations, flat.Labels)
+	}
+	if flat.PhotoURL != "https://lh3.googleusercontent.com/photo" || flat.Notes != "a note" {
+		t.Fatalf("photo/notes = %q %q", flat.PhotoURL, flat.Notes)
+	}
+
+	stored := BackupFromFlat(flat)
+	restored := personFromContactsBackup(stored)
+	if restored.Names[0].GivenName != "tst3" || restored.Names[0].DisplayName != "" {
+		t.Fatalf("restored name = %+v", restored.Names[0])
+	}
+	if restored.Addresses[0].City != "Surat" || restored.Events[0].Type != "other" || restored.Urls[0].Type != "blog" {
+		t.Fatalf("restored details = %+v", restored)
+	}
+	if restored.UserDefined[0].Value != "88888" || restored.Relations[0].Person != "fbcbcvbfgggdfg" || restored.Nicknames[0].Value != "gdgdgdf" {
+		t.Fatalf("restored extra = %+v", restored)
+	}
+}
+
+func TestPeopleStoredTypeUsesDisplayLabel(t *testing.T) {
+	if got := peopleStoredType("gfdgdgdg", "other"); got != "gfdgdgdg" {
+		t.Fatalf("custom label %q", got)
+	}
+	if got := peopleStoredType("Work", "work"); got != "Work" {
+		t.Fatalf("work label %q", got)
+	}
+	if got := peopleStoredType("", "blog"); got != "blog" {
+		t.Fatalf("raw label %q", got)
+	}
+}
+
+func TestContactBackupStaleWhenEditDayChanges(t *testing.T) {
+	key := "user@gmail.com/contacts/2026/07/21/c1.json"
+	if !ContactBackupStale(key, "2026-10-21T10:00:00Z") {
+		t.Fatal("later edit should rewrite the contact")
+	}
+	if ContactBackupStale(key, "2026-07-21T18:00:00Z") {
+		t.Fatal("same day should keep the contact file")
+	}
+}
+
+func TestContactPhotoURLAllowed(t *testing.T) {
+	if !contactPhotoURLAllowed("https://lh3.googleusercontent.com/abc") {
+		t.Fatal("google photo host should be allowed")
+	}
+	if contactPhotoURLAllowed("http://lh3.googleusercontent.com/abc") || contactPhotoURLAllowed("https://example.com/photo.jpg") {
+		t.Fatal("non-google or insecure photo url should be rejected")
 	}
 }

@@ -418,7 +418,7 @@ func (r *oneDriveRun) apply(ctx context.Context, items []outlook.OneDriveItem) e
 			r.removeItem(ctx, id)
 		}
 	}
-	return nil
+		return nil
 }
 
 // pathTo returns the folder ids from the drive root down to and including folderID; nil for
@@ -534,8 +534,8 @@ func (r *oneDriveRun) moveContents(ctx context.Context, oldPrefix, newPrefix str
 			err = r.store.put(ctx, dst, strings.NewReader(""), 0, st.meta)
 			if f := r.folders[id]; f != nil && f.fromKey {
 				f.chain = p.ParentIDs
-			}
-		} else {
+		}
+	} else {
 			err = r.store.copy(ctx, key, dst, st.size, st.meta)
 		}
 		if err != nil {
@@ -553,9 +553,9 @@ func (r *oneDriveRun) moveContents(ctx context.Context, oldPrefix, newPrefix str
 // the stored object when their content is unchanged.
 func (r *oneDriveRun) syncFile(ctx context.Context, item *outlook.OneDriveItem) error {
 	ids, err := r.pathTo(ctx, item.ParentID, 0)
-	if err != nil {
-		return err
-	}
+		if err != nil {
+			return err
+		}
 	r.flushFetched(ctx)
 	r.seen[item.ID] = true
 	key := outlook.OneDriveFileKey(r.prefix, outlook.OneDriveSectionMyDrive, ids, item.ID, item.Name)

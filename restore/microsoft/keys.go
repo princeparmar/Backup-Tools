@@ -984,11 +984,11 @@ func (s *TeamsRestoreSession) restoreLegacyReplies(ctx context.Context, objectKe
 		return out.failed(err)
 	}
 	snap, err := outlook.ParseTeamsReplySnapshot(raw)
-	if err != nil {
+		if err != nil {
 		return out.failed(err)
-	}
+		}
 	teamID, channelID, err := outlook.ResolveTeamsGraphIDs(outlook.TeamsCronBackupMeta{}, s.legacyTeamSnapshot(ctx, objectKey), objectKey, "", "")
-	if err != nil {
+		if err != nil {
 		return out.failed(err)
 	}
 	for i, reply := range snap.Replies {

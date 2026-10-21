@@ -407,10 +407,10 @@ func (r *outlookMailRun) syncMessage(ctx context.Context, f outlook.MailFolder, 
 
 	if stored == nil {
 		raw, detail, err := outlookMailFetchFn(ctx, r.accessToken, r.userBase, id)
-		if err != nil {
-			return err
-		}
-		if detail != nil {
+	if err != nil {
+		return err
+	}
+	if detail != nil {
 			detailFrom := ""
 			if detail.From != nil && detail.From.EmailAddress != nil {
 				detailFrom = detail.From.EmailAddress.Address

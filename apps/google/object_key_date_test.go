@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/api/calendar/v3"
 	"google.golang.org/api/gmail/v1"
 )
 
@@ -149,5 +150,60 @@ func TestGmailObjectKey(t *testing.T) {
 	want := "user@gmail.com/_/2026/07/21/a@b.com - Hi - mid1abcdefghij - mid1abcdefghij.gmail"
 	if got != want {
 		t.Fatalf("GmailObjectKey() = %q, want %q", got, want)
+	}
+}
+
+func TestCalendarIndexOneObject(t *testing.T) {
+	if got, want := CalendarDisplayName("user@gmail.com", "Der Dhaval"), "Der Dhaval"; got != want {
+		t.Fatalf("display name %q", got)
+	}
+	if got, want := CalendarDisplayName("7 IT A & B", ""), "7 IT A & B"; got != want {
+		t.Fatalf("display name %q", got)
+	}
+	if got := CalendarIndexObjectKey("user@gmail.com"); got != "user@gmail.com/calendar/_index.json" {
+		t.Fatalf("key %q", got)
+	}
+	row, ok := IndexEventFrom("cal1", "user@gmail.com/calendar/events/cal1_Work/2026/07/21/ev1_Standup.json", &calendar.Event{
+		Id:         "ev1",
+		Summary:    "Standup",
+		Start:      &calendar.EventDateTime{DateTime: "2026-10-21T10:00:00Z"},
+		End:        &calendar.EventDateTime{DateTime: "2026-10-21T10:30:00Z"},
+		Recurrence: []string{"RRULE:FREQ=WEEKLY"},
+	})
+	if !ok || row.Rule != "FREQ=WEEKLY" || row.AllDay || row.CalendarID != "cal1" {
+		t.Fatalf("row %+v ok %v", row, ok)
+	}
+	if _, ok := IndexEventFrom("cal1", "k", &calendar.Event{Id: "gone", Status: "cancelled", Start: &calendar.EventDateTime{Date: "2026-10-02"}}); ok {
+		t.Fatal("cancelled event should stay out of the index")
+	}
+	var idx CalendarIndex
+	idx.Put(row)
+	idx.Put(row)
+	other, ok := IndexEventFrom("cal2", "k2", &calendar.Event{
+		Id:    "ev2",
+		Start: &calendar.EventDateTime{Date: "2026-10-02"},
+		End:   &calendar.EventDateTime{Date: "2026-10-03"},
+	})
+	if !ok || !other.AllDay {
+		t.Fatalf("all-day %+v", other)
+	}
+	idx.Put(other)
+	if len(idx.Events) != 2 {
+		t.Fatalf("put len %d", len(idx.Events))
+	}
+	idx.ReplaceCalendar("cal1", nil)
+	if len(idx.Events) != 1 || idx.Events[0].ID != "ev2" {
+		t.Fatalf("replace %+v", idx.Events)
+	}
+	idx.Remove("cal2", "ev2")
+	if len(idx.Events) != 0 || idx.V != CalendarIndexFileVersion {
+		t.Fatalf("remove %+v", idx)
+	}
+	idx.SetCalendars([]FlatCalendar{
+		{ID: "c_classroom32c90b75@group.calendar.google.com", Summary: "7 IT A & B", DisplayName: "7 IT A & B"},
+		{ID: "c_other@group.calendar.google.com", Summary: "SEM-1 DIV-E_2022"},
+	})
+	if len(idx.Calendars) != 2 || idx.Calendars[0].Name != "7 IT A & B" || idx.Calendars[1].Name != "SEM-1 DIV-E_2022" {
+		t.Fatalf("calendars %+v", idx.Calendars)
 	}
 }

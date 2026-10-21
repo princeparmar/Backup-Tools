@@ -53,6 +53,18 @@ func gmailMailboxPathAndOAuthHolder(job *repo.CronJobListingDB, hasRefreshToken 
 	return mailboxForSession, path, oauthAccountEmail
 }
 
+// gmailUseDelegationOnly skips the admin refresh token when the mailbox is an employee
+// and domain-wide delegation can read it. The admin's own mailbox still uses the token.
+func gmailUseDelegationOnly(refreshToken string, needsDelegation, canDelegate bool) bool {
+	if !canDelegate {
+		return false
+	}
+	if strings.TrimSpace(refreshToken) == "" {
+		return true
+	}
+	return needsDelegation
+}
+
 func (g *gmailProcessor) Run(input ProcessorInput) error {
 
 	ctx := context.Background()
@@ -82,8 +94,11 @@ func (g *gmailProcessor) Run(input ProcessorInput) error {
 	mailboxForSession, pathPrefix, _ := gmailMailboxPathAndOAuthHolder(input.Job, refreshToken != "")
 	oauthAccountEmail := input.Database.CronJobRepo.ResolvedOAuthHolderEmail(input.Job)
 
-	// JWT and requires DWD; without DWD you get unauthorized_client despite a valid admin refresh token.
-	delegationOnly := refreshToken == "" && google.GmailJobUsesDelegationWithoutOAuth(mailboxForSession, oauthAccountEmail)
+	// Employee mail uses domain-wide delegation and must not fail when the admin
+	// refresh token was revoked. The admin's own mailbox still refreshes that token.
+	needsDelegation := google.MediaBackupNeedsDelegation(mailboxForSession, oauthAccountEmail)
+	canDelegate := google.GmailJobUsesDelegationWithoutOAuth(mailboxForSession, oauthAccountEmail)
+	delegationOnly := gmailUseDelegationOnly(refreshToken, needsDelegation, canDelegate)
 	var newToken string
 	if !delegationOnly {
 		if refreshToken == "" {
