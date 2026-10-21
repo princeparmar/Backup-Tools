@@ -4,13 +4,25 @@ on:
   push:
     tags:
       - 'v*' # Trigger on version tags (e.g., v1.0.0, v2.1.3)
-  workflow_dispatch: # Manual trigger
+  workflow_dispatch:
+    inputs:
+      product:
+        description: 'Which CyberLS service to replace'
+        required: true
+        type: choice
+        options:
+          - google
+          - microsoft
+        default: google
 
 env:
   APP_NAME: 'backuptools-windows-amd64.exe'
   BUILD_DIR: 'D:\deployment'
-  DEPLOY_DIR: 'D:\bin'
-  SERVICE_NAME: 'backuptools'
+  # Same exe name. Google keeps the existing folder and .env.
+  # Microsoft has its own folder because the process loads .env from the exe directory.
+  # A version-tag push has no input, so it deploys the Google service.
+  DEPLOY_DIR: ${{ github.event.inputs.product == 'microsoft' && 'D:\bin-microsoft' || 'D:\bin' }}
+  SERVICE_NAME: ${{ github.event.inputs.product == 'microsoft' && 'backuptools-microsoft' || 'backuptools' }}
   # Module + compile caches (dependencies / .a objects) — NOT the Go stdlib.
   # Keep them off runner _temp: that path is wiped and has produced corrupt
   # golang.org/toolchain downloads ("package context is not in std").
@@ -23,6 +35,8 @@ env:
 jobs:
   deploy:
     runs-on: [self-hosted, Windows, X64, cyberls]
+    # Google stays on the existing CyberLS environment. Microsoft uses its own.
+    environment: ${{ github.event.inputs.product == 'microsoft' && 'cyberls-microsoft' || 'cyberls' }}
     timeout-minutes: 25
     
     steps:
@@ -116,8 +130,20 @@ jobs:
             exit 1
           }
           
+      - name: Check service environment
+        shell: powershell
+        run: |
+          $envFile = Join-Path "${{ env.DEPLOY_DIR }}" ".env"
+          Write-Host "Service ${{ env.SERVICE_NAME }}"
+          Write-Host "Environment file $envFile"
+          if (!(Test-Path $envFile)) {
+            Write-Error ".env is missing at $envFile. Create that file for this service before deploying. The workflow does not copy it."
+            exit 1
+          }
+
       - name: Stop NSSM service
         run: |
+          Write-Host "Deploying service ${{ env.SERVICE_NAME }} from ${{ env.DEPLOY_DIR }}"
           # Fast stop using optimized polling
           $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
           if ($service) {
