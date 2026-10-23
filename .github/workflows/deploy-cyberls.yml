@@ -175,7 +175,12 @@ jobs:
               continue
             }
             Write-Host "Stopping $name"
-            Stop-Service -Name $name -Force -WarningAction SilentlyContinue
+            try {
+              Stop-Service -Name $name -Force -WarningAction SilentlyContinue -ErrorAction Stop
+            } catch {
+              Write-Error "The runner is not allowed to stop $name. On the server, as Administrator, give it the same permissions as backuptools: sc.exe sdshow backuptools, then sc.exe sdset $name <that value>."
+              exit 1
+            }
             $timeout = 30
             $elapsed = 0
             while ($service.Status -ne 'Stopped' -and $elapsed -lt $timeout) {
