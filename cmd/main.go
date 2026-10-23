@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/crons"
@@ -51,14 +52,8 @@ func initApp(ctx context.Context) error {
 	}
 
 	execDir := filepath.Dir(execPath)
-	envPath := filepath.Join(execDir, ".env")
-
-	// Try to load .env from the binary's directory first
-	if err := godotenv.Load(envPath); err != nil {
-		// Fallback to current directory
-		if err := godotenv.Load(); err != nil {
-			return err
-		}
+	if err := loadEnvFile(execDir); err != nil {
+		return err
 	}
 
 	satellite.StorxSatelliteService = utils.GetEnvWithKey("STORX_SATELLITE_SERVICE")
@@ -81,6 +76,30 @@ func initApp(ctx context.Context) error {
 	// Start system metrics updater (updates every 30 seconds)
 	monitor.StartSystemMetricsUpdater(30 * time.Second)
 	logger.Info(ctx, "System metrics updater started")
+	return nil
+}
+
+// envFilePath is the file this process loads. ENV_FILE is set per Windows
+// service, so the Google and Microsoft services can share one exe in D:\bin
+// and still read different files. An empty ENV_FILE keeps the existing
+// default: .env next to the exe.
+func envFilePath(execDir, envFile string) string {
+	if path := strings.TrimSpace(envFile); path != "" {
+		return path
+	}
+	return filepath.Join(execDir, ".env")
+}
+
+func loadEnvFile(execDir string) error {
+	path := envFilePath(execDir, os.Getenv("ENV_FILE"))
+	if strings.TrimSpace(os.Getenv("ENV_FILE")) != "" {
+		// Do not fall back to another file. A Microsoft service must not
+		// silently load the Google environment.
+		return godotenv.Load(path)
+	}
+	if err := godotenv.Load(path); err != nil {
+		return godotenv.Load()
+	}
 	return nil
 }
 
