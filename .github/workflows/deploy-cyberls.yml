@@ -21,9 +21,9 @@ env:
   # One shared folder and one exe. A version-tag push restarts Google only.
   # Google reads D:\bin\.env.google when that file exists, otherwise D:\bin\.env.
   # Microsoft reads D:\bin\.env.microsoft. Point that service at it once, as Administrator:
-  # nssm set backuptools-microsoft AppEnvironmentExtra ENV_FILE=D:\bin\.env.microsoft
+  # nssm set Cyberls-Microsoft-BackupTools AppEnvironmentExtra ENV_FILE=D:\bin\.env.microsoft
   DEPLOY_DIR: 'D:\bin'
-  SERVICE_NAME: ${{ github.event.inputs.product == 'microsoft' && 'backuptools-microsoft' || 'backuptools' }}
+  SERVICE_NAME: ${{ github.event.inputs.product == 'microsoft' && 'Cyberls-Microsoft-BackupTools' || 'backuptools' }}
   # Module + compile caches (dependencies / .a objects) — NOT the Go stdlib.
   # Keep them off runner _temp: that path is wiped and has produced corrupt
   # golang.org/toolchain downloads ("package context is not in std").
@@ -136,7 +136,7 @@ jobs:
         run: |
           $serviceName = "${{ env.SERVICE_NAME }}"
           $deploy = "${{ env.DEPLOY_DIR }}"
-          if ($serviceName -eq "backuptools-microsoft") {
+          if ($serviceName -eq "Cyberls-Microsoft-BackupTools") {
             $envFile = Join-Path $deploy ".env.microsoft"
           } else {
             $googleFile = Join-Path $deploy ".env.google"
@@ -162,7 +162,7 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Deploying ${{ env.SERVICE_NAME }}. Both services share ${{ env.DEPLOY_DIR }}\${{ env.APP_NAME }}"
-          $names = @('backuptools', 'backuptools-microsoft')
+          $names = @('backuptools', 'Cyberls-Microsoft-BackupTools')
           $restart = New-Object System.Collections.Generic.List[string]
           foreach ($name in $names) {
             $service = Get-Service -Name $name -ErrorAction SilentlyContinue
