@@ -59,7 +59,7 @@ func TestMicrosoftRunOutcome_existingUserWithoutServiceIsSkipped(t *testing.T) {
 	if err := (&AutosyncManager{store: store}).microsoftRunOutcome(context.Background(), job, errMailboxMissing); err != nil {
 		t.Fatalf("missing service must skip, got %v", err)
 	}
-	if !ProcessorLeftWarningOutcome(job) || !strings.HasPrefix(job.Message, "Mail not backed up: this user has no Exchange Online mailbox.") {
+	if !ProcessorLeftWarningOutcome(job) || !strings.Contains(job.Message, "Mail for ann@contoso.com was not backed up. Microsoft says this mailbox is inactive, stored on-premises, or not ready for backup.") {
 		t.Fatalf("job message = %q (%s), want the mailbox warning", job.Message, job.MessageStatus)
 	}
 	res, _ := store.MicrosoftResourceRepo.Get(reconcileTenant, repo.ResourceTypeUser, "oid-ann")
@@ -83,20 +83,31 @@ func TestMicrosoftRunOutcome_existingUserWithoutServiceIsSkipped(t *testing.T) {
 	}
 }
 
+func TestMicrosoftUnavailableMessageUsesGraphReason(t *testing.T) {
+	err := errors.New(`list mail folders http 404: {"error":{"code":"MailboxNotEnabledForRESTAPI","message":"The mailbox is either inactive, soft-deleted, or is hosted on-premises."}}`)
+	got := microsoftUnavailableMessage(&repo.CronJobListingDB{Method: "outlook", Name: "support@space.com"}, err)
+	want := "Mail for support@space.com was not backed up. Microsoft says the mailbox is either inactive, soft-deleted, or is hosted on-premises. The next backup will try again."
+	if got != want {
+		t.Fatalf("message = %q", got)
+	}
+}
+
 func TestMicrosoftUnavailableMessageNamesServiceAndReason(t *testing.T) {
 	for method, want := range map[string]string{
-		"outlook":          "Mail not backed up: this user has no Exchange Online mailbox.",
-		"outlook_calendar": "Calendar not backed up: this user has no Exchange Online mailbox.",
-		"outlook_contacts": "Contacts not backed up: this user has no Exchange Online mailbox.",
-		"outlook_onedrive": "OneDrive not backed up: this user has no OneDrive.",
-		"outlook_teams":    "Teams not backed up: Microsoft 365 has no Teams data for this team.",
+		"outlook":          "Mail for ada@contoso.com was not backed up. Microsoft did not allow access to this mailbox.",
+		"outlook_calendar": "Calendar for ada@contoso.com was not backed up. Microsoft did not allow access to this mailbox.",
+		"outlook_contacts": "Contacts for ada@contoso.com were not backed up. Microsoft did not allow access to this mailbox.",
+		"outlook_onedrive": "OneDrive for ada@contoso.com was not backed up. This account has no OneDrive.",
+		"outlook_teams":    "Teams for ada@contoso.com was not backed up. This team has no Teams data.",
 	} {
 		resourceType := repo.ResourceTypeUser
 		if method == "outlook_teams" {
 			resourceType = repo.ResourceTypeTeam
 		}
-		got := microsoftUnavailableMessage(&repo.CronJobListingDB{Method: method, ResourceType: resourceType})
-		if !strings.HasPrefix(got, want) || !strings.HasSuffix(got, "It is checked again on every run.") {
+		got := microsoftUnavailableMessage(&repo.CronJobListingDB{
+			Method: method, ResourceType: resourceType, Name: "ada@contoso.com",
+		}, nil)
+		if !strings.HasPrefix(got, want) || !strings.HasSuffix(got, "The next backup will try again.") {
 			t.Errorf("%s: %q", method, got)
 		}
 	}

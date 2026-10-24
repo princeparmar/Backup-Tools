@@ -160,13 +160,20 @@ func HandleMicrosoftAutosyncUsersGroupsList(c echo.Context) error {
 	}
 	if connectedCred != nil {
 		resp["connected_as"] = strings.TrimSpace(connectedCred.Email)
-		tid := selectedTenant
-		if tid == "" {
-			tid = connectedCred.HomeTenantID()
-		}
-		resp["tenant_id"] = tid
 		resp["account_type"] = strings.TrimSpace(connectedCred.AccountType)
-		if state, serr := mstenant.TenantAccessState(database, connectedCred.ID, tid); serr == nil {
+	}
+	tenantIDs := microsoftUsersGroupsTenantIDs(jobs)
+	if selectedTenant != "" {
+		resp["tenant_id"] = selectedTenant
+	} else if len(tenantIDs) == 1 {
+		resp["tenant_id"] = tenantIDs[0]
+		selectedTenant = tenantIDs[0]
+	}
+	if len(tenantIDs) > 1 {
+		resp["tenant_ids"] = tenantIDs
+	}
+	if connectedCred != nil && selectedTenant != "" {
+		if state, serr := mstenant.TenantAccessState(database, connectedCred.ID, selectedTenant); serr == nil {
 			resp["account_type"] = state.AccountType
 			resp["backup_mode"] = state.BackupMode
 			resp["connection_state"] = state.ConnectionState
@@ -175,44 +182,40 @@ func HandleMicrosoftAutosyncUsersGroupsList(c echo.Context) error {
 	return c.JSON(http.StatusOK, resp)
 }
 
-// filterUsersGroupsMicrosoftTenant keeps the jobs of the selected tenant (MICROSOFT_TENANT_ID or
-// tenant_id). Without a selection the jobs must all be in one tenant; jobs in several tenants
-// return tenant_id_required with the tenants so the UI can show one tab per tenant.
+// filterUsersGroupsMicrosoftTenant keeps the jobs of the selected tenant when MICROSOFT_TENANT_ID
+// or tenant_id is sent. With no selection every tenant is returned, so a personal account added
+// beside an organization still appears on the mailbox list. Each row carries its own tenant_id.
 func filterUsersGroupsMicrosoftTenant(c echo.Context, jobs []repo.CronJobListingDB) (string, []repo.CronJobListingDB, map[string]interface{}) {
 	selected := strings.ToLower(strings.TrimSpace(c.Request().Header.Get(headerMicrosoftTenantID)))
 	if selected == "" {
 		selected = strings.ToLower(strings.TrimSpace(c.QueryParam("tenant_id")))
 	}
-	if selected != "" {
-		out := make([]repo.CronJobListingDB, 0, len(jobs))
-		for i := range jobs {
-			if strings.EqualFold(strings.TrimSpace(jobs[i].TenantID), selected) {
-				out = append(out, jobs[i])
-			}
-		}
-		return selected, out, nil
+	if selected == "" {
+		return "", jobs, nil
 	}
-	var tenants []string
+	out := make([]repo.CronJobListingDB, 0, len(jobs))
+	for i := range jobs {
+		if strings.EqualFold(strings.TrimSpace(jobs[i].TenantID), selected) {
+			out = append(out, jobs[i])
+		}
+	}
+	return selected, out, nil
+}
+
+// microsoftUsersGroupsTenantIDs returns the distinct tenant ids on jobs, sorted.
+func microsoftUsersGroupsTenantIDs(jobs []repo.CronJobListingDB) []string {
 	seen := map[string]bool{}
+	out := make([]string, 0)
 	for i := range jobs {
 		tid := strings.ToLower(strings.TrimSpace(jobs[i].TenantID))
-		if tid != "" && !seen[tid] {
-			seen[tid] = true
-			tenants = append(tenants, tid)
+		if tid == "" || seen[tid] {
+			continue
 		}
+		seen[tid] = true
+		out = append(out, tid)
 	}
-	switch len(tenants) {
-	case 0:
-		return "", jobs, nil
-	case 1:
-		return tenants[0], jobs, nil
-	}
-	sort.Strings(tenants)
-	return "", nil, map[string]interface{}{
-		"code":       "tenant_id_required",
-		"error":      "Microsoft backups exist in several tenants; select one with MICROSOFT_TENANT_ID or tenant_id",
-		"tenant_ids": tenants,
-	}
+	sort.Strings(out)
+	return out
 }
 
 // addMicrosoftResourceIdentity adds the job's tenant, resource identity and vault folder to an

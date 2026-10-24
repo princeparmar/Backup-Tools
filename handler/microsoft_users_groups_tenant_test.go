@@ -31,11 +31,15 @@ func ugJob(id uint, tenant, rid string) repo.CronJobListingDB {
 func TestFilterUsersGroupsMicrosoftTenant(t *testing.T) {
 	jobs := []repo.CronJobListingDB{ugJob(1, ugTenantA, "oid-1"), ugJob(2, ugTenantB, "oid-2"), ugJob(3, ugTenantA, "oid-3")}
 
-	if _, _, errBody := filterUsersGroupsMicrosoftTenant(ugContext("/", nil), jobs); errBody == nil || errBody["code"] != "tenant_id_required" {
-		t.Fatalf("several tenants without a selection: %v", errBody)
+	tid, got, errBody := filterUsersGroupsMicrosoftTenant(ugContext("/", nil), jobs)
+	if errBody != nil || tid != "" || len(got) != 3 {
+		t.Fatalf("several tenants without a selection returns every job: %s %v %v", tid, got, errBody)
+	}
+	if ids := microsoftUsersGroupsTenantIDs(got); len(ids) != 2 || ids[0] != ugTenantA || ids[1] != ugTenantB {
+		t.Fatalf("tenant ids = %v", ids)
 	}
 
-	tid, got, errBody := filterUsersGroupsMicrosoftTenant(ugContext("/?tenant_id="+ugTenantA, nil), jobs)
+	tid, got, errBody = filterUsersGroupsMicrosoftTenant(ugContext("/?tenant_id="+ugTenantA, nil), jobs)
 	if errBody != nil || tid != ugTenantA || len(got) != 2 || got[0].ID != 1 || got[1].ID != 3 {
 		t.Fatalf("query tenant: %s %v %v", tid, got, errBody)
 	}
@@ -46,8 +50,11 @@ func TestFilterUsersGroupsMicrosoftTenant(t *testing.T) {
 	}
 
 	tid, got, errBody = filterUsersGroupsMicrosoftTenant(ugContext("/", nil), jobs[:1])
-	if errBody != nil || tid != ugTenantA || len(got) != 1 {
+	if errBody != nil || tid != "" || len(got) != 1 {
 		t.Fatalf("single tenant needs no selection: %s %v %v", tid, got, errBody)
+	}
+	if ids := microsoftUsersGroupsTenantIDs(got); len(ids) != 1 || ids[0] != ugTenantA {
+		t.Fatalf("single tenant id = %v", ids)
 	}
 }
 

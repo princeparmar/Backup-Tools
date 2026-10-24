@@ -2,7 +2,9 @@ package crons
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/mstenant"
@@ -56,27 +58,107 @@ func (a *AutosyncManager) microsoftRunOutcome(ctx context.Context, job *repo.Cro
 	}
 
 	_ = a.store.MicrosoftResourceRepo.AddUnavailableService(job.TenantID, job.ResourceType, job.ResourceID, job.Method)
-	job.Message = microsoftUnavailableMessage(job)
+	job.Message = microsoftUnavailableMessage(job, runErr)
 	job.MessageStatus = repo.JobMessageStatusWarning
 	return nil
 }
 
-// microsoftUnavailableMessage says which service was skipped and why, by method.
-func microsoftUnavailableMessage(job *repo.CronJobListingDB) string {
-	const again = " It is checked again on every run."
+// microsoftUnavailableWho is the address or name shown to the customer.
+func microsoftUnavailableWho(job *repo.CronJobListingDB) string {
+	if who := strings.TrimSpace(jobOutlookMailbox(job)); who != "" {
+		return who
+	}
+	return "this account"
+}
+
+// microsoftUnavailableMessage tells the customer which person's backup was skipped and why.
+func microsoftUnavailableMessage(job *repo.CronJobListingDB, runErr error) string {
+	who := microsoftUnavailableWho(job)
+	reason := microsoftDenyReason(job.Method, runErr)
+	const again = " The next backup will try again."
 	switch job.Method {
 	case "outlook":
-		return "Mail not backed up: this user has no Exchange Online mailbox." + again
+		return "Mail for " + who + " was not backed up. " + reason + again
 	case "outlook_calendar":
-		return "Calendar not backed up: this user has no Exchange Online mailbox." + again
+		return "Calendar for " + who + " was not backed up. " + reason + again
 	case "outlook_contacts":
-		return "Contacts not backed up: this user has no Exchange Online mailbox." + again
+		return "Contacts for " + who + " were not backed up. " + reason + again
 	case "outlook_onedrive":
-		return "OneDrive not backed up: this user has no OneDrive." + again
+		return "OneDrive for " + who + " was not backed up. " + reason + again
 	case "outlook_teams":
-		return "Teams not backed up: Microsoft 365 has no Teams data for this team." + again
+		return "Teams for " + who + " was not backed up. " + reason + again
 	}
-	return fmt.Sprintf("%s not backed up: not available for this %s.", job.Method, job.ResourceType) + again
+	return fmt.Sprintf("%s for %s was not backed up. %s", job.Method, who, reason) + again
+}
+
+// microsoftDenyReason is the customer-facing cause. Microsoft's own message wins when Graph sent one.
+func microsoftDenyReason(method string, runErr error) string {
+	if reason := microsoftGraphReason(runErr); reason != "" {
+		return reason
+	}
+	switch method {
+	case "outlook", "outlook_calendar", "outlook_contacts":
+		return "Microsoft did not allow access to this mailbox."
+	case "outlook_onedrive":
+		return "This account has no OneDrive."
+	case "outlook_teams":
+		return "This team has no Teams data."
+	}
+	return "Microsoft did not allow this backup."
+}
+
+func microsoftGraphReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	code, message := microsoftGraphError(err)
+	if sentence := cleanGraphMessage(message); sentence != "" {
+		return "Microsoft says " + sentence
+	}
+	switch strings.ToLower(code) {
+	case "mailboxnotenabledforrestapi":
+		return "Microsoft says this mailbox is inactive, stored on-premises, or not ready for backup."
+	case "errornonexistentmailbox":
+		return "Microsoft says this account has no mailbox."
+	case "errorinvaliduser":
+		return "Microsoft does not recognize this mailbox address."
+	case "request_resourcenotfound":
+		return "Microsoft could not find this account."
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "mysite not found") {
+		return "Microsoft says this account has no OneDrive."
+	}
+	return ""
+}
+
+func microsoftGraphError(err error) (code, message string) {
+	raw := err.Error()
+	start := strings.Index(raw, "{")
+	if start < 0 {
+		return "", ""
+	}
+	var parsed struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.NewDecoder(strings.NewReader(raw[start:])).Decode(&parsed) != nil {
+		return "", ""
+	}
+	return strings.TrimSpace(parsed.Error.Code), strings.TrimSpace(parsed.Error.Message)
+}
+
+func cleanGraphMessage(message string) string {
+	message = strings.Join(strings.Fields(message), " ")
+	if message == "" || strings.Contains(message, "{") || len(message) > 300 {
+		return ""
+	}
+	message = strings.TrimRight(message, ".")
+	if message == "" {
+		return ""
+	}
+	return strings.ToLower(message[:1]) + message[1:] + "."
 }
 
 // microsoftRunSucceeded clears the job's service from the resource's unavailable services, so a
