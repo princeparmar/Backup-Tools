@@ -1,0 +1,376 @@
+package outlook
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+)
+
+// ErrSharePointDeltaInvalid means the saved deltaLink can no longer be used; rebaseline required.
+var ErrSharePointDeltaInvalid = fmt.Errorf("sharepoint delta cursor invalid; rebaseline required")
+
+// SharePointSiteSummary is a site row for browse/onboarding.
+type SharePointSiteSummary struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name"`
+	WebURL      string `json:"web_url"`
+}
+
+// SharePointResolvedSite holds site_id + default document library drive_id.
+type SharePointResolvedSite struct {
+	SiteID   string
+	SiteName string
+	SiteURL  string
+	DriveID  string
+}
+
+// SharePointCronBackupMeta is JSON at {siteKey}/meta/.../{itemId}_{name}.json.
+type SharePointCronBackupMeta struct {
+	ItemID                string `json:"item_id"`
+	Name                  string `json:"name"`
+	MimeType              string `json:"mime_type,omitempty"`
+	ParentID              string `json:"parent_id,omitempty"`
+	ParentPath            string `json:"parent_path,omitempty"`
+	WebURL                string `json:"web_url,omitempty"`
+	Size                  int64  `json:"size,omitempty"`
+	CreatedDateTime       string `json:"created_date_time,omitempty"`
+	LastModifiedDateTime  string `json:"last_modified_date_time,omitempty"`
+	ETag                  string `json:"etag,omitempty"`
+	CTag                  string `json:"ctag,omitempty"`
+	SiteID                string `json:"site_id"`
+	DriveID               string `json:"drive_id"`
+	IsFolder              bool   `json:"is_folder"`
+	RemovedFromSharePoint bool   `json:"removed_from_sharepoint,omitempty"`
+	DeletedAt             string `json:"deleted_at,omitempty"`
+	DataObjectKey         string `json:"data_object_key,omitempty"`
+	UpdatedAt             string `json:"updated_at,omitempty"`
+}
+
+type graphSiteResponse struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName"`
+	WebURL      string `json:"webUrl"`
+}
+
+type graphDriveResponse struct {
+	ID string `json:"id"`
+}
+
+// DriveRootURLFromDriveID returns the Graph drive resource URL for delta/content calls.
+func DriveRootURLFromDriveID(driveID string) string {
+	driveID = strings.TrimSpace(driveID)
+	return graphBaseURL + "/drives/" + url.PathEscape(driveID)
+}
+
+// SharePointInitialDeltaURL is GET /drives/{drive_id}/root/delta for baseline.
+func SharePointInitialDeltaURL(driveID string) string {
+	return DriveRootURLFromDriveID(driveID) + "/root/delta"
+}
+
+// SanitizeSharePointSiteKey makes site_id safe for StorX object key prefixes.
+func SanitizeSharePointSiteKey(siteID string) string {
+	siteID = strings.TrimSpace(siteID)
+	replacer := strings.NewReplacer(",", "_", "/", "_", "\\", "_", ":", "_", "?", "_", "*", "_", "#", "_")
+	s := replacer.Replace(siteID)
+	if s == "" {
+		return "site"
+	}
+	return s
+}
+
+// SharePointIDBasedMetaKey is {prefix}/meta/{yyyy}/{mm}/{dd}/{itemId}_{name}.json (prefix: ResourceKeyPrefix
+// of the site or group).
+func SharePointIDBasedMetaKey(prefix, itemID, displayName, createdTime string) string {
+	return fmt.Sprintf("%s/meta/%s/%s_%s.json",
+		strings.Trim(strings.TrimSpace(prefix), "/"),
+		objectKeyDatePath(createdTime),
+		strings.TrimSpace(itemID),
+		SanitizeOneDrivePathSegment(displayName),
+	)
+}
+
+// SharePointIDBasedDataKey is {prefix}/data/{yyyy}/{mm}/{dd}/{itemId}_{name} (prefix: ResourceKeyPrefix).
+func SharePointIDBasedDataKey(prefix, itemID, displayName, createdTime string) string {
+	return fmt.Sprintf("%s/data/%s/%s_%s",
+		strings.Trim(strings.TrimSpace(prefix), "/"),
+		objectKeyDatePath(createdTime),
+		strings.TrimSpace(itemID),
+		SanitizeOneDrivePathSegment(displayName),
+	)
+}
+
+// FetchSharePointDeltaPage GETs a Graph drive delta URL (initial, nextLink, or saved deltaLink).
+func FetchSharePointDeltaPage(ctx context.Context, accessToken, requestURL string) (*OneDriveDeltaPage, error) {
+	page, err := FetchOneDriveDeltaPage(ctx, accessToken, requestURL)
+	if err == nil {
+		return page, nil
+	}
+	if err == ErrOneDriveDeltaInvalid {
+		return nil, ErrSharePointDeltaInvalid
+	}
+	return nil, err
+}
+
+// OpenSharePointItemContentStream streams file content from /drives/{drive_id}/items/{item_id}/content.
+func OpenSharePointItemContentStream(ctx context.Context, accessToken, driveID, itemID string) (io.ReadCloser, int64, error) {
+	return OpenOneDriveItemContentStream(ctx, accessToken, DriveRootURLFromDriveID(driveID), itemID)
+}
+
+// ResolveSharePointSite resolves site_id (and default drive_id) from site_id or site_url input.
+func ResolveSharePointSite(ctx context.Context, accessToken, siteID, siteURL string) (*SharePointResolvedSite, error) {
+	siteID = strings.TrimSpace(siteID)
+	siteURL = strings.TrimSpace(siteURL)
+	if siteID == "" && siteURL == "" {
+		return nil, fmt.Errorf("site_id or site_url is required")
+	}
+
+	var site graphSiteResponse
+	if siteID != "" {
+		reqURL := graphBaseURL + "/sites/" + url.PathEscape(siteID)
+		body, status, err := graphDoJSON(ctx, accessToken, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		if status < 200 || status >= 300 {
+			return nil, fmt.Errorf("sharepoint site http %d: %s", status, truncateForErr(body))
+		}
+		if err := json.Unmarshal(body, &site); err != nil {
+			return nil, err
+		}
+	} else {
+		host, path, err := parseSharePointSiteURL(siteURL)
+		if err != nil {
+			return nil, err
+		}
+		reqURL := fmt.Sprintf("%s/sites/%s:%s", graphBaseURL, url.PathEscape(host), url.PathEscape(path))
+		body, status, err := graphDoJSON(ctx, accessToken, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		if status < 200 || status >= 300 {
+			return nil, fmt.Errorf("sharepoint site by path http %d: %s", status, truncateForErr(body))
+		}
+		if err := json.Unmarshal(body, &site); err != nil {
+			return nil, err
+		}
+	}
+
+	resolvedSiteID := strings.TrimSpace(site.ID)
+	if resolvedSiteID == "" {
+		return nil, fmt.Errorf("sharepoint site id missing from graph response")
+	}
+
+	driveID, err := SiteDefaultDriveID(ctx, accessToken, resolvedSiteID)
+	if err != nil {
+		return nil, err
+	}
+
+	name := strings.TrimSpace(site.DisplayName)
+	if name == "" {
+		name = strings.TrimSpace(site.Name)
+	}
+	web := strings.TrimSpace(site.WebURL)
+	if web == "" {
+		web = siteURL
+	}
+
+	return &SharePointResolvedSite{
+		SiteID:   resolvedSiteID,
+		SiteName: name,
+		SiteURL:  web,
+		DriveID:  driveID,
+	}, nil
+}
+
+// ErrSharePointSiteNoDocumentLibrary means the site exists but has no document library to back up
+// (typically a hidden system site returned by getAllSites).
+var ErrSharePointSiteNoDocumentLibrary = errors.New("sharepoint site has no document library to back up")
+
+// EnsureSharePointLibrary returns the drive id of the site's document library named name,
+// creating the library when the site has none with that name.
+func EnsureSharePointLibrary(ctx context.Context, accessToken, siteID, name string) (string, error) {
+	name = strings.TrimSpace(name)
+	siteID = strings.TrimSpace(siteID)
+	if siteID == "" || name == "" {
+		return "", fmt.Errorf("site id and library name are required")
+	}
+	libs, err := ListSharePointSiteLibraries(ctx, accessToken, siteID)
+	if err != nil {
+		return "", err
+	}
+	for _, lib := range libs {
+		if strings.EqualFold(lib.Name, name) && lib.ID != "" {
+			return lib.ID, nil
+		}
+	}
+	body, err := json.Marshal(map[string]any{
+		"displayName": name,
+		"list":        map[string]string{"template": "documentLibrary"},
+	})
+	if err != nil {
+		return "", err
+	}
+	resp, status, err := graphDoJSONWrite(ctx, accessToken, http.MethodPost,
+		graphBaseURL+"/sites/"+url.PathEscape(siteID)+"/lists", body)
+	if err != nil {
+		return "", err
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if status < 200 || status >= 300 || json.Unmarshal(resp, &created) != nil || strings.TrimSpace(created.ID) == "" {
+		return "", fmt.Errorf("create sharepoint library http %d: %s", status, truncateForErr(resp))
+	}
+	driveURL := graphBaseURL + "/sites/" + url.PathEscape(siteID) + "/lists/" + url.PathEscape(created.ID) + "/drive?$select=id"
+	resp, status, err = graphDoJSON(ctx, accessToken, http.MethodGet, driveURL, nil)
+	if err != nil {
+		return "", err
+	}
+	var drive graphDriveResponse
+	if status < 200 || status >= 300 || json.Unmarshal(resp, &drive) != nil || strings.TrimSpace(drive.ID) == "" {
+		return "", fmt.Errorf("sharepoint library drive http %d: %s", status, truncateForErr(resp))
+	}
+	return strings.TrimSpace(drive.ID), nil
+}
+
+// SiteDefaultDriveID is the id of the site's default document library.
+func SiteDefaultDriveID(ctx context.Context, accessToken, siteID string) (string, error) {
+	reqURL := graphBaseURL + "/sites/" + url.PathEscape(siteID) + "/drive?$select=id"
+	body, status, err := graphDoJSON(ctx, accessToken, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return "", err
+	}
+	if status >= 200 && status < 300 {
+		var drive graphDriveResponse
+		if err := json.Unmarshal(body, &drive); err != nil {
+			return "", err
+		}
+		driveID := strings.TrimSpace(drive.ID)
+		if driveID != "" {
+			return driveID, nil
+		}
+	}
+	// getAllSites returns entries with no default library; try document libraries list.
+	if status == http.StatusNotFound {
+		drives, listErr := graphListAll[graphDriveResponse](
+			ctx,
+			accessToken,
+			graphBaseURL+"/sites/"+url.PathEscape(siteID)+"/drives?$select=id",
+			8,
+		)
+		if listErr == nil {
+			for _, d := range drives {
+				if id := strings.TrimSpace(d.ID); id != "" {
+					return id, nil
+				}
+			}
+			return "", ErrSharePointSiteNoDocumentLibrary
+		}
+	}
+	if status < 200 || status >= 300 {
+		return "", fmt.Errorf("sharepoint default drive http %d: %s", status, truncateForErr(body))
+	}
+	return "", fmt.Errorf("sharepoint default drive id missing")
+}
+
+// SharePointLibrary is one document library (Graph drive) of a site.
+type SharePointLibrary struct {
+	ID     string
+	Name   string
+	WebURL string
+}
+
+const sharePointDocumentLibrary = "documentLibrary"
+
+type graphSiteDrive struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	DriveType string `json:"driveType"`
+	WebURL    string `json:"webUrl"`
+}
+
+// ListSharePointSiteLibraries lists every document library of a site (app-only token). Every
+// page is read; a malformed, repeated or off-resource nextLink fails the whole listing, so a
+// returned list is complete.
+func ListSharePointSiteLibraries(ctx context.Context, accessToken, siteID string) ([]SharePointLibrary, error) {
+	rows, err := listSiteDrives(ctx, accessToken, siteID, "id,name,driveType,webUrl")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SharePointLibrary, 0, len(rows))
+	for _, r := range rows {
+		if id := strings.TrimSpace(r.ID); id != "" && r.DriveType == sharePointDocumentLibrary {
+			out = append(out, SharePointLibrary{ID: id, Name: strings.TrimSpace(r.Name), WebURL: strings.TrimSpace(r.WebURL)})
+		}
+	}
+	return out, nil
+}
+
+func listSiteDrives(ctx context.Context, accessToken, siteID, sel string) ([]graphSiteDrive, error) {
+	siteID = strings.TrimSpace(siteID)
+	if siteID == "" {
+		return nil, fmt.Errorf("site id is required")
+	}
+	raw, err := FetchTeamsAll(ctx, accessToken, graphBaseURL+"/sites/"+url.PathEscape(siteID)+"/drives?$select="+sel)
+	if err != nil {
+		return nil, fmt.Errorf("list sharepoint libraries: %w", err)
+	}
+	rows := make([]graphSiteDrive, 0, len(raw))
+	for _, item := range raw {
+		var r graphSiteDrive
+		if err := json.Unmarshal(item, &r); err != nil {
+			return nil, fmt.Errorf("list sharepoint libraries: %w: decode drive: %v", ErrTeamsPaging, err)
+		}
+		rows = append(rows, r)
+	}
+	return rows, nil
+}
+
+// SharePointSiteState reads a site (app-only token): ObjectStateActive when Graph returns it and
+// ObjectStateGone on 404. Any other answer (403, 429, 5xx, network) is an error and must not
+// change the stored state.
+func SharePointSiteState(ctx context.Context, appToken, siteID string) (string, error) {
+	siteID = strings.TrimSpace(siteID)
+	if siteID == "" {
+		return "", fmt.Errorf("site id is required")
+	}
+	body, status, err := graphDoJSON(ctx, appToken, http.MethodGet, graphBaseURL+"/sites/"+url.PathEscape(siteID)+"?$select=id", nil)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case status >= 200 && status < 300:
+		return ObjectStateActive, nil
+	case status == http.StatusNotFound:
+		return ObjectStateGone, nil
+	}
+	return "", fmt.Errorf("graph sites/%s: HTTP %d: %s", siteID, status, truncateForErr(body))
+}
+
+func parseSharePointSiteURL(raw string) (host, path string, err error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", "", fmt.Errorf("invalid site_url: %w", err)
+	}
+	host = strings.TrimSpace(u.Host)
+	path = strings.TrimSpace(u.Path)
+	if host == "" {
+		return "", "", fmt.Errorf("site_url host is required")
+	}
+	if path == "" {
+		path = "/"
+	}
+	return host, path, nil
+}
+
+// ListSharePointFlatFilesPage lists non-folder files at drive root (browse).
+func ListSharePointFlatFilesPage(ctx context.Context, accessToken, driveID string, skip, top int32) ([]OneDriveItem, error) {
+	return ListOneDriveFlatFilesPage(ctx, accessToken, DriveRootURLFromDriveID(driveID), skip, top)
+}

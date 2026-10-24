@@ -30,14 +30,16 @@ type OutlookMessageListJSON struct {
 type OutlookService struct {
 	client      *outlook.OutlookClient
 	accessGrant string
+	accessToken string
 	userEmail   string
 }
 
 // NewOutlookService creates a new OutlookService instance
-func NewOutlookService(client *outlook.OutlookClient, accessGrant, userEmail string) *OutlookService {
+func NewOutlookService(client *outlook.OutlookClient, accessGrant, accessToken, userEmail string) *OutlookService {
 	return &OutlookService{
 		client:      client,
 		accessGrant: accessGrant,
+		accessToken: accessToken,
 		userEmail:   userEmail,
 	}
 }
@@ -48,6 +50,21 @@ func (s *OutlookService) DownloadMessagesFromSatellite(ctx context.Context, keys
 
 	for _, key := range keys {
 		if key == "" {
+			continue
+		}
+
+		// Autosync mail backups restore into their original folder.
+		if outlook.IsOutlookMailBackupKey(key) {
+			userBase, _ := outlook.UserBaseURL("", "", "", false)
+			err := outlook.RestoreMailFromBackup(ctx, s.accessToken, userBase, key, func(k string) ([]byte, error) {
+				return satellite.DownloadObject(ctx, s.accessGrant, satellite.ReserveBucket_Outlook, k)
+			})
+			if err != nil {
+				logger.Error(ctx, "error restoring outlook message", logger.ErrorField(err), logger.String("key", key))
+				failedIDs.Add(key)
+			} else {
+				processedIDs.Add(key)
+			}
 			continue
 		}
 
@@ -86,17 +103,20 @@ func (s *OutlookService) DownloadMessagesFromSatellite(ctx context.Context, keys
 	}, nil
 }
 
-// getAccessTokens extracts and validates access tokens from request
+// getAccessTokens extracts StorX grant + Microsoft Graph token.
+// Authorization may be a Backup-Tools microsoft-auth JWT (from POST /microsoft-auth) or a raw Graph access token.
 func getAccessTokens(c echo.Context) (accessGrant, accessToken string, err error) {
 	accessGrant = c.Request().Header.Get("ACCESS_TOKEN")
-	accessToken = c.Request().Header.Get("Authorization")
+	authHeader := c.Request().Header.Get("Authorization")
 
-	if accessGrant == "" || accessToken == "" {
+	if accessGrant == "" || authHeader == "" {
 		return "", "", echo.NewHTTPError(http.StatusForbidden, "ACCESS_TOKEN and Authorization headers are required")
 	}
 
-	// Remove "Bearer " prefix if present
-	accessToken = strings.TrimPrefix(accessToken, "Bearer ")
+	accessToken, err = outlook.ResolveGraphAccessToken(c, authHeader)
+	if err != nil {
+		return "", "", echo.NewHTTPError(http.StatusUnauthorized, err.Error())
+	}
 	return accessGrant, accessToken, nil
 }
 
@@ -121,6 +141,10 @@ func parseMessageIDs(c echo.Context) ([]string, error) {
 		if decoded, err := base64.StdEncoding.DecodeString(ids[i]); err == nil {
 			ids[i] = string(decoded)
 		}
+	}
+
+	if len(ids) > microsoftManualRestoreMaxKeys {
+		return nil, echo.NewHTTPError(http.StatusBadRequest, "maximum 10 keys allowed")
 	}
 
 	return ids, nil
@@ -394,7 +418,7 @@ func HandleOutlookDownloadAndInsert(c echo.Context) error {
 	satellite.SendNotificationAsync(ctx, userID, "Outlook Restore Started", fmt.Sprintf("Restore of %d messages for %s has started", len(allIDs), userDetails.Mail), &priority, startData, nil)
 
 	// Create Outlook service and download messages
-	outlookService := NewOutlookService(outlookClient, accessGrant, "")
+	outlookService := NewOutlookService(outlookClient, accessGrant, accessToken, "")
 	result, err := outlookService.DownloadMessagesFromSatellite(c.Request().Context(), allIDs)
 	if err != nil {
 		// Send failure notification

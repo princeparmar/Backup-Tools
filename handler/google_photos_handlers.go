@@ -21,6 +21,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/restore"
+	googlestore "github.com/StorX2-0/Backup-Tools/restore/google"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 
 	"github.com/google/uuid"
@@ -960,7 +961,7 @@ func (s *PhotosService) RestorePhotosFromSatellite(ctx context.Context, sess *re
 			)
 			if dataKey, metaKey, idBased := parsePhotosIDBasedRestoreKeys(key); idBased {
 				var restoreErr error
-				data, filename, restoreErr = restore.DownloadPhotosIDBasedPayloadWithSession(ctx, sess, key, dataKey, metaKey)
+				data, filename, restoreErr = googlestore.DownloadPhotosIDBasedPayloadWithSession(ctx, sess, key, dataKey, metaKey)
 				if restoreErr != nil {
 					logger.Error(ctx, "failed ID-based photos restore", logger.ErrorField(restoreErr), logger.String("key", key))
 					failedIDs.Add(key)

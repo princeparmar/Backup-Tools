@@ -19,6 +19,7 @@ type TokenResponse struct {
 	ExpiresIn    int    `json:"expires_in"`
 	RefreshToken string `json:"refresh_token"`
 	Scope        string `json:"scope"`
+	IDToken      string `json:"id_token"`
 }
 
 const (
@@ -26,13 +27,53 @@ const (
 	authURL  = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
 )
 
+var tokenEndpointURL = tokenURL
+
+// defaultScopes are the minimal delegated Microsoft Graph permissions for personal backup connect / cron.
+// Organization backups (other mailboxes, Teams, Groups, SharePoint, directory) use the platform
+// app-only token with admin consent instead of delegated scopes.
+// Restore write scopes are separate — UI must OAuth with RestoreScopes then POST /microsoft-auth.
 var defaultScopes = []string{
+	"openid",
+	"profile",
+	"email",
 	"offline_access",
-	"Mail.ReadWrite",
+	"User.Read",
+	"Mail.Read",
+	"Calendars.Read",
+	"Contacts.Read",
+	"Files.Read",
+}
+
+// restoreScopes are write permissions for select-and-restore only.
+// UI builds a separate Microsoft authorize URL with these scopes, exchanges the Graph
+// access token via POST /microsoft-auth, then calls satellite-to-* with that JWT.
+var restoreScopes = []string{
+	"offline_access",
 	"openid",
 	"profile",
 	"email",
 	"User.Read",
+	"Mail.ReadWrite",
+	"Calendars.ReadWrite",
+	"Contacts.ReadWrite",
+	"Files.ReadWrite.All",
+	"ChannelMessage.Send",
+	"ChatMessage.Send",
+	// Groups restore is hidden for now; Group.ReadWrite.All is only used by it.
+	// "Group.ReadWrite.All",
+}
+
+// RestoreScopes returns Graph scopes for the restore OAuth consent screen.
+func RestoreScopes() []string {
+	out := make([]string, len(restoreScopes))
+	copy(out, restoreScopes)
+	return out
+}
+
+// RestoreScopesString returns space-separated restore scopes for authorize URL.
+func RestoreScopesString() string {
+	return strings.Join(restoreScopes, " ")
 }
 
 // BuildAuthURL builds the Microsoft OAuth authorization URL
@@ -79,66 +120,60 @@ func BuildAuthURL(ctx context.Context) (string, error) {
 	return finalURL, nil
 }
 
-func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
-
-	if refreshToken == "" {
-		return "", fmt.Errorf("refresh token is empty")
+// BuildRestoreAuthURL builds a Microsoft authorize URL with restore write scopes only.
+// UI should use this (or MicrosoftRestoreScopes on Satellite) before POST /microsoft-auth — not backup connect scopes.
+func BuildRestoreAuthURL(ctx context.Context, redirectURI string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-
-	// Prepare the form data
-	data := url.Values{}
 	clientID := utils.GetEnvWithKey("OUTLOOK_CLIENT_ID")
-	clientSecret := utils.GetEnvWithKey("OUTLOOK_CLIENT_SECRET")
-
+	if redirectURI == "" {
+		redirectURI = utils.GetEnvWithKey("OUTLOOK_REDIRECT_URI")
+	}
 	if clientID == "" {
 		return "", fmt.Errorf("OUTLOOK_CLIENT_ID environment variable is not set")
 	}
-	if clientSecret == "" {
-		return "", fmt.Errorf("OUTLOOK_CLIENT_SECRET environment variable is not set")
+	if redirectURI == "" {
+		return "", fmt.Errorf("redirect URI is required for restore OAuth")
 	}
+	params := url.Values{}
+	params.Set("client_id", clientID)
+	params.Set("response_type", "code")
+	params.Set("redirect_uri", redirectURI)
+	params.Set("response_mode", "query")
+	params.Set("scope", RestoreScopesString())
+	params.Set("prompt", "consent")
+	return authURL + "?" + params.Encode(), nil
+}
 
-	data.Set("client_id", clientID)
-	data.Set("client_secret", clientSecret)
-	data.Set("refresh_token", refreshToken)
-	data.Set("grant_type", "refresh_token")
-
-	// Create the request
-	req, err := http.NewRequestWithContext(context.Background(), "POST", tokenURL, strings.NewReader(data.Encode()))
+// AuthTokenUsingRefreshToken mints a Graph access token from a refresh token.
+func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
+	tok, err := AuthTokenResponseUsingRefreshToken(refreshToken)
 	if err != nil {
-		return "", fmt.Errorf("error creating request: %v", err)
+		return "", err
 	}
+	return tok.AccessToken, nil
+}
 
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+// AuthTokenResponseUsingRefreshToken refreshes tokens and returns the full Microsoft token
+// response. Personal Microsoft accounts often return opaque (non-JWT) access tokens; granted
+// scopes are then only available on TokenResponse.Scope — not in a JWT `scp` claim.
+func AuthTokenResponseUsingRefreshToken(refreshToken string) (*TokenResponse, error) {
+	return refreshTokenResponse(refreshToken, "")
+}
 
-	// Send the request
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("error sending request: %v", err)
-	}
-	defer resp.Body.Close()
+// accountDetectionScopes is a subset of the sign-in grant. Requesting openid makes Microsoft
+// return an id_token, whose `wids` claim carries the user's Entra directory roles.
+var accountDetectionScopes = "openid profile email offline_access User.Read"
 
-	// Read the response
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("error reading response: %v", err)
-	}
+// AuthTokenResponseForAccountDetection refreshes with scopes that return an id_token alongside a
+// User.Read access token, for account classification and admin-role detection.
+func AuthTokenResponseForAccountDetection(refreshToken string) (*TokenResponse, error) {
+	return refreshTokenResponse(refreshToken, accountDetectionScopes)
+}
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("error response from server: %s", string(body))
-	}
-
-	// Parse the response
-	var tokenResponse TokenResponse
-	if err := json.Unmarshal(body, &tokenResponse); err != nil {
-		return "", fmt.Errorf("error parsing response: %v", err)
-	}
-
-	if tokenResponse.AccessToken == "" {
-		return "", fmt.Errorf("received empty access token")
-	}
-
-	return tokenResponse.AccessToken, nil
+func refreshTokenResponse(refreshToken, scope string) (*TokenResponse, error) {
+	return refreshTokenAt(tokenEndpointURL, refreshToken, scope)
 }
 
 func AuthTokenUsingCode(code string) (*TokenResponse, error) {

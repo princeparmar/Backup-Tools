@@ -149,12 +149,17 @@ type PolicyAvailableServiceView struct {
 }
 
 var policyServiceLabels = map[string]string{
-	"gmail":           "Gmail",
-	"google_drive":    "Drive",
-	"google_calendar": "Calendar",
-	"google_contacts": "Contacts",
-	"google_photos":   "Photos",
-	"outlook":         "Outlook",
+	"gmail":              "Gmail",
+	"google_drive":       "Drive",
+	"google_calendar":    "Calendar",
+	"google_contacts":    "Contacts",
+	"google_photos":      "Photos",
+	"outlook":            "Outlook",
+	"outlook_calendar":   "Outlook Calendar",
+	"outlook_contacts":   "Outlook Contacts",
+	"outlook_onedrive":   "OneDrive",
+	"outlook_sharepoint": "SharePoint",
+	"outlook_teams":      "Teams",
 }
 
 func normalizeEmail(email string) string {
@@ -1182,6 +1187,7 @@ func HandleAutosyncPolicyAvailableAssignments(c echo.Context) error {
 	if err != nil {
 		return p.serverError("Failed to load jobs", err)
 	}
+	allJobs = repo.FilterJobsByMethods(allJobs, repo.IsSharedCredentialAutosyncMethod)
 
 	selectedEmail := strings.TrimSpace(p.echo.QueryParam("email"))
 	if selectedEmail != "" {
@@ -1203,6 +1209,23 @@ func HandleAutosyncPolicyAvailableAssignments(c echo.Context) error {
 type onboardingPolicyBatch struct {
 	allID uint
 	byOU  map[string]uint
+}
+
+// policyIDs returns every policy used by the batch.
+func (b *onboardingPolicyBatch) policyIDs() []uint {
+	if b == nil {
+		return nil
+	}
+	var out []uint
+	if b.allID > 0 {
+		out = append(out, b.allID)
+	}
+	for _, id := range b.byOU {
+		if id > 0 {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // resolveOnboardingPolicyID resolves or creates the policy for onboarding job assignment.

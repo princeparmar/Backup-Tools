@@ -315,7 +315,7 @@ func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 	req.Header.Set("Content-Type", "application/json")
 
 	// Send the request
-	client := &http.Client{}
+	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("error making HTTP request: %v", err)

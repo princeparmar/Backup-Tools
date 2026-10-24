@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	googlepack "github.com/StorX2-0/Backup-Tools/apps/google"
+	outlookpack "github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/handler"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
@@ -53,6 +54,8 @@ func StartServer(db *db.PostgresDb, address string) {
 	e.POST("/satellite-auth", satellite.HandleSatelliteAuthentication)
 	e.POST("/google-auth", googlepack.Autentificate)
 	e.GET("/google-auth", googlepack.Autentificateg)
+	// Microsoft restore auth for all Graph services (mirrors /google-auth): restore scopes → exchange Graph token → JWT for satellite-to-*.
+	e.POST("/microsoft-auth", outlookpack.Authenticate)
 
 	// Satellite → Backup-Tools account deletion lifecycle (X-API-Key = BACKUP_TOOLS_API_KEY).
 	internalAccount := e.Group("/internal/account")
@@ -80,12 +83,13 @@ func StartServer(db *db.PostgresDb, address string) {
 	usersGroups.GET("/mailbox/schedule", handler.HandleAutosyncUsersGroupsMailboxSchedule)
 	usersGroups.GET("/mailbox/credentials", handler.HandleAutosyncUsersGroupsMailboxCredentials)
 
-	autoSync := e.Group("/auto-sync")
+	autoSync := e.Group("/auto-sync") // Shared Google + Microsoft: list, live, job CRUD, policy, backup-now, tasks
 	autoSync.GET("/live", handler.HandleAutomaticSyncActiveJobsForUser)
 	autoSync.PUT("/task/hide", handler.HandleHideTask)
 
 	job := autoSync.Group("/job")
 	job.GET("/services", handler.HandleAutomaticSyncServicesForUser)
+	job.POST("/services-quota-check", handler.HandleAutomaticSyncServicesQuotaPrecheck)
 	job.GET("/", handler.HandleAutomaticSyncListForUser)
 	job.POST("", handler.HandleAutomaticSyncCreate)
 	job.GET("/interval", handler.HandleIntervalOnConfig)
@@ -109,6 +113,7 @@ func StartServer(db *db.PostgresDb, address string) {
 
 	task := autoSync.Group("/task")
 	task.POST("/:job_id/backup-now", handler.HandleAutomaticSyncBackupNow)
+	task.POST("/:job_id/quota-check", handler.HandleAutomaticSyncQuotaCheck)
 	task.POST("/:job_id", handler.HandleAutomaticSyncCreateTask)
 	task.GET("/:job_id", handler.HandleAutomaticSyncTaskList)
 
@@ -125,6 +130,48 @@ func StartServer(db *db.PostgresDb, address string) {
 	restoreGroup.GET("/job/:job_id", handler.HandleGetRestoreJob)
 	restoreGroup.POST("/job/:job_id/cancel", handler.HandleCancelRestoreJob)
 	restoreGroup.GET("/job/:job_id/dead-items", handler.HandleListRestoreDeadItems)
+
+	// Microsoft product surface (outlook / outlook_*). Job list/live/update/policy/backup-now use shared /auto-sync/* above.
+	microsoft := e.Group("/microsoft")
+	microsoft.GET("/outlook/corporate/domain-users", handler.HandleMicrosoftCorporateDomainUsers)
+	microsoft.GET("/account/detect", handler.HandleMicrosoftAccountDetect)
+	microsoft.GET("/directory/users", handler.HandleMicrosoftDirectoryUsers)
+	microsoft.GET("/workspace", handler.HandleMicrosoftWorkspace)
+
+	msAccountTenants := microsoft.Group("/accounts/tenants")
+	msAccountTenants.GET("", handler.HandleMicrosoftAccountTenants)
+	msAccountTenants.POST("/:tid/connect", handler.HandleMicrosoftConnectAccountTenant)
+	msAccountTenants.POST("/:tid/disconnect", handler.HandleMicrosoftDisconnectAccountTenant)
+	msAccountTenants.POST("/:tid/roles/refresh", handler.HandleMicrosoftRefreshAccountTenantRoles)
+
+	msTenants := microsoft.Group("/tenants/:tid")
+	msTenants.POST("/consent", handler.HandleMicrosoftTenantConsent)
+	msTenants.POST("/capabilities/refresh", handler.HandleMicrosoftTenantCapabilitiesRefresh)
+	msTenants.GET("/directory/users", handler.HandleMicrosoftTenantDirectoryUsers)
+
+	msUsersGroups := microsoft.Group("/users-groups")
+	msUsersGroups.GET("/domains", handler.HandleMicrosoftAutosyncUsersGroupsDomains)
+	msUsersGroups.PUT("/jobs/active", handler.HandleMicrosoftUsersGroupsJobsActive)
+	msUsersGroups.GET("", handler.HandleMicrosoftAutosyncUsersGroupsList)
+	msUsersGroups.GET("/mailbox/overview", handler.HandleMicrosoftAutosyncUsersGroupsMailboxOverview)
+	msUsersGroups.GET("/mailbox/services", handler.HandleMicrosoftAutosyncUsersGroupsMailboxServices)
+	msUsersGroups.GET("/mailbox/schedule", handler.HandleMicrosoftAutosyncUsersGroupsMailboxSchedule)
+	msUsersGroups.GET("/mailbox/credentials", handler.HandleMicrosoftAutosyncUsersGroupsMailboxCredentials)
+
+	msAutoSync := microsoft.Group("/auto-sync")
+	msAutoSync.POST("/job", handler.HandleMicrosoftAutomaticSyncCreate)
+
+	microsoft.GET("/query-messages", handler.HandleMicrosoftQueryMessages)
+	microsoft.GET("/contacts/list", handler.HandleMicrosoftListContacts)
+	microsoft.GET("/calendar/list", handler.HandleMicrosoftListCalendars)
+	microsoft.GET("/calendar/events/:calendarId", handler.HandleMicrosoftListCalendarEvents)
+	microsoft.GET("/onedrive/flat-files", handler.HandleMicrosoftOneDriveFlatFiles)
+	microsoft.GET("/outlook/flat-files", handler.HandleMicrosoftOutlookFlatFiles)
+	microsoft.GET("/sharepoint/sites", handler.HandleMicrosoftSharePointSites)
+	microsoft.GET("/sharepoint/flat-files", handler.HandleMicrosoftSharePointFlatFiles)
+	microsoft.GET("/teams/list", handler.HandleMicrosoftTeamsList)
+	microsoft.GET("/teams/channels", handler.HandleMicrosoftTeamChannels)
+	microsoft.GET("/teams/flat-messages", handler.HandleMicrosoftTeamsFlatMessages)
 
 	google := e.Group("/google")
 
@@ -237,6 +284,13 @@ func StartServer(db *db.PostgresDb, address string) {
 	office365.GET("/get-outlook-messages/:id", handler.HandleOutlookGetMessageById)
 	office365.POST("/outlook-messages-to-satellite", handler.HandleListOutlookMessagesToSatellite)
 	office365.POST("/satellite-to-outlook", handler.HandleOutlookDownloadAndInsert)
+	// Manual select-and-restore (≤10 vault keys), same pattern as /google/satellite-to-*.
+	office365.POST("/satellite-to-outlook-calendar", handler.HandleOutlookCalendarDownloadAndInsert)
+	office365.POST("/satellite-to-outlook-contacts", handler.HandleOutlookContactsDownloadAndInsert)
+	office365.POST("/satellite-to-onedrive", handler.HandleOneDriveDownloadAndInsert)
+	office365.POST("/satellite-to-sharepoint", handler.HandleSharePointDownloadAndInsert)
+	office365.POST("/satellite-to-teams", handler.HandleTeamsDownloadAndInsert)
+	office365.POST("/satellite-to-teams-chats", handler.HandleTeamsChatsDownloadAndInsert)
 	// AWS S3
 	aws := e.Group("/aws")
 	aws.GET("/list-files-in-bucket/:bucketName", handler.HandleListAWSs3BucketFiles)

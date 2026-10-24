@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/restore"
+	_ "github.com/StorX2-0/Backup-Tools/restore/register"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/labstack/echo/v4"
 )
@@ -41,13 +43,26 @@ type restoreAllRequest struct {
 	ProjectID   string `json:"project_id"`
 	LoginID     string `json:"login_id"`
 	TargetEmail string `json:"target_email,omitempty"`
+	// TenantID selects the Microsoft tenant when MICROSOFT_TENANT_ID is not sent.
+	TenantID string `json:"tenant_id,omitempty"`
 }
 
-// RestoreCredentialItem is one personal Google account for the restore list (no workspace tab).
+// restoreTenantID is the Microsoft tenant a restore runs in: MICROSOFT_TENANT_ID, else tenant_id.
+func restoreTenantID(c echo.Context, fallback string) string {
+	if tid := strings.TrimSpace(c.Request().Header.Get("MICROSOFT_TENANT_ID")); tid != "" {
+		return tid
+	}
+	return strings.TrimSpace(fallback)
+}
+
+// RestoreCredentialItem is one personal account for the restore list (no workspace tab).
 type RestoreCredentialItem struct {
-	Email                string `json:"email"`
-	HasBackup            bool   `json:"has_backup"`
-	NeedsGoogleReconnect bool   `json:"needs_google_reconnect"`
+	Email     string `json:"email"`
+	HasBackup bool   `json:"has_backup"`
+	// NeedsReconnect is true when OAuth refresh token is missing (Google or Microsoft).
+	NeedsReconnect bool `json:"needs_reconnect"`
+	// NeedsGoogleReconnect is a legacy alias of NeedsReconnect (kept for older Google clients).
+	NeedsGoogleReconnect bool `json:"needs_google_reconnect"`
 }
 
 // RestoreListPagination is shared pagination metadata for restore account lists.
@@ -78,10 +93,14 @@ func HandleRestoreWorkspaces(c echo.Context) error {
 		return err
 	}
 
+	microsoftOnly := strings.EqualFold(strings.TrimSpace(c.QueryParam("provider")), "microsoft")
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	domain := strings.TrimSpace(c.QueryParam("domain"))
+	if microsoftOnly {
+		return handleMicrosoftRestoreWorkspaces(c, database, userID, domain)
+	}
 	if domain == "" {
-		domains, listErr := listRestoreAdminWorkspaceDomains(database, userID)
+		domains, listErr := listRestoreAdminWorkspaceDomains(database, userID, false)
 		if listErr != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": listErr.Error()})
 		}
@@ -95,7 +114,7 @@ func HandleRestoreWorkspaces(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
 	}
 
-	adminCred, err := findRestoreAdminWorkspaceCred(database, userID, domain)
+	adminCred, err := findRestoreAdminWorkspaceCred(database, userID, domain, false)
 	if err != nil {
 		return c.JSON(http.StatusNotFound, map[string]interface{}{"error": "workspace not found"})
 	}
@@ -149,8 +168,31 @@ func HandleRestoreWorkspaces(c echo.Context) error {
 	})
 }
 
-// HandleRestoreCredentials lists personal Google credentials for the restore list.
-// Auth via token_key → user_id; credentials are loaded from DB by user (no project_id).
+func respondRestoreWorkspaceMailboxes(c echo.Context, emails []string, limit, offset int, search string) error {
+	loginID := strings.TrimSpace(c.QueryParam("login_id"))
+	loginExclude := strings.ToLower(loginID)
+	mailboxes := make([]string, 0, len(emails))
+	for _, email := range emails {
+		email = strings.TrimSpace(email)
+		if email == "" {
+			continue
+		}
+		if loginExclude != "" && strings.ToLower(email) == loginExclude {
+			continue
+		}
+		mailboxes = append(mailboxes, email)
+	}
+	mailboxes = filterRestoreEmailsBySearch(mailboxes, search)
+	mailboxes, pagination := paginateRestoreSlice(mailboxes, limit, offset)
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"mailboxes":  mailboxes,
+		"pagination": pagination,
+	})
+}
+
+// HandleRestoreCredentials lists the user's own sign-ins as restore destinations (Personal tab):
+// Google personal accounts, or Microsoft sign-ins connected with delegated access (personal and
+// work accounts alike). Auth via token_key → user_id; credentials are loaded by user.
 func HandleRestoreCredentials(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
@@ -162,6 +204,10 @@ func HandleRestoreCredentials(c echo.Context) error {
 	}
 
 	loginID := strings.TrimSpace(c.QueryParam("login_id"))
+	provider := strings.TrimSpace(strings.ToLower(c.QueryParam("provider")))
+	if provider == "" {
+		provider = "google"
+	}
 
 	limit, offset, search, err := parseRestoreListParams(c)
 	if err != nil {
@@ -183,19 +229,32 @@ func HandleRestoreCredentials(c echo.Context) error {
 	for i := range rows {
 		row := &rows[i]
 		email := strings.TrimSpace(row.Email)
-		if restoreAccountKind(strings.TrimSpace(row.AccountType)) != "personal" {
+		if provider == "microsoft" {
+			usable, linkErr := microsoftRestoreCredentialUsable(database, row)
+			if linkErr != nil {
+				return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": linkErr.Error()})
+			}
+			if !usable {
+				continue
+			}
+		} else if row.IsMicrosoft() || restoreAccountKind(strings.TrimSpace(row.AccountType)) != "personal" {
+			// Google personal credentials only (workspace accounts use /restore/workspaces).
 			continue
 		}
 		jobs, jobsErr := database.CronJobRepo.ListJobsByCredentialID(userID, row.ID)
 		if jobsErr != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": jobsErr.Error()})
 		}
-		needsGoogle, _ := credentialReconnectFlagsFromJobs(database.CronJobRepo, row, jobs)
+		if provider != "microsoft" && !restoreCredentialMatchesProvider(provider, jobs) {
+			continue
+		}
+		needsReconnect, _ := credentialReconnectFlagsFromJobs(database.CronJobRepo, row, jobs)
 		_, hasBackup := backupSet[strings.ToLower(email)]
 		credentials = append(credentials, RestoreCredentialItem{
 			Email:                email,
 			HasBackup:            hasBackup,
-			NeedsGoogleReconnect: needsGoogle,
+			NeedsReconnect:       needsReconnect,
+			NeedsGoogleReconnect: needsReconnect,
 		})
 	}
 
@@ -206,6 +265,39 @@ func HandleRestoreCredentials(c echo.Context) error {
 		"credentials": credentials,
 		"pagination":  pagination,
 	})
+}
+
+func credentialHasMicrosoftBackupJobs(jobs []repo.CronJobListingDB) bool {
+	for i := range jobs {
+		if repo.IsMicrosoftAutosyncMethod(jobs[i].Method) {
+			return true
+		}
+	}
+	return false
+}
+
+func credentialHasGoogleBackupJobs(jobs []repo.CronJobListingDB) bool {
+	for i := range jobs {
+		if repo.IsGoogleAutosyncMethod(jobs[i].Method) {
+			return true
+		}
+	}
+	return false
+}
+
+// restoreCredentialMatchesProvider splits Google vs Microsoft the same way users/groups does:
+// by backup job methods — not tenant_id / microsoft_auth_mode fields.
+func restoreCredentialMatchesProvider(provider string, jobs []repo.CronJobListingDB) bool {
+	hasMS := credentialHasMicrosoftBackupJobs(jobs)
+	hasGoogle := credentialHasGoogleBackupJobs(jobs)
+	if strings.EqualFold(strings.TrimSpace(provider), "microsoft") {
+		return hasMS
+	}
+	// Google (default): keep Google personal/workspace accounts; exclude Microsoft-only.
+	if hasMS && !hasGoogle {
+		return false
+	}
+	return true
 }
 
 func restoreAccountKind(accountType string) string {
@@ -232,16 +324,28 @@ func restoreBackupEmailSet(database *db.PostgresDb, userID string) (map[string]s
 	return set, nil
 }
 
-func listRestoreAdminWorkspaceDomains(database *db.PostgresDb, userID string) ([]string, error) {
+func listRestoreAdminWorkspaceDomains(database *db.PostgresDb, userID string, microsoftOnly bool) ([]string, error) {
 	rows, err := database.CredentialRepo.ListByUserID(userID, "")
 	if err != nil {
 		return nil, err
+	}
+	provider := "google"
+	if microsoftOnly {
+		provider = "microsoft"
 	}
 	seen := make(map[string]struct{})
 	domains := make([]string, 0)
 	for i := range rows {
 		row := &rows[i]
+		// Same as Google: admin_workspace domains only.
 		if google.NormalizeAccountType(row.AccountType) != google.AccountTypeAdminWorkspace {
+			continue
+		}
+		jobs, jobsErr := database.CronJobRepo.ListJobsByCredentialID(userID, row.ID)
+		if jobsErr != nil {
+			return nil, jobsErr
+		}
+		if !restoreCredentialMatchesProvider(provider, jobs) {
 			continue
 		}
 		domain := strings.ToLower(strings.TrimSpace(restore.EmailDomain(strings.TrimSpace(row.Email))))
@@ -257,14 +361,25 @@ func listRestoreAdminWorkspaceDomains(database *db.PostgresDb, userID string) ([
 	return domains, nil
 }
 
-func pickRestoreAdminWorkspaceCred(rows []repo.GoogleBackupCredentialDB, domain string) (*repo.GoogleBackupCredentialDB, error) {
+func pickRestoreAdminWorkspaceCred(database *db.PostgresDb, userID string, rows []repo.GoogleBackupCredentialDB, domain string, microsoftOnly bool) (*repo.GoogleBackupCredentialDB, error) {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	if domain == "" || restore.IsConsumerMailboxDomain(domain) {
 		return nil, fmt.Errorf("invalid workspace domain")
 	}
+	provider := "google"
+	if microsoftOnly {
+		provider = "microsoft"
+	}
 	for i := range rows {
 		row := &rows[i]
 		if google.NormalizeAccountType(row.AccountType) != google.AccountTypeAdminWorkspace {
+			continue
+		}
+		jobs, jobsErr := database.CronJobRepo.ListJobsByCredentialID(userID, row.ID)
+		if jobsErr != nil {
+			return nil, jobsErr
+		}
+		if !restoreCredentialMatchesProvider(provider, jobs) {
 			continue
 		}
 		adminDomain := strings.ToLower(strings.TrimSpace(restore.EmailDomain(strings.TrimSpace(row.Email))))
@@ -275,12 +390,12 @@ func pickRestoreAdminWorkspaceCred(rows []repo.GoogleBackupCredentialDB, domain 
 	return nil, fmt.Errorf("workspace not found")
 }
 
-func findRestoreAdminWorkspaceCred(database *db.PostgresDb, userID, domain string) (*repo.GoogleBackupCredentialDB, error) {
+func findRestoreAdminWorkspaceCred(database *db.PostgresDb, userID, domain string, microsoftOnly bool) (*repo.GoogleBackupCredentialDB, error) {
 	rows, err := database.CredentialRepo.ListByUserID(userID, "")
 	if err != nil {
 		return nil, err
 	}
-	return pickRestoreAdminWorkspaceCred(rows, domain)
+	return pickRestoreAdminWorkspaceCred(database, userID, rows, domain, microsoftOnly)
 }
 
 func parseRestoreListParams(c echo.Context) (limit, offset int, search string, err error) {
@@ -380,7 +495,7 @@ func HandleRestorePrepare(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	userID, err := satelliteUserIDFromRequest(c)
+	userID, err := restoreJobUserID(c)
 	if err != nil {
 		return err
 	}
@@ -399,7 +514,7 @@ func HandleRestorePrepare(c echo.Context) error {
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	result, err := restore.EvaluateReadinessWithOptions(ctx, database, restore.ReadinessRequest{
 		UserID: userID, ProjectID: projectID, LoginID: loginID, Service: service,
-		TargetEmail: targetEmail,
+		TargetEmail: targetEmail, TenantID: restoreTenantID(c, c.QueryParam("tenant_id")),
 	})
 	if err != nil {
 		logger.Warn(ctx, "Restore prepare check failed",
@@ -430,7 +545,7 @@ func HandleRestoreAll(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	userID, err := satelliteUserIDFromRequest(c)
+	userID, err := restoreJobUserID(c)
 	if err != nil {
 		return err
 	}
@@ -454,7 +569,7 @@ func HandleRestoreAll(c echo.Context) error {
 
 	prep, err := restore.EvaluateReadinessWithOptions(ctx, database, restore.ReadinessRequest{
 		UserID: userID, ProjectID: req.ProjectID, LoginID: req.LoginID, Service: req.Service,
-		TargetEmail: req.TargetEmail,
+		TargetEmail: req.TargetEmail, TenantID: restoreTenantID(c, req.TenantID),
 	})
 	if err != nil {
 		logger.Warn(ctx, "Restore all readiness check failed",
@@ -492,12 +607,27 @@ func HandleRestoreAll(c echo.Context) error {
 			logger.ErrorField(err))
 		return c.JSON(http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
 	}
+	sessionID, sessionErr := satelliteUserIDFromRequest(c)
+	if sessionErr == nil && sessionID != "" && sessionID != userID {
+		job.RestoreTag = "invite_restored"
+		_ = database.RestoreJobRepo.UpdateJob(job.ID, map[string]interface{}{"restore_tag": job.RestoreTag})
+	}
 
 	logger.Info(ctx, "Restore job queued",
 		logger.Int("job_id", int(job.ID)),
 		logger.String("service", req.Service),
 		logger.String("login_id", req.LoginID),
 		logger.String("method", job.Method))
+
+	// Kick the worker immediately so restore does not wait for the next cron tick.
+	go func() {
+		bg := context.Background()
+		if err := restore.ProcessRestoreJobs(bg, database); err != nil {
+			logger.Warn(bg, "Immediate restore worker run failed",
+				logger.Int("job_id", int(job.ID)),
+				logger.ErrorField(err))
+		}
+	}()
 
 	return c.JSON(http.StatusAccepted, map[string]interface{}{
 		"job_id":        job.ID,
@@ -515,7 +645,7 @@ func HandleGetRestoreJob(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	userID, err := satelliteUserIDFromRequest(c)
+	userID, err := restoreJobUserID(c)
 	if err != nil {
 		return err
 	}
@@ -548,6 +678,7 @@ type RestoreJobListResponse struct {
 	MessageStatus string                 `json:"message_status"`
 	AccountType   string                 `json:"account_type"`
 	AuthMode      string                 `json:"auth_mode"`
+	RestoreTag    string                 `json:"restore_tag,omitempty"`
 	InputData     map[string]interface{} `json:"input_data"`
 	CreatedAt     time.Time              `json:"created_at"`
 	UpdatedAt     time.Time              `json:"updated_at"`
@@ -580,7 +711,7 @@ func HandleListRestoreJobs(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	userID, err := satelliteUserIDFromRequest(c)
+	userID, err := restoreJobUserID(c)
 	if err != nil {
 		return err
 	}
@@ -617,7 +748,7 @@ func HandleRestoreLive(c echo.Context) error {
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	userID, err := satelliteUserIDFromRequest(c)
+	userID, err := restoreJobUserID(c)
 	if err != nil {
 		return c.JSON(http.StatusUnauthorized, map[string]interface{}{
 			"message": "not able to authenticate user",
@@ -669,6 +800,7 @@ func toRestoreJobListResponse(store *db.PostgresDb, job *repo.RestoreJobListingD
 		MessageStatus: repo.EffectiveRestoreMessageStatus(job),
 		AccountType:   job.AccountType,
 		AuthMode:      restore.AuthModeForJob(store, job),
+		RestoreTag:    job.RestoreTag,
 		InputData:     restoreJobInputData(job),
 		CreatedAt:     job.CreatedAt,
 		UpdatedAt:     job.UpdatedAt,
