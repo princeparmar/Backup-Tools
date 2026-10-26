@@ -58,8 +58,10 @@ const (
 	ReadinessReasonTokenRefreshFailed = "token_refresh_failed"
 	ReadinessReasonMissingPermissions = "missing_permissions"
 	ReadinessReasonDWDNotConfigured   = "dwd_not_configured"
-	ReadinessReasonAPIProbeFailed     = "api_probe_failed"
-	ReadinessReasonStorxMissing       = "storx_missing"
+	// ReadinessReasonInviteOAuthRequired: an invited member must sign in as the mailbox.
+	ReadinessReasonInviteOAuthRequired = "invite_oauth_required"
+	ReadinessReasonAPIProbeFailed      = "api_probe_failed"
+	ReadinessReasonStorxMissing        = "storx_missing"
 	// ReadinessReasonTenantRequired: the account has Microsoft backups in several tenants.
 	ReadinessReasonTenantRequired = "tenant_required"
 	// ReadinessReasonTenantMismatch: the restore would cross Microsoft tenants.
@@ -79,6 +81,11 @@ type ReadinessRequest struct {
 	TargetEmail string // migration write mailbox (unique per user+project in creds table)
 	// TenantID is the selected Microsoft tenant (MICROSOFT_TENANT_ID); ignored for Google.
 	TenantID string
+	// InviteRestore is set when an invited member starts restore-all on the owner's backup.
+	// That path uses the member's Google sign-in. It does not use domain-wide delegation.
+	InviteRestore bool
+	// InviteAccessToken is the Google access token from that sign-in. Empty on prepare.
+	InviteAccessToken string
 }
 
 // EvaluateReadiness runs prepare checks for in-place restore-all.
@@ -235,12 +242,63 @@ func EvaluateReadinessWithOptions(ctx context.Context, store *db.PostgresDb, req
 	}
 
 	out.CredentialID = sourceCred.ID
+	if req.InviteRestore {
+		out.AuthMode = RestoreAuthModeOAuth
+		probeEmail := loginID
+		if isMigrationRestore(loginID, targetEmail) {
+			probeEmail = targetEmail
+		}
+		return evaluateInviteOAuthReadiness(ctx, out, service, probeEmail, req.InviteAccessToken)
+	}
 	switch authMode {
 	case RestoreAuthModeDWD:
 		return evaluateDWDReadiness(ctx, out, service, loginID)
 	default:
 		return evaluateOAuthReadiness(ctx, store, out, service, cronJob, sourceCred)
 	}
+}
+
+// evaluateInviteOAuthReadiness checks the Google account the invited member just signed into.
+// It never asks for domain-wide delegation.
+func evaluateInviteOAuthReadiness(ctx context.Context, out *ReadinessResult, service, probeEmail, accessToken string) (*ReadinessResult, error) {
+	accessToken = strings.TrimSpace(accessToken)
+	if accessToken == "" {
+		out.Ready = false
+		out.Reason = ReadinessReasonInviteOAuthRequired
+		out.Message = restoreReadinessInviteOAuthRequired
+		out.ReconnectHint = "Sign in with Google as the mailbox being restored."
+		return out, nil
+	}
+
+	details, err := google.GetGoogleAccountDetailsFromAccessToken(accessToken)
+	if err != nil {
+		out.Ready = false
+		out.Reason = ReadinessReasonTokenRefreshFailed
+		out.Message = "Google sign-in could not be verified. Sign in with Google again, then retry restore."
+		return out, nil
+	}
+
+	required := google.RestoreOAuthScopesForService(service)
+	missing := google.TokenInfoMissingScopes(details.Scope, required)
+	if len(missing) > 0 {
+		out.Ready = false
+		out.Reason = ReadinessReasonMissingPermissions
+		out.GrantedScopes = strings.Fields(details.Scope)
+		out.MissingPermissions = oauthMissingList(service, missing)
+		out.Message = "Google sign-in is missing permission to restore this service. Sign in again and allow the requested access."
+		out.ReconnectHint = "Sign in with Google as the mailbox being restored."
+		return out, nil
+	}
+	out.GrantedScopes = strings.Fields(details.Scope)
+
+	if err := probeOAuthRestore(ctx, service, accessToken, probeEmail); err != nil {
+		out.Ready = false
+		out.Reason = ReadinessReasonAPIProbeFailed
+		out.Message = err.Error()
+		return out, nil
+	}
+	out.Ready = true
+	return out, nil
 }
 
 func isMigrationRestore(loginID, targetEmail string) bool {

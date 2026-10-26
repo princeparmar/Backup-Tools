@@ -944,6 +944,16 @@ func restoreJobUserID(c echo.Context) (string, error) {
 	return asUser, nil
 }
 
+// invitedRestoreRequest is true when Satellite asked Backup-Tools to use the project owner's
+// backup on behalf of a signed-in member. That restore uses the member's Google sign-in.
+func invitedRestoreRequest(c echo.Context, jobUserID string) bool {
+	sessionID, err := satelliteUserIDFromRequest(c)
+	if err != nil || strings.TrimSpace(sessionID) == "" || strings.TrimSpace(jobUserID) == "" {
+		return false
+	}
+	return sessionID != jobUserID
+}
+
 func syncTypeFromQuery(c echo.Context) (string, error) {
 	syncType := strings.TrimSpace(c.QueryParam("sync_type"))
 	if syncType == "" {

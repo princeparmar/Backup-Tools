@@ -366,16 +366,25 @@ func AuthTokenUsingRefreshToken(refreshToken string) (string, error) {
 	return tokenResponse.AccessToken, nil
 }
 
-func GetGoogleAccountDetailsFromContext(c echo.Context) (*GoogleAuthResponse, error) {
+// AccessTokenFromAuthHeader returns the Google access token stored for the google-auth JWT.
+// The JWT itself only carries a lookup key, not the access token.
+func AccessTokenFromAuthHeader(c echo.Context) (string, error) {
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
-
 	googleToken, err := GetGoogleTokenFromJWT(c)
 	if err != nil {
-		return nil, fmt.Errorf("unable to retrieve google-auth token from JWT: %v", err)
+		return "", fmt.Errorf("unable to retrieve google-auth token from JWT: %v", err)
 	}
-	token, err := database.AuthRepo.ReadGoogleAuthToken(googleToken)
+	token, err := database.AuthRepo.ReadGoogleAuthToken(strings.TrimSpace(googleToken))
 	if err != nil {
-		return nil, fmt.Errorf("unable to retrieve google-auth token from database: %v", err)
+		return "", fmt.Errorf("unable to retrieve google-auth token from database: %v", err)
+	}
+	return strings.TrimSpace(token), nil
+}
+
+func GetGoogleAccountDetailsFromContext(c echo.Context) (*GoogleAuthResponse, error) {
+	token, err := AccessTokenFromAuthHeader(c)
+	if err != nil {
+		return nil, err
 	}
 	// Get User Email
 	userDetails, err := GetGoogleAccountDetailsFromAccessToken(token)

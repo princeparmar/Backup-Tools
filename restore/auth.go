@@ -205,6 +205,17 @@ func buildRestoreDeps(ctx context.Context, store *db.PostgresDb, job *repo.Resto
 		deps.AccessGrant = strings.TrimSpace(grant)
 	}
 
+	if job.RestoreTag == "invite_restored" {
+		deps.AuthMode = RestoreAuthModeOAuth
+		token := strings.TrimSpace(PeekInviteAccessToken(job.ID))
+		if token == "" {
+			return nil, fmt.Errorf("invited restore needs a fresh Google sign-in for this mailbox")
+		}
+		deps.GoogleToken = token
+		// Do not fall back to the project admin refresh token. That token cannot write as this mailbox.
+		deps.RefreshToken = ""
+	}
+
 	if deps.AuthMode == "" {
 		deps.AuthMode = AuthModeForJob(store, job)
 	}

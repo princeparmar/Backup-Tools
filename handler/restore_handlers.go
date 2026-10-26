@@ -16,19 +16,19 @@ import (
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/restore"
 	_ "github.com/StorX2-0/Backup-Tools/restore/register"
-	"github.com/StorX2-0/Backup-Tools/satellite"
 	"github.com/labstack/echo/v4"
 )
 
 // resolveManualRestoreStorx loads storx grant from DB for manual item restore (one Satellite refresh on first uplink error).
+// An invited member's request carries X-Restore-As-User, so the backup job is the project owner's.
 func resolveManualRestoreStorx(c echo.Context, method, loginID string) (*restore.StorxGrantSession, error) {
 	loginID = strings.TrimSpace(loginID)
 	if loginID == "" {
 		return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"error": "login_id required"})
 	}
-	userID, err := satellite.GetUserdetails(c)
+	userID, err := restoreJobUserID(c)
 	if err != nil {
-		return nil, echo.NewHTTPError(http.StatusUnauthorized, map[string]interface{}{"error": "authentication failed"})
+		return nil, err
 	}
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
 	sess, err := restore.NewStorxGrantSession(c.Request().Context(), database, userID, method, loginID)
@@ -36,6 +36,11 @@ func resolveManualRestoreStorx(c echo.Context, method, loginID string) (*restore
 		return nil, echo.NewHTTPError(http.StatusForbidden, map[string]interface{}{"error": err.Error()})
 	}
 	return sess, nil
+}
+
+func googleRestoreService(service string) bool {
+	cfg, ok := restore.ConfigForMethod(service)
+	return ok && cfg.Provider == restore.RestoreProviderGoogle
 }
 
 type restoreAllRequest struct {
@@ -515,6 +520,7 @@ func HandleRestorePrepare(c echo.Context) error {
 	result, err := restore.EvaluateReadinessWithOptions(ctx, database, restore.ReadinessRequest{
 		UserID: userID, ProjectID: projectID, LoginID: loginID, Service: service,
 		TargetEmail: targetEmail, TenantID: restoreTenantID(c, c.QueryParam("tenant_id")),
+		InviteRestore: invitedRestoreRequest(c, userID),
 	})
 	if err != nil {
 		logger.Warn(ctx, "Restore prepare check failed",
@@ -566,10 +572,21 @@ func HandleRestoreAll(c echo.Context) error {
 	}
 
 	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+	invited := invitedRestoreRequest(c, userID)
+	inviteToken := ""
+	if invited && googleRestoreService(req.Service) {
+		// The google-auth header holds a lookup key. Readiness and the restore worker need the access token.
+		if token, tokenErr := google.AccessTokenFromAuthHeader(c); tokenErr != nil {
+			logger.Warn(ctx, "invited restore google token lookup failed", logger.ErrorField(tokenErr))
+		} else {
+			inviteToken = token
+		}
+	}
 
 	prep, err := restore.EvaluateReadinessWithOptions(ctx, database, restore.ReadinessRequest{
 		UserID: userID, ProjectID: req.ProjectID, LoginID: req.LoginID, Service: req.Service,
 		TargetEmail: req.TargetEmail, TenantID: restoreTenantID(c, req.TenantID),
+		InviteRestore: invited, InviteAccessToken: inviteToken,
 	})
 	if err != nil {
 		logger.Warn(ctx, "Restore all readiness check failed",
@@ -611,6 +628,7 @@ func HandleRestoreAll(c echo.Context) error {
 	if sessionErr == nil && sessionID != "" && sessionID != userID {
 		job.RestoreTag = "invite_restored"
 		_ = database.RestoreJobRepo.UpdateJob(job.ID, map[string]interface{}{"restore_tag": job.RestoreTag})
+		restore.RememberInviteAccessToken(job.ID, inviteToken)
 	}
 
 	logger.Info(ctx, "Restore job queued",

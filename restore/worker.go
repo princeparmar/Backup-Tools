@@ -436,6 +436,7 @@ func tryFinalizeJob(ctx context.Context, store *db.PostgresDb, job *repo.Restore
 		return nil
 	}
 
+	ForgetInviteAccessToken(job.ID)
 	status, msg := resolveJobTerminalStatus(job.FailedCount)
 
 	logger.Info(ctx, "Restore job finished",
@@ -463,6 +464,7 @@ func tryFinalizeJob(ctx context.Context, store *db.PostgresDb, job *repo.Restore
 }
 
 func failJob(ctx context.Context, store *db.PostgresDb, job *repo.RestoreJobListingDB, processErr error) error {
+	ForgetInviteAccessToken(job.ID)
 	fresh, getErr := store.RestoreJobRepo.GetByID(job.ID)
 	if getErr == nil && repo.IsRestoreJobTerminal(fresh.Status) {
 		logger.Info(ctx, "Restore job already terminal, skipping fail update",

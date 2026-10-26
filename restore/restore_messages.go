@@ -52,17 +52,18 @@ const (
 
 // Readiness / prepare API messages.
 const (
-	restoreReadinessNoCredential      = "No backup credential found for this project"
-	restoreReadinessNoTargetCredential = "No credential found for target account — connect via PUT /auto-sync/job/project"
-	restoreReadinessNoBackupJob      = "No backup job found for this account and service"
-	restoreReadinessNoBackupData     = "No backed-up items found for this account and service"
-	restoreReadinessStorxMissing     = "StorX access grant is missing — reconnect via auto-sync"
-	restoreReadinessRefreshMissing   = "Google refresh token is missing"
-	restoreReadinessRefreshInvalid   = "Google refresh token is invalid or expired"
-	restoreReadinessTokenValidation  = "Google token validation failed"
-	restoreReadinessMissingScopes    = "Missing OAuth scopes required for restore"
-	restoreReadinessDWDNotConfigured = "Ask your Google Workspace admin to authorize all restore scopes in Admin Console → Domain-wide delegation"
+	restoreReadinessNoCredential        = "No backup credential found for this project"
+	restoreReadinessNoTargetCredential  = "No credential found for target account — connect via PUT /auto-sync/job/project"
+	restoreReadinessNoBackupJob         = "No backup job found for this account and service"
+	restoreReadinessNoBackupData        = "No backed-up items found for this account and service"
+	restoreReadinessStorxMissing        = "StorX access grant is missing — reconnect via auto-sync"
+	restoreReadinessRefreshMissing      = "Google refresh token is missing"
+	restoreReadinessRefreshInvalid      = "Google refresh token is invalid or expired"
+	restoreReadinessTokenValidation     = "Google token validation failed"
+	restoreReadinessMissingScopes       = "Missing OAuth scopes required for restore"
+	restoreReadinessDWDNotConfigured    = "Ask your Google Workspace admin to authorize all restore scopes in Admin Console → Domain-wide delegation"
 	restoreTplReadinessDWDNotConfigured = "Ask your Google Workspace admin to authorize the %s restore scope in Admin Console → Domain-wide delegation"
+	restoreReadinessInviteOAuthRequired = "Sign in with Google as this mailbox to restore. An invited user restores with that Google sign-in. Domain-wide delegation is only for the project admin."
 )
 
 // Notification bodies (Satellite push).
