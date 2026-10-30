@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -174,5 +175,30 @@ func TestIsDialError(t *testing.T) {
 	}
 	if isDialError(io.ErrUnexpectedEOF) || isDialError(&net.OpError{Op: "read", Err: io.EOF}) {
 		t.Fatal("errors after the connection opened are not dial errors")
+	}
+}
+
+func TestTeamsRepostBodyIsOriginalMessageOnly(t *testing.T) {
+	t.Parallel()
+	raw := []byte(`{"createdDateTime":"2026-10-27T08:05:00Z","from":{"user":{"displayName":"Allwyn John"}},"body":{"content":"Hi sales how are you doing"}}`)
+	tests := []struct {
+		name      string
+		objectKey string
+		inReplyTo string
+	}{
+		{name: "plain post", objectKey: "k1"},
+		{name: "orphan reply", objectKey: "k2", inReplyTo: "300"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := TeamsRepostBody(raw, tt.objectKey, tt.inReplyTo)
+			if got != "Hi sales how are you doing" {
+				t.Fatalf("body %q", got)
+			}
+			if strings.Contains(got, "Originally posted") || strings.Contains(got, "In reply to") {
+				t.Fatalf("restore must not add extra notes: %q", got)
+			}
+		})
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
+	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/repo"
 )
 
@@ -52,6 +53,56 @@ func TestSharePointSiteRowsLegacyJobHasNoLibraries(t *testing.T) {
 	}
 	if rows[0]["vault_prefix"] == "" {
 		t.Fatal("legacy job lost its vault prefix")
+	}
+}
+
+func TestSharePointSiteRowsTenantJobExpandsSites(t *testing.T) {
+	const tenant = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	job := repo.CronJobListingDB{
+		Method: "outlook_sharepoint", Name: "Microsoft SharePoint", TenantID: tenant,
+		ResourceType: repo.ResourceTypeTenant, ResourceID: tenant, Active: true,
+		InputData: database.NewDbJsonFromValue(map[string]interface{}{
+			"sites": []interface{}{
+				map[string]interface{}{"site_id": "site-a", "drive_id": "d-a", "site_name": "Alpha", "site_url": "https://a"},
+				map[string]interface{}{"site_id": "site-b", "drive_id": "d-b", "site_name": "Beta"},
+			},
+		}),
+		TaskMemory: repo.TaskMemory{
+			SharePointSites: map[string]repo.SharePointSiteState{
+				"site-a": {Libraries: map[string]repo.SharePointLibraryState{
+					"d-a": {Name: "Documents", Default: true},
+				}},
+			},
+		},
+	}
+	job.ID = 42
+	merged := repo.CronJobListingDB{
+		Method: "outlook_sharepoint", Name: "Old Site", TenantID: tenant,
+		ResourceType: repo.ResourceTypeSite, ResourceID: "site-a", Active: false,
+		Message: repo.SharePointMergedJobMessage,
+		InputData: database.NewDbJsonFromValue(map[string]interface{}{
+			"site_id": "site-a", "drive_id": "d-a", "site_name": "Alpha",
+		}),
+	}
+	rows := buildMicrosoftSharePointSiteResources([]repo.CronJobListingDB{job, merged}, nil)
+	if len(rows) != 3 {
+		t.Fatalf("want 2 tenant sites + 1 merged, got %d: %+v", len(rows), rows)
+	}
+	if rows[0]["tenant_job"] != true || rows[0]["job_id"] != uint(42) || rows[0]["site_id"] != "site-a" {
+		t.Fatalf("first site %+v", rows[0])
+	}
+	if rows[0]["vault_prefix"] != outlook.ResourceKeyPrefix(tenant, repo.ResourceTypeSite, "site-a") {
+		t.Fatalf("vault prefix %+v", rows[0]["vault_prefix"])
+	}
+	libs, _ := rows[0]["libraries"].([]map[string]interface{})
+	if len(libs) != 1 || libs[0]["name"] != "Documents" {
+		t.Fatalf("libraries %+v", rows[0]["libraries"])
+	}
+	if rows[1]["site_id"] != "site-b" || rows[1]["job_id"] != uint(42) {
+		t.Fatalf("second site %+v", rows[1])
+	}
+	if rows[2]["merged"] != true {
+		t.Fatalf("merged row %+v", rows[2])
 	}
 }
 

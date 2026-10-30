@@ -22,8 +22,9 @@ func IsMicrosoftMethod(method string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(method)), "outlook")
 }
 
-// MicrosoftResourceTypeForMethod returns the resource type new jobs of a Microsoft method back up.
-// Teams is one job per tenant; older per-team rows keep their stored "team".
+// MicrosoftResourceTypeForMethod returns the default resource type for Microsoft scope rows and
+ // legacy helpers. SharePoint and Teams autosync jobs themselves are ResourceTypeTenant (one job
+ // per tenant); site/team rows still use site/team for vault keys and scopes.
 func MicrosoftResourceTypeForMethod(method string) string {
 	switch strings.ToLower(strings.TrimSpace(method)) {
 	case "outlook_sharepoint":

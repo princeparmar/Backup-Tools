@@ -51,13 +51,14 @@ type stubMicrosoftGraph struct {
 	userRoles  map[string][]string
 	samples    []string
 	tokenCalls int
+	listCalls  int
 	// noServicePrincipal simulates the StorX app missing from the tenant.
 	noServicePrincipal bool
 }
 
 func (s *stubMicrosoftGraph) install(t *testing.T) {
 	t.Helper()
-	prevToken, prevInv, prevEval, prevList := msAppOnlyTokenFn, msInvalidateAppOnlyFn, msEvaluateCapabilitiesFn, msListDirectoryUsersFn
+	prevToken, prevInv, prevEval, prevList := msAppOnlyTokenFn, msInvalidateAppOnlyFn, msEvaluateCapabilitiesFn, msListDirectoryUsersOptsFn
 	prevRoles, prevSP := msListTenantUserRolesFn, msServicePrincipalFn
 	msServicePrincipalFn = func(context.Context, string) (string, bool, error) {
 		if s.noServicePrincipal {
@@ -77,11 +78,14 @@ func (s *stubMicrosoftGraph) install(t *testing.T) {
 		s.samples = in.SampleUserIDs
 		return s.caps
 	}
-	msListDirectoryUsersFn = func(context.Context, string) ([]outlook.DirectoryUser, error) { return s.users, nil }
+	msListDirectoryUsersOptsFn = func(_ context.Context, _ string, _ outlook.ListTenantDirectoryUsersOptions) ([]outlook.DirectoryUser, error) {
+		s.listCalls++
+		return s.users, nil
+	}
 	msListTenantUserRolesFn = func(context.Context, string) (map[string][]string, error) { return s.userRoles, nil }
 	t.Cleanup(func() {
 		msListTenantUserRolesFn, msServicePrincipalFn = prevRoles, prevSP
-		msAppOnlyTokenFn, msInvalidateAppOnlyFn, msEvaluateCapabilitiesFn, msListDirectoryUsersFn = prevToken, prevInv, prevEval, prevList
+		msAppOnlyTokenFn, msInvalidateAppOnlyFn, msEvaluateCapabilitiesFn, msListDirectoryUsersOptsFn = prevToken, prevInv, prevEval, prevList
 	})
 }
 

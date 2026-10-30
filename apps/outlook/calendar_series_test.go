@@ -189,21 +189,46 @@ func TestRestoreCalendarEventSeriesWithoutOccurrencesIsOneCreate(t *testing.T) {
 }
 
 func TestEnsureCalendarReusesOrCreates(t *testing.T) {
-	base, calls := newSeriesGraph(t, map[string]func() (int, string){
-		"GET /me/calendars": func() (int, string) {
-			return http.StatusOK, `{"value":[{"id":"RO","name":"Team","canEdit":false},{"id":"C1","name":"Project","canEdit":true}]}`
-		},
-		"POST /me/calendars": func() (int, string) { return http.StatusCreated, `{"id":"C2"}` },
-	})
-	if id, err := EnsureCalendar(context.Background(), "tok", base+"/me", "Project"); err != nil || id != "C1" {
-		t.Fatalf("existing = %q, %v", id, err)
+	cases := []struct {
+		name, color, wantID string
+		wantPost            bool
+	}{
+		{name: "Project", wantID: "C1"},
+		{name: "Team", color: "lightGreen", wantID: "C2", wantPost: true},
+		{name: "Holidays", color: "auto", wantID: "C2", wantPost: true},
 	}
-	if id, err := EnsureCalendar(context.Background(), "tok", base+"/me", "Team"); err != nil || id != "C2" {
-		t.Fatalf("created = %q, %v", id, err)
-	}
-	last := (*calls)[len(*calls)-1]
-	if last.method != http.MethodPost || last.body["name"] != "Team" {
-		t.Fatalf("create call = %+v", last)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base, calls := newSeriesGraph(t, map[string]func() (int, string){
+				"GET /me/calendars": func() (int, string) {
+					return http.StatusOK, `{"value":[{"id":"RO","name":"Team","canEdit":false},{"id":"C1","name":"Project","canEdit":true}]}`
+				},
+				"POST /me/calendars": func() (int, string) { return http.StatusCreated, `{"id":"C2"}` },
+			})
+			id, err := EnsureCalendar(context.Background(), "tok", base+"/me", tc.name, tc.color)
+			if err != nil || id != tc.wantID {
+				t.Fatalf("id = %q, %v want %q", id, err, tc.wantID)
+			}
+			if !tc.wantPost {
+				for _, c := range *calls {
+					if c.method == http.MethodPost {
+						t.Fatalf("existing calendar must not be created: %+v", *calls)
+					}
+				}
+				return
+			}
+			last := (*calls)[len(*calls)-1]
+			if last.method != http.MethodPost || last.body["name"] != tc.name {
+				t.Fatalf("create call = %+v", last)
+			}
+			if tc.color == "" || strings.EqualFold(tc.color, "auto") {
+				if _, ok := last.body["color"]; ok {
+					t.Fatalf("auto/empty color must be omitted: %+v", last.body)
+				}
+			} else if last.body["color"] != tc.color {
+				t.Fatalf("color = %v want %q", last.body["color"], tc.color)
+			}
+		})
 	}
 }
 

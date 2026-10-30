@@ -21,8 +21,9 @@ type PostgresDb struct {
 	AccountLifecycleRepo  *repo.AccountLifecycleRepository
 	MicrosoftTenantRepo   *repo.MicrosoftTenantRepository
 	MicrosoftLinkRepo     *repo.MicrosoftAccountTenantRepository
-	MicrosoftResourceRepo *repo.MicrosoftResourceRepository
-	MicrosoftScopeRepo    *repo.MicrosoftBackupScopeRepository
+	MicrosoftResourceRepo     *repo.MicrosoftResourceRepository
+	MicrosoftScopeRepo        *repo.MicrosoftBackupScopeRepository
+	MicrosoftAccessVerifyRepo *repo.MicrosoftAccessVerifyBatchRepository
 }
 
 func NewPostgresStore(dsn string, queryLogging bool) (*PostgresDb, error) {
@@ -48,8 +49,9 @@ func NewPostgresStore(dsn string, queryLogging bool) (*PostgresDb, error) {
 		AccountLifecycleRepo:  repo.NewAccountLifecycleRepository(db),
 		MicrosoftTenantRepo:   repo.NewMicrosoftTenantRepository(db),
 		MicrosoftLinkRepo:     repo.NewMicrosoftAccountTenantRepository(db),
-		MicrosoftResourceRepo: repo.NewMicrosoftResourceRepository(db),
-		MicrosoftScopeRepo:    repo.NewMicrosoftBackupScopeRepository(db),
+		MicrosoftResourceRepo:     repo.NewMicrosoftResourceRepository(db),
+		MicrosoftScopeRepo:        repo.NewMicrosoftBackupScopeRepository(db),
+		MicrosoftAccessVerifyRepo: repo.NewMicrosoftAccessVerifyBatchRepository(db),
 	}, nil
 }
 
@@ -77,6 +79,7 @@ func (s *PostgresDb) Migrate() error {
 		&repo.MicrosoftAccountTenantDB{},
 		&repo.MicrosoftResourceDB{},
 		&repo.MicrosoftBackupScopeDB{},
+		&repo.MicrosoftAccessVerifyBatchDB{},
 	); err != nil {
 		return err
 	}

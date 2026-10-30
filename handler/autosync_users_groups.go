@@ -91,6 +91,13 @@ type UsersGroupsEntityServiceView struct {
 	// Microsoft jobs only: tenant and object key prefix inside the service bucket.
 	TenantID    string `json:"tenant_id,omitempty"`
 	VaultPrefix string `json:"vault_prefix,omitempty"`
+	// Microsoft access-verify (user services): pending / unavailable / empty when normal.
+	AccessVerifyState   string `json:"access_verify_state,omitempty"`
+	AccessVerifyMessage string `json:"access_verify_message,omitempty"`
+	AccessCheckedAt     string `json:"access_checked_at,omitempty"`
+	AccessUnavailableSince string `json:"access_unavailable_since,omitempty"`
+	AccessReasonCode    string `json:"access_reason_code,omitempty"`
+	Message             string `json:"message,omitempty"`
 }
 
 // UsersGroupsBulkActiveRequest is PUT /users-groups/jobs/active.
@@ -468,7 +475,7 @@ func buildUsersGroupsEntityServicesForOrder(jobs []repo.CronJobListingDB, polici
 		}
 		active := job.Active
 		tenantID, _, _, vaultPrefix := microsoftJobStorageIdentity(&job)
-		out = append(out, UsersGroupsEntityServiceView{
+		view := UsersGroupsEntityServiceView{
 			TenantID:      tenantID,
 			VaultPrefix:   vaultPrefix,
 			Method:        method,
@@ -482,7 +489,16 @@ func buildUsersGroupsEntityServicesForOrder(jobs []repo.CronJobListingDB, polici
 			Interval:      strings.TrimSpace(job.Interval),
 			On:            strings.TrimSpace(job.On),
 			RetentionType: retentionType,
-		})
+			Message:       strings.TrimSpace(job.Message),
+		}
+		if m := repo.JobAccessVerify(&job); m != nil {
+			view.AccessVerifyState = m.State
+			view.AccessVerifyMessage = m.Message
+			view.AccessCheckedAt = m.CheckedAt
+			view.AccessUnavailableSince = m.UnavailableSince
+			view.AccessReasonCode = m.ReasonCode
+		}
+		out = append(out, view)
 	}
 	return out
 }
@@ -1300,6 +1316,13 @@ func bulkUpdateUsersGroupsJobsActive(
 		}
 		email := jobMailboxEmail(job)
 		method := strings.TrimSpace(job.Method)
+
+		// Access-verify drafts / unavailable rows are activated only via Re-check access.
+		if active && repo.IsAccessVerifyOwned(job) {
+			failed = append(failed, usersGroupsBulkActiveFailure(jobID, email, method,
+				fmt.Errorf("access not verified; use Re-check access")))
+			continue
+		}
 
 		if err := cronRepo.UpdateCronJobByID(jobID, patch); err != nil {
 			failed = append(failed, usersGroupsBulkActiveFailure(jobID, email, method, err))

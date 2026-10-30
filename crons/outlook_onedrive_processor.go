@@ -15,6 +15,7 @@ import (
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/handler"
+	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/repo"
@@ -33,10 +34,12 @@ func (p *outlookOneDriveProcessor) Run(input ProcessorInput) error {
 
 // Graph seams (overridden in tests).
 var (
-	oneDriveDeltaPageFn = outlook.FetchOneDriveDeltaPage
-	oneDriveRootIDFn    = outlook.FetchOneDriveRootID
-	oneDriveItemFn      = outlook.FetchOneDriveItem
-	oneDriveContentFn   = outlook.OpenOneDriveItemContentStream
+	oneDriveDeltaPageFn     = outlook.FetchOneDriveDeltaPage
+	oneDriveRootIDFn        = outlook.FetchOneDriveRootID
+	oneDriveItemFn          = outlook.FetchOneDriveItem
+	oneDriveContentFn       = outlook.OpenOneDriveItemContentStream
+	oneDriveSharedWithMeFn  = outlook.ListSharedWithMePage
+	oneDriveDriveChildrenFn = outlook.ListDriveChildrenPage
 )
 
 func runOutlookOneDriveAutosync(input ProcessorInput) error {
@@ -86,12 +89,19 @@ func runOutlookOneDriveAutosync(input ProcessorInput) error {
 
 	run := newOneDriveRun(input, &satelliteOneDriveStore{input: input, storx: storx}, accessToken, driveRoot, keyPrefix, keys)
 	run.quota = newDriveQuotaSession(ctx, input)
-	if err := run.syncAll(ctx, &input.Job.TaskMemory); err != nil {
-		return err
+	syncErr := run.syncAll(ctx, &input.Job.TaskMemory)
+	if syncErr == nil && outlook.IsPersonalOneDriveRoot(driveRoot) {
+		if swmErr := run.syncSharedWithMe(ctx); swmErr != nil {
+			syncErr = swmErr
+		}
 	}
+	run.persistCoverage()
 	if q := run.quota; q != nil && q.skippedQuota > 0 {
 		ApplyDriveStorageSkipMessage(input, q.synced, q.skippedQuota, q.skippedBytes, q.remaining)
-	}
+		}
+		if syncErr != nil {
+			return syncErr
+		}
 	return saveMicrosoftTaskMemory(input)
 }
 
@@ -209,6 +219,41 @@ type oneDriveRun struct {
 	fetched []*outlook.OneDriveItem
 	seen    map[string]bool
 	now     string
+	// coverage accumulates durable per-run stats for job input_data (retry-safe: synced
+	// only counts newly stored content, not cTag-unchanged skips).
+	coverage oneDriveCoverage
+}
+
+const oneDriveCoverageInputKey = "onedrive_coverage"
+const oneDriveCoverageSampleCap = 10
+
+type oneDriveCoverageSample struct {
+	ItemID string `json:"item_id"`
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
+type oneDriveCoverage struct {
+	Synced          int                      `json:"synced"`
+	Unchanged       int                      `json:"unchanged"`
+	SkippedQuota    int                      `json:"skipped_quota"`
+	Failed          int                      `json:"failed"`
+	PackagesSkipped int                      `json:"packages_skipped"`
+	SharedSynced    int                      `json:"shared_synced"`
+	SharedFailed    int                      `json:"shared_failed"`
+	SharedSkipped   int                      `json:"shared_skipped"`
+	Samples         []oneDriveCoverageSample `json:"samples,omitempty"`
+}
+
+func (c *oneDriveCoverage) sample(itemID, name, reason string) {
+	if c == nil || len(c.Samples) >= oneDriveCoverageSampleCap {
+		return
+	}
+	c.Samples = append(c.Samples, oneDriveCoverageSample{
+		ItemID: strings.TrimSpace(itemID),
+		Name:   strings.TrimSpace(name),
+		Reason: reason,
+	})
 }
 
 func newOneDriveRun(input ProcessorInput, store oneDriveStore, token, driveRoot, prefix string, keys map[string]bool) *oneDriveRun {
@@ -262,6 +307,8 @@ func (r *oneDriveRun) syncAll(ctx context.Context, tm *repo.TaskMemory) error {
 
 // syncDrive runs the drive delta from *deltaLink and saves the new cursor and layout. The layout
 // migration re-baselines the drive so every legacy meta/data pair is rewritten in the folder tree.
+// Each Graph page is applied before the next page is fetched so a mid-run failure does not advance
+// the delta cursor past unprocessed items. Baseline sweepUnseen runs only after a full successful baseline.
 func (r *oneDriveRun) syncDrive(ctx context.Context, deltaLink **string, layout *int) error {
 	migrating := *layout < repo.OneDriveLayoutTree
 	if !migrating {
@@ -277,11 +324,8 @@ func (r *oneDriveRun) syncDrive(ctx context.Context, deltaLink **string, layout 
 	if !migrating && *deltaLink != nil {
 		start = strings.TrimSpace(**deltaLink)
 	}
-	items, link, err := r.collect(ctx, start)
+	link, err := r.collectAndApply(ctx, start)
 	if err != nil {
-		return err
-	}
-	if err := r.apply(ctx, items); err != nil {
 		return err
 	}
 	if r.baseline {
@@ -295,8 +339,10 @@ func (r *oneDriveRun) syncDrive(ctx context.Context, deltaLink **string, layout 
 	return nil
 }
 
-// collect reads the whole delta. An unusable saved cursor falls back to a baseline.
-func (r *oneDriveRun) collect(ctx context.Context, start string) ([]outlook.OneDriveItem, string, error) {
+// collectAndApply pages the delta and durably applies each page before advancing.
+// An unusable saved cursor falls back to a baseline. On any apply failure the final
+// deltaLink is not returned so the caller leaves the previous cursor unchanged.
+func (r *oneDriveRun) collectAndApply(ctx context.Context, start string) (string, error) {
 	initial := outlook.OneDriveInitialDeltaURL(r.driveRoot)
 	if start == "" {
 		start = initial
@@ -308,46 +354,47 @@ func (r *oneDriveRun) collect(ctx context.Context, start string) ([]outlook.OneD
 			start = initial
 		}
 	}
-	items, link, err := r.readDelta(ctx, start)
+	link, err := r.readDeltaApply(ctx, start)
 	if errors.Is(err, outlook.ErrOneDriveDeltaInvalid) && start != initial {
 		logger.Warn(ctx, "onedrive delta invalid; re-baselining", logger.String("prefix", r.prefix))
 		start = initial
-		items, link, err = r.readDelta(ctx, start)
+		link, err = r.readDeltaApply(ctx, start)
 	}
 	r.baseline = start == initial
-	return items, link, err
+	return link, err
 }
 
-func (r *oneDriveRun) readDelta(ctx context.Context, requestURL string) ([]outlook.OneDriveItem, string, error) {
+func (r *oneDriveRun) readDeltaApply(ctx context.Context, requestURL string) (string, error) {
 	guard := outlook.NewDriveDeltaGuard(r.driveRoot)
 	if err := guard.Start(requestURL); err != nil {
-		return nil, "", err
+		return "", err
 	}
-	var items []outlook.OneDriveItem
 	for {
 		if err := r.heartbeat(); err != nil {
-			return nil, "", err
+			return "", err
 		}
 		page, err := oneDriveDeltaPageFn(ctx, r.token, requestURL)
 		if err != nil {
-			return nil, "", err
+			return "", err
 		}
-		items = append(items, page.Items...)
+		if err := r.apply(ctx, page.Items); err != nil {
+			return "", err
+		}
 		if next := strings.TrimSpace(page.NextLink); next != "" {
 			if err := guard.Next(next); err != nil {
-				return nil, "", err
+				return "", err
 			}
 			requestURL = next
 			continue
 		}
 		final := strings.TrimSpace(page.DeltaLink)
 		if final == "" {
-			return nil, "", fmt.Errorf("onedrive delta finished without @odata.deltaLink")
+			return "", fmt.Errorf("onedrive delta finished without @odata.deltaLink")
 		}
 		if err := guard.Final(final); err != nil {
-			return nil, "", err
+			return "", err
 		}
-		return items, final, nil
+		return final, nil
 	}
 }
 
@@ -377,6 +424,8 @@ func (r *oneDriveRun) apply(ctx context.Context, items []outlook.OneDriveItem) e
 			r.folders[id] = &oneDriveFolder{name: it.Name, parentID: it.ParentID}
 			folders = append(folders, it)
 		case it.IsPackage:
+			r.coverage.PackagesSkipped++
+			r.coverage.sample(id, it.Name, "package")
 			logger.Info(ctx, "onedrive: package item skipped (no downloadable content)",
 				logger.String("item_id", id), logger.String("name", it.Name))
 		default:
@@ -396,10 +445,12 @@ func (r *oneDriveRun) apply(ctx context.Context, items []outlook.OneDriveItem) e
 			return err
 		}
 		if err := r.syncFolder(ctx, f); err != nil {
+			r.coverage.Failed++
+			r.coverage.sample(f.ID, f.Name, "failed")
 			if shouldAbortOnItemError(err) {
 				return wrapStorageAbort(r.service, err)
 			}
-			logger.Warn(ctx, "onedrive folder sync failed", logger.String("item_id", f.ID), logger.ErrorField(err))
+			return fmt.Errorf("onedrive folder sync failed (%s): %w", f.ID, err)
 		}
 	}
 	for _, f := range files {
@@ -407,10 +458,12 @@ func (r *oneDriveRun) apply(ctx context.Context, items []outlook.OneDriveItem) e
 			return err
 		}
 		if err := r.syncFile(ctx, f); err != nil {
+			r.coverage.Failed++
+			r.coverage.sample(f.ID, f.Name, "failed")
 			if shouldAbortOnItemError(err) {
 				return wrapStorageAbort(r.service, err)
 			}
-			logger.Warn(ctx, "onedrive file sync failed", logger.String("item_id", f.ID), logger.ErrorField(err))
+			return fmt.Errorf("onedrive file sync failed (%s): %w", f.ID, err)
 		}
 	}
 	for _, id := range deleted {
@@ -564,9 +617,11 @@ func (r *oneDriveRun) syncFile(ctx context.Context, item *outlook.OneDriveItem) 
 
 	if old == key {
 		if r.baseline {
+			r.coverage.Unchanged++
 			return nil
 		}
 		if st, err := r.store.stat(ctx, key); err == nil && outlook.OneDriveContentUnchanged(st.meta, item) {
+			r.coverage.Unchanged++
 			return nil
 		}
 		_, err := r.fetch(ctx, item, key, meta)
@@ -595,13 +650,23 @@ func (r *oneDriveRun) syncFile(ctx context.Context, item *outlook.OneDriveItem) 
 // fetch downloads the file from OneDrive into key. stored is false when the file was skipped
 // because it does not fit the remaining storage.
 func (r *oneDriveRun) fetch(ctx context.Context, item *outlook.OneDriveItem, key string, meta map[string]string) (stored bool, err error) {
+	return r.fetchInto(ctx, item, key, meta, false)
+}
+
+func (r *oneDriveRun) fetchInto(ctx context.Context, item *outlook.OneDriveItem, key string, meta map[string]string, shared bool) (stored bool, err error) {
 	if r.quota.shouldSkipFile(item.Size) {
 		r.quota.recordQuotaSkip(item.Size)
+		r.coverage.SkippedQuota++
+		r.coverage.sample(item.ID, item.Name, "quota")
 		logger.Warn(ctx, "onedrive file skipped: size exceeds remaining CyberLS storage",
 			logger.String("item_id", item.ID), logger.Int64("file_bytes", item.Size))
 		return false, nil
 	}
-	body, _, err := oneDriveContentFn(ctx, r.token, r.driveRoot, item.ID)
+	driveRoot := r.driveRoot
+	if id := strings.TrimSpace(item.DriveID); id != "" {
+		driveRoot = outlook.DriveRootURLFromDriveID(id)
+	}
+	body, _, err := oneDriveContentFn(ctx, r.token, driveRoot, item.ID)
 	if err != nil {
 		return false, err
 	}
@@ -612,7 +677,172 @@ func (r *oneDriveRun) fetch(ctx context.Context, item *outlook.OneDriveItem, key
 	}
 	r.quota.accountUpload(item.Size)
 	r.index[item.ID] = key
+	if shared {
+		r.coverage.SharedSynced++
+	} else {
+		r.coverage.Synced++
+	}
 	return true, nil
+}
+
+// syncSharedWithMe backs up personal Shared with me (Drive parity). Org/app-only jobs skip this.
+func (r *oneDriveRun) syncSharedWithMe(ctx context.Context) error {
+	next := ""
+	for {
+		if err := r.heartbeat(); err != nil {
+			return err
+		}
+		page, err := oneDriveSharedWithMeFn(ctx, r.token, next)
+		if err != nil {
+			return fmt.Errorf("onedrive shared with me: %w", err)
+		}
+		for i := range page.Items {
+			if err := r.heartbeat(); err != nil {
+				return err
+			}
+			if err := r.syncSharedItem(ctx, &page.Items[i], nil); err != nil {
+				r.coverage.SharedFailed++
+				r.coverage.sample(page.Items[i].ID, page.Items[i].Name, "shared_failed")
+				if shouldAbortOnItemError(err) {
+					return wrapStorageAbort(r.service, err)
+				}
+				return fmt.Errorf("onedrive shared sync failed (%s): %w", page.Items[i].ID, err)
+			}
+		}
+		next = strings.TrimSpace(page.NextLink)
+		if next == "" {
+			return nil
+		}
+	}
+}
+
+func (r *oneDriveRun) syncSharedItem(ctx context.Context, item *outlook.OneDriveItem, parentIDs []string) error {
+	if item == nil || strings.TrimSpace(item.ID) == "" {
+		r.coverage.SharedSkipped++
+		return nil
+	}
+	if strings.TrimSpace(item.DriveID) == "" {
+		r.coverage.SharedSkipped++
+		r.coverage.sample(item.ID, item.Name, "shared_no_remote")
+		return nil
+	}
+	if item.IsPackage {
+		r.coverage.PackagesSkipped++
+		r.coverage.sample(item.ID, item.Name, "package")
+		return nil
+	}
+	if item.IsFolder {
+		return r.syncSharedFolder(ctx, item, parentIDs)
+	}
+	return r.syncSharedFile(ctx, item, parentIDs)
+}
+
+func (r *oneDriveRun) syncSharedFolder(ctx context.Context, item *outlook.OneDriveItem, parentIDs []string) error {
+	key := outlook.OneDriveFolderKeyIn(r.prefix, outlook.OneDriveSectionSharedWithMe, parentIDs, item.ID, item.Name)
+	meta := outlook.OneDriveObjectMeta(item, r.sharedFolderNames(parentIDs))
+	if old := r.index[item.ID]; old != key {
+		if err := r.store.put(ctx, key, strings.NewReader(""), 0, meta); err != nil {
+			return err
+		}
+		r.index[item.ID] = key
+		if old != "" {
+			if p, ok := outlook.ParseOneDriveObjectKey(old); ok && p.Section != outlook.OneDriveSectionMyDrive {
+				r.store.remove(ctx, old)
+			}
+		}
+	}
+	r.folders[item.ID] = &oneDriveFolder{name: item.Name, chain: parentIDs, fromKey: true}
+
+	childParents := append(slices.Clone(parentIDs), item.ID)
+	next := ""
+	for {
+		if err := r.heartbeat(); err != nil {
+			return err
+		}
+		page, err := oneDriveDriveChildrenFn(ctx, r.token, item.DriveID, item.ID, next)
+		if err != nil {
+			return fmt.Errorf("onedrive shared folder children %s: %w", item.ID, err)
+		}
+		for i := range page.Items {
+			child := &page.Items[i]
+			if child.DriveID == "" {
+				child.DriveID = item.DriveID
+			}
+			if err := r.syncSharedItem(ctx, child, childParents); err != nil {
+				return err
+			}
+		}
+		next = strings.TrimSpace(page.NextLink)
+		if next == "" {
+			return nil
+		}
+	}
+}
+
+func (r *oneDriveRun) syncSharedFile(ctx context.Context, item *outlook.OneDriveItem, parentIDs []string) error {
+	key := outlook.OneDriveFileKey(r.prefix, outlook.OneDriveSectionSharedWithMe, parentIDs, item.ID, item.Name)
+	meta := outlook.OneDriveObjectMeta(item, r.sharedFolderNames(parentIDs))
+	old := r.index[item.ID]
+	if old == key {
+		if st, err := r.store.stat(ctx, key); err == nil && outlook.OneDriveContentUnchanged(st.meta, item) {
+			r.coverage.Unchanged++
+			return nil
+		}
+		_, err := r.fetchInto(ctx, item, key, meta, true)
+		return err
+	}
+	if old != "" {
+		// Do not steal a My files object when remote ids collide; keep MY_DRIVE as source of truth.
+		if p, ok := outlook.ParseOneDriveObjectKey(old); ok && p.Section == outlook.OneDriveSectionMyDrive {
+			r.coverage.SharedSkipped++
+			r.coverage.sample(item.ID, item.Name, "shared_id_collision")
+			return nil
+		}
+		if st, err := r.store.stat(ctx, old); err == nil && outlook.OneDriveContentUnchanged(st.meta, item) {
+			meta[outlook.OneDriveMetaBackedUpAt] = st.meta[outlook.OneDriveMetaBackedUpAt]
+			if err := r.store.copy(ctx, old, key, st.size, meta); err != nil {
+				return err
+			}
+			r.index[item.ID] = key
+			r.store.remove(ctx, old)
+			r.coverage.SharedSynced++
+			return nil
+		}
+	}
+	_, err := r.fetchInto(ctx, item, key, meta, true)
+	if err != nil {
+		return err
+	}
+	if old != "" && old != key {
+		r.store.remove(ctx, old)
+	}
+	return nil
+}
+
+func (r *oneDriveRun) sharedFolderNames(ids []string) string {
+	return r.folderNames(ids)
+}
+
+// persistCoverage writes onedrive_coverage onto the job input_data for UI/job detail.
+func (r *oneDriveRun) persistCoverage() {
+	if r == nil || r.input.Job == nil || r.input.Database == nil || r.input.Database.CronJobRepo == nil {
+		return
+	}
+	job := r.input.Job
+	input := map[string]interface{}{}
+	if job.InputData != nil && job.InputData.Json() != nil {
+		for k, v := range *job.InputData.Json() {
+			input[k] = v
+		}
+	}
+	cov := r.coverage
+	if q := r.quota; q != nil && cov.SkippedQuota == 0 && q.skippedQuota > 0 {
+		cov.SkippedQuota = q.skippedQuota
+	}
+	input[oneDriveCoverageInputKey] = cov
+	_ = r.input.Database.CronJobRepo.UpdateCronJobByID(job.ID, map[string]interface{}{
+		"input_data": database.NewDbJsonFromValue(input),
+	})
 }
 
 // migrateLegacy copies an unchanged file from its old meta/data backup instead of downloading it.

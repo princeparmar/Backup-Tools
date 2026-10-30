@@ -17,6 +17,31 @@ func TestSanitizeSharePointSiteKey(t *testing.T) {
 	}
 }
 
+func TestGraphSharePointSiteID(t *testing.T) {
+	t.Parallel()
+	const graph = "space2.sharepoint.com,edf2e428-d991-4aa0-9c11-aaaaaaaaaaaa,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	const vault = "space2.sharepoint.com_edf2e428-d991-4aa0-9c11-aaaaaaaaaaaa_bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{in: graph, want: graph},
+		{in: vault, want: graph},
+		{in: "  " + vault + "  ", want: graph},
+		{in: "", want: ""},
+		{in: "plain-guid-site", want: "plain-guid-site"},
+	}
+	for _, tt := range tests {
+		if got := GraphSharePointSiteID(tt.in); got != tt.want {
+			t.Fatalf("%q: got %q want %q", tt.in, got, tt.want)
+		}
+	}
+	key := ResourceKeyPrefix("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "site", graph) + "/MY_DRIVE/F1/ITEM1$file.docx"
+	if got := GraphSharePointSiteIDFromKey(key); got != graph {
+		t.Fatalf("from key: got %q want %q", got, graph)
+	}
+}
+
 func TestSharePointIDBasedKeys(t *testing.T) {
 	siteKey := "contoso.sharepoint.com,abc,def"
 	meta := SharePointIDBasedMetaKey(siteKey, "ITEM1", "report.pdf", "2026-07-21T15:04:05Z")

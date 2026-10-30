@@ -185,6 +185,7 @@ type OutlookMailBackupState struct {
 	FolderID           string `json:"folder_id,omitempty"`
 	FolderPath         string `json:"folder_path,omitempty"`
 	WellKnownFolder    string `json:"well_known_folder,omitempty"`
+	ChangeKey          string `json:"change_key,omitempty"`
 	RemovedFromMailbox bool   `json:"removed_from_mailbox,omitempty"`
 	RemovedAt          string `json:"removed_at,omitempty"`
 	BackedUpAt         string `json:"backed_up_at,omitempty"`
@@ -197,6 +198,22 @@ func ReadOutlookMailBackupState(raw []byte) OutlookMailBackupState {
 	}
 	_ = json.Unmarshal(raw, &doc)
 	return doc.State
+}
+
+// MailBackupChangeKey returns the Graph changeKey recorded in a mail backup (Graph field or
+// storx_backup), used to decide whether content must be re-fetched.
+func MailBackupChangeKey(raw []byte) string {
+	var doc struct {
+		ChangeKey string `json:"changeKey"`
+		State     struct {
+			ChangeKey string `json:"change_key"`
+		} `json:"storx_backup"`
+	}
+	_ = json.Unmarshal(raw, &doc)
+	if ck := strings.TrimSpace(doc.ChangeKey); ck != "" {
+		return ck
+	}
+	return strings.TrimSpace(doc.State.ChangeKey)
 }
 
 // PatchOutlookMailBackup applies the mailbox state from delta (when msg is not nil) and the
@@ -242,14 +259,28 @@ func PatchOutlookMailBackup(raw []byte, msg *OutlookMailDeltaMessage, state Outl
 		if msg.ParentFolderID != "" {
 			fields["parentFolderId"] = msg.ParentFolderID
 		}
+		if msg.ChangeKey != "" {
+			fields["changeKey"] = msg.ChangeKey
+			state.ChangeKey = msg.ChangeKey
+		}
+		if msg.LastModifiedDateTime != "" {
+			fields["lastModifiedDateTime"] = msg.LastModifiedDateTime
+		}
 		for k, v := range fields {
 			if err := set(k, v); err != nil {
 				return nil, err
 			}
 		}
 	}
+	prev := ReadOutlookMailBackupState(raw)
 	if state.BackedUpAt == "" {
-		state.BackedUpAt = ReadOutlookMailBackupState(raw).BackedUpAt
+		state.BackedUpAt = prev.BackedUpAt
+	}
+	if state.ChangeKey == "" {
+		state.ChangeKey = prev.ChangeKey
+		if state.ChangeKey == "" {
+			state.ChangeKey = MailBackupChangeKey(raw)
+		}
 	}
 	if err := set(outlookMailBackupStateField, state); err != nil {
 		return nil, err

@@ -124,6 +124,42 @@ func TestRestoreOneDriveBackupBinUsesDeletedFromPath(t *testing.T) {
 	}
 }
 
+func TestRestoreOneDriveBackupSharedWithMeIntoMyFiles(t *testing.T) {
+	g := newFakeDriveGraph(t)
+	key := OneDriveFileKey(testDrivePrefix, OneDriveSectionSharedWithMe, []string{"sf1"}, "r1", "shared.txt")
+	src := fakeDriveSource(map[string]fakeDriveObject{
+		key: {meta: map[string]string{
+			OneDriveMetaName: "shared.txt", OneDriveMetaDriveID: "b!remote",
+			OneDriveMetaParentPath: "IgnoredRemote",
+		}, data: []byte("shared-body")},
+	}, map[string]string{"sf1": "Team Share"})
+
+	if err := RestoreOneDriveBackup(context.Background(), "tok", g.userBase(), key, src); err != nil {
+		t.Fatal(err)
+	}
+	if got := g.calls[0].path; got != "/me/drive/root:/Team Share/shared.txt:/content" {
+		t.Fatalf("path = %s (want My files owned copy)", got)
+	}
+	if string(g.calls[0].body) != "shared-body" {
+		t.Fatalf("body = %q", g.calls[0].body)
+	}
+}
+
+func TestRestoreOneDriveBackupSharedWithMeRootFile(t *testing.T) {
+	g := newFakeDriveGraph(t)
+	key := OneDriveFileKey(testDrivePrefix, OneDriveSectionSharedWithMe, nil, "r1", "top.txt")
+	src := fakeDriveSource(map[string]fakeDriveObject{
+		key: {meta: map[string]string{OneDriveMetaName: "top.txt"}, data: []byte("x")},
+	}, nil)
+
+	if err := RestoreOneDriveBackup(context.Background(), "tok", g.userBase(), key, src); err != nil {
+		t.Fatal(err)
+	}
+	if got := g.calls[0].path; got != "/me/drive/root:/top.txt:/content" {
+		t.Fatalf("path = %s", got)
+	}
+}
+
 func TestRestoreOneDriveBackupFolderCreatesPath(t *testing.T) {
 	g := newFakeDriveGraph(t)
 	key := OneDriveFolderKey(testDrivePrefix, []string{"f1"}, "f2", "Work")
@@ -186,16 +222,28 @@ func TestRestoreOneDriveBackupLegacyMeta(t *testing.T) {
 }
 
 func TestRestoreOneDriveBackupLegacyTombstoneSkipped(t *testing.T) {
-	g := newFakeDriveGraph(t)
-	metaKey := testDrivePrefix + "/meta/2026/01/02/i1_gone.txt.json"
-	metaJSON, _ := json.Marshal(OneDriveCronBackupMeta{Name: "gone.txt", RemovedFromOneDrive: true})
-	src := fakeDriveSource(map[string]fakeDriveObject{metaKey: {data: metaJSON}}, nil)
-
-	if err := RestoreOneDriveBackup(context.Background(), "tok", g.userBase(), metaKey, src); err == nil {
-		t.Fatal("want skip error")
+	t.Parallel()
+	tests := []struct {
+		name string
+		meta OneDriveCronBackupMeta
+	}{
+		{name: "removed", meta: OneDriveCronBackupMeta{Name: "gone.txt", RemovedFromOneDrive: true}},
+		{name: "folder", meta: OneDriveCronBackupMeta{Name: "Docs", IsFolder: true}},
 	}
-	if len(g.calls) != 0 {
-		t.Fatalf("calls = %+v", g.calls)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			g := newFakeDriveGraph(t)
+			metaKey := testDrivePrefix + "/meta/2026/01/02/i1_" + tt.name + ".json"
+			metaJSON, _ := json.Marshal(tt.meta)
+			src := fakeDriveSource(map[string]fakeDriveObject{metaKey: {data: metaJSON}}, nil)
+			if err := RestoreOneDriveBackup(context.Background(), "tok", g.userBase(), metaKey, src); err != nil {
+				t.Fatalf("tombstone/folder must not fail restore-all: %v", err)
+			}
+			if len(g.calls) != 0 {
+				t.Fatalf("calls = %+v", g.calls)
+			}
+		})
 	}
 }
 

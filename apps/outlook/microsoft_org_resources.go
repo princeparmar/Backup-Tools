@@ -46,10 +46,24 @@ type graphDirectoryUserRow struct {
 	CreatedDateTime   *time.Time        `json:"createdDateTime"`
 }
 
+// ListTenantDirectoryUsersOptions controls Graph $select weight for directory listings.
+type ListTenantDirectoryUsersOptions struct {
+	// IncludeLicenses adds assignedLicenses (needed for capability sampling). Default picker lists omit it.
+	IncludeLicenses bool
+}
+
 // ListTenantDirectoryUsers lists every user in the tenant (app-only token, User.Read.All).
 func ListTenantDirectoryUsers(ctx context.Context, accessToken string) ([]DirectoryUser, error) {
-	reqURL := graphBaseURL + "/users?$select=id,userPrincipalName,mail,displayName,department,jobTitle," +
-		"officeLocation,accountEnabled,assignedLicenses,createdDateTime&$top=999"
+	return ListTenantDirectoryUsersWithOptions(ctx, accessToken, ListTenantDirectoryUsersOptions{IncludeLicenses: true})
+}
+
+// ListTenantDirectoryUsersWithOptions lists tenant users with optional heavy fields omitted.
+func ListTenantDirectoryUsersWithOptions(ctx context.Context, accessToken string, opts ListTenantDirectoryUsersOptions) ([]DirectoryUser, error) {
+	selectFields := "id,userPrincipalName,mail,displayName,department,jobTitle,officeLocation,accountEnabled,createdDateTime"
+	if opts.IncludeLicenses {
+		selectFields += ",assignedLicenses"
+	}
+	reqURL := graphBaseURL + "/users?$select=" + selectFields + "&$top=999"
 	rows, err := graphListAll[graphDirectoryUserRow](ctx, accessToken, reqURL, 0)
 	if err != nil {
 		return nil, fmt.Errorf("list tenant users: %w", err)
@@ -69,7 +83,7 @@ func ListTenantDirectoryUsers(ctx context.Context, accessToken string) ([]Direct
 			JobTitle:       strings.TrimSpace(r.JobTitle),
 			OfficeLocation: strings.TrimSpace(r.OfficeLocation),
 			AccountEnabled: r.AccountEnabled == nil || *r.AccountEnabled,
-			HasLicense:     len(r.AssignedLicenses) > 0,
+			HasLicense:     opts.IncludeLicenses && len(r.AssignedLicenses) > 0,
 			CreatedAt:      r.CreatedDateTime,
 		})
 	}

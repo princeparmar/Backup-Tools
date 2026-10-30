@@ -44,52 +44,214 @@ var (
 // sharePointWarningPrefix starts the job message of a run that left a library behind.
 const sharePointWarningPrefix = "SharePoint backup finished with warnings"
 
-// runOutlookSharePointAutosync backs up every document library of the site in the OneDrive
-// folder layout (MY_DRIVE / BIN): the default library at the site's resource prefix, the others
-// under SharePointLibraryPrefix.
+// runOutlookSharePointAutosync backs up SharePoint sites for the job. The preferred shape is one
+ // tenant job (ResourceTypeTenant) with input_data.sites[]; legacy per-site jobs still run alone
+ // until merged. Vault data is preserve-only (add/update).
 func runOutlookSharePointAutosync(input ProcessorInput) error {
 	ctx := context.Background()
 	var err error
 	defer monitor.Mon.Task()(&ctx)(&err)
+
+	sites := repo.JobSharePointSites(input.Job)
+	if len(sites) == 0 {
+		return fmt.Errorf("sites (or legacy site_id+drive_id) required on job for sharepoint backup")
+	}
+
+	if input.Job.ResourceType != repo.ResourceTypeTenant {
+		return runOutlookSharePointLegacySiteJob(ctx, input, sites[0])
+	}
 
 	auth, err := microsoftJobAccessToken(input)
 	if err != nil {
 		return err
 	}
 	accessToken, storx := auth.AccessToken, auth.StorxToken
-
 	drainMicrosoftWebhooks(input, storx, "sharepoint")
-
 	if err := input.HeartBeatFunc(); err != nil {
 		return err
 	}
+	_ = pauseMergedSharePointSiteJobs(ctx, input)
 
-	siteID := repo.JobSharePointSiteID(input.Job)
-	driveID := repo.JobSharePointDriveID(input.Job)
-	if siteID == "" || driveID == "" {
-		return fmt.Errorf("site_id and drive_id are required on job for sharepoint backup")
+	q := newDriveQuotaSession(ctx, input)
+	var (
+		siteWarnings []string
+		syncedSites  int
+		failedSites  int
+	)
+	for _, sel := range sites {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if input.HeartBeatFunc != nil {
+			if err := input.HeartBeatFunc(); err != nil {
+				return err
+			}
+		}
+		siteKey := outlook.ResourceKeyPrefix(input.Job.TenantID, repo.ResourceTypeSite, sel.SiteID)
+		if siteKey == "" {
+			failedSites++
+			siteWarnings = append(siteWarnings, sel.SiteID+": missing vault prefix")
+			continue
+		}
+		if err := ensureMicrosoftPlaceholder(ctx, input, storx, satellite.ReserveBucket_OutlookSharePoint, siteKey, "outlook_sharepoint"); err != nil {
+			failedSites++
+			siteWarnings = append(siteWarnings, labelSharePointSite(sel)+": "+err.Error())
+			continue
+		}
+		bindSharePointSiteMemory(&input.Job.TaskMemory, sel.SiteID)
+		site := sharePointSite{
+			siteID: sel.SiteID, siteKey: siteKey, defaultDriveID: sel.DriveID,
+			storx: storx, token: accessToken, quota: q,
+		}
+		cov := newSharePointCoverage(sel.SiteID, siteKey)
+		persistSharePointSiteCoverage(input, sel.SiteID, cov)
+
+		res, syncErr := syncSharePointSite(ctx, input, site, cov)
+		if syncErr != nil {
+			if isSharePointRunFatal(syncErr) {
+				storeSharePointSiteMemory(&input.Job.TaskMemory, sel.SiteID)
+				cov.finalize(res)
+				persistSharePointSiteCoverage(input, sel.SiteID, cov)
+				_ = saveSharePointMemory(input)
+				return syncErr
+			}
+			failedSites++
+			siteWarnings = append(siteWarnings, labelSharePointSite(sel)+": "+truncateLibraryError(syncErr))
+			cov.finalize(res)
+			persistSharePointSiteCoverage(input, sel.SiteID, cov)
+			storeSharePointSiteMemory(&input.Job.TaskMemory, sel.SiteID)
+			_ = saveSharePointMemory(input)
+			continue
+		}
+		if listErr := syncSharePointLists(ctx, input, site, cov); listErr != nil {
+			if isSharePointRunFatal(listErr) {
+				storeSharePointSiteMemory(&input.Job.TaskMemory, sel.SiteID)
+				cov.finalize(res)
+				persistSharePointSiteCoverage(input, sel.SiteID, cov)
+				_ = saveSharePointMemory(input)
+				return listErr
+			}
+			siteWarnings = append(siteWarnings, labelSharePointSite(sel)+" lists: "+truncateLibraryError(listErr))
+		}
+		syncSharePointVersionsAndPermissions(ctx, input, site, cov)
+		syncSharePointPages(ctx, input, site, cov)
+		cov.finalize(res)
+		persistSharePointSiteCoverage(input, sel.SiteID, cov)
+		if msg := res.warning(); msg != "" {
+			siteWarnings = append(siteWarnings, labelSharePointSite(sel)+": "+msg)
+		} else if msg := sharePointCoverageWarning(cov); msg != "" {
+			siteWarnings = append(siteWarnings, labelSharePointSite(sel)+": "+msg)
+		}
+		storeSharePointSiteMemory(&input.Job.TaskMemory, sel.SiteID)
+		syncedSites++
+		_ = saveSharePointMemory(input)
+	}
+
+	persistSharePointTenantCoverageRollup(input, syncedSites, failedSites, len(sites))
+
+	if q != nil && q.skippedQuota > 0 {
+		ApplyDriveStorageSkipMessage(input, q.synced, q.skippedQuota, q.skippedBytes, q.remaining)
+	} else if syncedSites == 0 && failedSites > 0 {
+		return fmt.Errorf("sharepoint: all %d sites failed", failedSites)
+	} else if len(siteWarnings) > 0 {
+		input.Job.Message = sharePointWarningPrefix + ": " + strings.Join(siteWarnings, "; ")
+		input.Job.MessageStatus = repo.JobMessageStatusWarning
+	}
+	return saveSharePointMemory(input)
+}
+
+func labelSharePointSite(sel repo.SharePointSiteSelection) string {
+	if strings.TrimSpace(sel.SiteName) != "" {
+		return strings.TrimSpace(sel.SiteName)
+	}
+	return sel.SiteID
+}
+
+// runOutlookSharePointLegacySiteJob runs an old per-site job. If a tenant SharePoint job exists
+ // for the same connection, wait to be merged; otherwise back up this site alone.
+func runOutlookSharePointLegacySiteJob(ctx context.Context, input ProcessorInput, sel repo.SharePointSiteSelection) error {
+	job := input.Job
+	tenantJob, err := input.Database.CronJobRepo.FindMicrosoftResourceJob(job.UserID, job.TenantID, repo.ResourceTypeTenant,
+		strings.ToLower(strings.TrimSpace(job.TenantID)), "outlook_sharepoint", job.SyncType)
+	if err == nil && tenantJob != nil && tenantJob.Active && repo.JobCredentialID(tenantJob) == repo.JobCredentialID(job) {
+		job.Message, job.MessageStatus = "Waiting to merge into the SharePoint tenant job", repo.JobMessageStatusWarning
+		return nil
+	}
+
+	auth, err := microsoftJobAccessToken(input)
+	if err != nil {
+		return err
+	}
+	accessToken, storx := auth.AccessToken, auth.StorxToken
+	drainMicrosoftWebhooks(input, storx, "sharepoint")
+	if err := input.HeartBeatFunc(); err != nil {
+		return err
 	}
 	siteKey, err := microsoftJobKeyPrefix(input.Job)
 	if err != nil {
 		return err
 	}
-
 	if err := ensureMicrosoftPlaceholder(ctx, input, storx, satellite.ReserveBucket_OutlookSharePoint, siteKey, "outlook_sharepoint"); err != nil {
 		return err
 	}
-
 	q := newDriveQuotaSession(ctx, input)
-	site := sharePointSite{siteID: siteID, siteKey: siteKey, defaultDriveID: driveID, storx: storx, token: accessToken, quota: q}
-	res, err := syncSharePointSite(ctx, input, site)
-	if err != nil {
-		return err
+	site := sharePointSite{siteID: sel.SiteID, siteKey: siteKey, defaultDriveID: sel.DriveID, storx: storx, token: accessToken, quota: q}
+	cov := newSharePointCoverage(sel.SiteID, siteKey)
+	persistSharePointCoverage(input, cov)
+	res, syncErr := syncSharePointSite(ctx, input, site, cov)
+	if syncErr != nil {
+		cov.finalize(res)
+		persistSharePointCoverage(input, cov)
+		return syncErr
 	}
+	if listErr := syncSharePointLists(ctx, input, site, cov); listErr != nil {
+		persistSharePointCoverage(input, cov)
+		cov.finalize(res)
+		persistSharePointCoverage(input, cov)
+		return listErr
+	}
+	syncSharePointVersionsAndPermissions(ctx, input, site, cov)
+	syncSharePointPages(ctx, input, site, cov)
+	cov.finalize(res)
+	persistSharePointCoverage(input, cov)
 	if q != nil && q.skippedQuota > 0 {
 		ApplyDriveStorageSkipMessage(input, q.synced, q.skippedQuota, q.skippedBytes, q.remaining)
 	} else if msg := res.warning(); msg != "" {
 		input.Job.Message, input.Job.MessageStatus = msg, repo.JobMessageStatusWarning
+	} else if msg := sharePointCoverageWarning(cov); msg != "" {
+		input.Job.Message, input.Job.MessageStatus = msg, repo.JobMessageStatusWarning
 	}
 	return saveSharePointMemory(input)
+}
+
+func pauseMergedSharePointSiteJobs(ctx context.Context, input ProcessorInput) error {
+	if input.Database == nil || input.Database.CronJobRepo == nil || input.Job == nil {
+		return nil
+	}
+	jobs, err := input.Database.CronJobRepo.ListMicrosoftScopeJobs(
+		input.Job.UserID, input.Job.TenantID, repo.ResourceTypeSite, input.Job.SyncType)
+	if err != nil {
+		logger.Warn(ctx, "sharepoint list site jobs for merge failed", logger.ErrorField(err))
+		return nil
+	}
+	var pause []uint
+	for i := range jobs {
+		j := &jobs[i]
+		if j.ID == input.Job.ID || !j.Active || j.Method != "outlook_sharepoint" {
+			continue
+		}
+		if repo.JobCredentialID(j) != repo.JobCredentialID(input.Job) {
+			continue
+		}
+		pause = append(pause, j.ID)
+	}
+	if len(pause) == 0 {
+		return nil
+	}
+	if err := input.Database.CronJobRepo.PauseJobs(pause, repo.SharePointMergedJobMessage); err != nil {
+		logger.Warn(ctx, "sharepoint pause merged site jobs failed", logger.ErrorField(err))
+	}
+	return nil
 }
 
 func saveSharePointMemory(input ProcessorInput) error {
@@ -134,10 +296,12 @@ func (r sharePointSiteResult) warning() string {
 }
 
 // syncSharePointSite syncs every document library of the site. A library that fails is recorded
-// and the others continue; the run fails only when no library could be backed up, or on
-// cancellation and storage errors. Libraries are removed (moved to BIN) only after a complete
-// listing that still has the default library no longer lists them.
-func syncSharePointSite(ctx context.Context, input ProcessorInput, s sharePointSite) (sharePointSiteResult, error) {
+ // and the others continue; the run fails only when no library could be backed up, or on
+ // cancellation and storage errors.
+ //
+ // Preserve-all: incomplete or complete listings never purge vault libraries. Missing libraries
+ // stay in StorX for restore. Inventory completeness is recorded in coverage only.
+func syncSharePointSite(ctx context.Context, input ProcessorInput, s sharePointSite, cov *sharePointCoverage) (sharePointSiteResult, error) {
 	var res sharePointSiteResult
 	job := input.Job
 	if job.MessageStatus == repo.JobMessageStatusWarning && strings.HasPrefix(job.Message, sharePointWarningPrefix) {
@@ -164,6 +328,12 @@ func syncSharePointSite(ctx context.Context, input ProcessorInput, s sharePointS
 
 	listed, listErr := sharePointLibrariesFn(ctx, s.token, s.siteID)
 	complete := listErr == nil
+	if cov != nil {
+		cov.ListComplete = complete
+		if listErr != nil {
+			cov.ListingError = truncateLibraryError(listErr)
+		}
+	}
 	if !complete {
 		if isSharePointRunFatal(listErr) {
 			return res, listErr
@@ -176,7 +346,13 @@ func syncSharePointSite(ctx context.Context, input ProcessorInput, s sharePointS
 	for _, l := range listed {
 		inList[l.ID] = true
 	}
-	trusted := complete && inList[s.defaultDriveID]
+	if cov != nil {
+		if complete {
+			cov.LibrariesTotal = len(listed)
+		} else {
+			cov.LibrariesTotal = len(libs)
+		}
+	}
 
 	var firstErr error
 	prefixes := map[string]string{}
@@ -203,11 +379,19 @@ func syncSharePointSite(ctx context.Context, input ProcessorInput, s sharePointS
 			state.LastError = "library key collides with another library of the site"
 			tm.SharePointLibraries[lib.ID] = state
 			res.failed = append(res.failed, label)
+			if cov != nil {
+				cov.Libraries = append(cov.Libraries, sharePointLibraryCoverage{
+					DriveID: lib.ID, Name: label, Default: isDefault, Status: spStatusFailed,
+					LastError: state.LastError, InventoryComplete: complete && inList[lib.ID],
+				})
+				cov.sample(label, "prefix_collision")
+				persistSharePointCoverage(input, cov)
+			}
 			continue
 		}
 		prefixes[prefix] = lib.ID
 		if state.RemovedAt != "" {
-			// Listed again: back up from a new baseline; files in BIN return to MY_DRIVE unchanged.
+			// Listed again after a legacy BIN marking: resume backup; do not purge vault.
 			state.RemovedAt, state.DeltaLink = "", nil
 		}
 
@@ -234,6 +418,15 @@ func syncSharePointSite(ctx context.Context, input ProcessorInput, s sharePointS
 			if firstErr == nil {
 				firstErr = fmt.Errorf("sharepoint library %s: %w", label, err)
 			}
+			if cov != nil {
+				cov.Libraries = append(cov.Libraries, sharePointLibraryCoverage{
+					DriveID: lib.ID, Name: label, Default: isDefault, Status: spStatusFailed,
+					LastError: state.LastError, BaselineDone: state.BaselineDone,
+					InventoryComplete: complete && inList[lib.ID],
+				})
+				cov.sample(label, "library_failed")
+				persistSharePointCoverage(input, cov)
+			}
 			continue
 		}
 		state.LastError, state.BaselineDone = "", true
@@ -243,16 +436,28 @@ func syncSharePointSite(ctx context.Context, input ProcessorInput, s sharePointS
 		}
 		tm.SharePointLibraries[lib.ID] = state
 		res.synced++
+		if cov != nil {
+			cov.Libraries = append(cov.Libraries, sharePointLibraryCoverage{
+				DriveID: lib.ID, Name: label, Default: isDefault, Status: spStatusComplete,
+				LastSyncAt: state.LastSyncAt, BaselineDone: true,
+				InventoryComplete: complete && inList[lib.ID],
+			})
+			persistSharePointCoverage(input, cov)
+		}
 		if err := saveSharePointMemory(input); err != nil {
 			logger.Warn(ctx, "sharepoint checkpoint failed", logger.ErrorField(err))
 		}
 	}
 
-	if trusted {
-		if err := removeSharePointLibraries(ctx, input, s, inList); err != nil {
-			return res, err
-		}
+	if cov != nil {
+		mergeKnownLibrariesIntoCoverage(cov, tm.SharePointLibraries, s.defaultDriveID, inList, complete)
+		persistSharePointCoverage(input, cov)
 	}
+
+	// Preserve-all: do not call removeSharePointLibraries / vault BIN for libraries missing
+	 // from inventory. Incomplete inventory must never look like "libraries deleted."
+	_ = complete // list_complete recorded on coverage; not used for vault removal
+
 	if res.synced == 0 && firstErr != nil {
 		return res, firstErr
 	}

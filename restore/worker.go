@@ -265,10 +265,11 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 		}
 
 		if shouldOAuth401Retry(deps, batchResult) {
-			logger.Warn(ctx, "Restore batch hit OAuth 401, refreshing Google token",
+			logger.Warn(ctx, "Restore batch hit OAuth 401, refreshing access token",
 				logger.Int("job_id", int(job.ID)),
-				logger.Int("task_id", int(batchTask.ID)))
-			if err := deps.RefreshGoogleAccessToken(ctx); err != nil {
+				logger.Int("task_id", int(batchTask.ID)),
+				logger.String("provider", restoreProviderName(deps)))
+			if err := deps.refreshAccessTokenForJob(ctx); err != nil {
 				logger.Warn(ctx, "Restore OAuth token refresh failed",
 					logger.Int("job_id", int(job.ID)),
 					logger.ErrorField(err))

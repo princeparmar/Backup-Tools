@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/mstenant"
@@ -18,7 +19,7 @@ import (
 
 const (
 	microsoftDirectoryDefaultPageSize = 50
-	microsoftDirectoryMaxPageSize     = 500
+	microsoftDirectoryMaxPageSize     = 999
 )
 
 // Seams (overridden in tests).
@@ -203,7 +204,12 @@ func HandleMicrosoftTenantDirectoryUsers(c echo.Context) error {
 
 func respondMicrosoftDirectoryUsers(c echo.Context, tc *mstenant.Context) error {
 	ctx := c.Request().Context()
-	all, err := msListDirectoryUsersFn(ctx, tc.Token)
+	// Picker/directory UI does not need assignedLicenses; keep them only when roles/licenses are requested.
+	includeRoles := queryTruthy(c.QueryParam("include_roles"))
+	includeLicenses := includeRoles || queryTruthy(c.QueryParam("include_licenses"))
+	all, err := msListDirectoryUsersOptsFn(ctx, tc.Token, outlook.ListTenantDirectoryUsersOptions{
+		IncludeLicenses: includeLicenses,
+	})
 	if err != nil {
 		return c.JSON(http.StatusBadGateway, map[string]interface{}{"error": err.Error()})
 	}
@@ -226,9 +232,22 @@ func respondMicrosoftDirectoryUsers(c echo.Context, tc *mstenant.Context) error 
 		Department:  c.QueryParam("department"),
 		EnabledOnly: strings.EqualFold(c.QueryParam("enabled_only"), "true"),
 	})
+	// all=1 returns the full filtered set in one response (Graph was already fully listed).
+	if queryTruthy(c.QueryParam("all")) {
+		page = 1
+		size = len(filtered)
+		if size == 0 {
+			size = microsoftDirectoryDefaultPageSize
+		}
+	}
 	start := min((page-1)*size, len(filtered))
 	end := min(start+size, len(filtered))
-	roles, rolesErr := microsoftTenantUserRoles(ctx, tc.Token)
+	var roles map[string][]string
+	rolesErr := ""
+	if includeRoles {
+		// Expensive: every directory role + all members. Opt-in only.
+		roles, rolesErr = microsoftTenantUserRoles(ctx, tc.Token)
+	}
 	resp := map[string]interface{}{
 		"tenant_id": tc.TenantID,
 		"users":     microsoftDirectoryUserViews(filtered[start:end], roles),

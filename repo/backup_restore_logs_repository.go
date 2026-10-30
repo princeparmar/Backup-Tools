@@ -98,9 +98,13 @@ func (r *BackupRestoreLogsRepository) ListBackupRestoreLogs(userID string, filte
 	}
 
 	if filter.IncludeBackup {
+		// Real backup jobs only — hide system access-check / internal rows (ms_access_verify).
 		backupWhere := []string{
 			"cj.user_id = " + arg(userID),
 			"COALESCE(cj.placeholder, false) = false",
+			"COALESCE(cj.hidden, false) = false",
+			"COALESCE(cj.job_type, '" + JobTypeBackup + "') = '" + JobTypeBackup + "'",
+			"cj.method <> '" + MethodMSAccessVerify + "'",
 			"cj.deleted_at IS NULL",
 			"(cj.last_run IS NOT NULL OR TRIM(COALESCE(cj.message, '')) <> '')",
 		}

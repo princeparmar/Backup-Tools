@@ -1168,53 +1168,128 @@ func createGoogleJobsForServiceEmails(
 	var jobs []onboardingJobResult
 	var failed []onboardingFailedResult
 	for _, targetEmail := range emails {
-		cronJob, createErr := createSyncJobWithCredential(userID, targetEmail, method, syncType, cred.ID, orgUnitInputData(req, targetEmail), c)
-		if createErr != nil {
-			failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: extractCreateJobError(createErr)})
+		entry, fail := createOrReuseGoogleJob(userID, targetEmail, method, svc, syncType, schedule, req, cred, isFirstConnection, policyBatch, c, database)
+		if fail != nil {
+			failed = append(failed, *fail)
 			continue
 		}
-		if err := applyOnboardingJobSchedule(database, userID, cronJob.ID, targetEmail, schedule, cred, req, isFirstConnection, policyBatch); err != nil {
-			if errors.Is(err, repo.ErrPolicyNameExists) {
-				failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: "policy name already exists for user"})
-				continue
-			}
-			failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: err.Error()})
-			continue
+		if entry != nil {
+			jobs = append(jobs, *entry)
 		}
-		// Recurring: activate only when storx is present AND caller did not force active=false
-		// (Satellite sets active=false when own_nodes mode has fewer than MinOwnNodes).
-		if syncType != "one_time" {
-			if shouldActivateOnboardingJob(req, cred) {
-				if err := database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(true)); err != nil {
-					failed = append(failed, onboardingFailedResult{
-						Service: svc, Email: targetEmail,
-						Error: fmt.Sprintf("job %d created but activation failed: %v", cronJob.ID, err),
-					})
-					continue
-				}
-			} else if isForcedInactiveOnboarding(req) {
-				_ = database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(false))
-			}
-		}
-		latestJob, _ := database.CronJobRepo.GetCronJobByID(cronJob.ID)
-		var policy *repo.AutosyncBackupPolicyDB
-		if latestJob != nil && latestJob.PolicyID > 0 {
-			policy, _ = database.PolicyRepo.GetByID(latestJob.PolicyID)
-		}
-		entry := onboardingJobResult{Service: svc, Email: targetEmail, JobID: cronJob.ID}
-		if policy != nil {
-			entry.PolicyID = policy.ID
-		}
-		if syncType == "one_time" {
-			if isForcedInactiveOnboarding(req) {
-				_ = database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(false))
-			} else if task, taskErr := database.TaskRepo.CreateTaskForCronJob(cronJob.ID); taskErr == nil {
-				entry.TaskID = task.ID
-			}
-		}
-		jobs = append(jobs, entry)
 	}
 	return jobs, failed
+}
+
+// createOrReuseGoogleJob finds an existing mailbox+method+sync job and reuses it (like Microsoft
+ // onboard), or creates a new one. Credentials are already upserted by the caller.
+func createOrReuseGoogleJob(
+	userID, targetEmail, method, svc, syncType string, schedule onboardingSchedule,
+	req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB, isFirstConnection bool, policyBatch *onboardingPolicyBatch,
+	c echo.Context, database *db.PostgresDb,
+) (*onboardingJobResult, *onboardingFailedResult) {
+	fail := func(msg string) (*onboardingJobResult, *onboardingFailedResult) {
+		return nil, &onboardingFailedResult{Service: svc, Email: targetEmail, Error: msg}
+	}
+
+	existing, err := database.CronJobRepo.FindJobForUser(userID, targetEmail, method, syncType)
+	if err != nil {
+		return fail(err.Error())
+	}
+	if existing != nil {
+		return finalizeExistingGoogleJob(userID, existing, targetEmail, svc, syncType, schedule, req, cred, isFirstConnection, policyBatch, database)
+	}
+
+	cronJob, createErr := createSyncJobWithCredential(userID, targetEmail, method, syncType, cred.ID, orgUnitInputData(req, targetEmail), c)
+	if createErr != nil {
+		// Race: another request created the same job between Find and Create.
+		if existing, _ = database.CronJobRepo.FindJobForUser(userID, targetEmail, method, syncType); existing != nil {
+			return finalizeExistingGoogleJob(userID, existing, targetEmail, svc, syncType, schedule, req, cred, isFirstConnection, policyBatch, database)
+		}
+		return fail(extractCreateJobError(createErr))
+	}
+	if err := applyOnboardingJobSchedule(database, userID, cronJob.ID, targetEmail, schedule, cred, req, isFirstConnection, policyBatch); err != nil {
+		if errors.Is(err, repo.ErrPolicyNameExists) {
+			return fail("policy name already exists for user")
+		}
+		return fail(err.Error())
+	}
+	entry := &onboardingJobResult{Service: svc, Email: targetEmail, JobID: cronJob.ID}
+	if syncType != "one_time" {
+		if shouldActivateOnboardingJob(req, cred) {
+			if err := database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(true)); err != nil {
+				return fail(fmt.Sprintf("job %d created but activation failed: %v", cronJob.ID, err))
+			}
+			entry.Active = true
+		} else if isForcedInactiveOnboarding(req) {
+			_ = database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(false))
+		}
+	}
+	if latestJob, _ := database.CronJobRepo.GetCronJobByID(cronJob.ID); latestJob != nil {
+		entry.PolicyID = latestJob.PolicyID
+	}
+	if syncType == "one_time" {
+		if isForcedInactiveOnboarding(req) {
+			_ = database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(false))
+		} else if task, taskErr := database.TaskRepo.CreateTaskForCronJob(cronJob.ID); taskErr == nil {
+			entry.TaskID = task.ID
+		}
+	}
+	return entry, nil
+}
+
+func finalizeExistingGoogleJob(
+	userID string, existing *repo.CronJobListingDB, targetEmail, svc, syncType string, schedule onboardingSchedule,
+	req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB, isFirstConnection bool, policyBatch *onboardingPolicyBatch,
+	database *db.PostgresDb,
+) (*onboardingJobResult, *onboardingFailedResult) {
+	fail := func(msg string) (*onboardingJobResult, *onboardingFailedResult) {
+		return nil, &onboardingFailedResult{Service: svc, Email: targetEmail, Error: msg}
+	}
+	policyID := existing.PolicyID
+	needSchedule := policyID == 0
+	if !needSchedule && req != nil && req.hasPolicyID() && req.PolicyID != nil && *req.PolicyID != policyID {
+		needSchedule = true
+	}
+	if needSchedule {
+		if err := applyOnboardingJobSchedule(database, userID, existing.ID, targetEmail, schedule, cred, req, isFirstConnection, policyBatch); err != nil {
+			if errors.Is(err, repo.ErrPolicyNameExists) {
+				return fail("policy name already exists for user")
+			}
+			return fail(err.Error())
+		}
+		if latest, _ := database.CronJobRepo.GetCronJobByID(existing.ID); latest != nil {
+			policyID = latest.PolicyID
+		}
+	}
+	// Keep credential_id on the job aligned with the credential used for this onboarding.
+	if cred != nil && cred.ID > 0 && repo.JobCredentialID(existing) != cred.ID {
+		_ = database.CronJobRepo.UpdateJobInputData(existing.ID, func(in map[string]interface{}) map[string]interface{} {
+			if in == nil {
+				in = map[string]interface{}{}
+			}
+			in["credential_id"] = cred.ID
+			if path := orgUnitPathForEmail(req, targetEmail); path != "" {
+				in["org_unit_path"] = path
+			}
+			return in
+		})
+	}
+	active := existing.Active
+	if syncType != "one_time" {
+		if shouldActivateOnboardingJob(req, cred) {
+			if err := database.CronJobRepo.UpdateCronJobByID(existing.ID, activeStateUpdateFields(true)); err != nil {
+				return fail(fmt.Sprintf("job %d exists but activation failed: %v", existing.ID, err))
+			}
+			active = true
+		} else if isForcedInactiveOnboarding(req) {
+			_ = database.CronJobRepo.UpdateCronJobByID(existing.ID, activeStateUpdateFields(false))
+			active = false
+		}
+	}
+	return &onboardingJobResult{
+		Service: svc, Email: targetEmail, JobID: existing.ID, PolicyID: policyID,
+		Existing: true, Active: active,
+	}, nil
 }
 
 func createSyncJobWithCredential(userID, name, method, syncType string, credentialID uint, extraInput map[string]interface{}, c echo.Context) (*repo.CronJobListingDB, error) {

@@ -22,17 +22,18 @@ func newReconcileTestDB(t *testing.T) *db.PostgresDb {
 		t.Fatal(err)
 	}
 	if err := gdb.Migrate(&repo.GoogleBackupCredentialDB{}, &repo.CronJobListingDB{}, &repo.TaskListingDB{}, &repo.MicrosoftTenantDB{}, &repo.AutosyncBackupPolicyDB{},
-		&repo.MicrosoftAccountTenantDB{}, &repo.MicrosoftResourceDB{}, &repo.MicrosoftBackupScopeDB{}); err != nil {
+		&repo.MicrosoftAccountTenantDB{}, &repo.MicrosoftResourceDB{}, &repo.MicrosoftBackupScopeDB{}, &repo.MicrosoftAccessVerifyBatchDB{}); err != nil {
 		t.Fatal(err)
 	}
 	return &db.PostgresDb{
-		DB:                    gdb,
-		CronJobRepo:           repo.NewCronJobRepository(gdb),
-		CredentialRepo:        repo.NewGoogleBackupCredentialRepository(gdb),
-		MicrosoftTenantRepo:   repo.NewMicrosoftTenantRepository(gdb),
-		MicrosoftLinkRepo:     repo.NewMicrosoftAccountTenantRepository(gdb),
-		MicrosoftResourceRepo: repo.NewMicrosoftResourceRepository(gdb),
-		MicrosoftScopeRepo:    repo.NewMicrosoftBackupScopeRepository(gdb),
+		DB:                        gdb,
+		CronJobRepo:               repo.NewCronJobRepository(gdb),
+		CredentialRepo:            repo.NewGoogleBackupCredentialRepository(gdb),
+		MicrosoftTenantRepo:       repo.NewMicrosoftTenantRepository(gdb),
+		MicrosoftLinkRepo:         repo.NewMicrosoftAccountTenantRepository(gdb),
+		MicrosoftResourceRepo:     repo.NewMicrosoftResourceRepository(gdb),
+		MicrosoftScopeRepo:        repo.NewMicrosoftBackupScopeRepository(gdb),
+		MicrosoftAccessVerifyRepo: repo.NewMicrosoftAccessVerifyBatchRepository(gdb),
 	}
 }
 
@@ -149,9 +150,12 @@ func TestReconcile_allScopeClonesSiblingsForNewUsers(t *testing.T) {
 	if !ok {
 		t.Fatalf("bob mail job missing: %v", byKey)
 	}
-	if bobMail.PolicyID != 9 || bobMail.Interval != "daily" || !bobMail.Active || bobMail.StorxToken != "storx-grant" ||
+	if bobMail.PolicyID != 9 || bobMail.Interval != "daily" || bobMail.Active || bobMail.StorxToken != "storx-grant" ||
 		bobMail.Name != "bob@contoso.com" || repo.JobCredentialID(&bobMail) != cred.ID {
-		t.Fatalf("clone must copy policy/interval/active/token: %+v", bobMail)
+		t.Fatalf("clone must copy policy/interval/token and stay inactive until access verify: %+v", bobMail)
+	}
+	if m := repo.JobAccessVerify(&bobMail); m == nil || m.State != repo.AccessVerifyStatePending {
+		t.Fatalf("new user-service jobs must be access-verify drafts: %+v", repo.JobAccessVerify(&bobMail))
 	}
 	if path, ok := (*bobMail.InputData.Json())["org_unit_path"]; ok {
 		t.Fatalf("template org_unit_path must not be copied: %v", path)

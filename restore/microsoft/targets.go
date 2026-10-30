@@ -3,7 +3,6 @@ package microsoft
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
@@ -119,13 +118,4 @@ func FindOrganizationTarget(ctx context.Context, store *db.PostgresDb, userID, e
 		return &tenants[i], &u, nil
 	}
 	return nil, nil, nil
-}
-
-// resolveTargetUserID is the directory id of the app-only restore destination in the job's tenant.
-func resolveTargetUserID(ctx context.Context, token, email string) (string, error) {
-	u, err := findDirectoryUserFn(ctx, token, email)
-	if err != nil {
-		return "", fmt.Errorf("restore destination %s: %w", email, err)
-	}
-	return u.ObjectID, nil
 }

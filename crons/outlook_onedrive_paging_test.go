@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"slices"
 	"testing"
@@ -105,5 +106,89 @@ func TestOneDriveSavedForeignCursorRebaselines(t *testing.T) {
 func TestSharePointDeltaPagingErrorIsNotFatal(t *testing.T) {
 	if isSharePointRunFatal(fmt.Errorf("library: %w", outlook.ErrOneDriveDeltaPaging)) {
 		t.Fatal("a paging error in one library must not stop the other libraries")
+	}
+}
+
+func TestOneDrivePageApplyFailureDoesNotAdvanceCursor(t *testing.T) {
+	store := seedDrive(t)
+	before := maps.Clone(store.objects)
+	prevDelta, prevRoot, prevContent := oneDriveDeltaPageFn, oneDriveRootIDFn, oneDriveContentFn
+	initial := outlook.OneDriveInitialDeltaURL(driveTestRoot)
+	var urls []string
+	oneDriveDeltaPageFn = func(_ context.Context, _, u string) (*outlook.OneDriveDeltaPage, error) {
+		urls = append(urls, u)
+		switch u {
+		case initial:
+			return &outlook.OneDriveDeltaPage{Items: []outlook.OneDriveItem{driveFolder("A", "ROOT", "Docs")}, NextLink: pagedNext}, nil
+		case pagedNext:
+			return &outlook.OneDriveDeltaPage{Items: []outlook.OneDriveItem{
+				driveFile("Fbad", "A", "boom.txt", "c1"),
+			}, DeltaLink: pagedFinal}, nil
+		}
+		return nil, fmt.Errorf("unexpected delta url %s", u)
+	}
+	oneDriveRootIDFn = func(context.Context, string, string) (string, error) { return "ROOT", nil }
+	oneDriveContentFn = func(context.Context, string, string, string) (io.ReadCloser, int64, error) {
+		return nil, 0, fmt.Errorf("forced content failure")
+	}
+	t.Cleanup(func() {
+		oneDriveDeltaPageFn, oneDriveRootIDFn, oneDriveContentFn = prevDelta, prevRoot, prevContent
+	})
+
+	tm := &repo.TaskMemory{OneDriveLayout: repo.OneDriveLayoutTree}
+	run := newOneDriveRun(ProcessorInput{}, store, "tok", driveTestRoot, driveTestPrefix, store.keySet())
+	err := run.syncAll(context.Background(), tm)
+	if err == nil {
+		t.Fatal("want apply failure")
+	}
+	if tm.OneDriveDeltaLink != nil {
+		t.Fatalf("cursor must not advance after mid-page failure: %q", *tm.OneDriveDeltaLink)
+	}
+	if len(urls) != 2 {
+		t.Fatalf("requested pages %v", urls)
+	}
+	// First page folders may have been written; cursor still must stay unset.
+	_ = before
+}
+
+func TestOneDriveFailedBaselineDoesNotSweepToBin(t *testing.T) {
+	store := seedDrive(t)
+	// Pre-seed an indexed file that will be "unseen" if a broken baseline swept.
+	oldKey := outlook.OneDriveFileKey(driveTestPrefix, outlook.OneDriveSectionMyDrive, nil, "OLD", "old.txt")
+	store.objects[oldKey] = memDriveObject{data: []byte("x"), meta: map[string]string{
+		outlook.OneDriveMetaItemID: "OLD", outlook.OneDriveMetaName: "old.txt",
+	}}
+
+	prevDelta, prevRoot, prevContent := oneDriveDeltaPageFn, oneDriveRootIDFn, oneDriveContentFn
+	initial := outlook.OneDriveInitialDeltaURL(driveTestRoot)
+	oneDriveDeltaPageFn = func(_ context.Context, _, u string) (*outlook.OneDriveDeltaPage, error) {
+		if u != initial {
+			return nil, fmt.Errorf("unexpected %s", u)
+		}
+		return &outlook.OneDriveDeltaPage{Items: []outlook.OneDriveItem{
+			driveFile("Fbad", "ROOT", "boom.txt", "c1"),
+		}, DeltaLink: pagedFinal}, nil
+	}
+	oneDriveRootIDFn = func(context.Context, string, string) (string, error) { return "ROOT", nil }
+	oneDriveContentFn = func(context.Context, string, string, string) (io.ReadCloser, int64, error) {
+		return nil, 0, fmt.Errorf("forced content failure")
+	}
+	t.Cleanup(func() {
+		oneDriveDeltaPageFn, oneDriveRootIDFn, oneDriveContentFn = prevDelta, prevRoot, prevContent
+	})
+
+	tm := &repo.TaskMemory{OneDriveLayout: repo.OneDriveLayoutTree}
+	run := newOneDriveRun(ProcessorInput{}, store, "tok", driveTestRoot, driveTestPrefix, store.keySet())
+	if err := run.syncAll(context.Background(), tm); err == nil {
+		t.Fatal("want baseline apply failure")
+	}
+	if tm.OneDriveDeltaLink != nil {
+		t.Fatal("cursor must not be saved")
+	}
+	if _, ok := store.objects[oldKey]; !ok {
+		t.Fatal("failed baseline must not sweep existing backups to BIN")
+	}
+	if bin := store.keysUnder(outlook.OneDriveSectionBin); len(bin) != 0 {
+		t.Fatalf("unexpected bin keys: %v", bin)
 	}
 }

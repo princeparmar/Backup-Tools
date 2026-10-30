@@ -14,6 +14,7 @@ var msRefreshAccountTenantsFn = mstenant.RefreshAccountTenants
 // HandleMicrosoftAccountTenants discovers every tenant the signed-in Microsoft account can reach,
 // checks a tenant-scoped token and roles in each, and returns their access states.
 // GET /microsoft/accounts/tenants (token_key, MICROSOFT_ACCOUNT_ID, REFRESH_TOKEN)
+// Optional query refresh=1 forces live token/role probes; otherwise recent checks are reused.
 func HandleMicrosoftAccountTenants(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
@@ -27,11 +28,21 @@ func HandleMicrosoftAccountTenants(c echo.Context) error {
 	if err != nil {
 		return microsoftErrorJSON(c, err)
 	}
-	out, err := msRefreshAccountTenantsFn(ctx, microsoftDB(c), cred, id.RefreshToken)
+	force := queryTruthy(c.QueryParam("refresh"))
+	out, err := msRefreshAccountTenantsFn(ctx, microsoftDB(c), cred, id.RefreshToken, force)
 	if err != nil {
 		return microsoftErrorJSON(c, err)
 	}
 	return c.JSON(http.StatusOK, out)
+}
+
+func queryTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 type microsoftConnectTenantRequest struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -125,11 +126,31 @@ func TestMigrationReadinessOrganizationTarget(t *testing.T) {
 		return res
 	}
 
+	prevDel := delegatedRestoreTokenFn
+	t.Cleanup(func() { delegatedRestoreTokenFn = prevDel })
+	delegatedRestoreTokenFn = func(string, string, string) (*outlook.TokenResponse, error) {
+		return nil, errors.New("no delegated write")
+	}
 	stubTargets(t, &OrganizationTenant{TenantID: orgTenant, CredentialID: admin.ID, Name: "Fabrikam", Token: readOnly}, user, nil)
 	res := run()
 	if res.Ready || res.Reason != restore.ReadinessReasonMissingPermissions ||
 		len(res.MissingPermissions) != 1 || res.MissingPermissions[0].Scope != "Mail.ReadWrite" {
 		t.Fatalf("read-only consent must report the missing write role: %+v", res)
+	}
+
+	delegatedRestoreTokenFn = func(string, string, string) (*outlook.TokenResponse, error) {
+		return &outlook.TokenResponse{
+			AccessToken: fakeJWT(map[string]interface{}{"scp": "Mail.ReadWrite"}),
+			Scope:       "Mail.ReadWrite",
+		}, nil
+	}
+	probedGrant := stubTargets(t, &OrganizationTenant{TenantID: orgTenant, CredentialID: admin.ID, Name: "Fabrikam", Token: readOnly}, user, nil)
+	res = run()
+	if !res.Ready || len(*probedGrant) != 1 {
+		t.Fatalf("Grant Access mail write should restore into the org mailbox: %+v probed=%v", res, *probedGrant)
+	}
+	delegatedRestoreTokenFn = func(string, string, string) (*outlook.TokenResponse, error) {
+		return nil, errors.New("no delegated write")
 	}
 
 	probed := stubTargets(t, &OrganizationTenant{TenantID: orgTenant, CredentialID: admin.ID, Token: readWrite}, user, nil)
@@ -279,6 +300,10 @@ func TestSharePointSiteReadiness(t *testing.T) {
 	if !res.Ready || !res.Migration || res.CredentialID != admin.ID || res.TenantID != srcTenant || res.TargetEmail != siteID || probed != siteID {
 		t.Fatalf("ready site: %+v probed=%q", res, probed)
 	}
+	res = run("contoso.sharepoint.com_11111111-1111-1111-1111-111111111111_22222222-2222-2222-2222-222222222222")
+	if !res.Ready || probed != siteID || res.TargetEmail != siteID {
+		t.Fatalf("sanitized site must probe Graph id: %+v probed=%q", res, probed)
+	}
 
 	checkSharePointSiteFn = func(context.Context, string, string) (string, error) {
 		return "", outlook.ErrSharePointSiteNoDocumentLibrary
@@ -302,10 +327,38 @@ func TestSharePointSiteReadiness(t *testing.T) {
 			Token: fakeJWT(map[string]interface{}{"roles": []string{"Sites.Read.All"}}),
 		}, nil
 	}
+	prevDel := delegatedRestoreTokenFn
+	t.Cleanup(func() { delegatedRestoreTokenFn = prevDel })
+	delegatedRestoreTokenFn = func(string, string, string) (*outlook.TokenResponse, error) {
+		return nil, errors.New("no delegated write")
+	}
 	res = run(siteID)
-	if res.Ready || res.Reason != restore.ReadinessReasonMissingPermissions ||
-		len(res.MissingPermissions) != 1 || res.MissingPermissions[0].Scope != "Sites.ReadWrite.All" {
+	if res.Ready || res.Reason != restore.ReadinessReasonMissingPermissions {
 		t.Fatalf("missing write role: %+v", res)
+	}
+	gotScopes := map[string]bool{}
+	for _, p := range res.MissingPermissions {
+		gotScopes[p.Scope] = true
+	}
+	if !gotScopes["Files.ReadWrite.All"] || !gotScopes["Sites.ReadWrite.All"] {
+		t.Fatalf("grant scopes %+v", res.MissingPermissions)
+	}
+
+	delTok := fakeJWT(map[string]interface{}{"scp": "Files.ReadWrite.All Sites.Read.All"})
+	delegatedRestoreTokenFn = func(string, string, string) (*outlook.TokenResponse, error) {
+		return &outlook.TokenResponse{AccessToken: delTok, Scope: "Files.ReadWrite.All Sites.Read.All"}, nil
+	}
+	var wroteWith string
+	checkSharePointSiteFn = func(_ context.Context, gotToken, site string) (string, error) {
+		wroteWith = gotToken
+		if site != siteID {
+			t.Fatalf("site %q", site)
+		}
+		return "drive-default", nil
+	}
+	res = run(siteID)
+	if !res.Ready || wroteWith != delTok {
+		t.Fatalf("Grant Access Files.ReadWrite.All should restore the site: ready=%v token=%q", res.Ready, wroteWith)
 	}
 
 	res = run("someone@contoso.com")

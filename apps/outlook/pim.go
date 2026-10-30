@@ -9,6 +9,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 )
 
 // Calendar and contacts backups store each Graph event or contact as its full JSON:
@@ -98,10 +100,12 @@ func (d graphDateTime) utc() string {
 }
 
 // PIMContactFolder is the stored description of a non-default contact folder.
+// RemovedAt is set when the folder is gone from Microsoft; its contacts backup is kept.
 type PIMContactFolder struct {
 	ID             string `json:"id"`
 	DisplayName    string `json:"displayName"`
 	ParentFolderID string `json:"parentFolderId,omitempty"`
+	RemovedAt      string `json:"removed_at,omitempty"`
 }
 
 // PIMItem is one Graph event or contact as returned by a list call.
@@ -109,6 +113,7 @@ type PIMItem struct {
 	ID           string
 	ChangeKey    string
 	SeriesMaster bool
+	Removed      bool // set on contacts/delta @removed rows
 	Raw          json.RawMessage
 }
 
@@ -152,9 +157,14 @@ func ParsePIMContactKey(key string) (dir string, inFolder bool) {
 }
 
 // ListPIMPage GETs one page of a Graph collection of events (times in UTC) or contacts. Cancelled
-// events are kept so the backup holds their latest state; restore skips them.
+// events are kept so the backup holds their latest state; restore skips them. Prefer UTC is only
+// sent for calendar event URLs; contacts ignore timezone.
 func ListPIMPage(ctx context.Context, accessToken, pageURL string) ([]PIMItem, string, error) {
-	body, status, err := graphRequest(ctx, accessToken, http.MethodGet, pageURL, nil, "UTC")
+	tz := ""
+	if strings.Contains(pageURL, "/events") || strings.Contains(pageURL, "/calendarView") || strings.Contains(pageURL, "/instances") {
+		tz = "UTC"
+	}
+	body, status, err := graphRequest(ctx, accessToken, http.MethodGet, pageURL, nil, tz)
 	if err != nil {
 		return nil, "", err
 	}
@@ -183,9 +193,29 @@ func ListPIMPage(ctx context.Context, accessToken, pageURL string) ([]PIMItem, s
 	return items, page.NextLink, nil
 }
 
-// PIMEventsURL lists the events of one calendar: single events and recurring series masters.
+// PIMCalendarEventRoot is {userBase}/calendars/{calendarId} for user calendar event APIs.
+func PIMCalendarEventRoot(userBase, calendarID string) string {
+	return strings.TrimRight(userBase, "/") + "/calendars/" + url.PathEscape(calendarID)
+}
+
+// PIMGroupCalendarEventRoot is /groups/{groupId}/calendar for M365 group calendar event APIs.
+func PIMGroupCalendarEventRoot(groupID string) string {
+	return graphBaseURL + "/groups/" + url.PathEscape(strings.TrimSpace(groupID)) + "/calendar"
+}
+
+// PIMGroupAttachmentRoot is /groups/{groupId} for event attachment GETs on a group calendar.
+func PIMGroupAttachmentRoot(groupID string) string {
+	return graphBaseURL + "/groups/" + url.PathEscape(strings.TrimSpace(groupID))
+}
+
+// PIMEventsURL lists the events of one user calendar: single events and recurring series masters.
 func PIMEventsURL(userBase, calendarID string) string {
-	return strings.TrimRight(userBase, "/") + "/calendars/" + url.PathEscape(calendarID) + "/events?$top=100"
+	return PIMEventsURLFromRoot(PIMCalendarEventRoot(userBase, calendarID))
+}
+
+// PIMEventsURLFromRoot lists events under an event root (.../calendars/{id} or .../groups/{id}/calendar).
+func PIMEventsURLFromRoot(eventRoot string) string {
+	return strings.TrimRight(eventRoot, "/") + "/events?$top=100"
 }
 
 // PIMContactsURL lists the contacts of a folder; "" is the default Contacts folder.
@@ -197,7 +227,7 @@ func PIMContactsURL(userBase, folderID string) string {
 	return base + "/contactFolders/" + url.PathEscape(folderID) + "/contacts?$top=100"
 }
 
-// ListPIMCalendars returns every calendar of the user.
+// ListPIMCalendars returns every calendar of the user (My calendars: primary, holidays, birthdays, …).
 func ListPIMCalendars(ctx context.Context, accessToken, userBase string) ([]FlatCalendar, error) {
 	next := strings.TrimRight(userBase, "/") + "/calendars?$top=100&$select=id,name,color,hexColor,canEdit,isDefaultCalendar"
 	var out []FlatCalendar
@@ -218,12 +248,220 @@ func ListPIMCalendars(ctx context.Context, accessToken, userBase string) ([]Flat
 		}
 		for _, c := range page.Value {
 			if c.ID != "" {
-				out = append(out, FlatCalendar{ID: c.ID, Name: c.Name, Color: c.Color, HexColor: c.HexColor, CanEdit: c.CanEdit, IsDefault: c.IsDefaultCalendar})
+				out = append(out, FlatCalendar{
+					ID: c.ID, Name: c.Name, Color: c.Color, HexColor: c.HexColor,
+					CanEdit: c.CanEdit, IsDefault: c.IsDefaultCalendar, Source: CalendarSourceUser,
+				})
 			}
 		}
 		next = page.NextLink
 	}
 	return out, nil
+}
+
+// ListPIMCalendarsFromGroups walks every Outlook calendarGroup (My calendars, Other calendars,
+// People, …). GET /me/calendars only returns the default group; Birthdays/holidays are usually
+// there, but shared / group-linked calendars often live in other calendarGroups.
+func ListPIMCalendarsFromGroups(ctx context.Context, accessToken, userBase string) ([]FlatCalendar, error) {
+	userBase = strings.TrimRight(strings.TrimSpace(userBase), "/")
+	if userBase == "" {
+		return nil, fmt.Errorf("user base is required")
+	}
+	next := userBase + "/calendarGroups?$select=id,name&$top=50"
+	var out []FlatCalendar
+	for next != "" {
+		var page struct {
+			Value []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"value"`
+			NextLink string `json:"@odata.nextLink"`
+		}
+		if err := graphGetInto(ctx, accessToken, next, &page); err != nil {
+			return nil, fmt.Errorf("list calendar groups: %w", err)
+		}
+		for _, g := range page.Value {
+			if g.ID == "" {
+				continue
+			}
+			cals, err := listCalendarsInCalendarGroup(ctx, accessToken, userBase, g.ID)
+			if err != nil {
+				logger.Warn(ctx, "outlook calendarGroup calendars skipped",
+					logger.String("calendar_group", g.Name), logger.ErrorField(err))
+				continue
+			}
+			source := CalendarSourceUser
+			if calendarGroupLooksLikeGroups(g.Name) {
+				source = CalendarSourceGroup
+			}
+			for i := range cals {
+				cals[i].Source = source
+				out = append(out, cals[i])
+			}
+		}
+		next = page.NextLink
+	}
+	return out, nil
+}
+
+func listCalendarsInCalendarGroup(ctx context.Context, accessToken, userBase, groupID string) ([]FlatCalendar, error) {
+	next := strings.TrimRight(userBase, "/") + "/calendarGroups/" + url.PathEscape(groupID) +
+		"/calendars?$top=100&$select=id,name,color,hexColor,canEdit,isDefaultCalendar"
+	var out []FlatCalendar
+	for next != "" {
+		var page struct {
+			Value []struct {
+				ID                string `json:"id"`
+				Name              string `json:"name"`
+				Color             string `json:"color"`
+				HexColor          string `json:"hexColor"`
+				CanEdit           bool   `json:"canEdit"`
+				IsDefaultCalendar bool   `json:"isDefaultCalendar"`
+			} `json:"value"`
+			NextLink string `json:"@odata.nextLink"`
+		}
+		if err := graphGetInto(ctx, accessToken, next, &page); err != nil {
+			return nil, err
+		}
+		for _, c := range page.Value {
+			if c.ID == "" {
+				continue
+			}
+			out = append(out, FlatCalendar{
+				ID: c.ID, Name: c.Name, Color: c.Color, HexColor: c.HexColor,
+				CanEdit: c.CanEdit, IsDefault: c.IsDefaultCalendar,
+			})
+		}
+		next = page.NextLink
+	}
+	return out, nil
+}
+
+func calendarGroupLooksLikeGroups(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	return n == "groups" || strings.Contains(n, "group calendars")
+}
+
+// ListPIMGroupCalendars returns M365 Groups calendars (Outlook sidebar "Groups", e.g. Smartiies)
+// via /me membership + /groups/{id}/calendar. Always uses /me for membership (delegated token),
+// even when mailbox calendars use /users/{upn}. App-only tokens fail /me and the caller soft-skips.
+// Soft-skips individual groups the token cannot open (missing Group.Read.All or no calendar).
+func ListPIMGroupCalendars(ctx context.Context, accessToken, userBase string) ([]FlatCalendar, error) {
+	_ = userBase // mailbox path unused; group calendars are resolved via /me + /groups/{id}
+	groups, err := listMemberUnifiedGroups(ctx, accessToken)
+	if err != nil {
+		return nil, err
+	}
+	var out []FlatCalendar
+	for _, g := range groups {
+		cal, err := fetchGroupCalendar(ctx, accessToken, g.ID)
+		if err != nil {
+			logger.Warn(ctx, "outlook group calendar skipped",
+				logger.String("group_id", g.ID), logger.String("group", g.DisplayName), logger.ErrorField(err))
+			continue
+		}
+		name := strings.TrimSpace(cal.Name)
+		if name == "" {
+			name = strings.TrimSpace(g.DisplayName)
+		}
+		if name == "" {
+			name = g.ID
+		}
+		id := strings.TrimSpace(cal.ID)
+		if id == "" {
+			id = g.ID
+		}
+		out = append(out, FlatCalendar{
+			ID: id, Name: name, Color: cal.Color, HexColor: cal.HexColor,
+			CanEdit: cal.CanEdit, Source: CalendarSourceGroup, GroupID: g.ID,
+		})
+	}
+	return out, nil
+}
+
+type graphUnifiedGroup struct {
+	ID          string
+	DisplayName string
+}
+
+func listMemberUnifiedGroups(ctx context.Context, accessToken string) ([]graphUnifiedGroup, error) {
+	// Prefer transitive membership so nested group membership still finds Smartiies-style groups.
+	urls := []string{
+		graphBaseURL + "/me/transitiveMemberOf/microsoft.graph.group?$select=id,displayName,groupTypes&$top=100",
+		graphBaseURL + "/me/memberOf/microsoft.graph.group?$select=id,displayName,groupTypes&$top=100",
+	}
+	seen := map[string]bool{}
+	var out []graphUnifiedGroup
+	var lastErr error
+	for _, start := range urls {
+		pageOut, err := listUnifiedGroupsFromURL(ctx, accessToken, start)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		for _, g := range pageOut {
+			if seen[g.ID] {
+				continue
+			}
+			seen[g.ID] = true
+			out = append(out, g)
+		}
+	}
+	if len(out) == 0 && lastErr != nil {
+		return nil, lastErr
+	}
+	return out, nil
+}
+
+func listUnifiedGroupsFromURL(ctx context.Context, accessToken, startURL string) ([]graphUnifiedGroup, error) {
+	next := startURL
+	var out []graphUnifiedGroup
+	for next != "" {
+		var page struct {
+			Value []struct {
+				ID          string   `json:"id"`
+				DisplayName string   `json:"displayName"`
+				GroupTypes  []string `json:"groupTypes"`
+			} `json:"value"`
+			NextLink string `json:"@odata.nextLink"`
+		}
+		if err := graphGetInto(ctx, accessToken, next, &page); err != nil {
+			return nil, fmt.Errorf("list member groups: %w", err)
+		}
+		for _, g := range page.Value {
+			if g.ID == "" || !groupTypesHasUnified(g.GroupTypes) {
+				continue
+			}
+			out = append(out, graphUnifiedGroup{ID: g.ID, DisplayName: g.DisplayName})
+		}
+		next = page.NextLink
+	}
+	return out, nil
+}
+
+func groupTypesHasUnified(types []string) bool {
+	for _, t := range types {
+		if strings.EqualFold(strings.TrimSpace(t), "Unified") {
+			return true
+		}
+	}
+	return false
+}
+
+func fetchGroupCalendar(ctx context.Context, accessToken, groupID string) (FlatCalendar, error) {
+	reqURL := graphBaseURL + "/groups/" + url.PathEscape(strings.TrimSpace(groupID)) +
+		"/calendar?$select=id,name,color,hexColor,canEdit"
+	var c struct {
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Color    string `json:"color"`
+		HexColor string `json:"hexColor"`
+		CanEdit  bool   `json:"canEdit"`
+	}
+	if err := graphGetInto(ctx, accessToken, reqURL, &c); err != nil {
+		return FlatCalendar{}, err
+	}
+	return FlatCalendar{ID: c.ID, Name: c.Name, Color: c.Color, HexColor: c.HexColor, CanEdit: c.CanEdit}, nil
 }
 
 // ListPIMContactFolders returns every contact folder below the default Contacts folder, nested

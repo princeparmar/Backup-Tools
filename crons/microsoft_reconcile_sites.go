@@ -23,10 +23,12 @@ var (
 	msSiteStateFn            = outlook.SharePointSiteState
 )
 
-// reconcileMicrosoftSiteScope checks the site of every job of the scope and, for
-// selection_mode=all, adds jobs for listed sites that have none. Existing jobs are never changed
-// except by the lifecycle check, and never removed.
+const sharePointTenantJobName = "Microsoft SharePoint"
+
+// reconcileMicrosoftSiteScope checks selected SharePoint sites and, for selection_mode=all, adds
+ // newly listed sites onto the combined tenant SharePoint job (never one job per site).
 func reconcileMicrosoftSiteScope(ctx context.Context, store *db.PostgresDb, tc *mstenant.Context, scope repo.MicrosoftBackupScopeDB, jobs []repo.CronJobListingDB) (int, error) {
+	jobs = appendSharePointTenantJobs(store, scope, jobs)
 	all := scope.SelectionMode == repo.MicrosoftScopeAll
 	var listed []outlook.SharePointSiteSummary
 	if all {
@@ -40,18 +42,45 @@ func reconcileMicrosoftSiteScope(ctx context.Context, store *db.PostgresDb, tc *
 	if !all {
 		return 0, nil
 	}
-	return addMicrosoftScopeSiteJobs(ctx, store, tc, scope, listed, jobs)
+	return addMicrosoftScopeSitesToTenantJob(ctx, store, tc, scope, listed, jobs)
 }
 
-// applySiteLifecycle pauses the jobs of a site Graph answers 404 for and resumes the jobs this
-// check paused once the site is back. A listed site is live; any other site is read one by one,
-// and a failed read (403, 429, 5xx, network) changes nothing.
+// appendSharePointTenantJobs adds the connection's combined outlook_sharepoint tenant job(s) to the
+ // site-scope job list (scopes are still ResourceTypeSite; the autosync job is ResourceTypeTenant).
+func appendSharePointTenantJobs(store *db.PostgresDb, scope repo.MicrosoftBackupScopeDB, jobs []repo.CronJobListingDB) []repo.CronJobListingDB {
+	rows, err := store.CronJobRepo.ListMicrosoftScopeJobs(scope.UserID, scope.TenantID, repo.ResourceTypeTenant, scope.SyncType)
+	if err != nil {
+		return jobs
+	}
+	seen := map[uint]bool{}
+	for _, j := range jobs {
+		seen[j.ID] = true
+	}
+	for _, j := range rows {
+		if j.Method != "outlook_sharepoint" || repo.JobCredentialID(&j) != scope.CredentialID || seen[j.ID] {
+			continue
+		}
+		jobs = append(jobs, j)
+	}
+	return jobs
+}
+
+// applySiteLifecycle pauses legacy per-site jobs when Graph answers 404 for that site, and
+ // resumes jobs this check paused once the site is back. The combined tenant SharePoint job is
+ // never paused here — missing sites are left in selection for the next backup warning.
 func applySiteLifecycle(ctx context.Context, store *db.PostgresDb, tc *mstenant.Context, jobs []repo.CronJobListingDB, listed []outlook.SharePointSiteSummary) {
 	live := make(map[string]bool, len(listed))
 	for _, s := range listed {
 		live[strings.TrimSpace(s.ID)] = true
 	}
-	order, bySite := groupJobsByResource(jobs)
+	legacy := make([]repo.CronJobListingDB, 0, len(jobs))
+	for i := range jobs {
+		if jobs[i].ResourceType == repo.ResourceTypeTenant {
+			continue
+		}
+		legacy = append(legacy, jobs[i])
+	}
+	order, bySite := groupJobsByResource(legacy)
 	for _, siteID := range order {
 		state := outlook.ObjectStateActive
 		if !live[siteID] {
@@ -66,24 +95,33 @@ func applySiteLifecycle(ctx context.Context, store *db.PostgresDb, tc *mstenant.
 	}
 }
 
-// addMicrosoftScopeSiteJobs creates, for every listed site without one, a job per method already
-// in the scope, copying the policy, interval, active state and settings of a sibling site job.
-func addMicrosoftScopeSiteJobs(ctx context.Context, store *db.PostgresDb, tc *mstenant.Context, scope repo.MicrosoftBackupScopeDB, sites []outlook.SharePointSiteSummary, jobs []repo.CronJobListingDB) (int, error) {
-	methods, templates, have := scopeJobIndex(jobs)
-	created := 0
+// addMicrosoftScopeSitesToTenantJob unions every listed site into the tenant SharePoint job's
+ // input_data.sites (creating that job once when only legacy site jobs exist).
+func addMicrosoftScopeSitesToTenantJob(ctx context.Context, store *db.PostgresDb, tc *mstenant.Context, scope repo.MicrosoftBackupScopeDB, sites []outlook.SharePointSiteSummary, jobs []repo.CronJobListingDB) (int, error) {
+	tenantJob, tmpl, err := ensureSharePointTenantJob(store, scope, jobs)
+	if err != nil {
+		return 0, err
+	}
+	_ = tmpl
+
+	have := map[string]bool{}
+	for _, sel := range repo.JobSharePointSites(tenantJob) {
+		have[sel.SiteID] = true
+	}
+	// Legacy per-site jobs also count as covered until they merge.
+	for i := range jobs {
+		if jobs[i].ResourceType == repo.ResourceTypeSite && jobs[i].Method == "outlook_sharepoint" {
+			if sid := strings.TrimSpace(jobs[i].ResourceID); sid != "" {
+				have[sid] = true
+			}
+		}
+	}
+
+	added := 0
 	var firstErr error
 	for _, s := range sites {
 		siteID := strings.TrimSpace(s.ID)
-		if siteID == "" {
-			continue
-		}
-		var missing []string
-		for _, m := range methods {
-			if !have[m+"|"+siteID] {
-				missing = append(missing, m)
-			}
-		}
-		if len(missing) == 0 {
+		if siteID == "" || have[siteID] {
 			continue
 		}
 		resolved, err := msReconcileResolveSiteFn(ctx, tc.Token, siteID, "")
@@ -93,55 +131,105 @@ func addMicrosoftScopeSiteJobs(ctx context.Context, store *db.PostgresDb, tc *ms
 			}
 			continue
 		}
-		upserted := false
-		for _, method := range missing {
-			if have[method+"|"+resolved.SiteID] {
-				continue
+		if have[resolved.SiteID] {
+			continue
+		}
+		if _, err := store.MicrosoftResourceRepo.Upsert(repo.MicrosoftResourceDB{
+			TenantID: scope.TenantID, ResourceType: repo.ResourceTypeSite, ExternalID: resolved.SiteID, DisplayName: resolved.SiteName,
+			Metadata: database.NewDbJsonFromValue(map[string]interface{}{"site_url": resolved.SiteURL, "drive_id": resolved.DriveID}),
+		}); err != nil {
+			return added, err
+		}
+		sel := repo.SharePointSiteSelection{
+			SiteID: resolved.SiteID, DriveID: resolved.DriveID,
+			SiteName: resolved.SiteName, SiteURL: resolved.SiteURL,
+		}
+		if err := store.CronJobRepo.UpdateJobInputData(tenantJob.ID, func(in map[string]interface{}) map[string]interface{} {
+			in = repo.SharePointSelectionAddSite(in, sel)
+			if sites := repo.JobSharePointSites(&repo.CronJobListingDB{InputData: database.NewDbJsonFromValue(in)}); len(sites) > 0 {
+				in["site_id"], in["drive_id"] = sites[0].SiteID, sites[0].DriveID
+				in["site_name"], in["site_url"] = sites[0].SiteName, sites[0].SiteURL
 			}
-			if existing, err := store.CronJobRepo.FindMicrosoftResourceJob(scope.UserID, scope.TenantID, repo.ResourceTypeSite, resolved.SiteID, method, scope.SyncType); err != nil || existing != nil {
-				if err != nil && firstErr == nil {
-					firstErr = err
-				}
-				have[method+"|"+resolved.SiteID] = existing != nil
-				continue
+			return in
+		}); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("add site %s to sharepoint job: %w", resolved.SiteID, err)
 			}
-			if !upserted {
-				if _, err := store.MicrosoftResourceRepo.Upsert(repo.MicrosoftResourceDB{
-					TenantID: scope.TenantID, ResourceType: repo.ResourceTypeSite, ExternalID: resolved.SiteID, DisplayName: resolved.SiteName,
-					Metadata: database.NewDbJsonFromValue(map[string]interface{}{"site_url": resolved.SiteURL, "drive_id": resolved.DriveID}),
-				}); err != nil {
-					return created, err
-				}
-				upserted = true
-			}
-			if err := cloneScopeSiteJob(store, scope, pickScopeTemplate(templates[method], scope.PolicyID), resolved); err != nil {
-				if firstErr == nil {
-					firstErr = fmt.Errorf("create %s job for site %s: %w", method, resolved.SiteID, err)
-				}
-				continue
-			}
-			have[method+"|"+resolved.SiteID] = true
-			created++
+			continue
+		}
+		have[resolved.SiteID] = true
+		added++
+		// Keep in-memory copy aligned for subsequent adds in this pass.
+		if refreshed, gerr := store.CronJobRepo.GetCronJobByID(tenantJob.ID); gerr == nil && refreshed != nil {
+			tenantJob = refreshed
 		}
 	}
-	return created, firstErr
+	return added, firstErr
 }
 
-func cloneScopeSiteJob(store *db.PostgresDb, scope repo.MicrosoftBackupScopeDB, tmpl repo.CronJobListingDB, site *outlook.SharePointResolvedSite) error {
-	input := scopeTemplateInput(tmpl)
-	name := strings.TrimSpace(site.SiteName)
-	if name == "" {
-		name = outlook.SanitizeSharePointSiteKey(site.SiteID)
+// ensureSharePointTenantJob returns the combined SharePoint job for this scope, creating it from
+ // a legacy site-job template when needed.
+func ensureSharePointTenantJob(store *db.PostgresDb, scope repo.MicrosoftBackupScopeDB, jobs []repo.CronJobListingDB) (*repo.CronJobListingDB, repo.CronJobListingDB, error) {
+	var tmpl repo.CronJobListingDB
+	var siteJobs []repo.CronJobListingDB
+	for i := range jobs {
+		j := jobs[i]
+		if j.Method != "outlook_sharepoint" {
+			continue
+		}
+		if j.ResourceType == repo.ResourceTypeTenant {
+			return &j, j, nil
+		}
+		if j.ResourceType == repo.ResourceTypeSite {
+			siteJobs = append(siteJobs, j)
+		}
 	}
-	input["email"] = name
-	input["site_id"] = site.SiteID
-	input["drive_id"] = site.DriveID
-	input["site_name"] = site.SiteName
-	input["site_url"] = site.SiteURL
-	job, err := store.CronJobRepo.CreateMicrosoftResourceJob(scope.UserID, name, tmpl.Method, scope.SyncType, scope.CredentialID,
-		repo.MicrosoftJobIdentity{TenantID: scope.TenantID, ResourceType: repo.ResourceTypeSite, ResourceID: site.SiteID}, input)
+	if existing, err := store.CronJobRepo.FindMicrosoftResourceJob(scope.UserID, scope.TenantID, repo.ResourceTypeTenant,
+		strings.ToLower(strings.TrimSpace(scope.TenantID)), "outlook_sharepoint", scope.SyncType); err != nil {
+		return nil, tmpl, err
+	} else if existing != nil && repo.JobCredentialID(existing) == scope.CredentialID {
+		return existing, *existing, nil
+	}
+
+	if len(siteJobs) > 0 {
+		tmpl = pickScopeTemplate(siteJobs, scope.PolicyID)
+	} else {
+		tmpl = repo.CronJobListingDB{
+			Method: "outlook_sharepoint", Interval: "daily", PolicyID: scope.PolicyID, Active: true,
+		}
+	}
+
+	extra := scopeTemplateInput(tmpl)
+	delete(extra, "site_id")
+	delete(extra, "drive_id")
+	delete(extra, "site_name")
+	delete(extra, "site_url")
+	delete(extra, "sites")
+	// Seed sites from every legacy site job so the tenant job owns the selection immediately.
+	for i := range siteJobs {
+		for _, sel := range repo.JobSharePointSites(&siteJobs[i]) {
+			extra = repo.SharePointSelectionAddSite(extra, sel)
+		}
+	}
+	if sites := repo.JobSharePointSites(&repo.CronJobListingDB{InputData: database.NewDbJsonFromValue(extra)}); len(sites) > 0 {
+		extra["site_id"], extra["drive_id"] = sites[0].SiteID, sites[0].DriveID
+		extra["site_name"], extra["site_url"] = sites[0].SiteName, sites[0].SiteURL
+	} else {
+		// Placeholder until the first listed site is resolved and added.
+		extra["sites"] = []repo.SharePointSiteSelection{}
+	}
+
+	job, err := store.CronJobRepo.CreateMicrosoftResourceJob(scope.UserID, sharePointTenantJobName, "outlook_sharepoint", scope.SyncType, scope.CredentialID,
+		repo.MicrosoftJobIdentity{TenantID: scope.TenantID, ResourceType: repo.ResourceTypeTenant, ResourceID: strings.ToLower(strings.TrimSpace(scope.TenantID))},
+		extra)
 	if err != nil {
-		return err
+		return nil, tmpl, err
 	}
-	return saveScopeTemplateSchedule(store, job.ID, tmpl)
+	if err := saveScopeTemplateSchedule(store, job.ID, tmpl); err != nil {
+		return nil, tmpl, err
+	}
+	if refreshed, gerr := store.CronJobRepo.GetCronJobByID(job.ID); gerr == nil && refreshed != nil {
+		job = refreshed
+	}
+	return job, tmpl, nil
 }

@@ -51,6 +51,19 @@ func TestValidateMicrosoftDelegatedOnboarding(t *testing.T) {
 	}
 }
 
+func TestMicrosoftOnboardingRequestValidateForAccessPreview_skipsSchedule(t *testing.T) {
+	app := &MicrosoftBackupOnboardingRequest{
+		Services: []string{"outlook"}, MicrosoftEmail: "admin@contoso.com",
+		BackupMode: microsoftBackupModeOrganization,
+	}
+	if err := app.validate("u"); err == nil {
+		t.Fatal("full validate still requires interval")
+	}
+	if err := app.validateForAccessPreview("u"); err != nil {
+		t.Fatalf("preview must not require interval/project: %v", err)
+	}
+}
+
 func TestMicrosoftOnboardingRequestValidate_authModes(t *testing.T) {
 	app := &MicrosoftBackupOnboardingRequest{
 		Services: []string{"outlook"}, MicrosoftEmail: "admin@contoso.com", ProjectID: "p", Interval: "daily",
@@ -127,9 +140,13 @@ func TestAuthorizeMicrosoftApplicationOnboarding(t *testing.T) {
 	if oneUser.wantsAllUsers() || !oneUser.wantsAllTenantResources() {
 		t.Fatal("all_tenant with named users covers tenant resources, not every user")
 	}
+	stub.listCalls = 0
 	picked, err := authorizeMicrosoftApplicationOnboarding(ctx, tc, oneUser, []string{"outlook"})
 	if err != nil || len(picked.Emails) != 1 || picked.Emails[0] != "ann@contoso.com" {
 		t.Fatalf("all_tenant must keep only the selected mailbox: %+v %v", picked, err)
+	}
+	if stub.listCalls != 0 {
+		t.Fatalf("paired user_ids+emails must skip Graph directory list, got %d calls", stub.listCalls)
 	}
 	everyone, err := authorizeMicrosoftApplicationOnboarding(ctx, tc,
 		&MicrosoftBackupOnboardingRequest{BackupScope: "all_tenant"}, []string{"outlook"})

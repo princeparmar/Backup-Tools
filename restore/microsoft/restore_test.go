@@ -8,6 +8,9 @@ import (
 	"testing"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
+	"github.com/StorX2-0/Backup-Tools/db"
+	"github.com/StorX2-0/Backup-Tools/mstenant"
+	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/restore"
 )
 
@@ -31,6 +34,32 @@ func TestMicrosoftRestoreScopesForMethod_table(t *testing.T) {
 			got := microsoftRestoreScopesForMethod(tt.method)
 			if len(got) == 0 || got[0] != tt.want {
 				t.Fatalf("scopes=%v want first %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMicrosoftRestoreGrantScopesSharePoint(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		method string
+		want   []string
+	}{
+		{method: "outlook_sharepoint", want: []string{"Files.ReadWrite.All", "Sites.ReadWrite.All"}},
+		{method: "outlook_onedrive", want: []string{"Files.ReadWrite.All"}},
+		{method: "outlook", want: []string{"Mail.ReadWrite"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method, func(t *testing.T) {
+			t.Parallel()
+			got, _ := microsoftRestoreGrantScopes(tt.method, nil)
+			if len(got) != len(tt.want) {
+				t.Fatalf("grant=%v want %v", got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Fatalf("grant=%v want %v", got, tt.want)
+				}
 			}
 		})
 	}
@@ -236,6 +265,240 @@ func TestRestoreUserBase(t *testing.T) {
 	}
 }
 
+func TestRestoreWriteUserBase(t *testing.T) {
+	prev := findOrganizationTargetFn
+	findOrganizationTargetFn = func(context.Context, *db.PostgresDb, string, string) (*OrganizationTenant, *outlook.DirectoryUser, error) {
+		t.Error("destination lookup must happen when the token is minted, not per key")
+		return nil, nil, nil
+	}
+	t.Cleanup(func() { findOrganizationTargetFn = prev })
+
+	key := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/user/oid-1/inbox/m1.json"
+	migration := &repo.RestoreJobListingDB{LoginID: "a@x.com", TargetEmail: "b@x.com", Method: "outlook"}
+	tests := []struct {
+		name    string
+		deps    *restore.RestoreDeps
+		want    string
+		wantErr bool
+	}{
+		{name: "delegated in place", deps: &restore.RestoreDeps{}, want: "/me"},
+		{name: "app in place uses key owner", deps: &restore.RestoreDeps{MicrosoftApplication: true}, want: "/users/oid-1"},
+		{name: "delegated migration uses signed-in mailbox", deps: &restore.RestoreDeps{Job: migration}, want: "/me"},
+		{
+			name: "app migration uses cached destination",
+			deps: &restore.RestoreDeps{
+				MicrosoftApplication:   true,
+				MicrosoftWriteUserBase: "https://graph.microsoft.com/v1.0/users/dest-oid",
+				Job:                    migration,
+			},
+			want: "/users/dest-oid",
+		},
+		{
+			name:    "app migration without destination fails",
+			deps:    &restore.RestoreDeps{MicrosoftApplication: true, Job: migration},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := restoreWriteUserBase(tt.deps, key)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil || !strings.HasSuffix(got, tt.want) {
+				t.Fatalf("base=%q err=%v want suffix %q", got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestPrepareMigrationWriteUser(t *testing.T) {
+	prev := findOrganizationTargetFn
+	t.Cleanup(func() { findOrganizationTargetFn = prev })
+	findOrganizationTargetFn = func(context.Context, *db.PostgresDb, string, string) (*OrganizationTenant, *outlook.DirectoryUser, error) {
+		return &OrganizationTenant{}, &outlook.DirectoryUser{ObjectID: "dest-oid"}, nil
+	}
+	inPlace := &repo.RestoreJobListingDB{LoginID: "a@x.com", Method: "outlook"}
+	migration := &repo.RestoreJobListingDB{UserID: "u", LoginID: "a@x.com", TargetEmail: "b@x.com", Method: "outlook"}
+	sharepoint := &repo.RestoreJobListingDB{LoginID: "a@x.com", TargetEmail: "site-1", Method: "outlook_sharepoint"}
+	tests := []struct {
+		name       string
+		deps       *restore.RestoreDeps
+		wantSuffix string
+		wantErr    bool
+	}{
+		{name: "in place clears destination", deps: &restore.RestoreDeps{MicrosoftApplication: true, MicrosoftWriteUserBase: "stale", Job: inPlace}},
+		{name: "delegated migration clears destination", deps: &restore.RestoreDeps{MicrosoftWriteUserBase: "stale", Job: migration}},
+		{name: "sharepoint migration is a site not a user", deps: &restore.RestoreDeps{MicrosoftApplication: true, MicrosoftWriteUserBase: "stale", Job: sharepoint}},
+		{
+			name:       "app migration resolves the destination user",
+			deps:       &restore.RestoreDeps{MicrosoftApplication: true, Store: &db.PostgresDb{}, Job: migration},
+			wantSuffix: "/users/dest-oid",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := prepareMigrationWriteUser(context.Background(), tt.deps)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantSuffix == "" && tt.deps.MicrosoftWriteUserBase != "" {
+				t.Fatalf("base=%q want empty", tt.deps.MicrosoftWriteUserBase)
+			}
+			if tt.wantSuffix != "" && !strings.HasSuffix(tt.deps.MicrosoftWriteUserBase, tt.wantSuffix) {
+				t.Fatalf("base=%q want suffix %q", tt.deps.MicrosoftWriteUserBase, tt.wantSuffix)
+			}
+		})
+	}
+}
+
+func TestEvaluateCredentialReadinessFallsBackToDelegatedWrite(t *testing.T) {
+	prevR, prevD := resolveTenantFn, delegatedRestoreTokenFn
+	t.Cleanup(func() { resolveTenantFn, delegatedRestoreTokenFn = prevR, prevD })
+	cases := []struct {
+		name      string
+		method    string
+		appRoles  []string
+		scp       string
+		mintErr   error
+		refresh   string
+		wantReady bool
+		wantGrant string
+	}{
+		{name: "mail Grant Access", method: "outlook", appRoles: []string{"Mail.Read"}, scp: "User.Read Mail.ReadWrite", refresh: "rt", wantReady: true},
+		{name: "mail Shared variant", method: "outlook", appRoles: []string{"Mail.Read"}, scp: "User.Read Mail.ReadWrite.Shared", refresh: "rt", wantReady: true},
+		{name: "mail still read-only", method: "outlook", appRoles: []string{"Mail.Read"}, scp: "User.Read Mail.Read", refresh: "rt", wantGrant: "Mail.ReadWrite"},
+		{name: "mail no refresh", method: "outlook", appRoles: []string{"Mail.Read"}, wantGrant: "Mail.ReadWrite"},
+		{name: "mail mint fails", method: "outlook", appRoles: []string{"Mail.Read"}, mintErr: errors.New("invalid_grant"), refresh: "rt", wantGrant: "Mail.ReadWrite"},
+		{name: "calendar Grant Access", method: "outlook_calendar", appRoles: []string{"Calendars.Read"}, scp: "Calendars.ReadWrite", refresh: "rt", wantReady: true},
+		{name: "contacts Grant Access", method: "outlook_contacts", appRoles: []string{"Contacts.Read"}, scp: "Contacts.ReadWrite", refresh: "rt", wantReady: true},
+		{name: "onedrive Grant Access", method: "outlook_onedrive", appRoles: []string{"Files.Read.All"}, scp: "Files.ReadWrite.All", refresh: "rt", wantReady: true},
+		{name: "onedrive personal Files.ReadWrite", method: "outlook_onedrive", appRoles: []string{"Files.Read.All"}, scp: "Files.ReadWrite", refresh: "rt", wantReady: true},
+		{name: "sharepoint Files.ReadWrite.All", method: "outlook_sharepoint", appRoles: []string{"Sites.Read.All"}, scp: "Files.ReadWrite.All Sites.Read.All", refresh: "rt", wantReady: true},
+		{name: "sharepoint Sites.ReadWrite.All", method: "outlook_sharepoint", appRoles: []string{"Sites.Read.All"}, scp: "Sites.ReadWrite.All", refresh: "rt", wantReady: true},
+		{name: "sharepoint still read-only", method: "outlook_sharepoint", appRoles: []string{"Sites.Read.All"}, scp: "Sites.Read.All Files.Read.All", refresh: "rt", wantGrant: "Files.ReadWrite.All"},
+		{name: "teams Grant Access both send scopes", method: "outlook_teams", appRoles: []string{"ChannelMessage.Read.All"}, scp: "ChannelMessage.Send ChatMessage.Send", refresh: "rt", wantReady: true},
+		{name: "teams channel only still asks chat", method: "outlook_teams", appRoles: []string{"ChannelMessage.Read.All"}, scp: "ChannelMessage.Send", refresh: "rt", wantGrant: "ChatMessage.Send"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			appTok := fakeJWT(map[string]interface{}{"roles": tc.appRoles, "idtyp": "app"})
+			resolveTenantFn = func(context.Context, *db.PostgresDb, mstenant.Request) (*mstenant.Context, error) {
+				return &mstenant.Context{Token: appTok, Application: true, TenantID: "tenant"}, nil
+			}
+			delegatedRestoreTokenFn = func(string, string, string) (*outlook.TokenResponse, error) {
+				if tc.mintErr != nil {
+					return nil, tc.mintErr
+				}
+				return &outlook.TokenResponse{
+					AccessToken: fakeJWT(map[string]interface{}{"scp": tc.scp}),
+					Scope:       tc.scp,
+				}, nil
+			}
+			out := &restore.ReadinessResult{Service: tc.method}
+			got, err := evaluateCredentialReadiness(context.Background(), nil, out, "u", tc.method, tc.method,
+				&repo.GoogleBackupCredentialDB{RefreshToken: tc.refresh}, "tenant")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Ready != tc.wantReady {
+				t.Fatalf("ready=%v want %v reason=%s missing=%+v", got.Ready, tc.wantReady, got.Reason, got.MissingPermissions)
+			}
+			if tc.wantGrant == "" {
+				return
+			}
+			found := false
+			for _, p := range got.MissingPermissions {
+				if p.Scope == tc.wantGrant {
+					found = true
+				}
+			}
+			if got.Ready || !found {
+				t.Fatalf("grant scopes %+v want %s", got.MissingPermissions, tc.wantGrant)
+			}
+		})
+	}
+}
+
+func TestDelegatedRestoreScopesOK(t *testing.T) {
+	cases := []struct {
+		name     string
+		method   string
+		granted  []string
+		required []string
+		ok       bool
+	}{
+		{name: "mail exact", method: "outlook", granted: []string{"Mail.ReadWrite"}, required: []string{"Mail.ReadWrite"}, ok: true},
+		{name: "mail shared", method: "outlook", granted: []string{"Mail.ReadWrite.Shared"}, required: []string{"Mail.ReadWrite"}, ok: true},
+		{name: "calendar shared", method: "outlook_calendar", granted: []string{"Calendars.ReadWrite.Shared"}, required: []string{"Calendars.ReadWrite"}, ok: true},
+		{name: "contacts shared", method: "outlook_contacts", granted: []string{"Contacts.ReadWrite.Shared"}, required: []string{"Contacts.ReadWrite"}, ok: true},
+		{name: "onedrive personal", method: "outlook_onedrive", granted: []string{"Files.ReadWrite"}, required: []string{"Files.ReadWrite.All"}, ok: true},
+		{name: "sharepoint sites write", method: "outlook_sharepoint", granted: []string{"Sites.ReadWrite.All"}, required: []string{"Files.ReadWrite.All"}, ok: true},
+		{name: "teams both", method: "outlook_teams", granted: []string{"ChannelMessage.Send", "ChatMessage.Send"}, required: []string{"ChannelMessage.Send", "ChatMessage.Send"}, ok: true},
+		{name: "teams channel only", method: "outlook_teams", granted: []string{"ChannelMessage.Send"}, required: []string{"ChannelMessage.Send", "ChatMessage.Send"}},
+		{name: "read is not write", method: "outlook", granted: []string{"Mail.Read"}, required: []string{"Mail.ReadWrite"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := delegatedRestoreScopesOK(tc.method, tc.granted, tc.required); got != tc.ok {
+				t.Fatalf("ok=%v want %v", got, tc.ok)
+			}
+		})
+	}
+}
+
+func TestEvaluateCredentialReadinessRequiresWriteRole(t *testing.T) {
+	prev := resolveTenantFn
+	t.Cleanup(func() { resolveTenantFn = prev })
+	tests := []struct {
+		name        string
+		method      string
+		roles       []string
+		application bool
+		scope       string
+		wantReady   bool
+	}{
+		{name: "app mail read is not enough", method: "outlook", roles: []string{"Mail.Read"}, application: true},
+		{name: "app mail readwrite", method: "outlook", roles: []string{"Mail.ReadWrite"}, application: true, wantReady: true},
+		{name: "app sharepoint files role is not site write", method: "outlook_sharepoint", roles: []string{"Files.ReadWrite.All"}, application: true},
+		{name: "app sharepoint sites write", method: "outlook_sharepoint", roles: []string{"Sites.ReadWrite.All"}, application: true, wantReady: true},
+		{name: "teams stays delegated", method: "outlook_teams", roles: []string{"ChannelMessage.Send"}, application: true},
+		{name: "personal opaque write scope", method: "outlook", scope: "Mail.ReadWrite", wantReady: true},
+		{name: "personal opaque read scope", method: "outlook", scope: "Mail.Read"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			token := "EwCIBMl6BAAUCBUz0PacOpaqueNotAJWT"
+			if tt.application {
+				token = fakeJWT(map[string]interface{}{"roles": tt.roles, "idtyp": "app"})
+			}
+			resolveTenantFn = func(context.Context, *db.PostgresDb, mstenant.Request) (*mstenant.Context, error) {
+				return &mstenant.Context{Token: token, TokenScope: tt.scope, Application: tt.application}, nil
+			}
+			out := &restore.ReadinessResult{Service: "outlook"}
+			got, err := evaluateCredentialReadiness(context.Background(), nil, out, "u", "outlook", tt.method, &repo.GoogleBackupCredentialDB{}, "tenant")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Ready != tt.wantReady {
+				t.Fatalf("ready=%v want %v reason=%s message=%s", got.Ready, tt.wantReady, got.Reason, got.Message)
+			}
+			if !tt.wantReady && got.Reason != restore.ReadinessReasonMissingPermissions {
+				t.Fatalf("reason=%s", got.Reason)
+			}
+		})
+	}
+}
+
 type teamsPost struct{ kind, team, channel, parent, chat, body string }
 
 func fakeTeamsPosts(t *testing.T, replyErr map[string]error) *[]teamsPost {
@@ -280,15 +543,14 @@ func TestTeamsRestoreSessionRepostsWithRefAndThreads(t *testing.T) {
 		t.Fatalf("posts: %+v", got)
 	}
 	if got[0].kind != "post" || got[0].team != "team-1" || got[0].channel != "19:ch@thread.tacv2" ||
-		!strings.Contains(got[0].body, "Originally posted by Ann on 2026-10-01 10:00 UTC (ref "+outlook.TeamsRestoreRef(root)+")") ||
-		!strings.HasSuffix(got[0].body, "hello") {
+		got[0].body != "hello" {
 		t.Fatalf("root repost: %+v", got[0])
 	}
 	if got[1].kind != "reply" || got[1].parent != "new-1" {
 		t.Fatalf("reply goes under the reposted root: %+v", got[1])
 	}
-	if got[2].kind != "reply" || got[2].parent != "300" || got[3].kind != "post" || !strings.Contains(got[3].body, "In reply to message 300") {
-		t.Fatalf("missing root falls back to a new post with In reply to: %+v", got[2:4])
+	if got[2].kind != "reply" || got[2].parent != "300" || got[3].kind != "post" || got[3].body != "hello" {
+		t.Fatalf("missing root falls back to a new post: %+v", got[2:4])
 	}
 	if got[4].kind != "chat" || got[4].chat != "19:chat@thread.v2" {
 		t.Fatalf("chat restore: %+v", got[4])

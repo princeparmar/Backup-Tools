@@ -13,6 +13,8 @@ const (
 	MailboxFallbackEstimateBytes int64 = 2 * 1024 * 1024 * 1024
 	// OneDriveFallbackEstimateBytes is used when Graph cannot report a drive's quota usage.
 	OneDriveFallbackEstimateBytes int64 = 5 * 1024 * 1024 * 1024
+	// ContactsMinEstimateBytes clamps small Outlook contacts backups (precheck buffer).
+	ContactsMinEstimateBytes int64 = 1 * 1024 * 1024
 	// averageMailMessageBytes approximates one message with typical attachments.
 	averageMailMessageBytes int64 = 75 * 1024
 )

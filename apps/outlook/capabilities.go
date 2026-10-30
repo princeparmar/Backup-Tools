@@ -63,24 +63,23 @@ var ConsentRequiredRoles = []string{"User.Read.All", "Mail.Read"}
 
 // roleSupersets lists granted roles that also satisfy a required role.
 var roleSupersets = map[string][]string{
-	"user.read.all":                 {"user.readwrite.all", "directory.read.all", "directory.readwrite.all"},
-	"mail.read":                     {"mail.readwrite"},
-	"calendars.read":                {"calendars.readwrite"},
-	"contacts.read":                 {"contacts.readwrite"},
-	"files.read.all":                {"files.readwrite.all"},
-	"files.readwrite.all":           {"sites.readwrite.all", "sites.fullcontrol.all"},
-	"sites.read.all":                {"sites.readwrite.all", "sites.fullcontrol.all"},
-	"sites.readwrite.all":           {"sites.fullcontrol.all"},
-	"group.read.all":                {"group.readwrite.all", "directory.read.all", "directory.readwrite.all"},
-	"channel.readbasic.all":         {"channel.readwrite.all"},
-	"channelmessage.read.all":       {},
-	"chat.read.all":                 {"chat.readwrite.all"},
-	"team.readbasic.all":            {"teamsettings.read.all", "teamsettings.readwrite.all", "group.read.all", "group.readwrite.all", "directory.read.all", "directory.readwrite.all"},
-	"onlinemeetings.read.all":       {"onlinemeetings.readwrite.all"},
-	"callrecord-pstncalls.read.all": {"callrecords.read.all"},
-	"teammember.read.all":           {"teammember.readwrite.all"},
-	"channelmember.read.all":        {"channelmember.readwrite.all"},
-	"teamworktag.read.all":          {"teamworktag.readwrite.all"},
+	"user.read.all":           {"user.readwrite.all", "directory.read.all", "directory.readwrite.all"},
+	"mail.read":               {"mail.readwrite"},
+	"calendars.read":          {"calendars.readwrite"},
+	"contacts.read":           {"contacts.readwrite"},
+	"files.read.all":          {"files.readwrite.all"},
+	"files.readwrite.all":     {"sites.readwrite.all", "sites.fullcontrol.all"},
+	"sites.read.all":          {"sites.readwrite.all", "sites.fullcontrol.all"},
+	"sites.readwrite.all":     {"sites.fullcontrol.all"},
+	"group.read.all":          {"group.readwrite.all", "directory.read.all", "directory.readwrite.all"},
+	"channel.readbasic.all":   {"channel.readwrite.all"},
+	"channelmessage.read.all": {},
+	"chat.read.all":           {"chat.readwrite.all"},
+	"team.readbasic.all":      {"teamsettings.read.all", "teamsettings.readwrite.all", "group.read.all", "group.readwrite.all", "directory.read.all", "directory.readwrite.all"},
+	"onlinemeetings.read.all": {"onlinemeetings.readwrite.all"},
+	"teammember.read.all":     {"teammember.readwrite.all"},
+	"channelmember.read.all":  {"channelmember.readwrite.all"},
+	"teamworktag.read.all":    {"teamworktag.readwrite.all"},
 	"teamsappinstallation.readforteam.all": {"teamsappinstallation.read.all", "teamsappinstallation.readwriteforteam.all",
 		"teamsappinstallation.readwriteandconsentforteam.all", "group.read.all", "group.readwrite.all", "directory.read.all", "directory.readwrite.all"},
 	"teamstab.read.all": {"teamstab.readwrite.all", "teamstab.readwriteforteam.all", "group.read.all", "group.readwrite.all",
@@ -116,6 +115,14 @@ var TeamsFeatureRoles = map[string][]string{
 	TeamsFeaturePSTN:            {"CallRecord-PstnCalls.Read.All"},
 	TeamsFeatureDirectRouting:   {"CallRecord-PstnCalls.Read.All"},
 	TeamsFeatureConfig:          {"Team.ReadBasic.All", "Channel.ReadBasic.All"},
+}
+
+// TeamsApplicationOnlyRoles are Graph application-only APIs. Admin-consenting the app role is
+// not enough when the job uses a signed-in user token (scp); Graph will 403.
+var TeamsApplicationOnlyRoles = map[string]string{
+	TeamsFeatureCallRecords:   "CallRecords.Read.All",
+	TeamsFeaturePSTN:          "CallRecord-PstnCalls.Read.All",
+	TeamsFeatureDirectRouting: "CallRecord-PstnCalls.Read.All",
 }
 
 // TeamsConfigPartRoles lists the application role each part of a team's config needs (the team
@@ -277,6 +284,32 @@ func TokenRoles(accessToken string) []string {
 		return nil
 	}
 	return c.Roles
+}
+
+// TokenDelegated reports a readable token that only has delegated scopes (scp), not app roles.
+func TokenDelegated(accessToken string) bool {
+	var c struct {
+		Roles []string `json:"roles"`
+		Scp   *string  `json:"scp"`
+	}
+	if decodeJWTClaims(accessToken, &c) != nil {
+		return false
+	}
+	return c.Scp != nil && len(c.Roles) == 0
+}
+
+// TeamsApplicationOnlyNotConsented returns call-record features a delegated token cannot use.
+// App-only tokens are checked by TeamsFeaturesNotConsented. An unreadable token reports nothing
+// so Graph's answer decides.
+func TeamsApplicationOnlyNotConsented(accessToken string) map[string]string {
+	if !TokenDelegated(accessToken) {
+		return nil
+	}
+	out := map[string]string{}
+	for feature, role := range TeamsApplicationOnlyRoles {
+		out[feature] = role
+	}
+	return out
 }
 
 // MissingApplicationRoles returns required roles not satisfied by granted (supersets count).

@@ -230,3 +230,38 @@ func TestTeamsRestoreUsesTenantJobPrefixAndGuard(t *testing.T) {
 		}
 	}
 }
+
+func TestSharePointRestoreUsesTenantJob(t *testing.T) {
+	store := newRestoreTestDB(t)
+	cred := restoreCred(t, store, "oid-ann")
+	connectLink(t, store, cred, tenantA)
+	const siteID = "contoso.sharepoint.com,aaaa-1,bbbb-2"
+	tenantJob := teamsJob(t, store, cred, tenantA, repo.ResourceTypeTenant, tenantA)
+	tenantJob.Method = "outlook_sharepoint"
+	tenantJob.Name = "Microsoft SharePoint"
+	if err := store.DB.Save(tenantJob).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name     string
+		tenantID string
+		loginID  string
+		wantJob  uint
+		wantPref string
+	}{
+		{"site in tenant", tenantA, siteID, tenantJob.ID, outlook.ResourceKeyPrefix(tenantA, repo.ResourceTypeSite, siteID) + "/"},
+		{"tenant login", tenantA, tenantA, tenantJob.ID, tenantA + "/"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := FindMicrosoftRestoreJob(store, "u1", "outlook_sharepoint", tc.tenantID, tc.loginID)
+			if err != nil || got == nil || got.ID != tc.wantJob {
+				t.Fatalf("job: %+v, %v want %d", got, err, tc.wantJob)
+			}
+			if pref := RestoreKeyPrefix(&repo.RestoreJobListingDB{Method: "outlook_sharepoint", LoginID: tc.loginID}, got); pref != tc.wantPref {
+				t.Fatalf("prefix = %q, want %q", pref, tc.wantPref)
+			}
+		})
+	}
+}

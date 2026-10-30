@@ -2,6 +2,7 @@ package outlook
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -170,7 +171,8 @@ func mapGraphOutlookMailMessage(row graphOutlookMailMessageRow) OutlookMailDelta
 	return msg
 }
 
-// FetchOutlookMailMessageRaw loads full message JSON from Graph.
+// FetchOutlookMailMessageRaw loads full message JSON from Graph, filling in attachment bytes
+// Graph omits from $expand (large file attachments).
 func FetchOutlookMailMessageRaw(ctx context.Context, accessToken, userBaseURL, messageID string) ([]byte, *GraphOutlookMailMessageDetail, error) {
 	messageID = strings.TrimSpace(messageID)
 	userBaseURL = strings.TrimRight(strings.TrimSpace(userBaseURL), "/")
@@ -186,6 +188,10 @@ func FetchOutlookMailMessageRaw(ctx context.Context, accessToken, userBaseURL, m
 	if status < 200 || status >= 300 {
 		return nil, nil, fmt.Errorf("outlook mail message http %d: %s", status, truncateForErr(body))
 	}
+	body, err = ensureMailAttachmentBytes(ctx, accessToken, userBaseURL, messageID, body)
+	if err != nil {
+		return nil, nil, err
+	}
 	var parsed GraphOutlookMailMessageDetail
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return nil, nil, fmt.Errorf("decode outlook mail message: %w", err)
@@ -200,6 +206,8 @@ type GraphOutlookMailMessageDetail struct {
 	Subject              string `json:"subject"`
 	ReceivedDateTime     string `json:"receivedDateTime"`
 	LastModifiedDateTime string `json:"lastModifiedDateTime"`
+	ChangeKey            string `json:"changeKey"`
+	HasAttachments       bool   `json:"hasAttachments"`
 	ConversationID       string `json:"conversationId"`
 	From                 *struct {
 		EmailAddress *struct {
@@ -208,33 +216,153 @@ type GraphOutlookMailMessageDetail struct {
 	} `json:"from"`
 }
 
-// ListOutlookMailFlatMessagesPage lists inbox messages for browse (non-delta).
-func ListOutlookMailFlatMessagesPage(ctx context.Context, accessToken, userBaseURL string, skip, top int32) ([]OutlookMailDeltaMessage, error) {
-	if top <= 0 {
-		top = 50
+// ensureMailAttachmentBytes lists attachments when expand returned none, and fetches
+// contentBytes (or /$value) for file attachments Graph omitted from the expand payload.
+func ensureMailAttachmentBytes(ctx context.Context, accessToken, userBaseURL, messageID string, raw []byte) ([]byte, error) {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil || doc == nil {
+		return raw, nil
 	}
-	if skip < 0 {
-		skip = 0
+	atts, err := mailAttachmentRawList(doc)
+	if err != nil {
+		return nil, err
 	}
-	url := fmt.Sprintf("%s/mailFolders/inbox/messages?$top=%d&$skip=%d&$select=id,subject,from,receivedDateTime,lastModifiedDateTime,changeKey,hasAttachments&$orderby=receivedDateTime%%20desc",
-		strings.TrimRight(strings.TrimSpace(userBaseURL), "/"), top, skip)
-	body, status, err := graphMailDo(ctx, accessToken, http.MethodGet, url, nil, 0)
+	hasAttachments := false
+	if v, ok := doc["hasAttachments"]; ok {
+		_ = json.Unmarshal(v, &hasAttachments)
+	}
+	listedFromEmpty := false
+	if len(atts) == 0 && hasAttachments {
+		listed, listErr := listMailMessageAttachments(ctx, accessToken, userBaseURL, messageID)
+		if listErr != nil {
+			return nil, listErr
+		}
+		atts = listed
+		listedFromEmpty = len(atts) > 0
+	}
+	if len(atts) == 0 {
+		return raw, nil
+	}
+
+	filledAny := false
+	for i := range atts {
+		var meta struct {
+			ODataType    string `json:"@odata.type"`
+			ID           string `json:"id"`
+			ContentBytes string `json:"contentBytes"`
+			Name         string `json:"name"`
+			ContentType  string `json:"contentType"`
+			IsInline     bool   `json:"isInline"`
+			ContentID    string `json:"contentId"`
+		}
+		if err := json.Unmarshal(atts[i], &meta); err != nil {
+			continue
+		}
+		if meta.ODataType != "#microsoft.graph.fileAttachment" || strings.TrimSpace(meta.ContentBytes) != "" {
+			continue
+		}
+		attID := strings.TrimSpace(meta.ID)
+		if attID == "" {
+			continue
+		}
+		filled, fetchErr := fetchMailFileAttachmentJSON(ctx, accessToken, userBaseURL, messageID, attID, meta.Name, meta.ContentType, meta.IsInline, meta.ContentID)
+		if fetchErr != nil {
+			return nil, fmt.Errorf("attachment %q: %w", meta.Name, fetchErr)
+		}
+		atts[i] = filled
+		filledAny = true
+	}
+	if !filledAny && !listedFromEmpty {
+		return raw, nil
+	}
+	encoded, err := json.Marshal(atts)
+	if err != nil {
+		return nil, err
+	}
+	doc["attachments"] = encoded
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func encodeMailAttachmentBytes(raw []byte) string {
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
+func mailAttachmentRawList(doc map[string]json.RawMessage) ([]json.RawMessage, error) {
+	raw, ok := doc["attachments"]
+	if !ok || len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var atts []json.RawMessage
+	if err := json.Unmarshal(raw, &atts); err != nil {
+		return nil, fmt.Errorf("decode attachments: %w", err)
+	}
+	return atts, nil
+}
+
+func listMailMessageAttachments(ctx context.Context, accessToken, userBaseURL, messageID string) ([]json.RawMessage, error) {
+	reqURL := fmt.Sprintf("%s/messages/%s/attachments?$top=100", userBaseURL, urlPathEscape(messageID))
+	var out []json.RawMessage
+	for reqURL != "" {
+		body, status, err := graphMailDo(ctx, accessToken, http.MethodGet, reqURL, nil, mailMessageReadLimit)
+		if err != nil {
+			return nil, err
+		}
+		if status < 200 || status >= 300 {
+			return nil, fmt.Errorf("list attachments http %d: %s", status, truncateForErr(body))
+		}
+		var page struct {
+			Value    []json.RawMessage `json:"value"`
+			NextLink string            `json:"@odata.nextLink"`
+		}
+		if err := json.Unmarshal(body, &page); err != nil {
+			return nil, fmt.Errorf("decode attachment list: %w", err)
+		}
+		out = append(out, page.Value...)
+		reqURL = strings.TrimSpace(page.NextLink)
+	}
+	return out, nil
+}
+
+func fetchMailFileAttachmentJSON(ctx context.Context, accessToken, userBaseURL, messageID, attachmentID, name, contentType string, isInline bool, contentID string) (json.RawMessage, error) {
+	metaURL := fmt.Sprintf("%s/messages/%s/attachments/%s", userBaseURL, urlPathEscape(messageID), urlPathEscape(attachmentID))
+	body, status, err := graphMailDo(ctx, accessToken, http.MethodGet, metaURL, nil, mailMessageReadLimit)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 200 && status < 300 {
+		var meta struct {
+			ContentBytes string `json:"contentBytes"`
+		}
+		if json.Unmarshal(body, &meta) == nil && strings.TrimSpace(meta.ContentBytes) != "" {
+			return body, nil
+		}
+	}
+
+	valueURL := metaURL + "/$value"
+	raw, status, err := graphMailDo(ctx, accessToken, http.MethodGet, valueURL, nil, mailMessageReadLimit)
 	if err != nil {
 		return nil, err
 	}
 	if status < 200 || status >= 300 {
-		return nil, fmt.Errorf("outlook mail list http %d: %s", status, truncateForErr(body))
+		return nil, fmt.Errorf("attachment $value http %d: %s", status, truncateForErr(raw))
 	}
-	var parsed graphOutlookMailDeltaResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, err
+	payload := map[string]interface{}{
+		"@odata.type":  "#microsoft.graph.fileAttachment",
+		"id":           attachmentID,
+		"name":         name,
+		"contentBytes": encodeMailAttachmentBytes(raw),
+		"isInline":     isInline,
 	}
-	out := make([]OutlookMailDeltaMessage, 0, len(parsed.Value))
-	for i := range parsed.Value {
-		msg := mapGraphOutlookMailMessage(parsed.Value[i])
-		if msg.ID != "" {
-			out = append(out, msg)
-		}
+	if contentType != "" {
+		payload["contentType"] = contentType
 	}
-	return out, nil
+	if contentID != "" {
+		payload["contentId"] = contentID
+	}
+	return json.Marshal(payload)
 }
+

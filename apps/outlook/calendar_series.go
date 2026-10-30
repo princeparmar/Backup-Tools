@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 )
 
 // Listing a calendar returns single events and series masters only. The backup of a series master
@@ -33,8 +35,12 @@ var seriesFields = []string{"start", "end", "cancelledOccurrences", "exceptionOc
 
 // PIMSeriesURL reads a series master with its changed and cancelled occurrences.
 func PIMSeriesURL(userBase, calendarID, masterID string) string {
-	return strings.TrimRight(userBase, "/") + "/calendars/" + url.PathEscape(calendarID) +
-		"/events/" + url.PathEscape(masterID) + "?" + seriesQuery
+	return PIMSeriesURLFromRoot(PIMCalendarEventRoot(userBase, calendarID), masterID)
+}
+
+// PIMSeriesURLFromRoot reads a series master under eventRoot (.../calendars/{id} or .../groups/{id}/calendar).
+func PIMSeriesURLFromRoot(eventRoot, masterID string) string {
+	return strings.TrimRight(eventRoot, "/") + "/events/" + url.PathEscape(masterID) + "?" + seriesQuery
 }
 
 // AddSeriesOccurrences returns the backup of a listed series master: raw with the changed and
@@ -110,8 +116,13 @@ const maxSeriesInstances = 2000
 
 // PIMInstancesURL lists the occurrences of a series master between from and to.
 func PIMInstancesURL(userBase, calendarID, masterID string, from, to time.Time) string {
-	return strings.TrimRight(userBase, "/") + "/calendars/" + url.PathEscape(calendarID) +
-		"/events/" + url.PathEscape(masterID) + "/instances?" + instancesQuery(from, to)
+	return PIMInstancesURLFromRoot(PIMCalendarEventRoot(userBase, calendarID), masterID, from, to)
+}
+
+// PIMInstancesURLFromRoot lists series occurrences under eventRoot.
+func PIMInstancesURLFromRoot(eventRoot, masterID string, from, to time.Time) string {
+	return strings.TrimRight(eventRoot, "/") + "/events/" + url.PathEscape(masterID) +
+		"/instances?" + instancesQuery(from, to)
 }
 
 func instancesQuery(from, to time.Time) string {
@@ -193,6 +204,10 @@ func restoreException(ctx context.Context, accessToken, base, masterID, tz strin
 	}
 	if err != nil {
 		return fmt.Errorf("change occurrence of %s: %w", ex.OriginalStart, err)
+	}
+	if attErr := RestoreEventFileAttachments(ctx, accessToken, base, inst.ID, raw); attErr != nil {
+		logger.Warn(ctx, "outlook series exception attachments not restored",
+			logger.String("original_start", ex.OriginalStart), logger.ErrorField(attErr))
 	}
 	return nil
 }

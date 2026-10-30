@@ -261,31 +261,49 @@ func primaryMicrosoftUsersGroupsCredential(credByID map[uint]*repo.GoogleBackupC
 	return nil
 }
 
+// buildMicrosoftSharePointSiteResources lists one row per site. A tenant SharePoint job expands to
+ // a row per selected site (all share the same job_id); old per-site jobs paused by the merge are
+ // marked merged. Vault prefixes stay per-site so the browser can open each site.
 func buildMicrosoftSharePointSiteResources(jobs []repo.CronJobListingDB, policies map[uint]*repo.AutosyncBackupPolicyDB) []map[string]interface{} {
 	out := make([]map[string]interface{}, 0, len(jobs))
 	for i := range jobs {
 		job := &jobs[i]
-		siteName := strings.TrimSpace(job.Name)
-		siteID, siteURL := "", ""
-		if job.InputData != nil && job.InputData.Json() != nil {
-			raw := *job.InputData.Json()
-			if v, ok := raw["site_id"].(string); ok {
-				siteID = strings.TrimSpace(v)
-			}
-			if v, ok := raw["site_url"].(string); ok {
-				siteURL = strings.TrimSpace(v)
-			}
-			if v, ok := raw["site_name"].(string); ok && strings.TrimSpace(v) != "" {
-				siteName = strings.TrimSpace(v)
-			}
+		if job.ResourceType == repo.ResourceTypeTenant {
+			out = append(out, buildMicrosoftTenantSharePointRows(job, policies)...)
+			continue
 		}
+		out = append(out, buildMicrosoftLegacySharePointSiteRow(job, policies))
+	}
+	return out
+}
+
+func buildMicrosoftTenantSharePointRows(job *repo.CronJobListingDB, policies map[uint]*repo.AutosyncBackupPolicyDB) []map[string]interface{} {
+	sites := repo.JobSharePointSites(job)
+	tenantID := strings.ToLower(strings.TrimSpace(job.TenantID))
+	out := make([]map[string]interface{}, 0, len(sites))
+	for _, sel := range sites {
+		siteID := strings.TrimSpace(sel.SiteID)
+		if siteID == "" {
+			continue
+		}
+		siteName := strings.TrimSpace(sel.SiteName)
+		if siteName == "" {
+			siteName = strings.TrimSpace(job.Name)
+		}
+		vaultPrefix := outlook.ResourceKeyPrefix(tenantID, repo.ResourceTypeSite, siteID)
 		entry := map[string]interface{}{
-			"name":     siteName,
-			"site_id":  siteID,
-			"site_url": siteURL,
-			"job_id":   job.ID,
-			"method":   job.Method,
-			"active":   job.Active,
+			"name":       siteName,
+			"site_id":    siteID,
+			"site_url":   strings.TrimSpace(sel.SiteURL),
+			"job_id":     job.ID,
+			"method":     job.Method,
+			"active":     job.Active,
+			"tenant_job": true,
+			"tenant_id":  tenantID,
+			"resource_type": repo.ResourceTypeSite,
+			"resource_id":   siteID,
+			"vault_prefix":  vaultPrefix,
+			"job_vault":     outlook.ResourceKeyPrefix(tenantID, repo.ResourceTypeTenant, tenantID),
 		}
 		if job.PolicyID > 0 {
 			if p, ok := policies[job.PolicyID]; ok && p != nil {
@@ -293,19 +311,78 @@ func buildMicrosoftSharePointSiteResources(jobs []repo.CronJobListingDB, policie
 				entry["interval"] = p.Interval
 			}
 		}
-		addMicrosoftResourceIdentity(entry, job)
-		if libs := sharePointLibraryRows(job, entry["vault_prefix"]); len(libs) > 0 {
-			entry["libraries"] = libs
+		libs := sharePointLibrariesForSite(job, siteID)
+		if rows := sharePointLibraryRowsFromMap(libs, vaultPrefix); len(rows) > 0 {
+			entry["libraries"] = rows
 		}
 		out = append(out, entry)
 	}
 	return out
 }
 
+func buildMicrosoftLegacySharePointSiteRow(job *repo.CronJobListingDB, policies map[uint]*repo.AutosyncBackupPolicyDB) map[string]interface{} {
+	siteName := strings.TrimSpace(job.Name)
+	siteID, siteURL := "", ""
+	if job.InputData != nil && job.InputData.Json() != nil {
+		raw := *job.InputData.Json()
+		if v, ok := raw["site_id"].(string); ok {
+			siteID = strings.TrimSpace(v)
+		}
+		if v, ok := raw["site_url"].(string); ok {
+			siteURL = strings.TrimSpace(v)
+		}
+		if v, ok := raw["site_name"].(string); ok && strings.TrimSpace(v) != "" {
+			siteName = strings.TrimSpace(v)
+		}
+	}
+	if siteID == "" {
+		siteID = strings.TrimSpace(job.ResourceID)
+	}
+	entry := map[string]interface{}{
+		"name":     siteName,
+		"site_id":  siteID,
+		"site_url": siteURL,
+		"job_id":   job.ID,
+		"method":   job.Method,
+		"active":   job.Active,
+	}
+	if job.PolicyID > 0 {
+		if p, ok := policies[job.PolicyID]; ok && p != nil {
+			entry["policy_id"] = p.ID
+			entry["interval"] = p.Interval
+		}
+	}
+	addMicrosoftResourceIdentity(entry, job)
+	if !job.Active && strings.TrimSpace(job.Message) == repo.SharePointMergedJobMessage {
+		entry["merged"] = true
+	}
+	libs := sharePointLibrariesForSite(job, siteID)
+	if rows := sharePointLibraryRowsFromMap(libs, entry["vault_prefix"]); len(rows) > 0 {
+		entry["libraries"] = rows
+	}
+	return entry
+}
+
+// sharePointLibrariesForSite returns library state for one site. Tenant jobs keep it under
+ // TaskMemory.SharePointSites[siteID]; legacy jobs use the top-level SharePointLibraries map.
+func sharePointLibrariesForSite(job *repo.CronJobListingDB, siteID string) map[string]repo.SharePointLibraryState {
+	if job == nil {
+		return nil
+	}
+	siteID = strings.TrimSpace(siteID)
+	if st, ok := job.TaskMemory.SharePointSites[siteID]; ok && len(st.Libraries) > 0 {
+		return st.Libraries
+	}
+	return job.TaskMemory.SharePointLibraries
+}
+
 // sharePointLibraryRows lists the document libraries a site job has backed up, default library
-// first, each with its vault prefix. Jobs from before library tracking have none.
+ // first, each with its vault prefix. Jobs from before library tracking have none.
 func sharePointLibraryRows(job *repo.CronJobListingDB, sitePrefix interface{}) []map[string]interface{} {
-	libs := job.TaskMemory.SharePointLibraries
+	return sharePointLibraryRowsFromMap(job.TaskMemory.SharePointLibraries, sitePrefix)
+}
+
+func sharePointLibraryRowsFromMap(libs map[string]repo.SharePointLibraryState, sitePrefix interface{}) []map[string]interface{} {
 	if len(libs) == 0 {
 		return nil
 	}

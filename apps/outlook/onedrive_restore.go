@@ -117,7 +117,7 @@ func RestoreDriveBackup(ctx context.Context, accessToken, driveURL, objectKey st
 		return fmt.Errorf("parse backup %s: %w", objectKey, err)
 	}
 	if m.RemovedFromOneDrive || m.IsFolder {
-		return fmt.Errorf("onedrive object skipped (removed or folder)")
+		return nil
 	}
 	dataKey := strings.TrimSpace(m.DataObjectKey)
 	if dataKey == "" {
@@ -147,7 +147,9 @@ func restoreOneDriveObject(ctx context.Context, accessToken, driveURL, folder, n
 	return restoreDriveFile(ctx, accessToken, driveURL, folder, name, pr, size)
 }
 
-// oneDriveRestoreFolder is the folder path a backup returns to.
+// oneDriveRestoreFolder is the folder path a backup returns to in the destination My files /
+// library drive. SHARED_WITH_ME restores as owned copies under My files (Drive parity): use
+// backed-up folder names when present, otherwise the saved parent path, otherwise the drive root.
 func oneDriveRestoreFolder(p OneDriveObjectKey, meta map[string]string, names map[string]string) string {
 	saved := strings.TrimSpace(meta[OneDriveMetaParentPath])
 	if p.Section == OneDriveSectionBin {

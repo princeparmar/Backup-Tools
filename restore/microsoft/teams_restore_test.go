@@ -176,8 +176,8 @@ func TestTeamsRestoreReportsThreadPlacement(t *testing.T) {
 		t.Fatalf("replies: %+v", g.posts)
 	}
 	last := g.posts[3]
-	if last.kind != "post" || !strings.Contains(last.body, "In reply to message 300") {
-		t.Fatalf("missing root becomes a new post with an In reply to line: %+v", last)
+	if last.kind != "post" || last.body == "" {
+		t.Fatalf("missing root becomes a new post: %+v", last)
 	}
 	if g.posts[4].chat != chatID {
 		t.Fatalf("chat id comes from the object: %+v", g.posts[4])

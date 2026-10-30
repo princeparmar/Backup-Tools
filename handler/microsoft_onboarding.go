@@ -60,6 +60,9 @@ type MicrosoftBackupOnboardingRequest struct {
 	Teams           []TeamsOnboardingInput          `json:"teams"`
 	PolicyID        *uint                           `json:"policy_id,omitempty"`
 	PolicyName      string                          `json:"policy_name,omitempty"`
+	// SystemJobID is the access-check system job from Access Check start; Continue materializes
+	// backup jobs from it (finals if done, drafts if still probing).
+	SystemJobID uint `json:"system_job_id,omitempty"`
 
 	// allSites is set when every tenant site was selected (no site named); reconcile then adds
 	// jobs for new sites.
@@ -168,6 +171,41 @@ func (r *MicrosoftBackupOnboardingRequest) validate(userID string) error {
 	return nil
 }
 
+// validateForAccessPreview checks fields needed to probe Graph access before job create.
+// Schedule (interval/policy) and project_id are not required — preview creates nothing.
+func (r *MicrosoftBackupOnboardingRequest) validateForAccessPreview(userID string) error {
+	switch r.AuthMode {
+	case "", outlook.MicrosoftAuthModeApplication, outlook.MicrosoftAuthModeDelegated:
+	default:
+		return fmt.Errorf("auth_mode must be %q or %q", outlook.MicrosoftAuthModeDelegated, outlook.MicrosoftAuthModeApplication)
+	}
+	switch r.BackupMode {
+	case "", microsoftBackupModeSelf, microsoftBackupModeOrganization:
+	default:
+		return fmt.Errorf("backup_mode must be %q or %q", microsoftBackupModeSelf, microsoftBackupModeOrganization)
+	}
+	if (r.AuthMode == outlook.MicrosoftAuthModeDelegated && r.BackupMode == microsoftBackupModeOrganization) ||
+		(r.AuthMode == outlook.MicrosoftAuthModeApplication && r.BackupMode == microsoftBackupModeSelf) {
+		return errors.New("auth_mode and backup_mode conflict")
+	}
+	if !r.applicationMode() && r.RefreshToken == "" {
+		return errors.New("refresh_token is required")
+	}
+	if r.MicrosoftEmail == "" {
+		return errors.New("microsoft_email is required")
+	}
+	if len(normalizeOnboardingServices(r.Services)) == 0 {
+		return errors.New("services is required")
+	}
+	if err := validateMicrosoftOnboardingServiceNames(r.Services); err != nil {
+		return err
+	}
+	if r.SatelliteUserID != "" && r.SatelliteUserID != userID {
+		return errors.New("satellite_user_id does not match token_key session")
+	}
+	return nil
+}
+
 func validateMicrosoftOnboardingServiceNames(raw []string) error {
 	for _, svc := range normalizeOnboardingServices(raw) {
 		if _, ok := microsoftOnboardingServiceToMethod[svc]; !ok {
@@ -254,7 +292,28 @@ func authorizeMicrosoftApplicationOnboarding(
 		return out, nil
 	}
 
-	directory, err := msListDirectoryUsersFn(ctx, token)
+	// Fast path: UI already resolved object IDs (directory step). Skip a full Graph /users crawl.
+	if users, ok := applicationUsersFromRequestIDs(req); ok {
+		for _, u := range users {
+			email := u.Email()
+			if email == "" {
+				continue
+			}
+			key := strings.ToLower(email)
+			if _, dup := out.Users[key]; dup {
+				continue
+			}
+			out.Emails = append(out.Emails, email)
+			out.Users[key] = u
+		}
+		if len(out.Emails) == 0 {
+			return nil, &MicrosoftOrgAccessError{HTTPStatus: http.StatusBadRequest, Code: "no_users",
+				Message: "select users with all_users, user_ids or emails"}
+		}
+		return out, nil
+	}
+
+	directory, err := msListDirectoryUsersOptsFn(ctx, token, outlook.ListTenantDirectoryUsersOptions{})
 	if err != nil {
 		return nil, &MicrosoftOrgAccessError{HTTPStatus: http.StatusBadGateway, Code: "directory_unavailable",
 			Message: "could not list tenant users: " + err.Error()}
@@ -322,6 +381,35 @@ func authorizeMicrosoftApplicationOnboarding(
 			Message: "select users with all_users, user_ids or emails"}
 	}
 	return out, nil
+}
+
+// applicationUsersFromRequestIDs builds directory users from paired emails+user_ids without a
+// Graph directory crawl. Used when the UI already listed the directory (preview / selected mailboxes).
+func applicationUsersFromRequestIDs(req *MicrosoftBackupOnboardingRequest) ([]outlook.DirectoryUser, bool) {
+	if req == nil || req.wantsAllUsers() || len(req.SharedMailboxes) > 0 {
+		return nil, false
+	}
+	if len(req.UserIDs) == 0 || len(req.Emails) == 0 || len(req.UserIDs) != len(req.Emails) {
+		return nil, false
+	}
+	seen := map[string]struct{}{}
+	out := make([]outlook.DirectoryUser, 0, len(req.UserIDs))
+	for i := range req.UserIDs {
+		email := strings.TrimSpace(req.Emails[i])
+		id := strings.TrimSpace(req.UserIDs[i])
+		if email == "" || id == "" {
+			return nil, false
+		}
+		key := strings.ToLower(email)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, outlook.DirectoryUser{
+			ObjectID: id, Mail: email, AccountEnabled: true,
+		})
+	}
+	return out, len(out) > 0
 }
 
 func dedupeStrings(in []string) []string {
@@ -490,8 +578,58 @@ func runMicrosoftOnboardingCreate(c echo.Context, ctx context.Context, userID st
 	}
 	var jobs []onboardingJobResult
 	var failed []onboardingFailedResult
+	var skipped []onboardingSkippedResult
+	var unverified []onboardingUnverifiedResult
 	servicesOut := make([]string, 0)
 	seenSvc := make(map[string]struct{})
+	var verification map[string]interface{}
+
+	needsMailboxMaterialize := false
+	if application {
+		for _, svc := range services {
+			method := microsoftOnboardingServiceToMethod[svc]
+			if outlook.IsAccessVerifyUserMethod(method) {
+				needsMailboxMaterialize = true
+				break
+			}
+		}
+	}
+	if needsMailboxMaterialize && req.SystemJobID == 0 {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"error": "system_job_id is required after Access Check for organization mailbox services",
+		})
+	}
+
+	// Org mailbox jobs: materialize from the Access Check system job when provided.
+	if application && req.SystemJobID > 0 {
+		mat, merr := materializeAccessCheckJobs(c, ctx, database, userID, req.SystemJobID, syncType, schedule, gReq, cred, tenantID, isFirstConnection, policyBatch, users, services)
+		if merr != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": merr.Error()})
+		}
+		jobs = append(jobs, mat.Jobs...)
+		failed = append(failed, mat.Failed...)
+		skipped = append(skipped, mat.Skipped...)
+		unverified = append(unverified, mat.Unverified...)
+		for _, j := range mat.Jobs {
+			if j.Service != "" {
+				if _, dup := seenSvc[j.Service]; !dup {
+					seenSvc[j.Service] = struct{}{}
+					servicesOut = append(servicesOut, j.Service)
+				}
+			}
+		}
+		mode := mat.Mode
+		status := "completed"
+		if mode == repo.AccessCheckMaterializeDraft {
+			status = "queued"
+		}
+		verification = map[string]interface{}{
+			"status":         status,
+			"mode":           mode,
+			"system_job_id":  req.SystemJobID,
+			"already_done":   mat.AlreadyDone,
+		}
+	}
 
 	for _, svc := range services {
 		if _, dup := seenSvc[svc]; dup {
@@ -520,6 +658,10 @@ func runMicrosoftOnboardingCreate(c echo.Context, ctx context.Context, userID st
 			failed = append(failed, f...)
 			continue
 		}
+		// Mailbox services already materialized from system_job_id.
+		if application && req.SystemJobID > 0 && outlook.IsAccessVerifyUserMethod(method) {
+			continue
+		}
 		j, f := createMicrosoftJobsForServiceEmails(c, userID, method, svc, syncType, schedule, gReq, cred, tenantID, isFirstConnection, policyBatch, emails, users, database)
 		jobs = append(jobs, j...)
 		failed = append(failed, f...)
@@ -530,16 +672,22 @@ func runMicrosoftOnboardingCreate(c echo.Context, ctx context.Context, userID st
 	}
 
 	policies := onboardingPoliciesFromBatch(database, policyBatch)
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"success":   len(failed) == 0,
-		"message":   syncCreateMessage(syncType),
-		"auth_mode": tc.Link.AuthMode,
-		"tenant_id": tenantID,
-		"jobs":      nullSliceJSON(jobs),
-		"failed":    nullSliceJSON(failed),
-		"services":  nullSliceJSON(servicesOut),
-		"policies":  nullSliceJSON(policies),
-	})
+	resp := map[string]interface{}{
+		"success":    len(failed) == 0,
+		"message":    syncCreateMessage(syncType),
+		"auth_mode":  tc.Link.AuthMode,
+		"tenant_id":  tenantID,
+		"jobs":       nullSliceJSON(jobs),
+		"failed":     nullSliceJSON(failed),
+		"skipped":    nullSliceJSON(skipped),
+		"unverified": nullSliceJSON(unverified),
+		"services":   nullSliceJSON(servicesOut),
+		"policies":   nullSliceJSON(policies),
+	}
+	if verification != nil {
+		resp["verification"] = verification
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 func createMicrosoftJobsForServiceEmails(
@@ -599,8 +747,12 @@ func onboardMicrosoftJob(
 	}
 	if existing != nil {
 		policyID := existing.PolicyID
-		if policyID == 0 {
-			// A previous attempt created the job but failed to assign its policy.
+		needSchedule := policyID == 0
+		if !needSchedule && req != nil && req.hasPolicyID() && req.PolicyID != nil && *req.PolicyID != policyID {
+			needSchedule = true
+		}
+		if needSchedule {
+			// Retry after a failed policy assign, or reconnect onto a different policy_id.
 			if err := applyOnboardingJobSchedule(database, userID, existing.ID, name, schedule, cred, req, isFirstConnection, policyBatch); err != nil {
 				return fail(err.Error())
 			}
@@ -608,9 +760,24 @@ func onboardMicrosoftJob(
 				policyID = latest.PolicyID
 			}
 		}
+		active := existing.Active
+		if syncType != "one_time" {
+			if shouldActivateOnboardingJob(req, cred) {
+				if err := database.CronJobRepo.UpdateCronJobByID(existing.ID, activeStateUpdateFields(true)); err != nil {
+					return fail(fmt.Sprintf("job %d exists but activation failed: %v", existing.ID, err))
+				}
+				active = true
+			} else if isForcedInactiveOnboarding(req) {
+				_ = database.CronJobRepo.UpdateCronJobByID(existing.ID, activeStateUpdateFields(false))
+				active = false
+			}
+		}
+		if strings.TrimSpace(name) != "" && strings.TrimSpace(existing.Name) != strings.TrimSpace(name) {
+			_ = database.CronJobRepo.UpdateCronJobByID(existing.ID, map[string]interface{}{"name": strings.TrimSpace(name)})
+		}
 		return &onboardingJobResult{
 			Service: svc, Email: name, JobID: existing.ID, PolicyID: policyID,
-			Existing: true, Active: existing.Active,
+			Existing: true, Active: active,
 		}, nil
 	}
 	if err := applyOnboardingJobSchedule(database, userID, cronJob.ID, name, schedule, cred, req, isFirstConnection, policyBatch); err != nil {
@@ -683,6 +850,8 @@ func appendMicrosoftJobResult(jobs []onboardingJobResult, failed []onboardingFai
 	return jobs, failed
 }
 
+const sharePointTenantJobName = "Microsoft SharePoint"
+
 func createMicrosoftJobsForSharePointSites(
 	c echo.Context,
 	ctx context.Context,
@@ -704,9 +873,10 @@ func createMicrosoftJobsForSharePointSites(
 		return nil, []onboardingFailedResult{{Service: svc, Error: "organization resources require backup_mode=organization"}}
 	}
 
-	var jobs []onboardingJobResult
 	var failed []onboardingFailedResult
+	var skipped []onboardingJobResult
 	seen := make(map[string]struct{})
+	var resolvedSites []repo.SharePointSiteSelection
 
 	for _, siteIn := range sites {
 		siteID := strings.TrimSpace(siteIn.SiteID)
@@ -722,7 +892,7 @@ func createMicrosoftJobsForSharePointSites(
 				label = siteID
 			}
 			if errors.Is(rerr, outlook.ErrSharePointSiteNoDocumentLibrary) {
-				jobs = append(jobs, onboardingJobResult{Service: svc, Email: label, Skipped: rerr.Error()})
+				skipped = append(skipped, onboardingJobResult{Service: svc, Email: label, Skipped: rerr.Error()})
 			} else {
 				failed = append(failed, onboardingFailedResult{Service: svc, Email: label, Error: rerr.Error()})
 			}
@@ -733,29 +903,59 @@ func createMicrosoftJobsForSharePointSites(
 		}
 		seen[resolved.SiteID] = struct{}{}
 
-		jobName := strings.TrimSpace(resolved.SiteName)
-		if jobName == "" {
-			jobName = outlook.SanitizeSharePointSiteKey(resolved.SiteID)
-		}
-		extra := map[string]interface{}{
-			"site_id":   resolved.SiteID,
-			"drive_id":  resolved.DriveID,
-			"site_name": resolved.SiteName,
-			"site_url":  resolved.SiteURL,
-		}
 		if _, err := database.MicrosoftResourceRepo.Upsert(repo.MicrosoftResourceDB{
 			TenantID: tenantID, ResourceType: repo.ResourceTypeSite, ExternalID: resolved.SiteID, DisplayName: resolved.SiteName,
 			Metadata: dbjson.NewDbJsonFromValue(map[string]interface{}{"site_url": resolved.SiteURL, "drive_id": resolved.DriveID}),
 		}); err != nil {
-			failed = append(failed, onboardingFailedResult{Service: svc, Email: jobName, Error: err.Error()})
+			failed = append(failed, onboardingFailedResult{Service: svc, Email: resolved.SiteName, Error: err.Error()})
 			continue
 		}
-		identity := repo.MicrosoftJobIdentity{TenantID: tenantID, ResourceType: repo.ResourceTypeSite, ResourceID: resolved.SiteID}
-		job, fail := onboardMicrosoftJob(c, database, userID, svc, jobName, "outlook_sharepoint", syncType, extra,
-			identity, schedule, req, cred, isFirstConnection, policyBatch)
-		jobs, failed = appendMicrosoftJobResult(jobs, failed, job, fail)
+		resolvedSites = append(resolvedSites, repo.SharePointSiteSelection{
+			SiteID: resolved.SiteID, DriveID: resolved.DriveID,
+			SiteName: resolved.SiteName, SiteURL: resolved.SiteURL,
+		})
 	}
+	if len(resolvedSites) == 0 {
+		return skipped, failed
+	}
+
+	// One SharePoint job per tenant (same pattern as Teams): selection lives in input_data.sites.
+	first := resolvedSites[0]
+	extra := map[string]interface{}{
+		"sites": []repo.SharePointSiteSelection{first},
+		// Keep legacy fields for the first site so older readers still find site_id/drive_id.
+		"site_id": first.SiteID, "drive_id": first.DriveID,
+		"site_name": first.SiteName, "site_url": first.SiteURL,
+	}
+	for _, s := range resolvedSites[1:] {
+		extra = repo.SharePointSelectionAddSite(extra, s)
+	}
+	identity := repo.MicrosoftJobIdentity{TenantID: tenantID, ResourceType: repo.ResourceTypeTenant, ResourceID: tenantID}
+	job, fail := onboardMicrosoftJob(c, database, userID, svc, sharePointTenantJobName, "outlook_sharepoint", syncType, extra,
+		identity, schedule, req, cred, isFirstConnection, policyBatch)
+	if job != nil && job.Existing {
+		err := database.CronJobRepo.UpdateJobInputData(job.JobID, func(in map[string]interface{}) map[string]interface{} {
+			for _, s := range resolvedSites {
+				in = repo.SharePointSelectionAddSite(in, s)
+			}
+			if sites := parseSharePointSitesFromInput(in); len(sites) > 0 {
+				in["site_id"], in["drive_id"] = sites[0].SiteID, sites[0].DriveID
+				in["site_name"], in["site_url"] = sites[0].SiteName, sites[0].SiteURL
+			}
+			return in
+		})
+		if err != nil {
+			return skipped, append(failed, onboardingFailedResult{Service: svc, Email: sharePointTenantJobName, Error: err.Error()})
+		}
+	}
+	jobs, failed := appendMicrosoftJobResult(skipped, failed, job, fail)
 	return jobs, failed
+}
+
+func parseSharePointSitesFromInput(in map[string]interface{}) []repo.SharePointSiteSelection {
+	return repo.JobSharePointSites(&repo.CronJobListingDB{
+		InputData: dbjson.NewDbJsonFromValue(in),
+	})
 }
 
 func createMicrosoftJobsForTeams(

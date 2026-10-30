@@ -18,6 +18,9 @@ var ErrMicrosoftTenantMismatch = errors.New("microsoft restore tenant mismatch")
 func RestoreKeyPrefix(job *repo.RestoreJobListingDB, cronJob *repo.CronJobListingDB) string {
 	if job != nil && IsMicrosoftRestoreMethod(job.Method) && cronJob != nil {
 		if cronJob.ResourceType == repo.ResourceTypeTenant {
+			if job.Method == "outlook_sharepoint" {
+				return sharePointTenantRestorePrefix(cronJob.TenantID, job.LoginID)
+			}
 			return teamsTenantRestorePrefix(cronJob.TenantID, job.LoginID)
 		}
 		if p := outlook.ResourceKeyPrefix(cronJob.TenantID, cronJob.ResourceType, cronJob.ResourceID); p != "" {
@@ -43,6 +46,20 @@ func teamsTenantRestorePrefix(tenantID, loginID string) string {
 		kind = outlook.TeamsKeyTeam
 	}
 	if p := outlook.ResourceKeyPrefix(tenant, kind, login); p != "" {
+		return p + "/"
+	}
+	return tenant + "/"
+}
+
+// sharePointTenantRestorePrefix is the prefix a restore from the tenant SharePoint job reads:
+// the requested site, or the whole tenant when the request names the tenant.
+func sharePointTenantRestorePrefix(tenantID, loginID string) string {
+	tenant := strings.ToLower(strings.TrimSpace(tenantID))
+	login := strings.TrimSpace(loginID)
+	if login == "" || strings.EqualFold(login, tenant) {
+		return tenant + "/"
+	}
+	if p := outlook.ResourceKeyPrefix(tenant, repo.ResourceTypeSite, login); p != "" {
 		return p + "/"
 	}
 	return tenant + "/"
@@ -144,11 +161,11 @@ var ErrMicrosoftTenantRequired = errors.New("this account has Microsoft backups 
 // FindMicrosoftRestoreJob picks the backup job for a Microsoft restore of loginID (mailbox or
 // resource ID) inside tenantID. Without a tenant the match must be in one tenant only.
 //
-// Teams: the tenant job (matched by tenant id) holds every team and chat; an old per-team job is
-// used only when no tenant job exists (its keys are read until the tenant job converts them).
+// Teams and SharePoint: the tenant job (matched by tenant id) holds every team/chat or site;
+// an old per-resource job is used only when no tenant job exists.
 func FindMicrosoftRestoreJob(store *db.PostgresDb, userID, method, tenantID, loginID string) (*repo.CronJobListingDB, error) {
-	if method == "outlook_teams" {
-		if j, err := findTeamsTenantRestoreJob(store, userID, tenantID, loginID); err != nil || j != nil {
+	if method == "outlook_teams" || method == "outlook_sharepoint" {
+		if j, err := findTenantScopedRestoreJob(store, userID, method, tenantID, loginID); err != nil || j != nil {
 			return j, err
 		}
 	}
@@ -166,6 +183,10 @@ func FindMicrosoftRestoreJob(store *db.PostgresDb, userID, method, tenantID, log
 }
 
 func findTeamsTenantRestoreJob(store *db.PostgresDb, userID, tenantID, loginID string) (*repo.CronJobListingDB, error) {
+	return findTenantScopedRestoreJob(store, userID, "outlook_teams", tenantID, loginID)
+}
+
+func findTenantScopedRestoreJob(store *db.PostgresDb, userID, method, tenantID, loginID string) (*repo.CronJobListingDB, error) {
 	tenants := []string{}
 	if t := strings.ToLower(strings.TrimSpace(tenantID)); t != "" {
 		tenants = append(tenants, t)
@@ -173,7 +194,7 @@ func findTeamsTenantRestoreJob(store *db.PostgresDb, userID, tenantID, loginID s
 		if isGUID(strings.TrimSpace(loginID)) {
 			tenants = append(tenants, strings.ToLower(strings.TrimSpace(loginID)))
 		}
-		old, err := store.CronJobRepo.FindMicrosoftJobsForRestore(userID, "outlook_teams", "", loginID)
+		old, err := store.CronJobRepo.FindMicrosoftJobsForRestore(userID, method, "", loginID)
 		if err != nil {
 			return nil, err
 		}
@@ -183,7 +204,7 @@ func findTeamsTenantRestoreJob(store *db.PostgresDb, userID, tenantID, loginID s
 	}
 	var found *repo.CronJobListingDB
 	for _, t := range tenants {
-		jobs, err := store.CronJobRepo.FindMicrosoftJobsForRestore(userID, "outlook_teams", t, t)
+		jobs, err := store.CronJobRepo.FindMicrosoftJobsForRestore(userID, method, t, t)
 		if err != nil {
 			return nil, err
 		}

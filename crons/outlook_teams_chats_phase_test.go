@@ -221,6 +221,130 @@ func TestTeamsChatDeletionMarkerPreservesStoredMessage(t *testing.T) {
 	}
 }
 
+func TestTeamsMeetNowChatIsNotStored(t *testing.T) {
+	cases := []struct {
+		name        string
+		chatType    string
+		topic       string
+		wantChatKey bool
+	}{
+		{name: "meet now", chatType: "meeting", topic: "Meeting with Kevin", wantChatKey: false},
+		{name: "scheduled meeting chat", chatType: "meeting", topic: "Standup call", wantChatKey: true},
+		{name: "regular 1:1", chatType: "oneOnOne", topic: "", wantChatKey: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id := "chat-" + strings.ReplaceAll(tc.name, " ", "-")
+			row := map[string]interface{}{"id": id, "chatType": tc.chatType, "members": []map[string]string{{"userId": "u1"}}}
+			if tc.topic != "" {
+				row["topic"] = tc.topic
+			}
+			g := &fakeGraph{pages: map[string]outlook.TeamsPage{
+				"/users/u1/chats?":      {Items: []json.RawMessage{rawJSON(row)}},
+				"pinnedMessages":        {},
+				"getAllMessages/delta":  {DeltaLink: "https://graph.microsoft.com/v1.0/users/u1/chats/getAllMessages/delta?$deltatoken=d1"},
+				"chats/getAllMessages?": {},
+			}}
+			g.install(t)
+			store := newMemTeamsStore()
+			r := newTestTeamsRun(t, store, nil, nil)
+			r.userScope["u1"] = true
+			if status, _ := r.syncUserChats("u1", r.deadline); status != teamsComplete {
+				t.Fatalf("status %s failures %+v", status, r.mem.TeamsFailures)
+			}
+			meta := outlook.TeamsChatMetaKey(outlook.TeamsChatPrefix(teamsTestTenant, id))
+			_, got := store.objs[meta]
+			if got != tc.wantChatKey {
+				t.Fatalf("stored=%v want %v keys %v", got, tc.wantChatKey, keysOf(store.objs))
+			}
+		})
+	}
+}
+
+func TestTeamsIsCallLogText(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{name: "plain", in: "Call Logs for Call c2a18cc6-624b-4b9f-92e4-2d9a9c038ad9", want: true},
+		{name: "html", in: "<p>Call Logs for Call 7daee59e-a214-48de-974b-5a68cb750cc6</p>", want: true},
+		{name: "normal chat", in: "hey, can you call me?", want: false},
+		{name: "meeting ended", in: "Call ended", want: false},
+		{name: "short id", in: "Call Logs for Call not-a-guid", want: false},
+		{name: "topic", in: "Call logs", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := teamsIsCallLogText(tc.in); got != tc.want {
+				t.Fatalf("got %v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTeamsIsMeetNowChat(t *testing.T) {
+	tests := []struct {
+		name     string
+		chatType string
+		topic    string
+		want     bool
+	}{
+		{name: "meet now", chatType: "meeting", topic: "Meeting with Kevin", want: true},
+		{name: "scheduled", chatType: "meeting", topic: "Standup call", want: false},
+		{name: "oneOnOne", chatType: "oneOnOne", topic: "Meeting with Kevin", want: false},
+		{name: "empty", chatType: "meeting", topic: "", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := teamsIsMeetNowChat(tc.chatType, tc.topic); got != tc.want {
+				t.Fatalf("got %v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTeamsCallLogChatIsNotStored(t *testing.T) {
+	callChat := rawJSON(map[string]interface{}{
+		"id": "call-chat", "topic": "Call logs", "chatType": "oneOnOne", "lastUpdatedDateTime": "2026-10-28T12:13:00.000Z",
+		"members": []map[string]string{{"userId": "u1", "displayName": "Me"}, {"userId": "u2", "displayName": "support"}},
+	})
+	humanChat := rawJSON(map[string]interface{}{"id": "chat-1", "members": []map[string]string{{"userId": "u1"}}})
+	g := &fakeGraph{pages: map[string]outlook.TeamsPage{
+		"/users/u1/chats?": {Items: []json.RawMessage{callChat, humanChat}},
+		"pinnedMessages":   {},
+		"getAllMessages/delta": {Items: []json.RawMessage{
+			chatMsg("h1", "chat-1", "2026-10-02T09:00:00.000Z", "u1"),
+			rawJSON(map[string]interface{}{
+				"id": "c1", "chatId": "call-chat", "etag": "e1", "createdDateTime": "2026-10-28T12:13:00.000Z",
+				"lastModifiedDateTime": "2026-10-28T12:13:00.000Z",
+				"body":                 map[string]string{"content": "Call Logs for Call c2a18cc6-624b-4b9f-92e4-2d9a9c038ad9"},
+			}),
+		}, DeltaLink: "https://graph.microsoft.com/v1.0/users/u1/chats/getAllMessages/delta?$deltatoken=d1"},
+		"chats/getAllMessages?": {Items: []json.RawMessage{chatMsg("h1", "chat-1", "2026-10-02T09:00:00.000Z", "u1")}},
+	}}
+	g.install(t)
+	store := newMemTeamsStore()
+	r := newTestTeamsRun(t, store, nil, nil)
+	r.userScope["u1"] = true
+	if status, _ := r.syncUserChats("u1", r.deadline); status != teamsComplete {
+		t.Fatalf("status %s failures %+v", status, r.mem.TeamsFailures)
+	}
+	for k := range store.objs {
+		if strings.Contains(k, "/chat/") && strings.Contains(k, "call-chat") {
+			t.Fatalf("call log chat must not be stored under chat/: %s", k)
+		}
+	}
+	callKey := outlook.TeamsCallRecordKey(teamsTestTenant, "call-chat", "2026-10-28T12:13:00.000Z")
+	if raw, ok := store.objs[callKey]; !ok || !strings.Contains(string(raw), "support") {
+		t.Fatalf("call log must land in Calls history: %s have %v", callKey, keysOf(store.objs))
+	}
+	humanPrefix := outlook.TeamsChatPrefix(teamsTestTenant, "chat-1")
+	if _, ok := store.objs[outlook.TeamsChatMessageKey(humanPrefix, "h1", "2026-10-01T09:00:00.000Z")]; !ok {
+		t.Fatalf("human chat must still be stored; have %v", keysOf(store.objs))
+	}
+}
+
 func calendarEvent(id, ical, userRole string, start time.Time, teams bool) json.RawMessage {
 	provider := "teamsForBusiness"
 	if !teams {
@@ -264,13 +388,13 @@ func TestTeamsMeetingsKeepMailboxCopiesApartAndReconcile(t *testing.T) {
 		}
 		var doc map[string]interface{}
 		_ = json.Unmarshal(store.objs[outlook.TeamsMeetingMetaKey(prefix)], &doc)
-		if doc["transcript_content_status"] != outlook.TeamsStatusPaidAPI || doc["identity"].(map[string]interface{})["reason"] != "case_unverified" {
+		if doc["transcript_content_status"] != outlook.TeamsStatusContentNotCollected || doc["identity"].(map[string]interface{})["reason"] != "case_unverified" {
 			t.Fatalf("_meeting.json: %v", doc)
 		}
 	}
 	nonTeams, _, _ := outlook.TeamsMeetingID("ical-x", "u1", "ev-x", false)
-	if _, ok := store.objs[outlook.TeamsMeetingEventKey(outlook.TeamsMeetingPrefix(teamsTestTenant, nonTeams))]; ok {
-		t.Fatal("non-Teams events belong to outlook_calendar")
+	if _, ok := store.objs[outlook.TeamsMeetingEventKey(outlook.TeamsMeetingPrefix(teamsTestTenant, nonTeams))]; !ok {
+		t.Fatal("mailbox calendar appointments must be stored with Teams meetings")
 	}
 	r.writeReconcile()
 	var rec struct {
@@ -289,6 +413,9 @@ func TestTeamsMeetingsKeepMailboxCopiesApartAndReconcile(t *testing.T) {
 	if _, ok := st.Attendance[m1]; !ok || len(st.CalendarRanges) != 1 || !st.CalendarRanges[0].Done {
 		t.Fatalf("organizer meeting queued for attendance, range done: %+v", st)
 	}
+	if _, ok := st.Attendance[nonTeams]; ok {
+		t.Fatal("plain calendar appointments must not queue meeting attendance")
+	}
 	if _, ok := store.objs[outlook.TeamsUserMeetingCoverageKey(outlook.TeamsUserPrefix(teamsTestTenant, "u1"))]; !ok {
 		t.Fatal("calendar coverage must be written")
 	}
@@ -301,6 +428,205 @@ func TestTeamsMeetingsKeepMailboxCopiesApartAndReconcile(t *testing.T) {
 	evKey := outlook.TeamsMeetingEventKey(outlook.TeamsMeetingPrefix(teamsTestTenant, m1))
 	if store.meta[evKey][outlook.TeamsMetaRemovedAt] == "" || len(store.objs[evKey]) == 0 {
 		t.Fatalf("removed event keeps its object with removed-at: %v", store.meta[evKey])
+	}
+}
+
+func TestTeamsCalendarStoresEveryMailboxEvent(t *testing.T) {
+	start := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Second)
+	cases := []struct {
+		name       string
+		id, ical   string
+		teams      bool
+		role       string
+		wantAttend bool
+	}{
+		{name: "teams organizer", id: "ev-t", ical: "ical-t", teams: true, role: "organizer", wantAttend: true},
+		{name: "outlook appointment", id: "ev-a", ical: "ical-a", teams: false, role: "organizer", wantAttend: false},
+		{name: "teams attendee", id: "ev-b", ical: "ical-b", teams: true, role: "attendee", wantAttend: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := &fakeGraph{pages: map[string]outlook.TeamsPage{
+				"/users/u1/calendarView/delta": {
+					Items:     []json.RawMessage{calendarEvent(tc.id, tc.ical, tc.role, start, tc.teams)},
+					DeltaLink: "https://graph.microsoft.com/v1.0/users/u1/calendarView/delta?$deltatoken=c1",
+				},
+			}}
+			g.install(t)
+			store := newMemTeamsStore()
+			r := newTestTeamsRun(t, store, nil, nil)
+			r.userScope["u1"] = true
+			if status, _ := r.syncUserMeetings("u1", r.deadline); status != teamsComplete {
+				t.Fatalf("status %s failures %+v", status, r.mem.TeamsFailures)
+			}
+			mid, _, _ := outlook.TeamsMeetingID(tc.ical, "u1", tc.id, false)
+			if _, ok := store.objs[outlook.TeamsMeetingEventKey(outlook.TeamsMeetingPrefix(teamsTestTenant, mid))]; !ok {
+				t.Fatal("event.json missing")
+			}
+			var st teamsUserState
+			r.loadState(outlook.TeamsUserStateKey(r.tenantPrefix, "u1"), &st)
+			_, queued := st.Attendance[mid]
+			if queued != tc.wantAttend {
+				t.Fatalf("attendance queued=%v want %v: %+v", queued, tc.wantAttend, st.Attendance)
+			}
+		})
+	}
+}
+
+func mailboxCalendar(id, name string, def bool) json.RawMessage {
+	return rawJSON(map[string]interface{}{
+		"id": id, "name": name, "color": "auto", "isDefaultCalendar": def,
+	})
+}
+
+func withEventFields(raw json.RawMessage, extra map[string]interface{}) json.RawMessage {
+	var m map[string]interface{}
+	if json.Unmarshal(raw, &m) != nil {
+		return raw
+	}
+	for k, v := range extra {
+		m[k] = v
+	}
+	return rawJSON(m)
+}
+
+func TestTeamsMailboxCalendarsBackupHolidaysAndBirthdays(t *testing.T) {
+	start := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Second)
+	cases := []struct {
+		name           string
+		calendars      []json.RawMessage
+		defaultEvents  []json.RawMessage
+		named          map[string][]json.RawMessage
+		docs           map[string][]byte
+		wantNames      []string
+		wantEventCal   map[string]string
+		wantSubjects   map[string]string
+		wantNamedDelta []string
+	}{
+		{
+			name: "holidays and birthdays with the default calendar",
+			calendars: []json.RawMessage{
+				mailboxCalendar("cal-def", "Calendar", true),
+				mailboxCalendar("cal-hol", "United States holidays", false),
+				mailboxCalendar("cal-bday", "Birthdays", false),
+			},
+			defaultEvents: []json.RawMessage{
+				withEventFields(calendarEvent("ev-standup", "ical-standup", "organizer", start, false), map[string]interface{}{"subject": "Standup"}),
+			},
+			named: map[string][]json.RawMessage{
+				"cal-hol": {
+					withEventFields(calendarEvent("ev-thanks", "ical-thanks", "organizer", start, false), map[string]interface{}{"subject": "Thanksgiving Day", "isAllDay": true}),
+				},
+				"cal-bday": {
+					withEventFields(calendarEvent("ev-bday", "ical-bday", "organizer", start, false), map[string]interface{}{"subject": "Alice's birthday", "isAllDay": true}),
+				},
+			},
+			wantNames: []string{"Calendar", "United States holidays", "Birthdays"},
+			wantEventCal: map[string]string{
+				"ev-standup": "Calendar",
+				"ev-thanks":  "United States holidays",
+				"ev-bday":    "Birthdays",
+			},
+			wantSubjects: map[string]string{
+				"ev-standup": "Standup",
+				"ev-thanks":  "Thanksgiving Day",
+				"ev-bday":    "Alice's birthday",
+			},
+			wantNamedDelta: []string{"/calendars/cal-hol/calendarView/delta", "/calendars/cal-bday/calendarView/delta"},
+		},
+		{
+			name: "occurrence without subject copies the series master",
+			calendars: []json.RawMessage{
+				mailboxCalendar("cal-def", "Calendar", true),
+			},
+			defaultEvents: []json.RawMessage{
+				withEventFields(calendarEvent("ev-occ", "ical-series", "organizer", start, false), map[string]interface{}{
+					"type": "occurrence", "subject": "", "seriesMasterId": "ev-master",
+				}),
+			},
+			docs: map[string][]byte{
+				"/users/u1/events/ev-master": withEventFields(calendarEvent("ev-master", "ical-series", "organizer", start, false), map[string]interface{}{
+					"type": "seriesMaster", "subject": "Weekly sync",
+				}),
+			},
+			wantNames:    []string{"Calendar"},
+			wantEventCal: map[string]string{"ev-occ": "Calendar"},
+			wantSubjects: map[string]string{"ev-occ": "Weekly sync"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pages := map[string]outlook.TeamsPage{
+				"/users/u1/calendars?": {
+					Items: tc.calendars,
+				},
+				"/users/u1/calendarView/delta": {
+					Items:     tc.defaultEvents,
+					DeltaLink: "https://graph.microsoft.com/v1.0/users/u1/calendarView/delta?$deltatoken=c1",
+				},
+			}
+			for id, items := range tc.named {
+				pages["/users/u1/calendars/"+id+"/calendarView/delta"] = outlook.TeamsPage{
+					Items:     items,
+					DeltaLink: "https://graph.microsoft.com/v1.0/users/u1/calendars/" + id + "/calendarView/delta?$deltatoken=n1",
+				}
+			}
+			g := &fakeGraph{pages: pages, docs: tc.docs}
+			g.install(t)
+			store := newMemTeamsStore()
+			r := newTestTeamsRun(t, store, nil, nil)
+			r.userScope["u1"] = true
+			if status, code := r.syncUserMeetings("u1", r.deadline); status != teamsComplete {
+				t.Fatalf("status %s %s failures %+v", status, code, r.mem.TeamsFailures)
+			}
+			var listed struct {
+				Calendars []struct {
+					Name string `json:"name"`
+				} `json:"calendars"`
+			}
+			if err := json.Unmarshal(store.objs[outlook.TeamsUserCalendarsKey(outlook.TeamsUserPrefix(teamsTestTenant, "u1"))], &listed); err != nil {
+				t.Fatalf("_calendars.json: %v", err)
+			}
+			gotNames := make([]string, 0, len(listed.Calendars))
+			for _, c := range listed.Calendars {
+				gotNames = append(gotNames, c.Name)
+			}
+			if strings.Join(gotNames, ",") != strings.Join(tc.wantNames, ",") {
+				t.Fatalf("calendars %v want %v", gotNames, tc.wantNames)
+			}
+			var st teamsUserState
+			r.loadState(outlook.TeamsUserStateKey(r.tenantPrefix, "u1"), &st)
+			for eventID, wantCal := range tc.wantEventCal {
+				mid := st.EventMids[eventID]
+				if mid == "" {
+					t.Fatalf("missing mid for %s: %+v", eventID, st.EventMids)
+				}
+				var doc map[string]interface{}
+				if err := json.Unmarshal(store.objs[outlook.TeamsMeetingMetaKey(outlook.TeamsMeetingPrefix(teamsTestTenant, mid))], &doc); err != nil {
+					t.Fatalf("_meeting.json %s: %v", eventID, err)
+				}
+				if doc["calendar_name"] != wantCal {
+					t.Fatalf("%s calendar_name %v want %s", eventID, doc["calendar_name"], wantCal)
+				}
+			}
+			for eventID, wantSub := range tc.wantSubjects {
+				mid := st.EventMids[eventID]
+				var ev struct {
+					Subject string `json:"subject"`
+				}
+				if err := json.Unmarshal(store.objs[outlook.TeamsMeetingEventKey(outlook.TeamsMeetingPrefix(teamsTestTenant, mid))], &ev); err != nil {
+					t.Fatalf("event.json %s: %v", eventID, err)
+				}
+				if ev.Subject != wantSub {
+					t.Fatalf("%s subject %q want %q", eventID, ev.Subject, wantSub)
+				}
+			}
+			for _, part := range tc.wantNamedDelta {
+				if !teamsCalled(g, part) {
+					t.Fatalf("graph never requested %s: %v", part, g.calls)
+				}
+			}
+		})
 	}
 }
 
@@ -643,7 +969,7 @@ func TestTeamsTranscriptListingPagesDeltaLinksAndResumes(t *testing.T) {
 	if _, ok := r.mem.TeamsFailures[streamKey]; ok {
 		t.Fatal("stream failure must clear")
 	}
-	if m := meta("om-1"); strings.Contains(m, "transcriptContentUrl") || !strings.Contains(m, `"transcript_content_status":"`+outlook.TeamsStatusPaidAPI+`"`) {
+	if m := meta("om-1"); strings.Contains(m, "transcriptContentUrl") || !strings.Contains(m, `"transcript_content_status":"`+outlook.TeamsStatusContentNotCollected+`"`) {
 		t.Fatalf("transcript content must not be stored or reported: %s", m)
 	}
 
@@ -865,9 +1191,12 @@ func TestTeamsFeatureWithoutRoleIsNotConsentedAndNeverCalled(t *testing.T) {
 			t.Fatalf("%s: %+v", f, got)
 		}
 	}
-	for _, f := range []string{outlook.TeamsFeatureCallRecords, outlook.TeamsFeaturePSTN, outlook.TeamsFeatureDirectRouting} {
-		if !r.consented(f) {
-			t.Fatalf("%s: CallRecords.Read.All covers it", f)
+	if !r.consented(outlook.TeamsFeatureCallRecords) {
+		t.Fatal("CallRecords.Read.All consents Teams call records")
+	}
+	for _, f := range []string{outlook.TeamsFeaturePSTN, outlook.TeamsFeatureDirectRouting} {
+		if r.consented(f) {
+			t.Fatalf("%s: CallRecords.Read.All does not cover PSTN/Direct Routing", f)
 		}
 	}
 	if outlook.TeamsFeaturesNotConsented(outlook.TokenRoles("opaque")) != nil {
@@ -1175,7 +1504,7 @@ func TestTeamsOnlineMeetingStoredWithOwnershipAndChatLink(t *testing.T) {
 		t.Fatalf("meeting chat link: %v", a)
 	}
 	if a["attendance_status"] != outlook.TeamsStatusOK || a["transcript_metadata_status"] != outlook.TeamsStatusOK ||
-		a["transcript_content_status"] != outlook.TeamsStatusPaidAPI || len(a["transcripts"].([]interface{})) != 1 {
+		a["transcript_content_status"] != outlook.TeamsStatusContentNotCollected || len(a["transcripts"].([]interface{})) != 1 {
 		t.Fatalf("existing statuses must be kept: %v", a)
 	}
 
@@ -1330,5 +1659,104 @@ func TestTeamsOnlineMeetingFailuresAreRetried(t *testing.T) {
 	}
 	if doc := teamsMeetingDoc(t, store, "mid-a"); doc["online_meeting_status"] != outlook.TeamsStatusOK || doc["chat_id"] != "19:meeting_x@thread.v2" {
 		t.Fatalf("retry: %v", doc)
+	}
+}
+
+func TestTeamsRecordingArtifactCoverageStates(t *testing.T) {
+	shareBody := []byte(`{"id":"item-1","name":"meeting.mp4","eTag":"et","parentReference":{"driveId":"d1","driveType":"business"}}`)
+	g := &fakeGraph{
+		pages: map[string]outlook.TeamsPage{},
+		docs: map[string][]byte{
+			"/shares/":        shareBody,
+			"/drives/d1":      []byte(`{"id":"d1","owner":{"user":{"id":"ou"}}}`),
+			"/users/ou/drive": []byte(`{"id":"d1"}`),
+		},
+	}
+	g.install(t)
+	dbs := newTeamsTestDB(t)
+	owner, err := dbs.CronJobRepo.CreateMicrosoftResourceJob("u1", "OD", "outlook_onedrive", "daily", 1,
+		repo.MicrosoftJobIdentity{TenantID: teamsTestTenant, ResourceType: repo.ResourceTypeUser, ResourceID: "ou"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbs.DB.Model(owner).Updates(map[string]interface{}{"active": true, "storx_token": "grant"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	ownerPrefix := outlook.ResourceKeyPrefix(teamsTestTenant, repo.ResourceTypeUser, "ou")
+	fileKey := outlook.OneDriveFileKey(ownerPrefix, outlook.OneDriveSectionMyDrive, nil, "item-1", "meeting.mp4")
+	prevK, prevS := teamsOwnerKeysFn, teamsOwnerStatFn
+	teamsOwnerKeysFn = func(context.Context, ProcessorInput, string, string, string, string, string) (map[string]bool, error) {
+		return map[string]bool{fileKey: true}, nil
+	}
+	teamsOwnerStatFn = func(context.Context, string, string, string) (map[string]string, error) {
+		return map[string]string{outlook.OneDriveMetaItemID: "item-1", outlook.OneDriveMetaETag: "bk"}, nil
+	}
+	t.Cleanup(func() { teamsOwnerKeysFn, teamsOwnerStatFn = prevK, prevS })
+
+	store := newMemTeamsStore()
+	r := newTestTeamsRun(t, store, dbs, nil)
+	st := &teamsUserState{OnlineMeetings: map[string]string{}}
+
+	// Metadata only (Graph content URL) → unresolved, never backed_up.
+	g.pages["getAllRecordings"] = outlook.TeamsPage{Items: []json.RawMessage{rawJSON(map[string]string{
+		"id": "rec-meta", "meetingId": "om-meta", "recordingContentUrl": "https://graph.microsoft.com/v1.0/users/u/onlineMeetings/m/recordings/r/content",
+	})}}
+	if got := r.syncArtifactListing("u1", st, "recordings", r.deadline, func() error { return nil }); got != teamsComplete {
+		t.Fatalf("meta-only status %s", got)
+	}
+	midMeta, _, _ := outlook.TeamsMeetingID("", "u1", "onlineMeeting:om-meta", false)
+	metaRaw := string(store.objs[outlook.TeamsMeetingMetaKey(outlook.TeamsMeetingPrefix(teamsTestTenant, midMeta))])
+	if !strings.Contains(metaRaw, `"backup_status":"`+outlook.TeamsFileUnresolved+`"`) || strings.Contains(metaRaw, `"backup_status":"`+outlook.TeamsFileBackedUp+`"`) {
+		t.Fatalf("unresolvable recording must stay unresolved: %s", metaRaw)
+	}
+
+	// Resolvable webUrl but OD/SP not backed up yet.
+	g.pages["getAllRecordings"] = outlook.TeamsPage{Items: []json.RawMessage{rawJSON(map[string]string{
+		"id": "rec-pending", "meetingId": "om-pending", "webUrl": "https://contoso-my.sharepoint.com/personal/ou/Documents/pending.mp4",
+	})}}
+	g.docs["/shares/"] = []byte(`{"id":"item-pending","name":"pending.mp4","eTag":"et","parentReference":{"driveId":"d1","driveType":"business"}}`)
+	teamsOwnerKeysFn = func(context.Context, ProcessorInput, string, string, string, string, string) (map[string]bool, error) {
+		return map[string]bool{}, nil
+	}
+	r.files = nil
+	if got := r.syncArtifactListing("u1", st, "recordings", r.deadline, func() error { return nil }); got != teamsComplete {
+		t.Fatalf("pending status %s", got)
+	}
+	midPending, _, _ := outlook.TeamsMeetingID("", "u1", "onlineMeeting:om-pending", false)
+	pendingRaw := string(store.objs[outlook.TeamsMeetingMetaKey(outlook.TeamsMeetingPrefix(teamsTestTenant, midPending))])
+	if !strings.Contains(pendingRaw, `"backup_status":"`+outlook.TeamsFileNotBackedUp+`"`) &&
+		!strings.Contains(pendingRaw, `"backup_status":"`+outlook.TeamsFileKeyUnverified+`"`) {
+		t.Fatalf("resolved but missing OD/SP backup: %s", pendingRaw)
+	}
+
+	// Resolvable and backed up by OneDrive.
+	g.pages["getAllRecordings"] = outlook.TeamsPage{Items: []json.RawMessage{rawJSON(map[string]string{
+		"id": "rec-ok", "meetingId": "om-ok", "webUrl": "https://contoso-my.sharepoint.com/personal/ou/Documents/meeting.mp4",
+	})}}
+	g.docs["/shares/"] = shareBody
+	teamsOwnerKeysFn = func(context.Context, ProcessorInput, string, string, string, string, string) (map[string]bool, error) {
+		return map[string]bool{fileKey: true}, nil
+	}
+	r.files = nil
+	if got := r.syncArtifactListing("u1", st, "recordings", r.deadline, func() error { return nil }); got != teamsComplete {
+		t.Fatalf("backed-up status %s", got)
+	}
+	midOK, _, _ := outlook.TeamsMeetingID("", "u1", "onlineMeeting:om-ok", false)
+	okRaw := string(store.objs[outlook.TeamsMeetingMetaKey(outlook.TeamsMeetingPrefix(teamsTestTenant, midOK))])
+	if !strings.Contains(okRaw, `"backup_status":"`+outlook.TeamsFileBackedUp+`"`) || !strings.Contains(okRaw, fileKey) {
+		t.Fatalf("backed up recording: %s", okRaw)
+	}
+
+	// @removed keeps entry with removed_at.
+	g.pages["getAllRecordings"] = outlook.TeamsPage{Items: []json.RawMessage{rawJSON(map[string]interface{}{
+		"id": "rec-ok", "meetingId": "om-ok", "@removed": map[string]string{"reason": "deleted"},
+	})}}
+	r.files = nil
+	if got := r.syncArtifactListing("u1", st, "recordings", r.deadline, func() error { return nil }); got != teamsComplete {
+		t.Fatalf("removed status %s", got)
+	}
+	removedRaw := string(store.objs[outlook.TeamsMeetingMetaKey(outlook.TeamsMeetingPrefix(teamsTestTenant, midOK))])
+	if !strings.Contains(removedRaw, `"removed_at"`) || !strings.Contains(removedRaw, "rec-ok") {
+		t.Fatalf("removed artifact must keep body + removed_at: %s", removedRaw)
 	}
 }

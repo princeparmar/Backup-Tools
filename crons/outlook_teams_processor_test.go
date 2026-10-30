@@ -128,7 +128,7 @@ func newTestTeamsRun(t *testing.T, store *memTeamsStore, dbs *db.PostgresDb, job
 		store: store, token: "tok", tenant: teamsTestTenant, tenantPrefix: outlook.TeamsTenantPrefix(teamsTestTenant),
 		mem: &job.TaskMemory, start: now, deadline: now.Add(teamsRunBudget), to: now.Add(-teamsNowMargin),
 		status: &teamsStatusDoc{}, userScope: map[string]bool{}, chatsSeen: map[string]bool{},
-		seriesSeen: map[string]string{}, midChecked: map[string]string{}, icalMids: map[string][]string{},
+		seriesSeen: map[string]string{}, seriesSubjects: map[string]string{}, midChecked: map[string]string{}, icalMids: map[string][]string{},
 	}
 	if err := r.loadKeys(); err != nil {
 		t.Fatal(err)
@@ -221,6 +221,31 @@ func teamsMsg(id, replyTo, channel, modified string, extra map[string]interface{
 	}
 	b, _ := json.Marshal(m)
 	return b
+}
+
+func TestTeamsRestorablePhaseOrder(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		got  []string
+		want []string
+	}{
+		{name: "production skips calls and meetings", got: teamsRestorablePhaseOrder, want: []string{teamsPhaseRetries, teamsPhaseTeams, teamsPhaseChats}},
+		{name: "full order kept for later", got: teamsPhaseOrder, want: []string{teamsPhaseCalls, teamsPhaseRetries, teamsPhaseTeams, teamsPhaseChats, teamsPhaseMeetings}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if len(tt.got) != len(tt.want) {
+				t.Fatalf("got %v want %v", tt.got, tt.want)
+			}
+			for i := range tt.want {
+				if tt.got[i] != tt.want[i] {
+					t.Fatalf("got %v want %v", tt.got, tt.want)
+				}
+			}
+		})
+	}
 }
 
 func TestTeamsPhaseBudgets(t *testing.T) {
@@ -968,6 +993,12 @@ func TestTeamsSharedChannelsAreReportedAsCoverageGaps(t *testing.T) {
 	if doc.Coverage["shared"] != "incomplete" || len(doc.Shared) != 2 {
 		t.Fatalf("shared channel coverage: %+v", doc)
 	}
+	if doc.Coverage["standard"] != "verified" || doc.Coverage["private"] != "verified" {
+		t.Fatalf("standard/private coverage after complete window: %+v", doc.Coverage)
+	}
+	if r.status.IncomingChannelSkipped != 1 {
+		t.Fatalf("incoming_channel_skipped = %d, want 1", r.status.IncomingChannelSkipped)
+	}
 	scopes := map[string]string{}
 	want := map[string]string{"shared-local": teamsSharedListed, "shared-incoming": teamsSharedNotCollected}
 	for _, entry := range doc.Shared {
@@ -981,6 +1012,9 @@ func TestTeamsSharedChannelsAreReportedAsCoverageGaps(t *testing.T) {
 	}
 }
 
+// Channel getAllMessages deletions use deletedDateTime (not @removed). Chat delta deletions use
+// @removed (see TestTeamsChatDeletionMarkerPreservesStoredMessage). The two fields are not
+// interchangeable across collectors.
 func TestTeamsChannelVersionRuleAndDeletion(t *testing.T) {
 	g := &fakeGraph{pages: map[string]outlook.TeamsPage{"getAllMessages": {Items: []json.RawMessage{
 		teamsMsg("100", "", "ch-a", "2026-10-02T10:00:00.000Z", nil),
@@ -1273,6 +1307,12 @@ func TestTeamsFailureCapHoldsInsteadOfGrowing(t *testing.T) {
 	if r.fail("chats:item:c:new", repo.TeamsFailure{Phase: "chats", Kind: teamsFailItem}, errors.New("x"), true) {
 		t.Fatal("a full failure list must not grow")
 	}
+	if r.failuresCapped != 1 || r.status.FailuresCapped != 1 {
+		t.Fatalf("failures capped counter: run=%d status=%d", r.failuresCapped, r.status.FailuresCapped)
+	}
+	if len(r.status.Gaps) != 1 || r.status.Gaps[0].Kind != "failures_capped" || r.status.Gaps[0].Resource != "chats:item:c:new" {
+		t.Fatalf("capped drop must be a durable gap: %+v", r.status.Gaps)
+	}
 	if !r.fail("chats:item:c:1", repo.TeamsFailure{Phase: "chats", Kind: teamsFailItem}, errors.New("x"), true) {
 		t.Fatal("an existing entry is still updated")
 	}
@@ -1281,6 +1321,25 @@ func TestTeamsFailureCapHoldsInsteadOfGrowing(t *testing.T) {
 	}
 	if size := teamsMemorySize(r.mem); size > teamsMaxMemoryBytes {
 		t.Fatalf("task memory %d bytes over the limit", size)
+	}
+}
+
+func TestTeamsChannelCoverageStates(t *testing.T) {
+	if got := teamsCoverageFromSync(teamsComplete, ""); got != "verified" {
+		t.Fatalf("complete → verified, got %s", got)
+	}
+	if got := teamsCoverageFromSync(teamsCompleteWithGaps, ""); got != "incomplete" {
+		t.Fatalf("gaps → incomplete, got %s", got)
+	}
+	if got := teamsCoverageFromSync(teamsBlocked, outlook.TeamsStatusMissingPermission); got != "inaccessible" {
+		t.Fatalf("missing permission → inaccessible, got %s", got)
+	}
+	if got := teamsCoverageFromSync(teamsBlocked, outlook.TeamsStatusThrottled); got != "failed" {
+		t.Fatalf("throttled block → failed, got %s", got)
+	}
+	cov := teamsBuildChannelCoverage(nil, nil, teamsComplete, "", "")
+	if cov["standard"] != "verified" || cov["private"] != "verified" || cov["shared"] != "verified" {
+		t.Fatalf("no shared channels after complete window: %+v", cov)
 	}
 }
 
@@ -1557,4 +1616,99 @@ func keysOf(m map[string][]byte) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+func TestTeamsJobWarning(t *testing.T) {
+	res := func(kind, phase, status, code string) teamsResourceStatus {
+		return teamsResourceStatus{Type: kind, Phase: phase, Status: status, Code: code}
+	}
+	tests := []struct {
+		name      string
+		resources map[string]teamsResourceStatus
+		notes     []string
+		want      string
+	}{
+		{
+			name: "all complete is success",
+			resources: map[string]teamsResourceStatus{
+				"team": res("team", teamsPhaseTeams, teamsComplete, ""),
+				"user": res("user", teamsPhaseChats, teamsComplete, ""),
+			},
+		},
+		{
+			name: "budget incomplete and optional calls block are not a job warning",
+			resources: map[string]teamsResourceStatus{
+				"t1": res("team", teamsPhaseTeams, teamsComplete, ""),
+				"u1": res("user", teamsPhaseChats, teamsComplete, ""),
+				"u2": res("user", teamsPhaseChats, teamsComplete, ""),
+				"u3": res("user", teamsPhaseChats, teamsComplete, ""),
+				"u4": res("user", teamsPhaseMeetings, teamsComplete, ""),
+				"u5": res("user", teamsPhaseMeetings, teamsComplete, ""),
+				"u6": res("user", teamsPhaseMeetings, teamsComplete, ""),
+				"u7": res("user", teamsPhaseMeetings, teamsCompleteWithRetries, ""),
+				"u8": res("user", teamsPhaseChats, teamsIncomplete, ""),
+				"c1": res("calls", teamsPhaseCalls, teamsBlocked, outlook.TeamsStatusMissingPermission),
+			},
+			notes: []string{"Some Teams files are in OneDrive or SharePoint locations without a backup job"},
+		},
+		{
+			name: "throttled incomplete resumes without a job warning",
+			resources: map[string]teamsResourceStatus{
+				"u1": res("user", teamsPhaseChats, teamsIncomplete, outlook.TeamsStatusThrottled),
+			},
+		},
+		{
+			name: "shared-channel limitation is not a job warning",
+			resources: map[string]teamsResourceStatus{
+				"t1": res("team", teamsPhaseTeams, teamsCompleteWithGaps, ""),
+			},
+			notes: []string{"Messages of shared channels owned by another tenant, or whose host team couldn't be read, are not collected"},
+		},
+		{
+			name: "required chat blocked is a job warning",
+			resources: map[string]teamsResourceStatus{
+				"u1": res("user", teamsPhaseChats, teamsBlocked, outlook.TeamsStatusMissingPermission),
+			},
+			want: teamsWarningPrefix + ": 1 blocked",
+		},
+		{
+			name: "team paging error is a job warning",
+			resources: map[string]teamsResourceStatus{
+				"t1": res("team", teamsPhaseTeams, teamsIncomplete, outlook.TeamsStatusPaging),
+			},
+			want: teamsWarningPrefix + ": 1 incomplete",
+		},
+		{
+			name:  "unexpected status note is a job warning",
+			notes: []string{"Graph returned an unexpected tenant error"},
+			want:  teamsWarningPrefix + ": Graph returned an unexpected tenant error",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := teamsJobWarning(tc.resources, tc.notes)
+			if got != tc.want {
+				t.Fatalf("got %q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTeamsFinishClearsExpectedWarning(t *testing.T) {
+	r := newTestTeamsRun(t, newMemTeamsStore(), nil, nil)
+	r.input.Job.Message = "Teams backup finished with warnings: 8 complete, 1 incomplete, 1 blocked"
+	r.input.Job.MessageStatus = repo.JobMessageStatusWarning
+	r.status.Resources = map[string]teamsResourceStatus{
+		"team:1:teams":  {Type: "team", Phase: teamsPhaseTeams, Status: teamsComplete},
+		"user:1:chats":  {Type: "user", Phase: teamsPhaseChats, Status: teamsComplete},
+		"user:2:chats":  {Type: "user", Phase: teamsPhaseChats, Status: teamsIncomplete},
+		"calls:t:calls": {Type: "calls", Phase: teamsPhaseCalls, Status: teamsBlocked, Code: outlook.TeamsStatusMissingPermission},
+	}
+	r.warn("Some Teams files are in OneDrive or SharePoint locations without a backup job")
+	if err := r.finish(); err != nil {
+		t.Fatal(err)
+	}
+	if r.input.Job.Message != "" || r.input.Job.MessageStatus != "" {
+		t.Fatalf("expected job warning cleared, got %q (%s)", r.input.Job.Message, r.input.Job.MessageStatus)
+	}
 }

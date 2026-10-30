@@ -11,14 +11,17 @@ import (
 //
 //	{prefix}/MY_DRIVE/{parentFolderId}/.../{itemId}${name}
 //	{prefix}/MY_DRIVE/{parentFolderId}/.../{folderId}/.folder__{name}
+//	{prefix}/SHARED_WITH_ME/{parentFolderId}/.../{itemId}${name}
 //	{prefix}/BIN/{itemId}${name}
 //
 // prefix is ResourceKeyPrefix. Parent folders are listed by id from the drive root down, so a
 // renamed folder keeps its contents' keys. Files deleted from OneDrive move to the flat BIN
-// section. "$" in ids and names is written as "$$". Item details are custom object metadata.
+// section. SHARED_WITH_ME holds personal Shared with me copies (remote item ids). "$" in ids
+// and names is written as "$$". Item details are custom object metadata.
 const (
-	OneDriveSectionMyDrive = "MY_DRIVE"
-	OneDriveSectionBin     = "BIN"
+	OneDriveSectionMyDrive      = "MY_DRIVE"
+	OneDriveSectionSharedWithMe = "SHARED_WITH_ME"
+	OneDriveSectionBin          = "BIN"
 
 	oneDriveFolderLeafPrefix = ".folder__"
 	oneDriveIDNameSep        = "$"
@@ -39,8 +42,8 @@ const (
 	OneDriveMetaIsFolder   = "is-folder"
 	OneDriveMetaRemovedAt  = "removed-at"
 	OneDriveMetaBackedUpAt = "backed-up-at"
-	// OneDriveMetaDriveID is the Graph drive of a SharePoint or group library backup; OneDrive
-	// backups restore into the user's drive and leave it unset.
+	// OneDriveMetaDriveID is the Graph drive of a SharePoint/group library or Shared with me
+	// remote item. Personal My files backups leave it unset (restore uses the user's drive).
 	OneDriveMetaDriveID = "drive-id"
 )
 
@@ -63,14 +66,29 @@ func OneDriveFileKey(prefix, section string, parentIDs []string, itemID, name st
 
 // OneDriveFolderKey builds the placeholder key of a folder in MY_DRIVE.
 func OneDriveFolderKey(prefix string, parentIDs []string, folderID, name string) string {
-	parts := oneDriveKeyHead(prefix, OneDriveSectionMyDrive, parentIDs)
+	return OneDriveFolderKeyIn(prefix, OneDriveSectionMyDrive, parentIDs, folderID, name)
+}
+
+// OneDriveFolderKeyIn builds the placeholder key of a folder in section (MY_DRIVE or SHARED_WITH_ME).
+func OneDriveFolderKeyIn(prefix, section string, parentIDs []string, folderID, name string) string {
+	parts := oneDriveKeyHead(prefix, section, parentIDs)
 	return strings.Join(append(parts, oneDriveKeyID(folderID), oneDriveFolderLeafPrefix+SanitizeOneDrivePathSegment(name)), "/")
 }
 
 // OneDriveFolderContentsPrefix is the key prefix of everything inside a MY_DRIVE folder.
 func OneDriveFolderContentsPrefix(prefix string, parentIDs []string, folderID string) string {
-	parts := oneDriveKeyHead(prefix, OneDriveSectionMyDrive, parentIDs)
+	return OneDriveFolderContentsPrefixIn(prefix, OneDriveSectionMyDrive, parentIDs, folderID)
+}
+
+// OneDriveFolderContentsPrefixIn is the key prefix of everything inside a folder in section.
+func OneDriveFolderContentsPrefixIn(prefix, section string, parentIDs []string, folderID string) string {
+	parts := oneDriveKeyHead(prefix, section, parentIDs)
 	return strings.Join(append(parts, oneDriveKeyID(folderID)), "/") + "/"
+}
+
+// IsOneDriveTreeSection reports sections that store a folder tree (not flat BIN).
+func IsOneDriveTreeSection(section string) bool {
+	return section == OneDriveSectionMyDrive || section == OneDriveSectionSharedWithMe
 }
 
 func oneDriveKeyHead(prefix, section string, parentIDs []string) []string {
@@ -122,14 +140,14 @@ func ParseOneDriveObjectKey(key string) (OneDriveObjectKey, bool) {
 		prefix += "/" + parts[0] + "/" + parts[1]
 		parts = parts[2:]
 	}
-	if len(parts) < 2 || (parts[0] != OneDriveSectionMyDrive && parts[0] != OneDriveSectionBin) {
+	if len(parts) < 2 || (parts[0] != OneDriveSectionMyDrive && parts[0] != OneDriveSectionSharedWithMe && parts[0] != OneDriveSectionBin) {
 		return OneDriveObjectKey{}, false
 	}
 	out := OneDriveObjectKey{Prefix: prefix, Section: parts[0]}
 	leaf, mid := parts[len(parts)-1], parts[1:len(parts)-1]
 
 	if name, isFolder := strings.CutPrefix(leaf, oneDriveFolderLeafPrefix); isFolder {
-		if out.Section != OneDriveSectionMyDrive || len(mid) == 0 || mid[len(mid)-1] == "" {
+		if !IsOneDriveTreeSection(out.Section) || len(mid) == 0 || mid[len(mid)-1] == "" {
 			return OneDriveObjectKey{}, false
 		}
 		out.IsFolder = true
@@ -232,6 +250,7 @@ func OneDriveObjectMeta(item *OneDriveItem, parentPath string) map[string]string
 	set(OneDriveMetaCreated, item.CreatedDateTime)
 	set(OneDriveMetaModified, item.LastModifiedDateTime)
 	set(OneDriveMetaWebURL, item.WebURL)
+	set(OneDriveMetaDriveID, item.DriveID)
 	if item.IsFolder {
 		meta[OneDriveMetaIsFolder] = "true"
 		return meta

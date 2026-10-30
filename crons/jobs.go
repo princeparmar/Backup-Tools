@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/handler"
 	"github.com/StorX2-0/Backup-Tools/pkg/database"
@@ -23,6 +24,10 @@ import (
 // errJobDeactivated stops an in-flight backup when the user turns that job off,
 // so the worker can start the next pushed task (Contacts, Calendar, …).
 var errJobDeactivated = errors.New("job deactivated")
+
+// errAccessCheckUnavailable: system access-check task finished; mailbox service is not eligible.
+// Treated as a successful task outcome (not a backup failure retry).
+var errAccessCheckUnavailable = errors.New("access check: unavailable")
 
 type ProcessorInput struct {
 	InputData     *database.DbJson[map[string]interface{}]
@@ -52,6 +57,16 @@ var processorMap = map[string]Processor{
 	"google_calendar":    NewGoogleCalendarProcessor(),
 }
 
+// memoryHeavyMethods — only one such backup at a time process-wide (avoids OOM from parallel Drive/Photos/Gmail).
+var memoryHeavyMethods = map[string]struct{}{
+	"google_drive":  {},
+	"google_photos": {},
+	"gmail":         {},
+}
+
+// heavyBackupSlot limits concurrent memory-heavy autosync processors (buffer 1 = strictly serial).
+var heavyBackupSlot = make(chan struct{}, 1)
+
 type AutosyncManager struct {
 	store *db.PostgresDb
 }
@@ -69,9 +84,10 @@ func createCronContext(operation string) context.Context {
 }
 
 func (a *AutosyncManager) Start() {
-	// Skip a new process_tasks tick while the previous tick is still running a backup.
-	// One autosync run at a time; queued tasks (pushed) wait until the loop finishes.
-	c := cron.New(cron.WithChain(cron.DelayIfStillRunning(cron.DefaultLogger)))
+	// Allow overlapping process_tasks ticks so multiple backups can run in parallel
+	// (SharePoint + OneDrive + Teams, etc.). Memory-heavy Google methods still
+	// serialize via heavyBackupSlot inside processTask.
+	c := cron.New()
 
 	// Create tasks for pending jobs
 	c.AddFunc("@every 1m", func() {
@@ -143,6 +159,12 @@ func (a *AutosyncManager) Start() {
 	})
 	c.AddFunc("@every 6h", func() {
 		a.reconcileMicrosoftScopes(createCronContext("microsoft_scope_reconcile"))
+	})
+	// Batch claim ticks removed: system access-check jobs run via ProcessTask.
+	// Keep daily grace-delete for unavailable draft backup jobs.
+	a.microsoftAccessVerifyGraceDelete(createCronContext("microsoft_access_verify_grace"))
+	c.AddFunc("@daily", func() {
+		a.microsoftAccessVerifyGraceDelete(createCronContext("microsoft_access_verify_grace"))
 	})
 
 	// c.AddFunc("@every 1m", func() {
@@ -317,6 +339,31 @@ func (a *AutosyncManager) processTask(ctx context.Context, task *repo.TaskListin
 		}
 	}
 
+	// System access-check job: probe selection into results only (never runs backup processors).
+	if repo.IsSystemJob(job) && job.Method == repo.MethodMSAccessVerify {
+		return a.runMicrosoftSystemAccessCheckJob(ctx, task, job)
+	}
+
+	// Legacy per-draft System: Access check tasks (and verify-owned drafts): probe then maybe backup.
+	if repo.IsSystemAccessCheckTask(task) || repo.IsAccessVerifyOwned(job) {
+		outcome, probeErr := a.runMicrosoftAccessCheckForTask(ctx, task, job)
+		if probeErr != nil {
+			return probeErr
+		}
+		switch outcome {
+		case outlook.AccessProbeNoAccess:
+			return errAccessCheckUnavailable
+		case outlook.AccessProbeError:
+			return fmt.Errorf("access could not be verified yet")
+		}
+		if latest, lerr := a.store.CronJobRepo.GetCronJobByID(job.ID); lerr == nil && latest != nil {
+			job = latest
+		}
+		if repo.IsSystemAccessCheckTask(task) {
+			task.Message = "System: Access check passed"
+		}
+	}
+
 	processor, ok := processorMap[job.Method]
 	if !ok {
 		return fmt.Errorf("processor for method '%s' not found", job.Method)
@@ -326,6 +373,11 @@ func (a *AutosyncManager) processTask(ctx context.Context, task *repo.TaskListin
 		logger.Int("task_id", int(task.ID)),
 		logger.String("method", job.Method),
 	)
+
+	if _, heavy := memoryHeavyMethods[job.Method]; heavy {
+		heavyBackupSlot <- struct{}{}
+		defer func() { <-heavyBackupSlot }()
+	}
 
 	recovery := handler.NewStorxRecovery(a.store, job)
 	if strings.TrimSpace(a.store.CronJobRepo.ResolvedStorxToken(job)) == "" {
@@ -442,6 +494,28 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 		return nil
 	}
 
+	if errors.Is(processErr, errAccessCheckUnavailable) {
+		task.Status = repo.TaskStatusSuccess
+		task.Message = "System: Access check — unavailable"
+		if task.StartTime != nil {
+			task.Execution = uint64(time.Since(*task.StartTime).Seconds())
+		}
+		if err := a.store.TaskRepo.UpdateTaskByID(task.ID, map[string]interface{}{
+			"status":    task.Status,
+			"message":   task.Message,
+			"execution": task.Execution,
+		}); err != nil {
+			return fmt.Errorf("failed to save task: %w", err)
+		}
+		// Job message/access_verify already set by ApplyMicrosoftAccessVerifyProbe.
+		if job != nil {
+			_ = a.store.CronJobRepo.UpdateCronJobByID(job.ID, map[string]interface{}{
+				"status": repo.JobStatusSuccess,
+			})
+		}
+		return nil
+	}
+
 	if processErr != nil {
 		task.Status = repo.TaskStatusFailed
 		task.RetryCount++
@@ -540,7 +614,10 @@ func (a *AutosyncManager) UpdateTaskStatus(task *repo.TaskListingDB, job *repo.C
 		if !repo.IsOnDemandTask(task) {
 			updateMap["last_run"] = job.LastRun
 		}
-		if job.InputData != nil {
+		// System access-check jobs persist results via PersistAccessCheckState during the
+		// processor. Do not write the stale in-memory InputData from task pickup — that
+		// wiped completed results and left the UI stuck on "still checking".
+		if job.InputData != nil && !repo.IsSystemJob(job) {
 			updateMap["input_data"] = job.InputData
 		}
 

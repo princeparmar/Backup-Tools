@@ -107,11 +107,13 @@ func scopeJobs(store *db.PostgresDb, scope repo.MicrosoftBackupScopeDB) ([]repo.
 
 // addMicrosoftScopeUserJobs creates, for every enabled user without one, a job per method already
 // in the scope. Each new job copies the policy, interval, active state and settings of a sibling
-// job (same org unit first).
+// job (same org unit first). Access-verify user methods are created as inactive drafts and
+// enqueued for background verification (same as large onboarding).
 func addMicrosoftScopeUserJobs(store *db.PostgresDb, scope repo.MicrosoftBackupScopeDB, users []outlook.DirectoryUser, jobs []repo.CronJobListingDB) (int, error) {
 	methods, templates, have := scopeJobIndex(jobs)
 	created := 0
 	var firstErr error
+	var draftIDs []uint
 	for _, u := range users {
 		email := strings.TrimSpace(u.Email())
 		if !u.AccountEnabled || strings.TrimSpace(u.ObjectID) == "" || email == "" {
@@ -131,30 +133,53 @@ func addMicrosoftScopeUserJobs(store *db.PostgresDb, scope repo.MicrosoftBackupS
 				}
 				upserted = true
 			}
-			if err := cloneScopeJob(store, scope, pickScopeTemplate(templates[method], scope.PolicyID), u, email); err != nil {
+			asDraft := outlook.IsAccessVerifyUserMethod(method)
+			jobID, err := cloneScopeJob(store, scope, pickScopeTemplate(templates[method], scope.PolicyID), u, email, asDraft)
+			if err != nil {
 				if firstErr == nil {
 					firstErr = fmt.Errorf("create %s job for %s: %w", method, email, err)
 				}
 				continue
 			}
+			if asDraft && jobID > 0 {
+				draftIDs = append(draftIDs, jobID)
+			}
 			have[method+"|"+u.ObjectID] = true
 			created++
+		}
+	}
+	for _, id := range draftIDs {
+		if latest, _ := store.CronJobRepo.GetCronJobByID(id); latest != nil {
+			_ = store.CronJobRepo.UpdateCronJobByID(id, repo.SetJobAccessVerifyPending(latest, 0, "Checking access in the background."))
+		}
+		if store.TaskRepo != nil {
+			_, _ = store.TaskRepo.CreateSystemAccessCheckTaskForCronJob(id)
 		}
 	}
 	return created, firstErr
 }
 
-func cloneScopeJob(store *db.PostgresDb, scope repo.MicrosoftBackupScopeDB, tmpl repo.CronJobListingDB, u outlook.DirectoryUser, email string) error {
+func cloneScopeJob(store *db.PostgresDb, scope repo.MicrosoftBackupScopeDB, tmpl repo.CronJobListingDB, u outlook.DirectoryUser, email string, asDraft bool) (uint, error) {
 	input := scopeTemplateInput(tmpl)
 	input["email"] = email
 	// Older jobs may still carry the template user's org_unit_path.
 	delete(input, "org_unit_path")
+	delete(input, "access_verify")
 	job, err := store.CronJobRepo.CreateMicrosoftResourceJob(scope.UserID, email, tmpl.Method, scope.SyncType, scope.CredentialID,
 		repo.MicrosoftJobIdentity{TenantID: scope.TenantID, ResourceType: repo.ResourceTypeUser, ResourceID: u.ObjectID}, input)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	return saveScopeTemplateSchedule(store, job.ID, tmpl)
+	if err := saveScopeTemplateSchedule(store, job.ID, tmpl); err != nil {
+		return job.ID, err
+	}
+	if asDraft {
+		latest, _ := store.CronJobRepo.GetCronJobByID(job.ID)
+		if latest != nil {
+			_ = store.CronJobRepo.UpdateCronJobByID(job.ID, repo.SetJobAccessVerifyPending(latest, 0, "Checking access in the background."))
+		}
+	}
+	return job.ID, nil
 }
 
 // scopeJobIndex groups existing scope jobs by method and records which method already covers a resource.

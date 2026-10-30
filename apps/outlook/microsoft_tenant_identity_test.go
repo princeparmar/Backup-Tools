@@ -156,7 +156,17 @@ func serveRoleGraph(t *testing.T, assignments interface{}, assignmentsStatus int
 func TestReadTenantRoles_fallbackOrderAndScope(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("role assignments are authoritative and keep scope", func(t *testing.T) {
+	t.Run("memberOf with roles is preferred", func(t *testing.T) {
+		serveRoleGraph(t, []map[string]interface{}{
+			{"directoryScopeId": "/administrativeUnits/au-1", "roleDefinition": map[string]string{"displayName": "User Administrator", "templateId": "fe930be7-5e62-47db-91fc-433a67967a1a"}},
+		}, 0, []directoryRoleRow{{RoleTemplateID: globalAdminTemplateID, DisplayName: "Global Administrator"}}, 0)
+		res := ReadTenantRoles(ctx, "at", "", "oid")
+		if res.Status != RoleStatusKnown || res.Source != "member_of" || !res.IsTenantWideAdmin() {
+			t.Fatalf("result = %+v", res)
+		}
+	})
+
+	t.Run("empty memberOf falls through to role assignments with scope", func(t *testing.T) {
 		serveRoleGraph(t, []map[string]interface{}{
 			{"directoryScopeId": "/administrativeUnits/au-1", "roleDefinition": map[string]string{"displayName": "User Administrator", "templateId": "fe930be7-5e62-47db-91fc-433a67967a1a"}},
 		}, 0, nil, 0)
@@ -169,7 +179,7 @@ func TestReadTenantRoles_fallbackOrderAndScope(t *testing.T) {
 		}
 	})
 
-	t.Run("memberOf fallback is tenant-wide", func(t *testing.T) {
+	t.Run("memberOf fallback when assignments forbidden", func(t *testing.T) {
 		serveRoleGraph(t, nil, http.StatusForbidden, []directoryRoleRow{{RoleTemplateID: globalAdminTemplateID, DisplayName: "Global Administrator"}}, 0)
 		res := ReadTenantRoles(ctx, "at", "", "oid")
 		if res.Status != RoleStatusKnown || res.Source != "member_of" || !res.IsTenantWideAdmin() {

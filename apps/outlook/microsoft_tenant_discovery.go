@@ -131,21 +131,21 @@ func (r TenantRolesResult) IsTenantWideAdmin() bool {
 	return false
 }
 
-// ReadTenantRoles reads the user's directory roles in the token's tenant. Order: role assignments
-// (authoritative, with scope), then /me/memberOf directory roles (tenant-wide), then the `wids`
-// hint. Only role assignments or memberOf make the status known; wids alone stays unknown.
+// ReadTenantRoles reads the user's directory roles in the token's tenant. Order: /me/memberOf
+// (cheap, tenant-wide) when it returns roles, then role assignments (scoped, needs object ID),
+// then the `wids` hint. Only memberOf or role assignments make the status known; wids alone stays unknown.
 func ReadTenantRoles(ctx context.Context, accessToken, idToken, objectID string) TenantRolesResult {
-	if objectID = strings.TrimSpace(objectID); objectID != "" {
-		if roles, err := roleAssignmentsForPrincipal(ctx, accessToken, objectID); err == nil {
-			return TenantRolesResult{Roles: roles, Status: RoleStatusKnown, Source: "role_assignments"}
-		}
-	}
-	if rows, err := memberOfDirectoryRolesStrict(ctx, accessToken); err == nil {
+	if rows, err := memberOfDirectoryRolesStrict(ctx, accessToken); err == nil && len(rows) > 0 {
 		roles := make([]TenantRole, 0, len(rows))
 		for _, r := range rows {
 			roles = append(roles, TenantRole{TemplateID: strings.ToLower(strings.TrimSpace(r.RoleTemplateID)), Name: strings.TrimSpace(r.DisplayName), Scope: "/"})
 		}
 		return TenantRolesResult{Roles: sortRoles(roles), Status: RoleStatusKnown, Source: "member_of"}
+	}
+	if objectID = strings.TrimSpace(objectID); objectID != "" {
+		if roles, err := roleAssignmentsForPrincipal(ctx, accessToken, objectID); err == nil {
+			return TenantRolesResult{Roles: roles, Status: RoleStatusKnown, Source: "role_assignments"}
+		}
 	}
 	var hinted []TenantRole
 	seen := map[string]struct{}{}

@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
@@ -28,8 +30,14 @@ const (
 	teamsQAReactionsPending = "pending"
 )
 
-// teamsQAEnabled switches the Q&A listing on; it is off until the feature is released.
-var teamsQAEnabled = false
+// teamsQAEnabled switches the Q&A listing on. Default off until permissions, tenant capability
+// checks, failure handling and retrieval are verified in staging (TEAMS_QA_ENABLED=true|1|yes).
+var teamsQAEnabled = teamsQAEnabledFromEnv()
+
+func teamsQAEnabledFromEnv() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("TEAMS_QA_ENABLED")))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
 
 // teamsQAState is {tenant}/tenant/{tenantId}/_state/qa.json. Conversations pins each Q&A
 // conversation to the meeting folder it was first stored in.

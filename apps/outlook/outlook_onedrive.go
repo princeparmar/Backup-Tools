@@ -37,8 +37,11 @@ type OneDriveItem struct {
 	MimeType             string
 	ParentID             string
 	ParentPath           string // optional path from parentReference.path when present; never fetched recursively
-	IsFolder             bool
-	IsDeleted            bool
+	// DriveID is the Graph drive that owns the item. Set for Shared with me remote items and
+	// when listing children on a remote drive; empty for personal My files delta items.
+	DriveID   string
+	IsFolder  bool
+	IsDeleted bool
 	// IsRoot marks the drive root; IsPackage marks items such as OneNote notebooks that have no
 	// downloadable content.
 	IsRoot    bool
@@ -47,8 +50,8 @@ type OneDriveItem struct {
 	CTag      string
 }
 
-// OneDriveCronBackupMeta is the legacy meta JSON at {prefix}/meta/.../{itemId}_{name}.json; the
-// SharePoint backup still writes it.
+// OneDriveCronBackupMeta is the legacy meta JSON at {prefix}/meta/.../{itemId}_{name}.json.
+// Tree-layout cron jobs no longer write this; it remains for migration and legacy restore only.
 type OneDriveCronBackupMeta struct {
 	ItemID               string `json:"item_id"`
 	Name                 string `json:"name"`
@@ -97,8 +100,9 @@ type graphDriveItem struct {
 		MimeType string `json:"mimeType"`
 	} `json:"file"`
 	ParentReference *struct {
-		ID   string `json:"id"`
-		Path string `json:"path"`
+		ID      string `json:"id"`
+		Path    string `json:"path"`
+		DriveID string `json:"driveId"`
 	} `json:"parentReference"`
 	Deleted *struct {
 		State string `json:"state"`
@@ -107,6 +111,19 @@ type graphDriveItem struct {
 	Package *struct {
 		Type string `json:"type"`
 	} `json:"package"`
+	// RemoteItem is set on Shared with me stubs; content lives on the remote drive.
+	RemoteItem *graphDriveItem `json:"remoteItem"`
+}
+
+// OneDriveListPage is one page of a Graph children / sharedWithMe list (no deltaLink).
+type OneDriveListPage struct {
+	Items    []OneDriveItem
+	NextLink string
+}
+
+type graphListResponse struct {
+	Value    []graphDriveItem `json:"value"`
+	NextLink string           `json:"@odata.nextLink"`
 }
 
 // OneDriveDriveRootURL returns the Graph drive root for mailbox.
@@ -190,8 +207,105 @@ func mapGraphDriveItem(it graphDriveItem) OneDriveItem {
 	if it.ParentReference != nil {
 		item.ParentID = strings.TrimSpace(it.ParentReference.ID)
 		item.ParentPath = strings.TrimSpace(it.ParentReference.Path)
+		item.DriveID = strings.TrimSpace(it.ParentReference.DriveID)
 	}
 	return item
+}
+
+// mapSharedWithMeItem prefers remoteItem fields so backups use the real drive/item ids.
+func mapSharedWithMeItem(it graphDriveItem) OneDriveItem {
+	if it.RemoteItem == nil {
+		return mapGraphDriveItem(it)
+	}
+	remote := *it.RemoteItem
+	// Host stub may carry the only display name / webUrl.
+	if strings.TrimSpace(remote.Name) == "" {
+		remote.Name = it.Name
+	}
+	if strings.TrimSpace(remote.WebURL) == "" {
+		remote.WebURL = it.WebURL
+	}
+	item := mapGraphDriveItem(remote)
+	if item.DriveID == "" && remote.ParentReference != nil {
+		item.DriveID = strings.TrimSpace(remote.ParentReference.DriveID)
+	}
+	// Shared roots have no meaningful parent on the user's drive; store under SHARED_WITH_ME root.
+	item.ParentID = ""
+	item.ParentPath = ""
+	return item
+}
+
+// IsPersonalOneDriveRoot reports whether driveRootURL is the signed-in user's /me/drive.
+func IsPersonalOneDriveRoot(driveRootURL string) bool {
+	u := strings.TrimRight(strings.TrimSpace(driveRootURL), "/")
+	return strings.HasSuffix(u, "/me/drive")
+}
+
+// OneDriveSharedWithMeURL is GET /me/drive/sharedWithMe.
+func OneDriveSharedWithMeURL() string {
+	return graphBaseURL + "/me/drive/sharedWithMe"
+}
+
+// ListSharedWithMePage lists one page of Shared with me items (personal /me only).
+// Pass nextLink from a previous page, or "" for the first page.
+func ListSharedWithMePage(ctx context.Context, accessToken, nextLink string) (*OneDriveListPage, error) {
+	reqURL := strings.TrimSpace(nextLink)
+	if reqURL == "" {
+		reqURL = OneDriveSharedWithMeURL()
+	}
+	return fetchOneDriveListPage(ctx, accessToken, reqURL, true)
+}
+
+// ListDriveChildrenPage lists one page of children under /drives/{driveId}/items/{itemId}.
+func ListDriveChildrenPage(ctx context.Context, accessToken, driveID, itemID, nextLink string) (*OneDriveListPage, error) {
+	reqURL := strings.TrimSpace(nextLink)
+	if reqURL == "" {
+		driveID = strings.TrimSpace(driveID)
+		itemID = strings.TrimSpace(itemID)
+		if driveID == "" || itemID == "" {
+			return nil, fmt.Errorf("drive id and item id are required")
+		}
+		reqURL = DriveRootURLFromDriveID(driveID) + "/items/" + url.PathEscape(itemID) + "/children" +
+			"?$select=id,name,size,createdDateTime,lastModifiedDateTime,webUrl,eTag,cTag,file,folder,package,parentReference"
+	}
+	return fetchOneDriveListPage(ctx, accessToken, reqURL, false)
+}
+
+func fetchOneDriveListPage(ctx context.Context, accessToken, requestURL string, sharedWithMe bool) (*OneDriveListPage, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	requestURL = strings.TrimSpace(requestURL)
+	accessToken = strings.TrimSpace(accessToken)
+	if requestURL == "" {
+		return nil, fmt.Errorf("onedrive list url is required")
+	}
+	if accessToken == "" {
+		return nil, fmt.Errorf("access token is required")
+	}
+	body, status, err := graphDoJSON(ctx, accessToken, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status < 200 || status >= 300 {
+		return nil, fmt.Errorf("onedrive list http %d: %s", status, truncateForErr(body))
+	}
+	var parsed graphListResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("decode onedrive list: %w", err)
+	}
+	out := &OneDriveListPage{
+		NextLink: strings.TrimSpace(parsed.NextLink),
+		Items:    make([]OneDriveItem, 0, len(parsed.Value)),
+	}
+	for i := range parsed.Value {
+		if sharedWithMe {
+			out.Items = append(out.Items, mapSharedWithMeItem(parsed.Value[i]))
+		} else {
+			out.Items = append(out.Items, mapGraphDriveItem(parsed.Value[i]))
+		}
+	}
+	return out, nil
 }
 
 func isDeltaResyncRequired(body []byte) bool {
@@ -230,39 +344,6 @@ func OpenOneDriveItemContentStream(ctx context.Context, accessToken, driveRootUR
 		return nil, 0, fmt.Errorf("onedrive content http %d: %s", resp.StatusCode, truncateForErr(b))
 	}
 	return resp.Body, resp.ContentLength, nil
-}
-
-// ListOneDriveFlatFilesPage lists non-folder children under drive root (browse).
-// Uses /root/children with $skip/$top; not delta. Folders are filtered out.
-func ListOneDriveFlatFilesPage(ctx context.Context, accessToken, driveRootURL string, skip, top int32) ([]OneDriveItem, error) {
-	if top <= 0 {
-		top = 50
-	}
-	if skip < 0 {
-		skip = 0
-	}
-	url := fmt.Sprintf("%s/root/children?$top=%d&$skip=%d&$select=id,name,size,createdDateTime,lastModifiedDateTime,webUrl,file,folder,parentReference",
-		strings.TrimRight(strings.TrimSpace(driveRootURL), "/"), top, skip)
-	body, status, err := graphDoJSON(ctx, accessToken, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	if status < 200 || status >= 300 {
-		return nil, fmt.Errorf("onedrive list http %d: %s", status, truncateForErr(body))
-	}
-	var parsed graphDeltaResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, err
-	}
-	out := make([]OneDriveItem, 0, len(parsed.Value))
-	for i := range parsed.Value {
-		it := mapGraphDriveItem(parsed.Value[i])
-		if it.IsFolder || it.IsDeleted || it.ID == "" {
-			continue
-		}
-		out = append(out, it)
-	}
-	return out, nil
 }
 
 func graphDoJSON(ctx context.Context, accessToken, method, url string, body io.Reader) ([]byte, int, error) {

@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"net"
 	"net/http"
@@ -17,18 +16,7 @@ import (
 	"time"
 )
 
-// UploadDriveFile uploads bytes to the signed-in user's OneDrive root via a single PUT.
-// MVP: simple upload only. Large files should later use createUploadSession + chunked upload.
-func UploadDriveFile(ctx context.Context, accessToken, fileName string, data []byte) error {
-	fileName = strings.TrimSpace(fileName)
-	if fileName == "" {
-		fileName = "restored.bin"
-	}
-	reqURL := fmt.Sprintf("%s/me/drive/root:/%s:/content", graphBaseURL, url.PathEscape(fileName))
-	return putDriveContent(ctx, accessToken, reqURL, data)
-}
-
-// UploadSharePointDriveFile uploads bytes into a SharePoint/group drive root (simple PUT; see UploadDriveFile).
+// UploadSharePointDriveFile uploads bytes into a SharePoint/group drive root (simple PUT).
 func UploadSharePointDriveFile(ctx context.Context, accessToken, driveID, fileName string, data []byte) error {
 	driveID = strings.TrimSpace(driveID)
 	fileName = strings.TrimSpace(fileName)
@@ -61,15 +49,8 @@ func putDriveContent(ctx context.Context, accessToken, reqURL string, data []byt
 	return nil
 }
 
-// PostTeamsChannelMessage posts a channel message as a *new* Graph message (restore-as-new;
-// original message IDs cannot be recreated). Replies are restored via PostTeamsChannelReply.
-func PostTeamsChannelMessage(ctx context.Context, accessToken, teamID, channelID, bodyContent string) error {
-	_, err := PostTeamsChannelMessageID(ctx, accessToken, teamID, channelID, bodyContent)
-	return err
-}
-
-// PostTeamsChannelMessageID posts a new channel message and returns its id. A Graph failure is
-// a *TeamsGraphError.
+// PostTeamsChannelMessageID posts a new channel message and returns its id. Original message IDs
+// cannot be recreated. Replies use PostTeamsChannelReply. A Graph failure is a *TeamsGraphError.
 func PostTeamsChannelMessageID(ctx context.Context, accessToken, teamID, channelID, bodyContent string) (string, error) {
 	teamID = strings.TrimSpace(teamID)
 	channelID = strings.TrimSpace(channelID)
@@ -199,36 +180,40 @@ func TeamsRestoreRef(objectKey string) string {
 	return hex.EncodeToString(sum[:])[:10]
 }
 
-// TeamsRepostBody is the HTML of a reposted backup message: a note with the original sender,
-// time and ref, an "In reply to" line when the original thread root can't be used, then the body.
+// TeamsRepostBody is the HTML posted for a restored Teams message: the original body only.
+// Attribution notes ("Originally posted by…", "In reply to…") are kept below for a later option.
 func TeamsRepostBody(raw []byte, objectKey, inReplyTo string) string {
-	var m struct {
-		CreatedDateTime string `json:"createdDateTime"`
-		From            *struct {
-			User        *struct{ DisplayName string } `json:"user"`
-			Application *struct{ DisplayName string } `json:"application"`
-		} `json:"from"`
-	}
-	_ = json.Unmarshal(raw, &m)
-	who := "unknown sender"
-	if m.From != nil {
-		switch {
-		case m.From.User != nil && strings.TrimSpace(m.From.User.DisplayName) != "":
-			who = m.From.User.DisplayName
-		case m.From.Application != nil && strings.TrimSpace(m.From.Application.DisplayName) != "":
-			who = m.From.Application.DisplayName
+	_, _ = objectKey, inReplyTo
+	return ExtractTeamsMessageBody(raw)
+	/*
+		var m struct {
+			CreatedDateTime string `json:"createdDateTime"`
+			From            *struct {
+				User        *struct{ DisplayName string } `json:"user"`
+				Application *struct{ DisplayName string } `json:"application"`
+			} `json:"from"`
 		}
-	}
-	when := strings.TrimSpace(m.CreatedDateTime)
-	if t, ok := ParseTeamsTime(when); ok {
-		when = t.Format("2006-01-02 15:04 UTC")
-	}
-	note := fmt.Sprintf("<p><em>Originally posted by %s on %s (ref %s)</em></p>",
-		html.EscapeString(strings.TrimSpace(who)), html.EscapeString(when), TeamsRestoreRef(objectKey))
-	if strings.TrimSpace(inReplyTo) != "" {
-		note += fmt.Sprintf("<p><em>In reply to message %s</em></p>", html.EscapeString(inReplyTo))
-	}
-	return note + ExtractTeamsMessageBody(raw)
+		_ = json.Unmarshal(raw, &m)
+		who := "unknown sender"
+		if m.From != nil {
+			switch {
+			case m.From.User != nil && strings.TrimSpace(m.From.User.DisplayName) != "":
+				who = m.From.User.DisplayName
+			case m.From.Application != nil && strings.TrimSpace(m.From.Application.DisplayName) != "":
+				who = m.From.Application.DisplayName
+			}
+		}
+		when := strings.TrimSpace(m.CreatedDateTime)
+		if t, ok := ParseTeamsTime(when); ok {
+			when = t.Format("2006-01-02 15:04 UTC")
+		}
+		note := fmt.Sprintf("<p><em>Originally posted by %s on %s (ref %s)</em></p>",
+			html.EscapeString(strings.TrimSpace(who)), html.EscapeString(when), TeamsRestoreRef(objectKey))
+		if strings.TrimSpace(inReplyTo) != "" {
+			note += fmt.Sprintf("<p><em>In reply to message %s</em></p>", html.EscapeString(inReplyTo))
+		}
+		return note + ExtractTeamsMessageBody(raw)
+	*/
 }
 
 // ExtractTeamsMessageBody pulls HTML/text body from Graph message JSON.

@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -90,22 +91,35 @@ func checkMicrosoftManualRestoreKeys(c echo.Context, accessToken string, keys []
 	if tokenTenant == "" {
 		tokenTenant = headerTenant
 	}
-	if tokenTenant == "" {
-		return "", echo.NewHTTPError(http.StatusBadRequest, "cannot determine the access token's tenant; send MICROSOFT_TENANT_ID")
-	}
-	if headerTenant != "" && headerTenant != tokenTenant {
-		return "", echo.NewHTTPError(http.StatusForbidden, fmt.Sprintf("access token is for tenant %s, not %s", tokenTenant, headerTenant))
-	}
+	keyTenants := make([]string, 0, len(keys))
 	for _, key := range keys {
 		_, keyTenant, _, _, _, ok := outlook.SplitResourceKey(key)
 		if !ok {
 			return "", echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("key %q is not a tenant-scoped Microsoft backup key", key))
 		}
-		if strings.ToLower(keyTenant) != tokenTenant {
-			return "", echo.NewHTTPError(http.StatusForbidden, fmt.Sprintf("key %q belongs to tenant %s, not %s", key, keyTenant, tokenTenant))
-		}
+		keyTenants = append(keyTenants, keyTenant)
+	}
+	if msg, code := msrestore.ManualRestoreIdentityIssue(tokenTenant, headerTenant, keyTenants); msg != "" {
+		return "", echo.NewHTTPError(code, msg)
 	}
 	return tokenTenant, nil
+}
+
+// microsoftManualKeysNeedTenantCheck reports whether every non-empty key is a tenant backup key.
+// Legacy flat mail keys are not tenant-scoped and stay on the signed-in mailbox path.
+func microsoftManualKeysNeedTenantCheck(keys []string) bool {
+	saw := false
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		saw = true
+		if _, _, _, _, _, ok := outlook.SplitResourceKey(key); !ok {
+			return false
+		}
+	}
+	return saw
 }
 
 func notifyMicrosoftRestore(ctx context.Context, sess *microsoftManualRestoreSession, method, phase string, itemCount int, result *DownloadResult, restoreErr error) {
@@ -122,26 +136,85 @@ func notifyMicrosoftRestore(ctx context.Context, sess *microsoftManualRestoreSes
 		"timestamp": "now",
 	}
 	title := fmt.Sprintf("Microsoft %s restore %s", method, phase)
-	msg := ""
+	msg := microsoftManualRestoreActivityMessage(sess.loginID, phase, itemCount, result, restoreErr)
 	switch phase {
 	case "started":
 		data["item_count"] = itemCount
-		msg = fmt.Sprintf("Restore of %d items for %s has started", itemCount, sess.loginID)
 	case "completed":
 		if result != nil {
 			data["processed_count"] = len(result.ProcessedIDs)
 			data["failed_count"] = len(result.FailedIDs)
-			msg = fmt.Sprintf("Restore for %s completed. %d succeeded, %d failed", sess.loginID, len(result.ProcessedIDs), len(result.FailedIDs))
 		}
 	case "failed":
 		priority = "high"
 		data["level"] = 4
 		if restoreErr != nil {
-			data["error"] = restoreErr.Error()
-			msg = fmt.Sprintf("Restore for %s failed: %v", sess.loginID, restoreErr)
+			data["error"] = microsoftManualRestoreErrorText(restoreErr)
 		}
 	}
 	satellite.SendNotificationAsync(ctx, sess.userID, title, msg, &priority, data, nil)
+}
+
+func notifyMicrosoftManualRestoreDenied(c echo.Context, method string, restoreErr error) {
+	if restoreErr == nil {
+		return
+	}
+	userID, err := satellite.GetUserdetails(c)
+	if err != nil || strings.TrimSpace(userID) == "" {
+		return
+	}
+	accessToken := strings.TrimSpace(strings.TrimPrefix(c.Request().Header.Get(echo.HeaderAuthorization), "Bearer "))
+	claims, _ := outlook.IdentityClaimsFromTokens("", accessToken)
+	sess := &microsoftManualRestoreSession{userID: userID, loginID: claims.Email}
+	notifyMicrosoftRestore(c.Request().Context(), sess, method, "failed", 0, nil, errors.New(microsoftManualRestoreErrorText(restoreErr)))
+}
+
+func microsoftManualRestoreErrorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	if he, ok := err.(*echo.HTTPError); ok {
+		return strings.TrimSpace(fmt.Sprint(he.Message))
+	}
+	return strings.TrimSpace(err.Error())
+}
+
+func microsoftManualRestoreActivityMessage(loginID, phase string, itemCount int, result *DownloadResult, restoreErr error) string {
+	who := strings.TrimSpace(loginID)
+	if who == "" {
+		who = "this Microsoft account"
+	}
+	switch phase {
+	case "started":
+		return fmt.Sprintf("Restore of %d items for %s has started", itemCount, who)
+	case "completed":
+		nOK, nFail := 0, 0
+		note := ""
+		if result != nil {
+			nOK, nFail = len(result.ProcessedIDs), len(result.FailedIDs)
+			note = microsoftManualRestoreFailureNote(result.Message)
+		}
+		msg := fmt.Sprintf("Restore for %s completed. %d succeeded, %d failed", who, nOK, nFail)
+		if nFail > 0 && note != "" {
+			return msg + ". " + note
+		}
+		return msg
+	case "failed":
+		if text := microsoftManualRestoreErrorText(restoreErr); text != "" {
+			return fmt.Sprintf("Restore for %s failed: %s", who, text)
+		}
+		return fmt.Sprintf("Restore for %s failed", who)
+	}
+	return ""
+}
+
+func microsoftManualRestoreFailureNote(message string) string {
+	m := strings.TrimSpace(message)
+	switch m {
+	case "", "sharepoint restore processed", teamsRepostNotice:
+		return ""
+	}
+	return m
 }
 
 func microsoftManualRestoreHTTPError(c echo.Context, err error) error {
@@ -219,7 +292,7 @@ func HandleOutlookContactsDownloadAndInsert(c echo.Context) error {
 			failed.Add(key)
 			continue
 		}
-		folderID := msrestore.ContactFolderIDForKey(ctx, sess.accessGrant, key, nil)
+		folderID := msrestore.RestoreContactFolderID(ctx, sess.accessGrant, sess.accessToken, userBase, key, nil)
 		if cerr := outlook.RestoreContact(ctx, sess.accessToken, userBase, folderID, raw); cerr != nil {
 			logger.Error(ctx, "contacts restore create failed", logger.ErrorField(cerr), logger.String("key", key))
 			failed.Add(key)
@@ -316,17 +389,41 @@ func HandleSharePointDownloadAndInsert(c echo.Context) error {
 
 	sess, keys, err := prepareMicrosoftManualRestore(c)
 	if err != nil {
+		notifyMicrosoftManualRestoreDenied(c, "outlook_sharepoint", err)
 		return microsoftManualRestoreHTTPError(c, err)
 	}
 	notifyMicrosoftRestore(ctx, sess, "outlook_sharepoint", "started", len(keys), nil, nil)
 
 	lib := newLibraryRestore(sess.accessGrant, satellite.ReserveBucket_OutlookSharePoint)
+	vaultGet := func(ctx context.Context, key string) ([]byte, error) {
+		return satellite.DownloadObject(ctx, sess.accessGrant, satellite.ReserveBucket_OutlookSharePoint, key)
+	}
 	processed, failed := utils.NewLockedArray(), utils.NewLockedArray()
+	var firstErr error
 	for _, key := range keys {
+		if outlook.IsSharePointListItemKey(key) {
+			if _, uerr := outlook.RestoreSharePointListItemFromVault(ctx, sess.accessToken, "", key, vaultGet); uerr != nil {
+				noteSharePointManualFailure(ctx, failed, key, uerr, &firstErr)
+			} else {
+				processed.Add(key)
+			}
+			continue
+		}
+		if outlook.IsSharePointPageKey(key) {
+			siteID := strings.TrimSpace(c.Request().Header.Get("MICROSOFT_SITE_ID"))
+			if siteID == "" {
+				siteID = strings.TrimSpace(c.QueryParam("site_id"))
+			}
+			if _, uerr := outlook.RestoreSharePointPageFromVault(ctx, sess.accessToken, siteID, key, vaultGet); uerr != nil {
+				noteSharePointManualFailure(ctx, failed, key, uerr, &firstErr)
+			} else {
+				processed.Add(key)
+			}
+			continue
+		}
 		if handled, uerr := lib.restore(ctx, sess.accessToken, key); handled {
 			if uerr != nil {
-				logger.Error(ctx, "sharepoint restore failed", logger.ErrorField(uerr), logger.String("key", key))
-				failed.Add(key)
+				noteSharePointManualFailure(ctx, failed, key, uerr, &firstErr)
 			} else {
 				processed.Add(key)
 			}
@@ -334,30 +431,40 @@ func HandleSharePointDownloadAndInsert(c echo.Context) error {
 		}
 		metaJSON, dataBytes, _, derr := msrestore.DownloadMetaFollowData(ctx, sess.accessGrant, satellite.ReserveBucket_OutlookSharePoint, key)
 		if derr != nil || len(dataBytes) == 0 {
-			failed.Add(key)
+			if derr == nil {
+				derr = errors.New("sharepoint backup object could not be read")
+			}
+			noteSharePointManualFailure(ctx, failed, key, derr, &firstErr)
 			continue
 		}
 		var meta outlook.SharePointCronBackupMeta
 		_ = json.Unmarshal(metaJSON, &meta)
-		name := strings.TrimSpace(meta.Name)
-		if name == "" {
-			name = path.Base(key)
+		if strings.TrimSpace(meta.Name) == "" {
+			meta.Name = path.Base(key)
 		}
-		driveID := strings.TrimSpace(meta.DriveID)
-		if driveID == "" {
-			failed.Add(key)
-			continue
-		}
-		if uerr := outlook.UploadSharePointDriveFile(ctx, sess.accessToken, driveID, name, dataBytes); uerr != nil {
-			logger.Error(ctx, "sharepoint restore upload failed", logger.ErrorField(uerr), logger.String("key", key))
-			failed.Add(key)
+		if uerr := outlook.RestoreSharePointLegacyMetaFile(ctx, sess.accessToken, "", meta, dataBytes); uerr != nil {
+			noteSharePointManualFailure(ctx, failed, key, uerr, &firstErr)
 			continue
 		}
 		processed.Add(key)
 	}
-	result := &DownloadResult{ProcessedIDs: processed.Get(), FailedIDs: failed.Get(), Message: "sharepoint restore processed"}
+	failedIDs := failed.Get()
+	msg := "sharepoint restore processed"
+	if len(failedIDs) > 0 && firstErr != nil {
+		msg = firstErr.Error()
+	}
+	result := &DownloadResult{ProcessedIDs: processed.Get(), FailedIDs: failedIDs, Message: msg}
 	notifyMicrosoftRestore(ctx, sess, "outlook_sharepoint", "completed", len(keys), result, nil)
 	return c.JSON(http.StatusOK, result)
+}
+
+func noteSharePointManualFailure(ctx context.Context, failed *utils.LockedArray, key string, uerr error, first *error) {
+	uerr = msrestore.WrapWorkspaceWriteError("sharepoint", uerr)
+	logger.Error(ctx, "sharepoint restore failed", logger.ErrorField(uerr), logger.String("key", key))
+	failed.Add(key)
+	if first != nil && *first == nil {
+		*first = uerr
+	}
 }
 
 // HandleTeamsDownloadAndInsert restores selected Teams channel messages (≤10 keys) by posting them
@@ -376,7 +483,7 @@ func HandleTeamsChatsDownloadAndInsert(c echo.Context) error {
 }
 
 // teamsRepostNotice is returned with every Teams restore result.
-const teamsRepostNotice = "Messages are reposted as new messages by the signed-in user, each with a note naming the original sender, time and ref. Original message ids, authors, times, reactions and inline images are not recreated. A message whose outcome is unknown may already be in Teams; search for its ref before restoring it again."
+const teamsRepostNotice = "Messages are posted as new messages by the signed-in user."
 
 // teamsManualRestoreResult is the manual Teams restore answer: the usual id lists (skipped keys
 // apart) and one outcome per key.
@@ -395,6 +502,7 @@ func handleTeamsManualRestore(c echo.Context, kind, scope string) error {
 		return msrestore.CheckTeamsRestoreToken(accessToken, scope)
 	})
 	if err != nil {
+		notifyMicrosoftManualRestoreDenied(c, "outlook_teams", err)
 		return microsoftManualRestoreHTTPError(c, err)
 	}
 	notifyMicrosoftRestore(ctx, sess, "outlook_teams", "started", len(keys), nil, nil)
@@ -404,8 +512,21 @@ func handleTeamsManualRestore(c echo.Context, kind, scope string) error {
 		session.OverrideChannelID = strings.TrimSpace(c.QueryParam("channel_id"))
 	}
 	result := restoreTeamsManualKeys(ctx, session, keys, kind)
-	notifyMicrosoftRestore(ctx, sess, "outlook_teams", "completed", len(keys), &result.DownloadResult, nil)
+	notify := result.DownloadResult
+	if detail := firstTeamsManualFailureDetail(result); detail != "" {
+		notify.Message = detail
+	}
+	notifyMicrosoftRestore(ctx, sess, "outlook_teams", "completed", len(keys), &notify, nil)
 	return c.JSON(http.StatusOK, result)
+}
+
+func firstTeamsManualFailureDetail(result teamsManualRestoreResult) string {
+	for _, it := range result.Items {
+		if it.Status == msrestore.TeamsFailed && strings.TrimSpace(it.Detail) != "" {
+			return it.Detail
+		}
+	}
+	return ""
 }
 
 // restoreTeamsManualKeys restores the keys an endpoint accepts (channel endpoint: channel messages

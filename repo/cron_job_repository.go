@@ -119,6 +119,36 @@ type CronJobListingDB struct {
 	RemainingBytes int64 `json:"remaining_bytes,omitempty" gorm:"column:remaining_bytes;default:0"`
 	// QuotaKind is "storage" or "bandwidth" when FailureCode is set.
 	QuotaKind string `json:"quota_kind,omitempty" gorm:"column:quota_kind;type:varchar(32);default:''"`
+
+	// JobType distinguishes normal backup jobs from internal system jobs (e.g. MS access check).
+	// backup (default) | system. System jobs are never scheduled for recurring backups.
+	JobType string `json:"job_type" gorm:"column:job_type;not null;default:backup;index"`
+}
+
+// Job type values for CronJobListingDB.JobType.
+const (
+	JobTypeBackup = "backup"
+	JobTypeSystem = "system"
+)
+
+// IsSystemJob reports whether this cron job is an internal system job (not a backup).
+func IsSystemJob(job *CronJobListingDB) bool {
+	if job == nil {
+		return false
+	}
+	t := strings.TrimSpace(job.JobType)
+	return t == JobTypeSystem
+}
+
+// EffectiveJobType returns job_type or backup when empty (legacy rows).
+func EffectiveJobType(job *CronJobListingDB) string {
+	if job == nil {
+		return JobTypeBackup
+	}
+	if t := strings.TrimSpace(job.JobType); t != "" {
+		return t
+	}
+	return JobTypeBackup
 }
 
 // OutlookMailLayoutFiles is the mail layout with one Gmail-style object per message under its
@@ -152,7 +182,9 @@ type TaskMemory struct {
 	// re-baselines and rewrites every meta/data pair as one object in its folder tree.
 	OneDriveLayout int `json:"onedrive_layout,omitempty"`
 
-	// SharePoint incremental sync state (Graph delta on /drives/{drive_id}; per job/site)
+	// SharePoint incremental sync state (Graph delta on /drives/{drive_id}).
+	 // Legacy single-site jobs keep cursors on these fields; the combined tenant job nests
+	 // per-site state under SharePointSites[siteID] (see SharePointSiteState).
 	SharePointDeltaLink    *string `json:"sharepoint_delta_link,omitempty"`
 	SharePointBaselineDone bool    `json:"sharepoint_baseline_done,omitempty"`
 	// SharePointLayout is the SharePoint layout version (same values as OneDriveLayout); below
@@ -161,6 +193,10 @@ type TaskMemory struct {
 	// SharePointLibraries is every document library of the site seen by a backup, by drive id.
 	// The default library's cursor stays in SharePointDeltaLink / SharePointLayout.
 	SharePointLibraries map[string]SharePointLibraryState `json:"sharepoint_libraries,omitempty"`
+	// SharePointListCursors tracks non-library list backup progress (preserve-only; no purge).
+	SharePointListCursors map[string]SharePointListCursor `json:"sharepoint_list_cursors,omitempty"`
+	// SharePointSites holds per-site sync state for the combined tenant SharePoint job.
+	SharePointSites map[string]SharePointSiteState `json:"sharepoint_sites,omitempty"`
 
 	// Outlook mail incremental sync state (Graph mail delta per mail folder).
 	// OutlookMailFolderDeltas maps mailFolderId -> deltaLink for every backed-up folder.
@@ -171,6 +207,15 @@ type TaskMemory struct {
 	// OutlookMailLayout is the mail layout version; below OutlookMailLayoutFiles the next run
 	// converts ids to immutable ids and rewrites every meta/data pair as one object in its folder.
 	OutlookMailLayout int `json:"outlook_mail_layout,omitempty"`
+
+	// Outlook contacts incremental sync (Graph contacts/delta per folder).
+	// OutlookContactFolderDeltas maps contactFolderId -> deltaLink; "" is the default Contacts folder.
+	OutlookContactFolderDeltas map[string]string `json:"outlook_contact_folder_deltas,omitempty"`
+	// OutlookContactFolderParents maps contactFolderId -> parentFolderId at the last sync; a changed
+	// parent (move) re-baselines that folder.
+	OutlookContactFolderParents map[string]string `json:"outlook_contact_folder_parents,omitempty"`
+	// OutlookContactsLayout below OutlookContactsLayoutPhotos means the next run re-fetches photos.
+	OutlookContactsLayout int `json:"outlook_contacts_layout,omitempty"`
 
 	// DriveUserPageToken is the USER change-log token (My Drive / shared-with-me).
 	DriveUserPageToken *string `json:"drive_user_page_token,omitempty"`
@@ -338,9 +383,28 @@ type SharePointLibraryState struct {
 	BaselineDone bool    `json:"baseline_done,omitempty"`
 	LastSyncAt   string  `json:"last_sync_at,omitempty"`
 	LastError    string  `json:"last_error,omitempty"`
-	// RemovedAt is set once a complete library listing no longer had the library and its backup
-	// moved to BIN.
+	// RemovedAt is legacy: older runs may have marked libraries removed after vault BIN moves.
+	// New SharePoint workspace backup is preserve-only and does not set this for new removals.
 	RemovedAt string `json:"removed_at,omitempty"`
+}
+
+// SharePointListCursor is durable progress for one non-library list (add/update only).
+type SharePointListCursor struct {
+	Name         string `json:"name,omitempty"`
+	LastSyncAt   string `json:"last_sync_at,omitempty"`
+	BaselineDone bool   `json:"baseline_done,omitempty"`
+	LastError    string `json:"last_error,omitempty"`
+}
+
+// SharePointSiteState is per-site sync memory on the combined SharePoint tenant job.
+type SharePointSiteState struct {
+	DeltaLink    *string                         `json:"delta_link,omitempty"`
+	BaselineDone bool                            `json:"baseline_done,omitempty"`
+	Layout       int                             `json:"layout,omitempty"`
+	Libraries    map[string]SharePointLibraryState `json:"libraries,omitempty"`
+	ListCursors  map[string]SharePointListCursor `json:"list_cursors,omitempty"`
+	LastSyncAt   string                          `json:"last_sync_at,omitempty"`
+	LastError    string                          `json:"last_error,omitempty"`
 }
 
 // DriveSharedDriveState holds baseline + change token for one Shared Drive.
@@ -418,7 +482,9 @@ type CronJobFilter struct {
 // GetAllCronJobsForUser retrieves all cron jobs for a specific user with optional filtering
 func (r *CronJobRepository) GetAllCronJobsForUser(userID string, filter *CronJobFilter) ([]CronJobListingDB, error) {
 	var res []CronJobListingDB
-	query := r.db.Where("user_id = ?", userID).Where("COALESCE(placeholder, false) = ?", false)
+	query := r.db.Where("user_id = ?", userID).
+		Where("COALESCE(placeholder, false) = ?", false).
+		Where("COALESCE(job_type, ?) = ?", JobTypeBackup, JobTypeBackup)
 
 	// Apply filters if provided
 	if filter != nil {
@@ -475,7 +541,9 @@ func (r *CronJobRepository) ListServiceJobCountsForUser(userID string) ([]Servic
 			COUNT(*) AS total_jobs,
 			COUNT(*) FILTER (WHERE active = true) AS active_jobs,
 			COUNT(*) FILTER (WHERE active = false) AS deactive_jobs`).
-		Where("user_id = ? AND COALESCE(placeholder, false) = ?", userID, false).
+		Where("user_id = ?", userID).
+		Where("COALESCE(placeholder, false) = ?", false).
+		Where("COALESCE(job_type, ?) = ?", JobTypeBackup, JobTypeBackup).
 		Group("method").
 		Order("method ASC").
 		Scan(&rows).Error
@@ -508,7 +576,8 @@ func (r *CronJobRepository) ListJobsForUsersGroups(userID string, f *UsersGroups
 	var res []CronJobListingDB
 	query := r.db.Model(&CronJobListingDB{}).
 		Where("cron_job_listing_dbs.user_id = ?", userID).
-		Where("COALESCE(cron_job_listing_dbs.placeholder, false) = ?", false)
+		Where("COALESCE(cron_job_listing_dbs.placeholder, false) = ?", false).
+		Where("COALESCE(cron_job_listing_dbs.job_type, ?) = ?", JobTypeBackup, JobTypeBackup)
 
 	if f != nil {
 		if domain := strings.ToLower(strings.TrimSpace(f.Domain)); domain != "" {
@@ -564,6 +633,7 @@ func (r *CronJobRepository) GetAllActiveCronJobsForUser(userID string) ([]LiveCr
 		AND cj.deleted_at IS NULL
 		AND (cj.hidden = false OR cj.hidden IS NULL)
 		AND COALESCE(cj.placeholder, false) = false
+		AND COALESCE(cj.job_type, 'backup') = 'backup'
 		ORDER BY cj.id, t.start_time DESC`
 
 	rows, err := r.db.Raw(query, userID).Rows()
@@ -687,6 +757,7 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 			FROM cron_job_listing_dbs c2
 			LEFT JOIN autosync_backup_policy_dbs p ON p.id = c2.policy_id AND p.deleted_at IS NULL
 			WHERE c2.active = true
+			AND COALESCE(c2.job_type, 'backup') = 'backup'
 			AND (c2.message IS NULL OR c2.message != ?)
 			AND c2.status NOT IN (?, ?)
 			AND c2.policy_id IS NOT NULL
@@ -1156,23 +1227,27 @@ func (r *CronJobRepository) ListJobsByCredentialID(userID string, credentialID u
 	return rows, nil
 }
 
-// HasLinkedJobsForCredential reports whether a credential has any linked jobs for a user.
+// HasLinkedJobsForCredential reports whether a credential has any real backup jobs for a user.
+ // System jobs (access-check, etc.) do not count — otherwise isFirstConnection flips false too early.
 func (r *CronJobRepository) HasLinkedJobsForCredential(userID string, credentialID uint) (bool, error) {
 	if credentialID == 0 {
 		return false, nil
 	}
-	var exists bool
-	err := r.db.Raw(`
-SELECT EXISTS (
-  SELECT 1 FROM cron_job_listing_dbs
-  WHERE user_id = ?
-    AND (input_data->>'credential_id')::bigint = ?
-    AND deleted_at IS NULL
-)`, userID, credentialID).Scan(&exists).Error
+	var rows []CronJobListingDB
+	err := r.db.Select("id", "input_data").
+		Where("user_id = ?", userID).
+		Where("COALESCE(job_type, ?) = ?", JobTypeBackup, JobTypeBackup).
+		Where("COALESCE(hidden, false) = ?", false).
+		Find(&rows).Error
 	if err != nil {
 		return false, fmt.Errorf("has linked jobs for credential: %w", err)
 	}
-	return exists, nil
+	for i := range rows {
+		if JobCredentialID(&rows[i]) == credentialID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ListBackupMailboxEmailsForUser returns distinct mailbox emails with backup jobs for a user (all projects).
@@ -1519,6 +1594,73 @@ func (r *CronJobRepository) DeleteCronJobByID(ID uint) error {
 		return fmt.Errorf("error deleting cron job: %v", res.Error)
 	}
 	return nil
+}
+
+// DeleteCronJobAndTasksByID deletes a cron job and its task_listing_dbs rows.
+func (r *CronJobRepository) DeleteCronJobAndTasksByID(id uint) error {
+	if id == 0 {
+		return nil
+	}
+	tx := r.db.Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+	if err := tx.Unscoped().Where("cron_job_id = ?", id).Delete(&TaskListingDB{}).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := tx.Delete(&CronJobListingDB{}, id).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit().Error
+}
+
+// ListMicrosoftJobsByIDs loads Microsoft cron jobs by id for a satellite user.
+func (r *CronJobRepository) ListMicrosoftJobsByIDs(userID string, ids []uint) ([]CronJobListingDB, error) {
+	ids = uniqueUintIDs(ids)
+	if strings.TrimSpace(userID) == "" || len(ids) == 0 {
+		return nil, nil
+	}
+	var rows []CronJobListingDB
+	err := r.db.Where("user_id = ? AND provider = ? AND id IN ? AND COALESCE(placeholder, false) = ?",
+		userID, CredentialProviderMicrosoft, ids, false).Find(&rows).Error
+	return rows, err
+}
+
+// ListMicrosoftAccessVerifyUnavailableJobs returns Microsoft user-service jobs marked
+// access_verify.state=unavailable for grace cleanup or UI listing.
+func (r *CronJobRepository) ListMicrosoftAccessVerifyUnavailableJobs(userID, tenantID string) ([]CronJobListingDB, error) {
+	return r.listMicrosoftAccessVerifyJobsByState(userID, tenantID, AccessVerifyStateUnavailable)
+}
+
+// ListMicrosoftAccessVerifyPendingJobs returns Microsoft user-service jobs marked
+// access_verify.state=pending.
+func (r *CronJobRepository) ListMicrosoftAccessVerifyPendingJobs(userID, tenantID string) ([]CronJobListingDB, error) {
+	return r.listMicrosoftAccessVerifyJobsByState(userID, tenantID, AccessVerifyStatePending)
+}
+
+func (r *CronJobRepository) listMicrosoftAccessVerifyJobsByState(userID, tenantID, state string) ([]CronJobListingDB, error) {
+	q := r.db.Where("provider = ? AND COALESCE(placeholder, false) = ? AND active = ?",
+		CredentialProviderMicrosoft, false, false)
+	if strings.TrimSpace(userID) != "" {
+		q = q.Where("user_id = ?", strings.TrimSpace(userID))
+	}
+	if strings.TrimSpace(tenantID) != "" {
+		q = q.Where("tenant_id = ?", strings.ToLower(strings.TrimSpace(tenantID)))
+	}
+	var rows []CronJobListingDB
+	if err := q.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]CronJobListingDB, 0, len(rows))
+	for i := range rows {
+		m := JobAccessVerify(&rows[i])
+		if m != nil && m.State == state {
+			out = append(out, rows[i])
+		}
+	}
+	return out, nil
 }
 
 // stripDeprecatedCronJobColumnUpdates removes fields no longer stored on cron_job_listing_dbs.
@@ -1991,13 +2133,8 @@ func (r *CronJobRepository) validateJobForActivation(job *CronJobListingDB) erro
 			}
 		}
 		if job.Method == "outlook_sharepoint" {
-			siteID := JobSharePointSiteID(job)
-			driveID := JobSharePointDriveID(job)
-			if siteID == "" {
-				return fmt.Errorf("site_id is required in input_data for outlook_sharepoint method")
-			}
-			if driveID == "" {
-				return fmt.Errorf("drive_id is required in input_data for outlook_sharepoint method")
+			if len(JobSharePointSites(job)) == 0 {
+				return fmt.Errorf("sites (or legacy site_id+drive_id) required in input_data for outlook_sharepoint")
 			}
 		}
 	case "database", "psql_database", "mysql_database":

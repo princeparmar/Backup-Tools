@@ -69,11 +69,12 @@ type teamsUserState struct {
 	// Retained is the user's retained chat messages listing (earlier versions of edited messages).
 	Retained teamsRetainedState `json:"retained"`
 
-	Transcripts    teamsListingState    `json:"transcripts,omitempty"`
-	Recordings     teamsListingState    `json:"recordings,omitempty"`
-	CalendarRanges []teamsCalendarRange `json:"calendar_ranges,omitempty"`
-	CoveredFrom    *time.Time           `json:"covered_from,omitempty"`
-	CoverageHash   string               `json:"coverage_hash,omitempty"`
+	Transcripts      teamsListingState      `json:"transcripts,omitempty"`
+	Recordings       teamsListingState      `json:"recordings,omitempty"`
+	CalendarRanges   []teamsCalendarRange   `json:"calendar_ranges,omitempty"`
+	MailboxCalendars []teamsMailboxCalendar `json:"mailbox_calendars,omitempty"`
+	CoveredFrom      *time.Time             `json:"covered_from,omitempty"`
+	CoverageHash     string                 `json:"coverage_hash,omitempty"`
 
 	EventMids      map[string]string                 `json:"event_mids,omitempty"`
 	Pointers       map[string]string                 `json:"pointers,omitempty"`
@@ -105,6 +106,21 @@ type teamsCalendarRange struct {
 	Held      int        `json:"held,omitempty"`
 	HeldSince *time.Time `json:"held_since,omitempty"`
 	Done      bool       `json:"done,omitempty"`
+}
+
+// teamsMailboxCalendar is one Outlook calendar besides the default calendarView (holidays, birthdays, …).
+type teamsMailboxCalendar struct {
+	ID       string               `json:"id"`
+	Name     string               `json:"name,omitempty"`
+	Color    string               `json:"color,omitempty"`
+	HexColor string               `json:"hex_color,omitempty"`
+	Default  bool                 `json:"is_default,omitempty"`
+	Ranges   []teamsCalendarRange `json:"ranges,omitempty"`
+}
+
+type teamsCalendarInfo struct {
+	ID, Name, Color, HexColor string
+	Default                   bool
 }
 
 // teamsPendingAttendance is an organizer's meeting whose attendance is still being collected.
@@ -572,11 +588,110 @@ func (r *teamsRun) chatItem(userID, source string, raw json.RawMessage) (string,
 		return "chats:item:unparsed:" + id, repo.TeamsFailure{Phase: "chats", Kind: teamsFailItem, ResourceType: "user", ResourceID: userID,
 			ItemIDs: map[string]string{"source": source}}, fmt.Errorf("unparseable chat message"), false
 	}
+	if teamsIsCallLogText(head.Body.Content) {
+		return "", repo.TeamsFailure{}, nil, false
+	}
 	key := "chats:item:" + head.ChatID + ":" + head.ID
 	f := repo.TeamsFailure{Phase: "chats", Kind: teamsFailItem, ResourceType: "user", ResourceID: userID,
 		ItemIDs: map[string]string{"chat_id": head.ChatID, "message_id": head.ID, "source": source}}
 	_, err := r.storeChatMessage(raw, head)
 	return key, f, err, outlook.TeamsVerified(outlook.TeamsCheckLookupChatMessage)
+}
+
+func teamsCallLogPlain(s string) string {
+	var b strings.Builder
+	inTag := false
+	for _, r := range s {
+		switch {
+		case r == '<':
+			inTag = true
+		case r == '>':
+			inTag = false
+		case !inTag:
+			b.WriteRune(r)
+		}
+	}
+	return strings.Join(strings.Fields(strings.TrimSpace(b.String())), " ")
+}
+
+func teamsIsCallLogChatTopic(topic string) bool {
+	t := strings.ToLower(teamsCallLogPlain(topic))
+	return t == "call log" || t == "call logs" || strings.HasPrefix(t, "call logs for call")
+}
+
+func teamsIsMeetNowChat(chatType, topic string) bool {
+	if !strings.EqualFold(strings.TrimSpace(chatType), "meeting") {
+		return false
+	}
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(topic)), "meeting with")
+}
+
+type teamsChatMember struct {
+	UserID      string `json:"userId"`
+	DisplayName string `json:"displayName"`
+}
+
+// storeCallLogFromChat writes a 1:1 "Call logs" chat as a Calls-history row (names like
+// support/sales). Those threads stay out of Chat.
+func (r *teamsRun) storeCallLogFromChat(userID, chatID, start string, members []teamsChatMember) error {
+	if start == "" {
+		start = outlook.TeamsUTC(r.now())
+	}
+	key := outlook.TeamsCallRecordKey(r.tenant, chatID, start)
+	if r.userScope[userID] {
+		if err := r.putPointer(outlook.TeamsUserCallPointerKey(outlook.TeamsUserPrefix(r.tenant, userID), chatID, start), key, nil); err != nil {
+			return err
+		}
+	}
+	if r.keys[key] {
+		return nil
+	}
+	parts := make([]map[string]interface{}, 0, len(members))
+	for _, m := range members {
+		if m.UserID == "" && m.DisplayName == "" {
+			continue
+		}
+		parts = append(parts, map[string]interface{}{
+			"identity": map[string]interface{}{"user": map[string]string{"id": m.UserID, "displayName": m.DisplayName}},
+		})
+	}
+	doc := map[string]interface{}{
+		"type": "peerToPeer", "startDateTime": start, "participants": parts,
+	}
+	body, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	body, err = outlook.PatchTeamsBackup(body, outlook.TeamsBackupBlock{TenantID: r.tenant, Source: "chatCallLog", BackedUpAt: outlook.TeamsUTC(r.now())})
+	if err != nil {
+		return err
+	}
+	return r.put(key, body, map[string]string{outlook.TeamsMetaComplete: "true"})
+}
+
+func teamsIsCallLogText(s string) bool {
+	s = strings.ToLower(teamsCallLogPlain(s))
+	const prefix = "call logs for call "
+	if !strings.HasPrefix(s, prefix) {
+		return false
+	}
+	id := strings.TrimSpace(strings.TrimPrefix(s, prefix))
+	if len(id) != 36 {
+		return false
+	}
+	for i, c := range id {
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (r *teamsRun) removeChatMessage(chatID, messageID string) error {
@@ -636,13 +751,22 @@ func (r *teamsRun) syncUserChatList(userID string, st *teamsUserState) error {
 	var firstErr error
 	for _, raw := range items {
 		var c struct {
-			ID          string `json:"id"`
-			LastUpdated string `json:"lastUpdatedDateTime"`
-			Members     []struct {
-				UserID string `json:"userId"`
-			} `json:"members"`
+			ID          string            `json:"id"`
+			Topic       string            `json:"topic"`
+			ChatType    string            `json:"chatType"`
+			LastUpdated string            `json:"lastUpdatedDateTime"`
+			Members     []teamsChatMember `json:"members"`
 		}
 		if json.Unmarshal(raw, &c) != nil || c.ID == "" {
+			continue
+		}
+		if teamsIsMeetNowChat(c.ChatType, c.Topic) {
+			continue
+		}
+		if teamsIsCallLogChatTopic(c.Topic) {
+			if err := r.storeCallLogFromChat(userID, c.ID, c.LastUpdated, c.Members); err != nil && firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 		chatPrefix := outlook.TeamsChatPrefix(r.tenant, c.ID)
@@ -753,6 +877,7 @@ func (r *teamsRun) putPointer(key, target string, extra map[string]string) error
 type teamsEvent struct {
 	ID                    string          `json:"id"`
 	Removed               json.RawMessage `json:"@removed"`
+	Subject               string          `json:"subject"`
 	ICalUID               string          `json:"iCalUId"`
 	Type                  string          `json:"type"`
 	SeriesMasterID        string          `json:"seriesMasterId"`
@@ -834,9 +959,9 @@ func meetingShared(ev teamsEvent) bool {
 	return outlook.TeamsVerified(outlook.TeamsCheckMergeSingleMeeting)
 }
 
-// runMeetingsPhase backs up the tenant's meeting Q&A, then each user's Teams meetings: calendar
-// ranges, meeting folders, the organizer's attendance and the transcript/recording metadata
-// listings.
+// runMeetingsPhase backs up the tenant's meeting Q&A, then each user's mailbox calendar (the same
+// events Teams Calendar shows), meeting folders, organizer attendance, and transcript/recording
+// metadata listings. Attendance is queued only for Teams online meetings.
 func (r *teamsRun) runMeetingsPhase(deadline time.Time) bool {
 	qaDone := r.syncMeetingQA(deadline)
 	if !r.consented(outlook.TeamsFeatureCalendar) {
@@ -862,9 +987,18 @@ func (r *teamsRun) syncUserMeetings(userID string, deadline time.Time) (string, 
 	if st.skipped("calendar", r.now()) {
 		status, code = teamsBlocked, st.Status["calendar"]
 	} else {
-		r.planCalendarRanges(st)
+		listed := r.listMailboxCalendars(userID)
+		_ = r.writeMailboxCalendars(userID, listed)
+		def := teamsCalendarInfo{Name: "Calendar", Default: true}
+		for _, c := range listed {
+			if c.Default {
+				def = teamsCalendarInfo{ID: c.ID, Name: c.Name, Color: c.Color, HexColor: c.HexColor, Default: true}
+				break
+			}
+		}
+		r.planRanges(&st.CalendarRanges)
 		for i := range st.CalendarRanges {
-			s, c := r.syncCalendarRange(userID, st, &st.CalendarRanges[i], deadline, save)
+			s, c := r.syncCalendarRange(userID, st, &st.CalendarRanges[i], "", def, deadline, save)
 			status = teamsWorst(status, s)
 			if c != "" {
 				code = c
@@ -873,14 +1007,12 @@ func (r *teamsRun) syncUserMeetings(userID string, deadline time.Time) (string, 
 				break
 			}
 		}
-		if n := len(st.CalendarRanges); n > 1 && st.CalendarRanges[n-1].Done {
-			for _, old := range st.CalendarRanges[:n-1] {
-				if st.CoveredFrom == nil || old.Start.Before(*st.CoveredFrom) {
-					t := old.Start
-					st.CoveredFrom = &t
-				}
+		st.CalendarRanges = compactCalendarRanges(st, st.CalendarRanges)
+		if s, c := r.syncExtraCalendars(userID, st, listed, deadline, save); s != teamsComplete {
+			status = teamsWorst(status, s)
+			if c != "" {
+				code = c
 			}
-			st.CalendarRanges = st.CalendarRanges[n-1:]
 		}
 		r.writeMeetingCoverage(userID, st)
 	}
@@ -901,38 +1033,177 @@ func (r *teamsRun) syncUserMeetings(userID string, deadline time.Time) (string, 
 	return status, code
 }
 
-// planCalendarRanges starts the first range (2 years back, 1 year ahead) and rolls over to a new
-// range when the newest one ends within 6 months.
-func (r *teamsRun) planCalendarRanges(st *teamsUserState) {
+// planRanges starts the first range (2 years back, 1 year ahead) and rolls over to a new range
+// when the newest one ends within 6 months.
+func (r *teamsRun) planRanges(ranges *[]teamsCalendarRange) {
 	now := r.now()
-	if len(st.CalendarRanges) == 0 {
-		st.CalendarRanges = []teamsCalendarRange{{Start: now.Add(-teamsCalendarBack), End: now.Add(teamsCalendarAhead)}}
+	if len(*ranges) == 0 {
+		*ranges = []teamsCalendarRange{{Start: now.Add(-teamsCalendarBack), End: now.Add(teamsCalendarAhead)}}
 		return
 	}
-	if last := st.CalendarRanges[len(st.CalendarRanges)-1]; last.End.Sub(now) < teamsCalendarRollover {
-		st.CalendarRanges = append(st.CalendarRanges, teamsCalendarRange{Start: now.Add(-teamsCalendarRestart), End: now.Add(teamsCalendarAhead)})
+	if last := (*ranges)[len(*ranges)-1]; last.End.Sub(now) < teamsCalendarRollover {
+		*ranges = append(*ranges, teamsCalendarRange{Start: now.Add(-teamsCalendarRestart), End: now.Add(teamsCalendarAhead)})
 	}
 }
 
-func (r *teamsRun) syncCalendarRange(userID string, st *teamsUserState, rg *teamsCalendarRange, deadline time.Time, save func() error) (string, string) {
+func compactCalendarRanges(st *teamsUserState, ranges []teamsCalendarRange) []teamsCalendarRange {
+	n := len(ranges)
+	if n < 2 || !ranges[n-1].Done {
+		return ranges
+	}
+	for _, old := range ranges[:n-1] {
+		if st.CoveredFrom == nil || old.Start.Before(*st.CoveredFrom) {
+			t := old.Start
+			st.CoveredFrom = &t
+		}
+	}
+	return ranges[n-1:]
+}
+
+func parseMailboxCalendar(raw json.RawMessage) (teamsMailboxCalendar, bool) {
+	var c struct {
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		Color     string `json:"color"`
+		HexColor  string `json:"hexColor"`
+		IsDefault bool   `json:"isDefaultCalendar"`
+	}
+	if json.Unmarshal(raw, &c) != nil || c.ID == "" {
+		return teamsMailboxCalendar{}, false
+	}
+	name := strings.TrimSpace(c.Name)
+	if name == "" {
+		name = "Calendar"
+	}
+	return teamsMailboxCalendar{ID: c.ID, Name: name, Color: c.Color, HexColor: c.HexColor, Default: c.IsDefault}, true
+}
+
+func (r *teamsRun) listMailboxCalendars(userID string) []teamsMailboxCalendar {
+	seen := map[string]bool{}
+	var out []teamsMailboxCalendar
+	add := func(items []json.RawMessage) {
+		for _, raw := range items {
+			c, ok := parseMailboxCalendar(raw)
+			if !ok || seen[c.ID] {
+				continue
+			}
+			seen[c.ID] = true
+			out = append(out, c)
+		}
+	}
+	if items, err := r.getAll(outlook.TeamsUserCalendarsURL(userID)); err != nil {
+		logger.Warn(r.ctx, "teams mailbox calendars not listed; backing up the default calendar only", logger.ErrorField(err))
+	} else {
+		add(items)
+	}
+	groups, err := r.getAll(outlook.TeamsUserCalendarGroupsURL(userID))
+	if err != nil {
+		return out
+	}
+	for _, raw := range groups {
+		var g struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(raw, &g) != nil || g.ID == "" {
+			continue
+		}
+		items, err := r.getAll(outlook.TeamsUserCalendarGroupCalendarsURL(userID, g.ID))
+		if err != nil {
+			logger.Warn(r.ctx, "teams calendar group skipped", logger.String("group", g.ID), logger.ErrorField(err))
+			continue
+		}
+		add(items)
+	}
+	return out
+}
+
+func (r *teamsRun) writeMailboxCalendars(userID string, cals []teamsMailboxCalendar) error {
+	if len(cals) == 0 {
+		return nil
+	}
+	rows := make([]map[string]interface{}, 0, len(cals))
+	for _, c := range cals {
+		rows = append(rows, map[string]interface{}{
+			"id": c.ID, "name": c.Name, "color": c.Color, "hex_color": c.HexColor, "is_default": c.Default,
+		})
+	}
+	body, err := json.Marshal(map[string]interface{}{"calendars": rows})
+	if err != nil {
+		return err
+	}
+	body, err = outlook.PatchTeamsBackup(body, outlook.TeamsBackupBlock{TenantID: r.tenant, Source: "calendars", BackedUpAt: outlook.TeamsUTC(r.now())})
+	if err != nil {
+		return err
+	}
+	return r.put(outlook.TeamsUserCalendarsKey(outlook.TeamsUserPrefix(r.tenant, userID)), body, nil)
+}
+
+func (r *teamsRun) syncExtraCalendars(userID string, st *teamsUserState, listed []teamsMailboxCalendar, deadline time.Time, save func() error) (string, string) {
+	byID := map[string]int{}
+	for i := range st.MailboxCalendars {
+		byID[st.MailboxCalendars[i].ID] = i
+	}
+	for _, c := range listed {
+		if c.Default || c.ID == "" {
+			continue
+		}
+		if i, ok := byID[c.ID]; ok {
+			st.MailboxCalendars[i].Name, st.MailboxCalendars[i].Color, st.MailboxCalendars[i].HexColor = c.Name, c.Color, c.HexColor
+			continue
+		}
+		st.MailboxCalendars = append(st.MailboxCalendars, teamsMailboxCalendar{ID: c.ID, Name: c.Name, Color: c.Color, HexColor: c.HexColor})
+		byID[c.ID] = len(st.MailboxCalendars) - 1
+	}
+	status, code := teamsComplete, ""
+	for i := range st.MailboxCalendars {
+		cal := &st.MailboxCalendars[i]
+		if cal.Default || cal.ID == "" {
+			continue
+		}
+		r.planRanges(&cal.Ranges)
+		info := teamsCalendarInfo{ID: cal.ID, Name: cal.Name, Color: cal.Color, HexColor: cal.HexColor}
+		for j := range cal.Ranges {
+			s, c := r.syncCalendarRange(userID, st, &cal.Ranges[j], cal.ID, info, deadline, save)
+			status = teamsWorst(status, s)
+			if c != "" {
+				code = c
+			}
+			if s == teamsBlocked || r.stopped() {
+				return status, code
+			}
+		}
+		cal.Ranges = compactCalendarRanges(st, cal.Ranges)
+	}
+	return status, code
+}
+
+func (r *teamsRun) syncCalendarRange(userID string, st *teamsUserState, rg *teamsCalendarRange, calID string, info teamsCalendarInfo, deadline time.Time, save func() error) (string, string) {
 	first := rg.DeltaLink
 	if first == "" {
-		first = outlook.TeamsCalendarViewDeltaURL(userID, rg.Start, rg.End)
+		if calID == "" {
+			first = outlook.TeamsCalendarViewDeltaURL(userID, rg.Start, rg.End)
+		} else {
+			first = outlook.TeamsNamedCalendarViewDeltaURL(userID, calID, rg.Start, rg.End)
+		}
+	}
+	stream := "calendar:stream:user:" + userID
+	if calID != "" {
+		stream += ":" + calID
 	}
 	outcome, delta, err := r.pageThrough(teamsPager{
 		pageLink: &rg.PageLink, first: first, dirty: &rg.Dirty, deadline: deadline,
-		streamKey: "calendar:stream:user:" + userID,
-		stream:    repo.TeamsFailure{Phase: "calendar", Kind: teamsFailStream, ResourceType: "user", ResourceID: userID},
+		streamKey: stream,
+		stream:    repo.TeamsFailure{Phase: "calendar", Kind: teamsFailStream, ResourceType: "user", ResourceID: userID, ItemIDs: map[string]string{"calendar_id": calID}},
 		save:      save,
 		item: func(raw json.RawMessage) (string, repo.TeamsFailure, error, bool) {
-			return r.calendarItem(userID, st, rg, raw)
+			return r.calendarItem(userID, st, rg, info, raw)
 		},
 	})
 	status, code := r.pageStatus(st, "calendar", "teams_calendar", outcome, err, func() { rg.DeltaLink, rg.PageLink = "", "" })
 	if outcome != teamsPageDone {
 		return status, code
 	}
-	closed, gaps := r.endRound(teamsRound{&rg.Dirty, &rg.Held, &rg.HeldSince, "calendar:stream:user:" + userID}, r.failureKeysFor("calendar", userID, ""))
+	closed, gaps := r.endRound(teamsRound{&rg.Dirty, &rg.Held, &rg.HeldSince, stream}, r.failureKeysFor("calendar", userID, ""))
 	if !closed {
 		return teamsIncomplete, ""
 	}
@@ -947,21 +1218,18 @@ func (r *teamsRun) syncCalendarRange(userID string, st *teamsUserState, rg *team
 	return teamsComplete, ""
 }
 
-func (r *teamsRun) calendarItem(userID string, st *teamsUserState, rg *teamsCalendarRange, raw json.RawMessage) (string, repo.TeamsFailure, error, bool) {
+func (r *teamsRun) calendarItem(userID string, st *teamsUserState, rg *teamsCalendarRange, info teamsCalendarInfo, raw json.RawMessage) (string, repo.TeamsFailure, error, bool) {
 	var ev teamsEvent
 	if err := json.Unmarshal(raw, &ev); err != nil || ev.ID == "" {
 		return "", repo.TeamsFailure{}, nil, false
 	}
 	key := "calendar:item:" + userID + ":" + ev.ID
-	f := repo.TeamsFailure{Phase: "calendar", Kind: teamsFailItem, ResourceType: "user", ResourceID: userID, ItemIDs: map[string]string{"event_id": ev.ID}}
+	f := repo.TeamsFailure{Phase: "calendar", Kind: teamsFailItem, ResourceType: "user", ResourceID: userID, ItemIDs: map[string]string{"event_id": ev.ID, "calendar_id": info.ID}}
 	lookup := outlook.TeamsVerified(outlook.TeamsCheckLookupEvent)
 	if len(ev.Removed) > 0 {
 		return key, f, r.removeEvent(userID, st, rg, ev.ID), lookup
 	}
-	if !ev.isTeamsMeeting() {
-		return "", f, nil, false
-	}
-	return key, f, r.storeMeetingEvent(userID, st, raw, ev), lookup
+	return key, f, r.storeMeetingEvent(userID, st, raw, ev, info), lookup
 }
 
 // resolveMid applies the collision check: a folder whose stored identity differs from this
@@ -1006,16 +1274,82 @@ func (r *teamsRun) meetingIdentity(userID string, ev teamsEvent) (string, map[st
 	return mid, identity
 }
 
-// storeMeetingEvent writes one Teams meeting copy: event.json (version rule by changeKey),
-// _meeting.json, the user's pointer, the series master once, and the organizer's attendance.
-func (r *teamsRun) storeMeetingEvent(userID string, st *teamsUserState, raw json.RawMessage, ev teamsEvent) error {
+func stampCalendar(doc map[string]interface{}, info teamsCalendarInfo) {
+	if info.ID != "" {
+		doc["calendar_id"] = info.ID
+	}
+	if info.Name != "" {
+		doc["calendar_name"] = info.Name
+	}
+	if info.Color != "" {
+		doc["calendar_color"] = info.Color
+	}
+	if info.HexColor != "" {
+		doc["calendar_hex_color"] = info.HexColor
+	}
+	if info.Default {
+		doc["calendar_default"] = true
+	}
+}
+
+func withEventSubject(raw json.RawMessage, subject string) json.RawMessage {
+	subject = strings.TrimSpace(subject)
+	if subject == "" {
+		return raw
+	}
+	var doc map[string]json.RawMessage
+	if json.Unmarshal(raw, &doc) != nil {
+		return raw
+	}
+	var cur string
+	_ = json.Unmarshal(doc["subject"], &cur)
+	if strings.TrimSpace(cur) != "" {
+		return raw
+	}
+	b, err := json.Marshal(subject)
+	if err != nil {
+		return raw
+	}
+	doc["subject"] = b
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+func (r *teamsRun) calendarInfoFromState(st *teamsUserState, calID string) teamsCalendarInfo {
+	if calID != "" {
+		for _, c := range st.MailboxCalendars {
+			if c.ID == calID {
+				return teamsCalendarInfo{ID: c.ID, Name: c.Name, Color: c.Color, HexColor: c.HexColor, Default: c.Default}
+			}
+		}
+		return teamsCalendarInfo{ID: calID}
+	}
+	for _, c := range st.MailboxCalendars {
+		if c.Default {
+			return teamsCalendarInfo{ID: c.ID, Name: c.Name, Color: c.Color, HexColor: c.HexColor, Default: true}
+		}
+	}
+	return teamsCalendarInfo{Name: "Calendar", Default: true}
+}
+
+// storeMeetingEvent writes one calendar event copy: event.json (version rule by changeKey),
+// _meeting.json, the user's pointer, the series master once, and attendance for a Teams meeting
+// the user organized.
+func (r *teamsRun) storeMeetingEvent(userID string, st *teamsUserState, raw json.RawMessage, ev teamsEvent, info teamsCalendarInfo) error {
 	seriesMid := ""
 	if ev.SeriesMasterID != "" {
-		mid, err := r.storeSeriesMaster(userID, st, ev.SeriesMasterID)
+		mid, subj, err := r.storeSeriesMaster(userID, st, ev.SeriesMasterID, info)
 		if err != nil {
 			return fmt.Errorf("series master: %w", err)
 		}
 		seriesMid = mid
+		if strings.TrimSpace(ev.Subject) == "" && subj != "" {
+			ev.Subject = subj
+			raw = withEventSubject(raw, subj)
+		}
 	}
 	mid, identity := r.meetingIdentity(userID, ev)
 	prefix := outlook.TeamsMeetingPrefix(r.tenant, mid)
@@ -1036,6 +1370,10 @@ func (r *teamsRun) storeMeetingEvent(userID string, st *teamsUserState, raw json
 		if seriesMid != "" {
 			doc["series_mid"] = seriesMid
 		}
+		if ev.Subject != "" {
+			doc["subject"] = ev.Subject
+		}
+		stampCalendar(doc, info)
 		ids, _ := doc["event_ids"].(map[string]interface{})
 		if ids == nil {
 			ids = map[string]interface{}{}
@@ -1062,7 +1400,7 @@ func (r *teamsRun) storeMeetingEvent(userID string, st *teamsUserState, raw json
 	if ev.ICalUID != "" {
 		r.icalMids[ev.ICalUID] = appendUnique(r.icalMids[ev.ICalUID], mid)
 	}
-	if ev.IsOrganizer && ev.joinURL() != "" && !end.IsZero() && r.now().Sub(end) < teamsAttendanceWindow {
+	if ev.isTeamsMeeting() && ev.IsOrganizer && ev.joinURL() != "" && !end.IsZero() && r.now().Sub(end) < teamsAttendanceWindow {
 		p := st.Attendance[mid]
 		p.JoinURL, p.End = ev.joinURL(), end
 		st.Attendance[mid] = p
@@ -1081,7 +1419,10 @@ func appendUnique(list []string, v string) []string {
 
 func teamsMeetingDefaults(doc map[string]interface{}) {
 	if _, ok := doc["transcript_content_status"]; !ok {
-		doc["transcript_content_status"] = outlook.TeamsStatusPaidAPI
+		doc["transcript_content_status"] = outlook.TeamsStatusContentNotCollected
+	}
+	if _, ok := doc["recording_content_status"]; !ok {
+		doc["recording_content_status"] = outlook.TeamsStatusContentNotCollected
 	}
 	for _, k := range []string{"transcript_metadata_status", "recording_metadata_status", "attendance_status"} {
 		if _, ok := doc[k]; !ok {
@@ -1170,28 +1511,32 @@ func (r *teamsRun) movePointer(st *teamsUserState, mid, key, target string, meta
 }
 
 // storeSeriesMaster stores a recurring series master once per user and run (kind series).
-func (r *teamsRun) storeSeriesMaster(userID string, st *teamsUserState, masterID string) (string, error) {
+func (r *teamsRun) storeSeriesMaster(userID string, st *teamsUserState, masterID string, info teamsCalendarInfo) (string, string, error) {
 	seen := userID + "|" + masterID
 	if mid, ok := r.seriesSeen[seen]; ok {
-		return mid, nil
+		return mid, r.seriesSubjects[seen], nil
 	}
 	raw, err := r.getJSON(outlook.TeamsUserEventURL(userID, masterID))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	var ev teamsEvent
 	if err := json.Unmarshal(raw, &ev); err != nil || ev.ID == "" {
-		return "", fmt.Errorf("unparseable series master")
+		return "", "", fmt.Errorf("unparseable series master")
 	}
 	ev.Type = "seriesMaster"
 	mid, identity := r.meetingIdentity(userID, ev)
 	prefix := outlook.TeamsMeetingPrefix(r.tenant, mid)
 	if err := r.writeEventJSON(prefix, raw, ev, ""); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if err := r.updateMeetingMeta(prefix, func(doc map[string]interface{}) {
 		doc["mid"], doc["identity"], doc["kind"], doc["ical_uid"], doc["join_url"] = mid, identity, "series", ev.ICalUID, ev.joinURL()
 		doc["calendar_status"] = outlook.TeamsStatusOK
+		if ev.Subject != "" {
+			doc["subject"] = ev.Subject
+		}
+		stampCalendar(doc, info)
 		ids, _ := doc["event_ids"].(map[string]interface{})
 		if ids == nil {
 			ids = map[string]interface{}{}
@@ -1200,11 +1545,15 @@ func (r *teamsRun) storeSeriesMaster(userID string, st *teamsUserState, masterID
 		doc["event_ids"] = ids
 		teamsMeetingDefaults(doc)
 	}); err != nil {
-		return "", err
+		return "", "", err
 	}
 	st.EventMids[ev.ID] = mid
 	r.seriesSeen[seen] = mid
-	return mid, nil
+	if r.seriesSubjects == nil {
+		r.seriesSubjects = map[string]string{}
+	}
+	r.seriesSubjects[seen] = strings.TrimSpace(ev.Subject)
+	return mid, r.seriesSubjects[seen], nil
 }
 
 // removeEvent applies a calendar @removed entry: only an event whose stored start lies inside the
@@ -1602,16 +1951,13 @@ func (r *teamsRun) storeArtifact(userID string, st *teamsUserState, kind, status
 	if err := json.Unmarshal(raw, &row); err != nil {
 		return err
 	}
-	if _, removed := row["@removed"]; removed {
-		return nil
-	}
 	id, _ := row["id"].(string)
 	meetingID, _ := row["meetingId"].(string)
 	if id == "" || meetingID == "" {
+		if _, removed := row["@removed"]; removed {
+			return nil
+		}
 		return fmt.Errorf("artifact row without id or meetingId")
-	}
-	for _, k := range []string{"transcriptContentUrl", "recordingContentUrl", "content", "metadataContent"} {
-		delete(row, k)
 	}
 	mid := st.OnlineMeetings[meetingID]
 	artifactOnly := false
@@ -1620,8 +1966,35 @@ func (r *teamsRun) storeArtifact(userID string, st *teamsUserState, kind, status
 		artifactOnly = true
 	}
 	prefix := outlook.TeamsMeetingPrefix(r.tenant, mid)
-	if kind == "recordings" {
-		row["file"] = outlook.TeamsFileRef{BackupStatus: outlook.TeamsFileUnresolved, CheckedAt: outlook.TeamsUTC(r.now())}
+	if _, removed := row["@removed"]; removed {
+		// Keep the artifact entry and stamp removed_at; do not delete vault bytes.
+		return r.updateMeetingMeta(prefix, func(doc map[string]interface{}) {
+			list, _ := doc[kind].([]interface{})
+			now := outlook.TeamsUTC(r.now())
+			for i, item := range list {
+				m, ok := item.(map[string]interface{})
+				if !ok || fmt.Sprint(m["id"]) != id {
+					continue
+				}
+				m["removed_at"] = now
+				list[i] = m
+				doc[kind] = list
+				return
+			}
+		})
+	}
+	fileURL := teamsArtifactFileURL(row)
+	for _, k := range []string{"transcriptContentUrl", "recordingContentUrl", "content", "metadataContent"} {
+		delete(row, k)
+	}
+	if kind == "recordings" || kind == "transcripts" {
+		ref := outlook.TeamsFileRef{BackupStatus: outlook.TeamsFileUnresolved, CheckedAt: outlook.TeamsUTC(r.now())}
+		if fileURL != "" {
+			f := r.fileResolver()
+			ref = f.resolve(fileURL)
+			f.register(ref, outlook.TeamsMeetingMetaKey(prefix))
+		}
+		row["file"] = ref
 	}
 	return r.updateMeetingMeta(prefix, func(doc map[string]interface{}) {
 		if artifactOnly {
@@ -1644,6 +2017,29 @@ func (r *teamsRun) storeArtifact(userID string, st *teamsUserState, kind, status
 		doc[kind] = append(list, row)
 		teamsMeetingDefaults(doc)
 	})
+}
+
+// teamsArtifactFileURL picks a resolvable OD/SP link from artifact metadata. Only webUrl (or
+// equivalent non-Graph file links) is used. Graph transcriptContentUrl / recordingContentUrl /
+// content URLs are never resolved here — media stays with OneDrive/SharePoint owners.
+func teamsArtifactFileURL(row map[string]interface{}) string {
+	for _, k := range []string{"webUrl"} {
+		u, _ := row[k].(string)
+		u = strings.TrimSpace(u)
+		if u == "" || outlook.IsTeamsContentURL(u) || teamsLooksLikeGraphContentURL(u) {
+			continue
+		}
+		return u
+	}
+	return ""
+}
+
+func teamsLooksLikeGraphContentURL(u string) bool {
+	low := strings.ToLower(u)
+	if !strings.Contains(low, "graph.microsoft.com/") {
+		return false
+	}
+	return strings.Contains(low, "/content") || strings.Contains(low, "/metadatacontent")
 }
 
 // writeReconcile lists, per meeting folder, the other folders holding a copy with the same
@@ -2204,9 +2600,6 @@ func (r *teamsRun) retryItem(f repo.TeamsFailure) error {
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			return err
 		}
-		if !ev.isTeamsMeeting() {
-			return nil
-		}
 		st, save := r.loadUserState(f.ResourceID)
 		for _, m := range []*map[string]string{&st.EventMids, &st.Pointers, &st.OnlineMeetings} {
 			if *m == nil {
@@ -2216,7 +2609,7 @@ func (r *teamsRun) retryItem(f repo.TeamsFailure) error {
 		if st.Attendance == nil {
 			st.Attendance = map[string]teamsPendingAttendance{}
 		}
-		if err := r.storeMeetingEvent(f.ResourceID, st, raw, ev); err != nil {
+		if err := r.storeMeetingEvent(f.ResourceID, st, raw, ev, r.calendarInfoFromState(st, ids["calendar_id"])); err != nil {
 			return err
 		}
 		return save()
@@ -2504,7 +2897,8 @@ func (f *teamsFileResolver) userDrive(userID string) string {
 
 // siteJob finds the active SharePoint job that backs up driveID: the site's default library or a
 // library the job has backed up. Without one, a job of the file's site is returned with
-// backsDrive false. siteID is the bare site collection id or the composite host,site,web id.
+// backsDrive false. siteID comes from the shared drive item's parentReference (so private and
+// shared channel files resolve to their own SharePoint site, not only the parent team's site).
 func (f *teamsFileResolver) siteJob(driveID, siteID string) (job *repo.CronJobListingDB, backsDrive bool, err error) {
 	if f.sites == nil {
 		in := f.r.input

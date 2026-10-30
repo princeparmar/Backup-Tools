@@ -175,7 +175,7 @@ func spBinKey(prefix, id, name string) string {
 
 func runSite(t *testing.T, in ProcessorInput, q *driveQuotaSession) sharePointSiteResult {
 	t.Helper()
-	res, err := syncSharePointSite(context.Background(), in, spSite(q))
+	res, err := syncSharePointSite(context.Background(), in, spSite(q), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +305,7 @@ func TestSharePointEveryLibraryFailingFailsTheRun(t *testing.T) {
 		drives:    map[string]*spDrive{spDefault: {fail: errGraphForbidden}, spLegal: {fail: errGraphForbidden}},
 	}
 	stubSharePoint(t, g, store)
-	if _, err := syncSharePointSite(context.Background(), spInput(), spSite(nil)); !errors.Is(err, errGraphForbidden) {
+	if _, err := syncSharePointSite(context.Background(), spInput(), spSite(nil), nil); !errors.Is(err, errGraphForbidden) {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -322,7 +322,7 @@ func TestSharePointStopsOnCancellation(t *testing.T) {
 	stubSharePoint(t, g, store)
 	in := spInput()
 	in.HeartBeatFunc = func() error { return errJobDeactivated }
-	if _, err := syncSharePointSite(context.Background(), in, spSite(nil)); !errors.Is(err, errJobDeactivated) {
+	if _, err := syncSharePointSite(context.Background(), in, spSite(nil), nil); !errors.Is(err, errJobDeactivated) {
 		t.Fatalf("err = %v", err)
 	}
 	if len(g.deltaURLs) != 0 || len(store.objects) != 0 {
@@ -340,7 +340,7 @@ func TestSharePointStorageLimitStopsTheRun(t *testing.T) {
 		},
 	}
 	stubSharePoint(t, g, store)
-	if _, err := syncSharePointSite(context.Background(), spInput(), spSite(nil)); !quota.IsStorageQuota(err) {
+	if _, err := syncSharePointSite(context.Background(), spInput(), spSite(nil), nil); !quota.IsStorageQuota(err) {
 		t.Fatalf("err = %v", err)
 	}
 	if len(store.objects) != 0 {
@@ -404,7 +404,9 @@ func TestSharePointListFailureSyncsKnownLibrariesWithoutRemoval(t *testing.T) {
 	}
 }
 
-func TestSharePointRemovedLibraryMovesToBinOnceAndReturns(t *testing.T) {
+func TestSharePointPreserveVaultWhenLibraryMissingFromListing(t *testing.T) {
+	// Workspace rule: preserve-all — libraries missing from a complete Graph listing must
+	// not purge or BIN vault objects. Backup stays restorable as-is.
 	store := newMemDriveStore()
 	g := &spGraph{
 		libraries: spLibs(spDefault, spLegal),
@@ -425,51 +427,21 @@ func TestSharePointRemovedLibraryMovesToBinOnceAndReturns(t *testing.T) {
 		t.Fatalf("legal file missing: %v", store.keySet())
 	}
 
-	// A complete listing without the library moves its backup to BIN.
 	g.libraries = spLibs(spDefault)
 	runSite(t, in, nil)
-	binKey := spBinKey(legalPrefix, "L1", "nda.pdf")
-	if o, ok := store.objects[binKey]; !ok || o.meta[outlook.OneDriveMetaRemovedAt] == "" {
-		t.Fatalf("legal file not in bin: %v", store.keySet())
+	if _, ok := store.objects[liveKey]; !ok {
+		t.Fatalf("preserve-all violated: legal file purged: %v", store.keySet())
 	}
-	if _, ok := store.objects[liveKey]; ok {
-		t.Fatal("legal file left in MY_DRIVE")
+	for k := range store.objects {
+		if strings.Contains(k, legalPrefix) && strings.Contains(k, "/BIN/") {
+			t.Fatalf("preserve-all violated: legal file moved to bin: %s", k)
+		}
 	}
-	if _, ok := store.objects[outlook.OneDriveFolderKey(legalPrefix, nil, "LF", "Contracts")]; ok {
-		t.Fatal("legal folder placeholder left")
+	if in.Job.TaskMemory.SharePointLibraries[spLegal].RemovedAt != "" {
+		t.Fatal("preserve-all violated: RemovedAt set on missing library")
 	}
 	if _, ok := store.objects[spFileKey(spSitePrefix, "D1", "plan.docx")]; !ok {
-		t.Fatal("default library touched by the removal")
-	}
-	st := in.Job.TaskMemory.SharePointLibraries[spLegal]
-	if st.RemovedAt == "" || st.DeltaLink != nil {
-		t.Fatalf("removed state %+v", st)
-	}
-
-	// Removal is idempotent.
-	copies := len(store.copies)
-	removedAt := st.RemovedAt
-	runSite(t, in, nil)
-	if len(store.copies) != copies || in.Job.TaskMemory.SharePointLibraries[spLegal].RemovedAt != removedAt {
-		t.Fatalf("second removal changed the backup: copies %d -> %d", copies, len(store.copies))
-	}
-
-	// The library comes back: a new baseline returns the unchanged file from BIN.
-	g.libraries = spLibs(spDefault, spLegal)
-	g.downloads = nil
-	runSite(t, in, nil)
-	if _, ok := store.objects[liveKey]; !ok {
-		t.Fatalf("legal file not restored to MY_DRIVE: %v", store.keySet())
-	}
-	if _, ok := store.objects[binKey]; ok {
-		t.Fatal("bin copy left after the library returned")
-	}
-	if len(g.downloads) != 0 {
-		t.Fatalf("unchanged file downloaded again: %v", g.downloads)
-	}
-	st = in.Job.TaskMemory.SharePointLibraries[spLegal]
-	if st.RemovedAt != "" || st.DeltaLink == nil || *st.DeltaLink != spCursor(spLegal) {
-		t.Fatalf("returned state %+v", st)
+		t.Fatal("default library touched")
 	}
 }
 

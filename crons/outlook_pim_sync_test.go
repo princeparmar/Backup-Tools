@@ -10,6 +10,7 @@ import (
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/pkg/quota"
+	"github.com/StorX2-0/Backup-Tools/repo"
 )
 
 const pimTestPrefix = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/user/u1"
@@ -448,6 +449,22 @@ func withCalendars(t *testing.T, calendars ...outlook.FlatCalendar) {
 	prev := pimCalendarsFn
 	pimCalendarsFn = func(context.Context, string, string) ([]outlook.FlatCalendar, error) { return calendars, nil }
 	t.Cleanup(func() { pimCalendarsFn = prev })
+	withCalendarGroupCals(t) // default: no extra calendarGroup entries
+	withGroupCalendars(t)    // default: no M365 Groups calendars unless a test overrides
+}
+
+func withCalendarGroupCals(t *testing.T, calendars ...outlook.FlatCalendar) {
+	t.Helper()
+	prev := pimCalendarGroupsCalsFn
+	pimCalendarGroupsCalsFn = func(context.Context, string, string) ([]outlook.FlatCalendar, error) { return calendars, nil }
+	t.Cleanup(func() { pimCalendarGroupsCalsFn = prev })
+}
+
+func withGroupCalendars(t *testing.T, calendars ...outlook.FlatCalendar) {
+	t.Helper()
+	prev := pimGroupCalendarsFn
+	pimGroupCalendarsFn = func(context.Context, string, string) ([]outlook.FlatCalendar, error) { return calendars, nil }
+	t.Cleanup(func() { pimGroupCalendarsFn = prev })
 }
 
 func readCalendarMeta(t *testing.T, store *memPIMStore, calendarID string) outlook.FlatCalendar {
@@ -547,11 +564,59 @@ func TestPIMSyncItemFailureRetriedNextRun(t *testing.T) {
 	}
 }
 
+func withContactsDelta(t *testing.T, pages map[string]*outlook.ContactsDeltaPage) {
+	t.Helper()
+	prev := pimContactsDeltaFn
+	pimContactsDeltaFn = func(_ context.Context, _, reqURL string) (*outlook.ContactsDeltaPage, error) {
+		id := "default"
+		if i := strings.Index(reqURL, "/contactFolders/"); i >= 0 {
+			rest := reqURL[i+len("/contactFolders/"):]
+			if j := strings.Index(rest, "/"); j > 0 {
+				id = rest[:j]
+			}
+		}
+		page := pages[id]
+		if page == nil {
+			return &outlook.ContactsDeltaPage{DeltaLink: "delta-" + id}, nil
+		}
+		out := *page
+		if out.DeltaLink == "" {
+			out.DeltaLink = "delta-" + id
+		}
+		return &out, nil
+	}
+	t.Cleanup(func() { pimContactsDeltaFn = prev })
+}
+
+func stubContactFullFetch(t *testing.T) {
+	t.Helper()
+	prev := pimContactFetchRawFn
+	pimContactFetchRawFn = func(_ context.Context, _, _, _, contactID string) ([]byte, error) {
+		raw, _ := json.Marshal(map[string]any{
+			"id": contactID, "displayName": "n-" + contactID, "changeKey": "k1",
+			"spouseName": "so", "companyName": "co", "jobTitle": "dev",
+			"categories": []string{"test"}, "imAddresses": []string{"im"},
+			"businessHomePage": "https://example.com", "personalNotes": "note",
+		})
+		return raw, nil
+	}
+	t.Cleanup(func() { pimContactFetchRawFn = prev })
+}
+
+func newTestContactsRun(store *memPIMStore) *pimRun {
+	run := newTestPIMRun(store)
+	run.method = "outlook_contacts"
+	run.fetchPhotos = false
+	run.tm = &repo.TaskMemory{OutlookContactsLayout: outlook.OutlookContactsLayoutFull}
+	return run
+}
+
 func TestSyncOutlookContactsCoversFolders(t *testing.T) {
-	withPIMGraph(t, &stubPIMGraph{pages: map[string][][]outlook.PIMItem{
-		outlook.PIMContactsURL("https://g/me", ""):   {{pimItem("c1", "k1")}},
-		outlook.PIMContactsURL("https://g/me", "F1"): {{pimItem("c2", "k1")}},
-	}})
+	stubContactFullFetch(t)
+	withContactsDelta(t, map[string]*outlook.ContactsDeltaPage{
+		"default": {Items: []outlook.PIMItem{pimItem("c1", "k1")}},
+		"F1":      {Items: []outlook.PIMItem{pimItem("c2", "k1")}},
+	})
 	prev := pimContactFoldersFn
 	pimContactFoldersFn = func(context.Context, string, string) ([]outlook.PIMContactFolder, error) {
 		return []outlook.PIMContactFolder{{ID: "F1", DisplayName: "Work"}}, nil
@@ -559,7 +624,7 @@ func TestSyncOutlookContactsCoversFolders(t *testing.T) {
 	t.Cleanup(func() { pimContactFoldersFn = prev })
 
 	store := &memPIMStore{objects: map[string][]byte{}}
-	run := newTestPIMRun(store)
+	run := newTestContactsRun(store)
 	if err := syncOutlookContacts(context.Background(), run, "https://g/me", pimTestPrefix); err != nil {
 		t.Fatal(err)
 	}
@@ -577,6 +642,125 @@ func TestSyncOutlookContactsCoversFolders(t *testing.T) {
 	if !strings.Contains(string(store.objects[pimTestPrefix+"/folders/F1/"+outlook.PIMFolderMetaName]), `"displayName":"Work"`) {
 		t.Fatalf("folder meta = %s", store.objects[pimTestPrefix+"/folders/F1/"+outlook.PIMFolderMetaName])
 	}
+	if run.tm.OutlookContactFolderDeltas[""] == "" || run.tm.OutlookContactFolderDeltas["F1"] == "" {
+		t.Fatalf("delta links not saved: %+v", run.tm.OutlookContactFolderDeltas)
+	}
+}
+
+func TestSyncOutlookContactsFailsWhenFoldersUnavailable(t *testing.T) {
+	prev := pimContactFoldersFn
+	pimContactFoldersFn = func(context.Context, string, string) ([]outlook.PIMContactFolder, error) {
+		return nil, errors.New("http 503")
+	}
+	t.Cleanup(func() { pimContactFoldersFn = prev })
+
+	if err := syncOutlookContacts(context.Background(), newTestContactsRun(&memPIMStore{objects: map[string][]byte{}}), "https://g/me", pimTestPrefix); err == nil {
+		t.Fatal("folder listing failure must fail the job")
+	}
+}
+
+func TestSyncOutlookContactsSkipsSparseDeltaWhenFullFetchFails(t *testing.T) {
+	prev := pimContactFetchRawFn
+	pimContactFetchRawFn = func(context.Context, string, string, string, string) ([]byte, error) {
+		return nil, errors.New("graph down")
+	}
+	t.Cleanup(func() { pimContactFetchRawFn = prev })
+	withContactsDelta(t, map[string]*outlook.ContactsDeltaPage{
+		"default": {Items: []outlook.PIMItem{pimItem("c1", "k1")}},
+	})
+	prevFolders := pimContactFoldersFn
+	pimContactFoldersFn = func(context.Context, string, string) ([]outlook.PIMContactFolder, error) {
+		return nil, nil
+	}
+	t.Cleanup(func() { pimContactFoldersFn = prevFolders })
+
+	store := &memPIMStore{objects: map[string][]byte{}}
+	run := newTestContactsRun(store)
+	if err := syncOutlookContacts(context.Background(), run, "https://g/me", pimTestPrefix); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.objects[pimTestPrefix+"/c1.json"]; ok {
+		t.Fatal("must not store sparse delta contact when full fetch fails")
+	}
+	if run.coverage.FailedItems < 1 {
+		t.Fatalf("expected failed coverage, got %+v", run.coverage)
+	}
+}
+
+func TestSyncOutlookContactsMarksRemovedFolders(t *testing.T) {
+	stubContactFullFetch(t)
+	userBase := "https://g/me"
+	folderMeta := pimTestPrefix + "/folders/F-GONE/" + outlook.PIMFolderMetaName
+	indexKey := pimTestPrefix + "/folders/F-GONE/" + outlook.PIMIndexName
+	contactKey := pimTestPrefix + "/folders/F-GONE/c-gone.json"
+	store := &memPIMStore{objects: map[string][]byte{
+		folderMeta: []byte(`{"id":"F-GONE","displayName":"Old"}`),
+		indexKey:   []byte(`{"items":{"c-gone":{"key":"` + contactKey + `","change_key":"k1"}}}`),
+		contactKey: []byte(`{"id":"c-gone"}`),
+	}}
+	withContactsDelta(t, map[string]*outlook.ContactsDeltaPage{
+		"default": {Items: []outlook.PIMItem{pimItem("c1", "k1")}},
+	})
+	prev := pimContactFoldersFn
+	pimContactFoldersFn = func(context.Context, string, string) ([]outlook.PIMContactFolder, error) {
+		return nil, nil
+	}
+	t.Cleanup(func() { pimContactFoldersFn = prev })
+
+	run := newTestContactsRun(store)
+	run.synced[folderMeta], run.synced[indexKey], run.synced[contactKey] = true, true, true
+	if err := syncOutlookContacts(context.Background(), run, userBase, pimTestPrefix); err != nil {
+		t.Fatal(err)
+	}
+	var folder outlook.PIMContactFolder
+	if err := json.Unmarshal(store.objects[folderMeta], &folder); err != nil || folder.RemovedAt == "" {
+		t.Fatalf("folder not marked removed: %+v err=%v", folder, err)
+	}
+	var index outlook.PIMIndex
+	if err := json.Unmarshal(store.objects[indexKey], &index); err != nil || index.Items["c-gone"].RemovedAt == "" {
+		t.Fatalf("contact not marked removed: %+v err=%v", index, err)
+	}
+}
+
+func TestPIMPutJSONSkipsUnchanged(t *testing.T) {
+	metaKey := pimTestPrefix + "/folders/F1/" + outlook.PIMFolderMetaName
+	raw, _ := json.Marshal(outlook.PIMContactFolder{ID: "F1", DisplayName: "Work"})
+	store := &memPIMStore{objects: map[string][]byte{metaKey: raw}}
+	run := newTestPIMRun(store)
+	run.synced[metaKey] = true
+	before := len(store.puts)
+	if err := run.putJSON(context.Background(), metaKey, outlook.PIMContactFolder{ID: "F1", DisplayName: "Work"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.puts) != before {
+		t.Fatalf("unchanged folder meta uploaded: %v", store.puts[before:])
+	}
+}
+
+func TestSyncOutlookCalendarsIncludesGroupCalendar(t *testing.T) {
+	userBase := "https://graph.microsoft.com/v1.0/me"
+	groupRoot := outlook.PIMGroupCalendarEventRoot("gid-smart")
+	groupEvents := outlook.PIMEventsURLFromRoot(groupRoot)
+	withPIMGraph(t, &stubPIMGraph{pages: map[string][][]outlook.PIMItem{
+		outlook.PIMEventsURL(userBase, "main"): {{pimItem("e1", "k1")}},
+		groupEvents:                            {{pimItem("ge1", "k1")}},
+	}})
+	withCalendars(t, outlook.FlatCalendar{ID: "main", Name: "Calendar", IsDefault: true, Source: outlook.CalendarSourceUser})
+	withGroupCalendars(t, outlook.FlatCalendar{
+		ID: "gcal1", Name: "Smartiies", Source: outlook.CalendarSourceGroup, GroupID: "gid-smart",
+	})
+
+	store := &memPIMStore{objects: map[string][]byte{}}
+	if err := syncOutlookCalendars(context.Background(), newTestPIMRun(store), userBase, pimTestPrefix); err != nil {
+		t.Fatal(err)
+	}
+	meta := readCalendarMeta(t, store, "gcal1")
+	if meta.Name != "Smartiies" || meta.Source != outlook.CalendarSourceGroup || meta.GroupID != "gid-smart" {
+		t.Fatalf("group meta %+v", meta)
+	}
+	if _, ok := store.objects[outlook.PIMCalendarDir(pimTestPrefix, "gcal1")+"ge1.json"]; !ok {
+		t.Fatal("group calendar event not backed up")
+	}
 }
 
 func TestSyncOutlookCalendarsSkipsFailingCalendar(t *testing.T) {
@@ -585,11 +769,7 @@ func TestSyncOutlookCalendarsSkipsFailingCalendar(t *testing.T) {
 		pages: map[string][][]outlook.PIMItem{outlook.PIMEventsURL(userBase, "ok"): {{pimItem("e1", "k1")}}},
 		fail:  map[string]error{outlook.PIMEventsURL(userBase, "bad"): errors.New("http 403")},
 	})
-	prev := pimCalendarsFn
-	pimCalendarsFn = func(context.Context, string, string) ([]outlook.FlatCalendar, error) {
-		return []outlook.FlatCalendar{{ID: "bad", Name: "Shared"}, {ID: "ok", Name: "Calendar"}}, nil
-	}
-	t.Cleanup(func() { pimCalendarsFn = prev })
+	withCalendars(t, outlook.FlatCalendar{ID: "bad", Name: "Shared"}, outlook.FlatCalendar{ID: "ok", Name: "Calendar"})
 
 	store := &memPIMStore{objects: map[string][]byte{}}
 	if err := syncOutlookCalendars(context.Background(), newTestPIMRun(store), userBase, pimTestPrefix); err != nil {

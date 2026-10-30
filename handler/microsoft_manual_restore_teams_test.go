@@ -66,7 +66,7 @@ func TestTeamsManualRestoreRefusesBeforeAnyWrite(t *testing.T) {
 		{"app-only token, chat endpoint", HandleTeamsChatsDownloadAndInsert, appOnly, []string{key}, http.StatusForbidden, "organization connections"},
 		{"roles without scp, channel endpoint", HandleTeamsDownloadAndInsert, rolesOnly, []string{key}, http.StatusForbidden, "organization connections"},
 		{"delegated token without ChatMessage.Send", HandleTeamsChatsDownloadAndInsert, channelOnly, []string{key}, http.StatusForbidden, "ChatMessage.Send"},
-		{"key of another tenant", HandleTeamsDownloadAndInsert, delegated, []string{key, foreign}, http.StatusForbidden, "belongs to tenant"},
+		{"key of another tenant", HandleTeamsDownloadAndInsert, delegated, []string{key, foreign}, http.StatusForbidden, "another Microsoft organization"},
 		{"key that is not tenant scoped", HandleTeamsDownloadAndInsert, delegated, []string{"teams/old-layout/100.json"}, http.StatusBadRequest, "not a tenant-scoped"},
 	}
 	for _, tc := range cases {

@@ -22,6 +22,14 @@ func TestOneDriveFileAndFolderKeys(t *testing.T) {
 	if got, want := OneDriveFolderContentsPrefix(prefix, []string{"F1"}, "F2"), prefix+"/MY_DRIVE/F1/F2/"; got != want {
 		t.Fatalf("contents prefix: got %s want %s", got, want)
 	}
+	if got, want := OneDriveFileKey(prefix, OneDriveSectionSharedWithMe, nil, "R1", "shared.docx"),
+		prefix+"/SHARED_WITH_ME/R1$shared.docx"; got != want {
+		t.Fatalf("shared file key:\n got %s\nwant %s", got, want)
+	}
+	if got, want := OneDriveFolderKeyIn(prefix, OneDriveSectionSharedWithMe, nil, "SF", "SharedFolder"),
+		prefix+"/SHARED_WITH_ME/SF/.folder__SharedFolder"; got != want {
+		t.Fatalf("shared folder key:\n got %s\nwant %s", got, want)
+	}
 }
 
 func TestParseOneDriveObjectKey(t *testing.T) {
@@ -54,6 +62,18 @@ func TestParseOneDriveObjectKey(t *testing.T) {
 			name: "bin",
 			key:  OneDriveFileKey(prefix, OneDriveSectionBin, nil, "I1", "a.txt"),
 			want: OneDriveObjectKey{Prefix: prefix, Section: OneDriveSectionBin, ParentIDs: []string{}, ItemID: "I1", Name: "a.txt"},
+			ok:   true,
+		},
+		{
+			name: "shared with me file",
+			key:  OneDriveFileKey(prefix, OneDriveSectionSharedWithMe, []string{"SF"}, "R1", "doc.docx"),
+			want: OneDriveObjectKey{Prefix: prefix, Section: OneDriveSectionSharedWithMe, ParentIDs: []string{"SF"}, ItemID: "R1", Name: "doc.docx"},
+			ok:   true,
+		},
+		{
+			name: "shared with me folder",
+			key:  OneDriveFolderKeyIn(prefix, OneDriveSectionSharedWithMe, nil, "SF", "Team"),
+			want: OneDriveObjectKey{Prefix: prefix, Section: OneDriveSectionSharedWithMe, ParentIDs: []string{}, ItemID: "SF", Name: "Team", IsFolder: true},
 			ok:   true,
 		},
 		{name: "bin with folders", key: prefix + "/BIN/F1/I1$a.txt"},
@@ -120,10 +140,11 @@ func TestOneDriveContentUnchanged(t *testing.T) {
 }
 
 func TestOneDriveObjectMeta(t *testing.T) {
-	file := OneDriveObjectMeta(&OneDriveItem{ID: "I", Name: "a.txt", Size: 5, CTag: "c", MimeType: "text/plain"}, "A/B")
+	file := OneDriveObjectMeta(&OneDriveItem{ID: "I", Name: "a.txt", Size: 5, CTag: "c", MimeType: "text/plain", DriveID: "b!drv"}, "A/B")
 	want := map[string]string{
 		OneDriveMetaItemID: "I", OneDriveMetaName: "a.txt", OneDriveMetaParentPath: "A/B",
 		OneDriveMetaMimeType: "text/plain", OneDriveMetaCTag: "c", OneDriveMetaSize: "5",
+		OneDriveMetaDriveID: "b!drv",
 	}
 	if !reflect.DeepEqual(file, want) {
 		t.Fatalf("file meta %v", file)

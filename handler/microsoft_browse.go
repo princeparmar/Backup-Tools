@@ -6,128 +6,10 @@ import (
 	"strings"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
-	"github.com/StorX2-0/Backup-Tools/mstenant"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/labstack/echo/v4"
 )
-
-// microsoftBrowseClient resolves the request's tenant and returns a Graph client for it. Delegated
-// links browse the signed-in user (/me); application links must name the mailbox (mailbox or email query).
-func microsoftBrowseClient(c echo.Context, capability string) (*outlook.OutlookClient, *mstenant.Context, error) {
-	tc, err := microsoftTenantContextFromRequest(c, capability, false)
-	if err != nil {
-		return nil, nil, err
-	}
-	if tc.Application {
-		client, cerr := outlook.NewOutlookClientForUser(tc.Token, browseMailbox(c))
-		return client, tc, cerr
-	}
-	client, cerr := outlook.NewOutlookClientUsingToken(tc.Token)
-	return client, tc, cerr
-}
-
-func browseMailbox(c echo.Context) string {
-	if m := strings.TrimSpace(c.QueryParam("mailbox")); m != "" {
-		return m
-	}
-	return strings.TrimSpace(c.QueryParam("email"))
-}
-
-func browseErrorJSON(c echo.Context, err error) error {
-	if _, ok := mstenant.AsError(err); ok {
-		return microsoftErrorJSON(c, err)
-	}
-	return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
-}
-
-// HandleMicrosoftQueryMessages lists Outlook messages for the new Microsoft product UI.
-func HandleMicrosoftQueryMessages(c echo.Context) error {
-	ctx := c.Request().Context()
-	var err error
-	defer monitor.Mon.Task()(&ctx)(&err)
-
-	client, _, err := microsoftBrowseClient(c, outlook.CapabilityMail)
-	if err != nil {
-		return browseErrorJSON(c, err)
-	}
-
-	skip, top := microsoftBrowsePage(c, 50)
-	messages, err := client.GetMessageWithDetails(int32(skip), int32(top))
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
-	}
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":  "Outlook messages",
-		"messages": messages,
-	})
-}
-
-// HandleMicrosoftListContacts lists Microsoft Graph contacts.
-func HandleMicrosoftListContacts(c echo.Context) error {
-	ctx := c.Request().Context()
-	var err error
-	defer monitor.Mon.Task()(&ctx)(&err)
-
-	client, _, err := microsoftBrowseClient(c, outlook.CapabilityContacts)
-	if err != nil {
-		return browseErrorJSON(c, err)
-	}
-	skip, top := microsoftBrowsePage(c, 100)
-	contacts, err := client.ListContacts(int32(skip), int32(top))
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
-	}
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":  "Outlook contacts",
-		"contacts": contacts,
-	})
-}
-
-// HandleMicrosoftListCalendars lists Microsoft Graph calendars.
-func HandleMicrosoftListCalendars(c echo.Context) error {
-	ctx := c.Request().Context()
-	var err error
-	defer monitor.Mon.Task()(&ctx)(&err)
-
-	client, _, err := microsoftBrowseClient(c, outlook.CapabilityCalendar)
-	if err != nil {
-		return browseErrorJSON(c, err)
-	}
-	calendars, err := client.ListCalendars()
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
-	}
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":   "Outlook calendars",
-		"calendars": calendars,
-	})
-}
-
-// HandleMicrosoftListCalendarEvents lists events for a calendar.
-func HandleMicrosoftListCalendarEvents(c echo.Context) error {
-	ctx := c.Request().Context()
-	var err error
-	defer monitor.Mon.Task()(&ctx)(&err)
-
-	client, _, err := microsoftBrowseClient(c, outlook.CapabilityCalendar)
-	if err != nil {
-		return browseErrorJSON(c, err)
-	}
-	calendarID := strings.TrimSpace(c.Param("calendarId"))
-	if calendarID == "" {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": "calendarId is required"})
-	}
-	skip, top := microsoftBrowsePage(c, 50)
-	events, err := client.ListCalendarEvents(calendarID, int32(skip), int32(top))
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
-	}
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message": "Outlook calendar events",
-		"events":  events,
-	})
-}
 
 // HandleMicrosoftAccountDetect classifies the caller's Microsoft account for sign-in: the workspace
 // contract of the selected tenant (default: home), without directory entities.
@@ -162,10 +44,10 @@ func HandleMicrosoftCorporateDomainUsers(c echo.Context) error {
 		_, top := microsoftBrowsePage(c, 200)
 		ws.id.TenantID = ws.tenantID
 		if tc, rerr := resolveMicrosoftTenant(c, ws.id, "", true); rerr == nil {
-			if users, lerr := msListDirectoryUsersFn(ctx, tc.Token); lerr == nil {
+			if users, lerr := msListDirectoryUsersOptsFn(ctx, tc.Token, outlook.ListTenantDirectoryUsersOptions{}); lerr == nil {
 				users = filterMicrosoftDirectoryUsers(users, microsoftDirectoryFilter{EnabledOnly: true})
-				roles, _ := microsoftTenantUserRoles(ctx, tc.Token)
-				entities = microsoftDirectoryUserViews(users[:min(top, len(users))], roles)
+				// Role membership listing is expensive; browse preview omits it (use include_roles on directory/users).
+				entities = microsoftDirectoryUserViews(users[:min(top, len(users))], nil)
 			}
 		}
 	}
@@ -203,77 +85,6 @@ func microsoftBrowsePage(c echo.Context, defaultTop int) (skip, top int) {
 	return skip, top
 }
 
-// HandleMicrosoftOneDriveFlatFiles lists non-folder OneDrive files (browse twin of Google drive-flat-files).
-func HandleMicrosoftOneDriveFlatFiles(c echo.Context) error {
-	ctx := c.Request().Context()
-	var err error
-	defer monitor.Mon.Task()(&ctx)(&err)
-
-	client, tc, err := microsoftBrowseClient(c, outlook.CapabilityOneDrive)
-	if err != nil {
-		return browseErrorJSON(c, err)
-	}
-	accessToken := tc.Token
-
-	mailbox := strings.TrimSpace(c.QueryParam("email"))
-	if mailbox == "" {
-		mailbox = strings.TrimSpace(c.QueryParam("mailbox"))
-	}
-	driveRoot, err := client.OneDriveDriveRootURL(mailbox)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
-	}
-
-	skip, top := microsoftBrowsePage(c, 50)
-
-	files, err := outlook.ListOneDriveFlatFilesPage(ctx, accessToken, driveRoot, int32(skip), int32(top))
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
-	}
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message": "OneDrive flat files",
-		"files":   files,
-		"skip":    skip,
-		"top":     top,
-	})
-}
-
-// HandleMicrosoftOutlookFlatFiles lists inbox messages for a mailbox (Outlook mail browse).
-func HandleMicrosoftOutlookFlatFiles(c echo.Context) error {
-	ctx := c.Request().Context()
-	var err error
-	defer monitor.Mon.Task()(&ctx)(&err)
-
-	client, tc, err := microsoftBrowseClient(c, outlook.CapabilityMail)
-	if err != nil {
-		return browseErrorJSON(c, err)
-	}
-	accessToken := tc.Token
-
-	mailbox := strings.TrimSpace(c.QueryParam("mailbox"))
-	if mailbox == "" {
-		mailbox = strings.TrimSpace(c.QueryParam("email"))
-	}
-	userBase, err := client.MailUserBaseURL(mailbox)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
-	}
-
-	skip, top := microsoftBrowsePage(c, 50)
-
-	messages, err := outlook.ListOutlookMailFlatMessagesPage(ctx, accessToken, userBase, int32(skip), int32(top))
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
-	}
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":  "Outlook flat messages",
-		"messages": messages,
-		"mailbox":  mailbox,
-		"skip":     skip,
-		"top":      top,
-	})
-}
-
 // HandleMicrosoftSharePointSites lists SharePoint sites for site picker (Sites.Read.All, admin only).
 func HandleMicrosoftSharePointSites(c echo.Context) error {
 	ctx := c.Request().Context()
@@ -299,37 +110,6 @@ func HandleMicrosoftSharePointSites(c echo.Context) error {
 		"message": "SharePoint sites",
 		"sites":   sites,
 		"top":     top,
-	})
-}
-
-// HandleMicrosoftSharePointFlatFiles lists non-folder files in a document library drive (browse, admin only).
-func HandleMicrosoftSharePointFlatFiles(c echo.Context) error {
-	ctx := c.Request().Context()
-	var err error
-	defer monitor.Mon.Task()(&ctx)(&err)
-
-	accessToken, respErr := microsoftOrgBrowseToken(c, outlook.CapabilitySharePoint)
-	if accessToken == "" {
-		return respErr
-	}
-
-	driveID := strings.TrimSpace(c.QueryParam("drive_id"))
-	if driveID == "" {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": "drive_id is required"})
-	}
-
-	skip, top := microsoftBrowsePage(c, 50)
-
-	files, err := outlook.ListSharePointFlatFilesPage(ctx, accessToken, driveID, int32(skip), int32(top))
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
-	}
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":  "SharePoint flat files",
-		"files":    files,
-		"drive_id": driveID,
-		"skip":     skip,
-		"top":      top,
 	})
 }
 

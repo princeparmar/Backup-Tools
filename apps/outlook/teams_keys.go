@@ -281,6 +281,11 @@ func TeamsUserMeetingCoverageKey(userPrefix string) string {
 	return userPrefix + "/" + TeamsSectionMeetings + "/_coverage.json"
 }
 
+// TeamsUserCalendarsKey lists the mailbox calendars Teams Calendar can show (primary, holidays, birthdays).
+func TeamsUserCalendarsKey(userPrefix string) string {
+	return userPrefix + "/CALENDARS/_calendars.json"
+}
+
 // TeamsUserCallPointerKey is the zero-byte pointer from a participant to a call record or log row.
 func TeamsUserCallPointerKey(userPrefix, callID, start string) string {
 	return userPrefix + "/" + TeamsSectionCalls + "/" + teamsDatePath(start) + "/" + teamsCallPointer + teamsKeyID(callID)

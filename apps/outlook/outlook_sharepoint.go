@@ -30,26 +30,13 @@ type SharePointResolvedSite struct {
 	DriveID  string
 }
 
-// SharePointCronBackupMeta is JSON at {siteKey}/meta/.../{itemId}_{name}.json.
+// SharePointCronBackupMeta is legacy JSON at {siteKey}/meta/.../{itemId}_{name}.json.
+// Embeds the shared OneDrive legacy fields; site/drive identify the library.
 type SharePointCronBackupMeta struct {
-	ItemID                string `json:"item_id"`
-	Name                  string `json:"name"`
-	MimeType              string `json:"mime_type,omitempty"`
-	ParentID              string `json:"parent_id,omitempty"`
-	ParentPath            string `json:"parent_path,omitempty"`
-	WebURL                string `json:"web_url,omitempty"`
-	Size                  int64  `json:"size,omitempty"`
-	CreatedDateTime       string `json:"created_date_time,omitempty"`
-	LastModifiedDateTime  string `json:"last_modified_date_time,omitempty"`
-	ETag                  string `json:"etag,omitempty"`
-	CTag                  string `json:"ctag,omitempty"`
+	OneDriveCronBackupMeta
 	SiteID                string `json:"site_id"`
 	DriveID               string `json:"drive_id"`
-	IsFolder              bool   `json:"is_folder"`
 	RemovedFromSharePoint bool   `json:"removed_from_sharepoint,omitempty"`
-	DeletedAt             string `json:"deleted_at,omitempty"`
-	DataObjectKey         string `json:"data_object_key,omitempty"`
-	UpdatedAt             string `json:"updated_at,omitempty"`
 }
 
 type graphSiteResponse struct {
@@ -83,6 +70,62 @@ func SanitizeSharePointSiteKey(siteID string) string {
 		return "site"
 	}
 	return s
+}
+
+// GraphSharePointSiteID turns a vault/login site key back into the Graph composite id.
+// Restore jobs store login_id as host_guid_guid; Graph writes need host,guid,guid.
+func GraphSharePointSiteID(siteID string) string {
+	siteID = strings.TrimSpace(siteID)
+	if siteID == "" {
+		return ""
+	}
+	if parts := strings.Split(siteID, ","); len(parts) == 3 && isGraphGUID(parts[1]) && isGraphGUID(parts[2]) {
+		return siteID
+	}
+	widAt := strings.LastIndex(siteID, "_")
+	if widAt <= 0 {
+		return siteID
+	}
+	wid := siteID[widAt+1:]
+	rest := siteID[:widAt]
+	scidAt := strings.LastIndex(rest, "_")
+	if scidAt <= 0 {
+		return siteID
+	}
+	host, scid := rest[:scidAt], rest[scidAt+1:]
+	if host == "" || !isGraphGUID(scid) || !isGraphGUID(wid) {
+		return siteID
+	}
+	return host + "," + scid + "," + wid
+}
+
+// GraphSharePointSiteIDFromKey reads the site resource id from a vault key and unsanitizes it.
+func GraphSharePointSiteIDFromKey(objectKey string) string {
+	_, _, resourceType, resourceID, _, ok := SplitResourceKey(objectKey)
+	if !ok || resourceType != "site" {
+		return ""
+	}
+	return GraphSharePointSiteID(resourceID)
+}
+
+func isGraphGUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, r := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
 
 // SharePointIDBasedMetaKey is {prefix}/meta/{yyyy}/{mm}/{dd}/{itemId}_{name}.json (prefix: ResourceKeyPrefix
@@ -370,7 +413,27 @@ func parseSharePointSiteURL(raw string) (host, path string, err error) {
 	return host, path, nil
 }
 
-// ListSharePointFlatFilesPage lists non-folder files at drive root (browse).
-func ListSharePointFlatFilesPage(ctx context.Context, accessToken, driveID string, skip, top int32) ([]OneDriveItem, error) {
-	return ListOneDriveFlatFilesPage(ctx, accessToken, DriveRootURLFromDriveID(driveID), skip, top)
+// ErrSharePointLegacyTombstone means the legacy meta marks the item removed from SharePoint.
+var ErrSharePointLegacyTombstone = fmt.Errorf("sharepoint tombstone skipped")
+
+// RestoreSharePointLegacyMetaFile uploads one legacy SharePoint meta+data backup into driveID
+// (or meta.DriveID when driveID is empty). Shared by batch restore and manual restore.
+func RestoreSharePointLegacyMetaFile(ctx context.Context, accessToken, driveID string, meta SharePointCronBackupMeta, data []byte) error {
+	if meta.RemovedFromSharePoint || meta.RemovedFromOneDrive {
+		return ErrSharePointLegacyTombstone
+	}
+	name := strings.TrimSpace(meta.Name)
+	if name == "" {
+		return fmt.Errorf("sharepoint file name missing")
+	}
+	if strings.TrimSpace(driveID) == "" {
+		driveID = strings.TrimSpace(meta.DriveID)
+	}
+	if driveID == "" {
+		return fmt.Errorf("sharepoint drive_id missing")
+	}
+	if len(data) == 0 {
+		return fmt.Errorf("sharepoint data missing")
+	}
+	return UploadSharePointDriveFile(ctx, accessToken, driveID, name, data)
 }

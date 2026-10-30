@@ -4,12 +4,20 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/repo"
 )
+
+// tenantAccessCheckTTL: skip live token/role probes on list when the link was checked this recently.
+// Explicit refresh (GET ?refresh=1 or POST .../roles/refresh) always re-probes.
+const tenantAccessCheckTTL = 10 * time.Minute
+
+// tenantAccessCheckConcurrency caps parallel Graph/token probes while listing tenants.
+const tenantAccessCheckConcurrency = 4
 
 // Seams (overridden in tests).
 var (
@@ -111,7 +119,8 @@ type AccountTenants struct {
 // RefreshAccountTenants discovers the tenants a sign-in can reach, checks a tenant-scoped token and
 // the roles in each, and upserts the links. The home link always exists. Discovery failures keep
 // the known links and report discovery_status instead of shrinking the list.
-func RefreshAccountTenants(ctx context.Context, database *db.PostgresDb, cred *repo.GoogleBackupCredentialDB, refreshToken string) (*AccountTenants, error) {
+// When force is false, tenants probed within tenantAccessCheckTTL are not re-probed (still listed).
+func RefreshAccountTenants(ctx context.Context, database *db.PostgresDb, cred *repo.GoogleBackupCredentialDB, refreshToken string, force bool) (*AccountTenants, error) {
 	refresh := strings.TrimSpace(refreshToken)
 	if refresh == "" {
 		refresh = strings.TrimSpace(cred.RefreshToken)
@@ -146,8 +155,13 @@ func RefreshAccountTenants(ctx context.Context, database *db.PostgresDb, cred *r
 		}
 	}
 
+	type probe struct {
+		tid string
+	}
+	var toProbe []probe
 	for _, tid := range order {
 		f := tenants[tid]
+		existing, _ := database.MicrosoftLinkRepo.Get(cred.ID, tid)
 		d := repo.MicrosoftTenantDiscovery{
 			TenantID: tid, TenantName: f.name, DefaultDomain: f.domain,
 			Category: CategoryFor(home, tid, ""), HomeTenantID: home,
@@ -155,10 +169,44 @@ func RefreshAccountTenants(ctx context.Context, database *db.PostgresDb, cred *r
 		if tid == home {
 			d.DiscoveryStatus = out.DiscoveryStatus
 		}
+		if existing != nil && strings.TrimSpace(existing.UserType) != "" {
+			d.UserType = existing.UserType
+			d.Category = CategoryFor(home, tid, existing.UserType)
+		}
+		if existing != nil {
+			if oid := existing.ObjectIDValue(); oid != "" {
+				d.ObjectID = oid
+			}
+		}
 		if _, err := database.MicrosoftLinkRepo.UpsertDiscovered(cred.ID, d); err != nil {
 			return nil, err
 		}
-		CheckTenantAccess(ctx, database, cred, tid, refresh)
+		if force || !tenantAccessCheckFresh(existing) {
+			toProbe = append(toProbe, probe{tid: tid})
+		}
+	}
+
+	if len(toProbe) > 0 {
+		workers := tenantAccessCheckConcurrency
+		if workers > len(toProbe) {
+			workers = len(toProbe)
+		}
+		jobs := make(chan string, len(toProbe))
+		for _, p := range toProbe {
+			jobs <- p.tid
+		}
+		close(jobs)
+		var wg sync.WaitGroup
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for tid := range jobs {
+					CheckTenantAccess(ctx, database, cred, tid, refresh)
+				}
+			}()
+		}
+		wg.Wait()
 	}
 
 	states, err := AccessStates(database, cred)
@@ -167,6 +215,21 @@ func RefreshAccountTenants(ctx context.Context, database *db.PostgresDb, cred *r
 	}
 	out.Tenants = states
 	return out, nil
+}
+
+func tenantAccessCheckFresh(link *repo.MicrosoftAccountTenantDB) bool {
+	if link == nil || link.CheckedAt == nil {
+		return false
+	}
+	if time.Since(*link.CheckedAt) > tenantAccessCheckTTL {
+		return false
+	}
+	switch link.TokenStatus {
+	case repo.MicrosoftStatusWorking, repo.MicrosoftStatusError, repo.MicrosoftStatusSigninRequired:
+		return true
+	default:
+		return false
+	}
 }
 
 // CheckTenantAccess mints a delegated token at the tenant authority and re-reads the person's object
@@ -206,15 +269,27 @@ func CheckTenantAccess(ctx context.Context, database *db.PostgresDb, cred *repo.
 		_ = links.SaveRoles(cred.ID, tenantID, nil, repo.MicrosoftStatusKnown, false)
 		return
 	}
-	me, merr := meIdentityFn(ctx, tok.AccessToken)
-	if merr == nil && me.ObjectID != "" {
-		home := cred.HomeTenantID()
-		_, _ = links.UpsertDiscovered(cred.ID, repo.MicrosoftTenantDiscovery{
-			TenantID: tenantID, ObjectID: me.ObjectID, UserType: me.UserType,
-			Category: CategoryFor(home, tenantID, me.UserType), HomeTenantID: home,
-		})
+	objectID := ""
+	userType := ""
+	if existing, _ := links.Get(cred.ID, tenantID); existing != nil {
+		objectID = existing.ObjectIDValue()
+		userType = strings.TrimSpace(existing.UserType)
 	}
-	roles := readRolesFn(ctx, tok.AccessToken, tok.IDToken, me.ObjectID)
+	if objectID == "" || userType == "" {
+		me, merr := meIdentityFn(ctx, tok.AccessToken)
+		if merr == nil && me.ObjectID != "" {
+			objectID = me.ObjectID
+			if me.UserType != "" {
+				userType = me.UserType
+			}
+			home := cred.HomeTenantID()
+			_, _ = links.UpsertDiscovered(cred.ID, repo.MicrosoftTenantDiscovery{
+				TenantID: tenantID, ObjectID: me.ObjectID, UserType: me.UserType,
+				Category: CategoryFor(home, tenantID, me.UserType), HomeTenantID: home,
+			})
+		}
+	}
+	roles := readRolesFn(ctx, tok.AccessToken, tok.IDToken, objectID)
 	stored := make([]repo.MicrosoftRoleAssignment, 0, len(roles.Roles))
 	for _, r := range roles.Roles {
 		stored = append(stored, repo.MicrosoftRoleAssignment{TemplateID: r.TemplateID, Name: r.Name, Scope: r.Scope})

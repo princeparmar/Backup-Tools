@@ -14,8 +14,12 @@ import (
 	"github.com/StorX2-0/Backup-Tools/satellite"
 )
 
-// Graph seam (overridden in tests).
-var pimCalendarsFn = outlook.ListPIMCalendars
+// Graph seams (overridden in tests).
+var (
+	pimCalendarsFn          = outlook.ListPIMCalendars
+	pimCalendarGroupsCalsFn = outlook.ListPIMCalendarsFromGroups
+	pimGroupCalendarsFn     = outlook.ListPIMGroupCalendars
+)
 
 type outlookCalendarProcessor struct{}
 
@@ -27,22 +31,54 @@ func (p *outlookCalendarProcessor) Run(input ProcessorInput) error {
 	return runOutlookPIMJob(input, "outlook_calendar", satellite.ReserveBucket_OutlookCalendar, google.CalendarMinEstimateBytes, syncOutlookCalendars)
 }
 
-// syncOutlookCalendars backs up every calendar of the user. A calendar that cannot be listed is
-// skipped; the job fails only when none can be backed up. Backed-up calendars missing from the
-// listing are then marked removed.
+// syncOutlookCalendars backs up every calendar Outlook can show for the user:
+//  1. default /calendars (My calendars)
+//  2. every calendarGroup (shared / other / Groups folder entries)
+//  3. M365 /groups/{id}/calendar (sidebar Groups like Smartiies; needs Group.Read.All)
+//
+// A calendar that cannot be listed is skipped; the job fails only when none can be backed up.
 func syncOutlookCalendars(ctx context.Context, run *pimRun, userBase, keyPrefix string) error {
 	calendars, err := pimCalendarsFn(ctx, run.accessToken, userBase)
 	if err != nil {
 		return err
 	}
+	if fromGroups, gerr := pimCalendarGroupsCalsFn(ctx, run.accessToken, userBase); gerr != nil {
+		logger.Warn(ctx, "outlook calendarGroups not listed; continuing with /calendars",
+			logger.ErrorField(gerr))
+		run.coverage.sample("calendarGroups", "calendar_groups_failed")
+	} else {
+		calendars = append(calendars, fromGroups...)
+	}
+	if m365, gerr := pimGroupCalendarsFn(ctx, run.accessToken, userBase); gerr != nil {
+		logger.Warn(ctx, "outlook M365 group calendars not listed (re-consent Group.Read.All?); continuing",
+			logger.ErrorField(gerr))
+		run.coverage.sample("m365_groups", "group_calendars_failed")
+	} else if len(m365) > 0 {
+		calendars = append(calendars, m365...)
+		logger.Info(ctx, "outlook M365 group calendars discovered",
+			logger.Int("count", len(m365)))
+	}
 	collections := make([]pimCollection, 0, len(calendars))
+	seen := map[string]bool{}
 	for _, cal := range calendars {
+		if cal.ID == "" || seen[cal.ID] {
+			continue
+		}
+		seen[cal.ID] = true
 		dir := outlook.PIMCalendarDir(keyPrefix, cal.ID)
-		collections = append(collections, pimCollection{
-			name: cal.Name, dir: dir, listURL: outlook.PIMEventsURL(userBase, cal.ID),
-			metaKey: dir + outlook.PIMCalendarMetaName, meta: cal,
+		col := pimCollection{
+			name: cal.Name, dir: dir, metaKey: dir + outlook.PIMCalendarMetaName, meta: cal,
 			userBase: userBase, calendarID: cal.ID,
-		})
+		}
+		if cal.Source == outlook.CalendarSourceGroup && cal.GroupID != "" {
+			col.eventRoot = outlook.PIMGroupCalendarEventRoot(cal.GroupID)
+			col.attachmentRoot = outlook.PIMGroupAttachmentRoot(cal.GroupID)
+			col.listURL = outlook.PIMEventsURLFromRoot(col.eventRoot)
+		} else {
+			col.eventRoot = outlook.PIMCalendarEventRoot(userBase, cal.ID)
+			col.listURL = outlook.PIMEventsURLFromRoot(col.eventRoot)
+		}
+		collections = append(collections, col)
 	}
 	if err := run.syncCollections(ctx, collections); err != nil {
 		return err

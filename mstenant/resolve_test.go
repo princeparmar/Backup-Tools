@@ -355,6 +355,50 @@ func TestResolve_neverChangesBackupMode(t *testing.T) {
 	}
 }
 
+func TestRefreshAccountTenants_skipsFreshProbesUnlessForced(t *testing.T) {
+	store := newTestDB(t)
+	stubs := &tokenStubs{}
+	stubs.install(t)
+	prevDiscover, prevMe, prevRoles := discoverTenantsFn, meIdentityFn, readRolesFn
+	discoverTenantsFn = func(context.Context, string, string) outlook.DiscoveryResult {
+		return outlook.DiscoveryResult{
+			Status: outlook.DiscoveryComplete,
+			Tenants: []outlook.DiscoveredTenant{
+				{TenantID: homeTenant, DisplayName: "Home"},
+				{TenantID: guestTenant, DisplayName: "Guest"},
+			},
+		}
+	}
+	meIdentityFn = func(context.Context, string) (outlook.MeIdentity, error) {
+		return outlook.MeIdentity{ObjectID: "oid-a", UserType: "Member"}, nil
+	}
+	readRolesFn = func(context.Context, string, string, string) outlook.TenantRolesResult {
+		return outlook.TenantRolesResult{Status: outlook.RoleStatusKnown}
+	}
+	t.Cleanup(func() { discoverTenantsFn, meIdentityFn, readRolesFn = prevDiscover, prevMe, prevRoles })
+
+	cred := newCredential(t, store, "u1", "oid-a")
+	if _, err := RefreshAccountTenants(context.Background(), store, cred, "rt", false); err != nil {
+		t.Fatal(err)
+	}
+	first := stubs.delegatedCalls
+	if first < 2 {
+		t.Fatalf("expected probes for home+guest, got %d", first)
+	}
+	if _, err := RefreshAccountTenants(context.Background(), store, cred, "rt", false); err != nil {
+		t.Fatal(err)
+	}
+	if stubs.delegatedCalls != first {
+		t.Fatalf("fresh list must not re-probe: before=%d after=%d", first, stubs.delegatedCalls)
+	}
+	if _, err := RefreshAccountTenants(context.Background(), store, cred, "rt", true); err != nil {
+		t.Fatal(err)
+	}
+	if stubs.delegatedCalls <= first {
+		t.Fatalf("force refresh must re-probe: before=%d after=%d", first, stubs.delegatedCalls)
+	}
+}
+
 // Token or role-read failures never make someone an admin.
 func TestCheckTenantAccess_failuresNeverGrantAdmin(t *testing.T) {
 	store := newTestDB(t)

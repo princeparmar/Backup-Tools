@@ -139,6 +139,94 @@ func microsoftGrantedScopes(accessToken, tokenEndpointScope string) []string {
 	return out
 }
 
+// microsoftRestoreGrantScopes is what the Grant Access popup should request. Always the
+// delegated write scopes — application roles like Sites.ReadWrite.All cannot be added by
+// a user login and caused the grant loop on every Microsoft service.
+func microsoftRestoreGrantScopes(method string, appMissing []string) (grant []string, hint string) {
+	grant = microsoftRestoreScopesForMethod(method)
+	if strings.TrimSpace(method) == "outlook_sharepoint" {
+		grant = []string{"Files.ReadWrite.All", "Sites.ReadWrite.All"}
+	}
+	if len(grant) == 0 {
+		grant = appMissing
+	}
+	if len(grant) == 0 {
+		return nil, "Grant Access with the Microsoft write permission for this service, then retry"
+	}
+	return grant, "Grant Access with " + strings.Join(grant, ", ") + ", then retry"
+}
+
+// delegatedWriteCovers is the Graph scopes that can perform the same restore write as required.
+// Grant Access often returns Shared / personal / Sites variants instead of the exact name.
+func delegatedWriteCovers(required string) []string {
+	switch strings.ToLower(strings.TrimSpace(required)) {
+	case "mail.readwrite", "mail.readwrite.shared":
+		return []string{"Mail.ReadWrite", "Mail.ReadWrite.Shared"}
+	case "calendars.readwrite", "calendars.readwrite.shared":
+		return []string{"Calendars.ReadWrite", "Calendars.ReadWrite.Shared"}
+	case "contacts.readwrite", "contacts.readwrite.shared":
+		return []string{"Contacts.ReadWrite", "Contacts.ReadWrite.Shared"}
+	case "files.readwrite.all", "files.readwrite", "sites.readwrite.all":
+		return []string{"Files.ReadWrite.All", "Files.ReadWrite", "Sites.ReadWrite.All"}
+	default:
+		if required = strings.TrimSpace(required); required != "" {
+			return []string{required}
+		}
+		return nil
+	}
+}
+
+func delegatedScopeGranted(have map[string]struct{}, required string) bool {
+	for _, alt := range delegatedWriteCovers(required) {
+		if _, ok := have[strings.ToLower(alt)]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func grantedScopeSet(granted []string) map[string]struct{} {
+	have := make(map[string]struct{}, len(granted))
+	for _, g := range granted {
+		g = strings.TrimSpace(g)
+		if g == "" {
+			continue
+		}
+		have[strings.ToLower(g)] = struct{}{}
+		if i := strings.LastIndex(g, "/"); i >= 0 && i+1 < len(g) {
+			have[strings.ToLower(g[i+1:])] = struct{}{}
+		}
+	}
+	return have
+}
+
+// delegatedRestoreScopesOK reports whether Grant Access put a write token on the signed-in
+// account for this service (Mail, Calendar, Contacts, OneDrive, SharePoint, Teams).
+func delegatedRestoreScopesOK(method string, granted, required []string) bool {
+	if len(required) == 0 {
+		required = microsoftRestoreScopesForMethod(method)
+	}
+	return len(microsoftMissingDelegatedScopes(granted, required)) == 0
+}
+
+func microsoftMissingDelegatedScopes(granted, required []string) []string {
+	if len(required) == 0 {
+		return nil
+	}
+	have := grantedScopeSet(granted)
+	var missing []string
+	for _, r := range required {
+		r = strings.TrimSpace(r)
+		if r == "" {
+			continue
+		}
+		if !delegatedScopeGranted(have, r) {
+			missing = append(missing, r)
+		}
+	}
+	return missing
+}
+
 func microsoftMissingScopes(granted, required []string) []string {
 	if len(required) == 0 {
 		return nil

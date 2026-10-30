@@ -109,19 +109,15 @@ func buildDriveFolderNameMap(deps *restore.RestoreDeps) map[string]string {
 	if email == "" {
 		email = strings.TrimSpace(WriteEmail(deps))
 	}
-	rows, err := deps.Store.SyncedObjectRepo.GetSyncedObjectsByUserAndBucket(userID, satellite.ReserveBucket_Drive, "google", "drive")
-	if err != nil {
-		return out
-	}
 	prefix := ""
 	if email != "" {
 		prefix = email + "/"
 	}
-	for _, row := range rows {
-		key := row.ObjectKey
-		if prefix != "" && !strings.HasPrefix(key, prefix) {
-			continue
-		}
+	keys, err := deps.Store.SyncedObjectRepo.ListSyncedObjectKeys(userID, satellite.ReserveBucket_Drive, "google", "drive", prefix)
+	if err != nil {
+		return out
+	}
+	for _, key := range keys {
 		p, ok := google.ParseDriveObjectKey(key)
 		if !ok || !p.IsFolder {
 			continue

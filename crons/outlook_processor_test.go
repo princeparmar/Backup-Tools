@@ -97,14 +97,39 @@ func TestOutlookMailSyncBaselineSkipsUnchanged(t *testing.T) {
 	fetches := stubMailFetch(t)
 	store := newMemMailStore()
 	key := mailKey("Inbox", "M1")
-	store.objects[key] = []byte(`{"id":"M1"}`)
+	store.objects[key] = []byte(`{"id":"M1","changeKey":"CK1"}`)
 	run := newTestMailRun(store, map[string]string{"M1": key})
 
-	if err := run.syncMessage(context.Background(), mailInbox, mailDelta("M1"), true); err != nil {
+	msg := mailDelta("M1")
+	msg.ChangeKey = "CK1"
+	if err := run.syncMessage(context.Background(), mailInbox, msg, true); err != nil {
 		t.Fatal(err)
 	}
-	if *fetches != 0 || len(store.downloads) != 0 || len(store.uploads) != 0 {
+	if *fetches != 0 || len(store.uploads) != 0 {
 		t.Fatalf("fetches=%d downloads=%v uploads=%v", *fetches, store.downloads, store.uploads)
+	}
+	if len(store.downloads) != 1 {
+		t.Fatalf("expected one changeKey check download, got %v", store.downloads)
+	}
+}
+
+func TestOutlookMailSyncRefetchesOnChangeKey(t *testing.T) {
+	fetches := stubMailFetch(t)
+	store := newMemMailStore()
+	key := mailKey("Inbox", "M1")
+	store.objects[key] = []byte(`{"id":"M1","changeKey":"CK-OLD","body":{"content":"old"}}`)
+	run := newTestMailRun(store, map[string]string{"M1": key})
+
+	msg := mailDelta("M1")
+	msg.ChangeKey = "CK-NEW"
+	if err := run.syncMessage(context.Background(), mailInbox, msg, false); err != nil {
+		t.Fatal(err)
+	}
+	if *fetches != 1 {
+		t.Fatalf("fetches=%d, want refetch on changeKey drift", *fetches)
+	}
+	if ck := outlook.MailBackupChangeKey(store.objects[key]); ck != "CK-NEW" {
+		t.Fatalf("changeKey=%q", ck)
 	}
 }
 
@@ -305,6 +330,10 @@ func TestOutlookMailPrecheckBlocksRun(t *testing.T) {
 }
 
 func TestOutlookMailStopsWhenStorageFull(t *testing.T) {
+	prevParallel := mailFolderSyncParallelism
+	mailFolderSyncParallelism = 1
+	t.Cleanup(func() { mailFolderSyncParallelism = prevParallel })
+
 	fetches := stubMailFetch(t)
 	stubMailFolders(t, []outlook.MailFolder{mailInbox, mailProject}, map[string][]outlook.OutlookMailDeltaMessage{
 		"F-INBOX": {*mailDelta("M1"), *mailDelta("M2")},

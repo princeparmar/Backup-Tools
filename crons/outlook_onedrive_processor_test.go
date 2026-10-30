@@ -443,7 +443,12 @@ func TestSharePointLibraryMigratesToTree(t *testing.T) {
 	store := newMemDriveStore()
 	metaKey := outlook.SharePointIDBasedMetaKey(driveTestPrefix, "F1", "q3.txt", "2026-07-21T00:00:00Z")
 	dataKey := outlook.SharePointIDBasedDataKey(driveTestPrefix, "F1", "q3.txt", "2026-07-21T00:00:00Z")
-	b, _ := json.Marshal(outlook.SharePointCronBackupMeta{ItemID: "F1", Name: "q3.txt", CTag: "c1", ETag: "e-c1", Size: 4, SiteID: "s1", DriveID: "b!lib", DataObjectKey: dataKey})
+	b, _ := json.Marshal(outlook.SharePointCronBackupMeta{
+		OneDriveCronBackupMeta: outlook.OneDriveCronBackupMeta{
+			ItemID: "F1", Name: "q3.txt", CTag: "c1", ETag: "e-c1", Size: 4, DataObjectKey: dataKey,
+		},
+		SiteID: "s1", DriveID: "b!lib",
+	})
 	store.objects[metaKey] = memDriveObject{data: b}
 	store.objects[dataKey] = memDriveObject{data: []byte("old:F1")}
 
@@ -472,5 +477,72 @@ func TestSharePointLibraryMigratesToTree(t *testing.T) {
 	}
 	if tm.SharePointLayout != repo.OneDriveLayoutTree || *tm.SharePointDeltaLink != driveCursor2 || tm.OneDriveDeltaLink != nil {
 		t.Fatalf("task memory %+v", tm)
+	}
+}
+
+func TestOneDriveSharedWithMeSyncPersonal(t *testing.T) {
+	store := newMemDriveStore()
+	prevSWM, prevChildren, prevContent := oneDriveSharedWithMeFn, oneDriveDriveChildrenFn, oneDriveContentFn
+	t.Cleanup(func() {
+		oneDriveSharedWithMeFn, oneDriveDriveChildrenFn, oneDriveContentFn = prevSWM, prevChildren, prevContent
+	})
+
+	oneDriveSharedWithMeFn = func(_ context.Context, _, next string) (*outlook.OneDriveListPage, error) {
+		if next != "" {
+			return nil, fmt.Errorf("unexpected next %s", next)
+		}
+		return &outlook.OneDriveListPage{Items: []outlook.OneDriveItem{
+			{ID: "RFILE", Name: "shared.txt", DriveID: "b!remote", CTag: "sc1", Size: 5, MimeType: "text/plain"},
+			{ID: "RFOLDER", Name: "Team", DriveID: "b!remote", IsFolder: true},
+			{ID: "NOP", Name: "broken", DriveID: ""}, // skipped
+		}}, nil
+	}
+	oneDriveDriveChildrenFn = func(_ context.Context, _, driveID, itemID, next string) (*outlook.OneDriveListPage, error) {
+		if driveID != "b!remote" || itemID != "RFOLDER" || next != "" {
+			return nil, fmt.Errorf("unexpected children %s/%s next=%s", driveID, itemID, next)
+		}
+		return &outlook.OneDriveListPage{Items: []outlook.OneDriveItem{
+			{ID: "RCHILD", Name: "inside.txt", DriveID: "b!remote", CTag: "sc2", Size: 3, MimeType: "text/plain"},
+		}}, nil
+	}
+	downloads := []string{}
+	oneDriveContentFn = func(_ context.Context, _, driveRoot, id string) (io.ReadCloser, int64, error) {
+		downloads = append(downloads, driveRoot+"|"+id)
+		return io.NopCloser(strings.NewReader("body-" + id)), 0, nil
+	}
+
+	personalRoot := "https://graph.microsoft.com/v1.0/me/drive"
+	run := newOneDriveRun(ProcessorInput{}, store, "tok", personalRoot, driveTestPrefix, store.keySet())
+	if err := run.syncSharedWithMe(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	fileKey := outlook.OneDriveFileKey(driveTestPrefix, outlook.OneDriveSectionSharedWithMe, nil, "RFILE", "shared.txt")
+	folderKey := outlook.OneDriveFolderKeyIn(driveTestPrefix, outlook.OneDriveSectionSharedWithMe, nil, "RFOLDER", "Team")
+	childKey := outlook.OneDriveFileKey(driveTestPrefix, outlook.OneDriveSectionSharedWithMe, []string{"RFOLDER"}, "RCHILD", "inside.txt")
+	for _, k := range []string{fileKey, folderKey, childKey} {
+		if _, ok := store.objects[k]; !ok {
+			t.Fatalf("missing key %s; have %v", k, store.keySet())
+		}
+	}
+	if store.objects[fileKey].meta[outlook.OneDriveMetaDriveID] != "b!remote" {
+		t.Fatalf("drive meta %v", store.objects[fileKey].meta)
+	}
+	if run.coverage.SharedSynced != 2 || run.coverage.SharedSkipped != 1 {
+		t.Fatalf("coverage %+v", run.coverage)
+	}
+	if len(downloads) != 2 {
+		t.Fatalf("downloads=%v", downloads)
+	}
+	for _, d := range downloads {
+		if !strings.Contains(d, "/drives/") {
+			t.Fatalf("expected remote drive content URL, got %s", d)
+		}
+	}
+}
+
+func TestOneDriveSharedWithMeSkippedForOrgDriveRoot(t *testing.T) {
+	if outlook.IsPersonalOneDriveRoot(driveTestRoot) {
+		t.Fatalf("%s must not be treated as personal", driveTestRoot)
 	}
 }

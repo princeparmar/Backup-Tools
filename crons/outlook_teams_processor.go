@@ -67,6 +67,7 @@ const (
 	teamsMergeKeep          = 30 * 24 * time.Hour
 	teamsMergedJobMessage   = repo.TeamsMergedJobMessage
 	teamsWaitingMergeReason = "Waiting to be merged into the Teams tenant job"
+	teamsWarningPrefix      = "Teams backup finished with warnings"
 )
 
 // Phases of a tenant run, in order.
@@ -78,7 +79,13 @@ const (
 	teamsPhaseMeetings = "meetings"
 )
 
+// teamsPhaseOrder is the full tenant run (calls + meetings included). Graph cannot restore
+// calendar, calls, or recordings into Teams, so production uses teamsRestorablePhaseOrder.
+// Keep runCallsPhase / runMeetingsPhase so this list can be switched back later.
 var teamsPhaseOrder = []string{teamsPhaseCalls, teamsPhaseRetries, teamsPhaseTeams, teamsPhaseChats, teamsPhaseMeetings}
+
+// teamsRestorablePhaseOrder backs up channel and chat messages only.
+var teamsRestorablePhaseOrder = []string{teamsPhaseRetries, teamsPhaseTeams, teamsPhaseChats}
 
 // Per-resource statuses ("Data integrity rules, 16").
 const (
@@ -276,6 +283,10 @@ type teamsStatusDoc struct {
 	Gaps         []teamsGap                     `json:"gaps,omitempty"`
 	SkippedItems []teamsSkippedItem             `json:"skipped_items,omitempty"`
 	Warnings     []string                       `json:"warnings,omitempty"`
+	// Counters surfaced for ops/UI; durable across checkpoints via _status.json.
+	IncomingChannelSkipped int `json:"incoming_channel_skipped,omitempty"`
+	FailuresCapped         int `json:"failures_capped,omitempty"`
+	StoredFallback         int `json:"stored_fallback,omitempty"`
 }
 
 type teamsPhaseStatus struct {
@@ -393,11 +404,12 @@ type teamsRun struct {
 	usersLoaded bool
 	usersErr    error
 
-	chatsSeen  map[string]bool
-	seriesSeen map[string]string
-	midChecked map[string]string
-	icalMids   map[string][]string
-	files      *teamsFileResolver
+	chatsSeen      map[string]bool
+	seriesSeen     map[string]string
+	seriesSubjects map[string]string
+	midChecked     map[string]string
+	icalMids       map[string][]string
+	files          *teamsFileResolver
 }
 
 func runOutlookTeamsAutosync(input ProcessorInput) error {
@@ -412,7 +424,7 @@ func runOutlookTeamsAutosync(input ProcessorInput) error {
 	if err != nil {
 		return err
 	}
-	err = r.run(teamsPhaseOrder)
+	err = r.run(teamsRestorablePhaseOrder)
 	return err
 }
 
@@ -671,8 +683,8 @@ func (r *teamsRun) graph(call func(token string) error) error {
 	case outlook.TeamsStatusOK:
 		r.consecutive429 = 0
 	}
-			return err
-		}
+	return err
+}
 
 func (r *teamsRun) page(u string) (outlook.TeamsPage, error) {
 	var p outlook.TeamsPage
@@ -737,8 +749,8 @@ func (r *teamsRun) loadKeys() error {
 	for _, k := range keys {
 		r.keys[k] = true
 	}
-		return nil
-	}
+	return nil
+}
 
 func (r *teamsRun) keysWithPrefix(prefix string) []string {
 	var out []string
@@ -748,7 +760,7 @@ func (r *teamsRun) keysWithPrefix(prefix string) []string {
 		}
 	}
 	sort.Strings(out)
-		return out
+	return out
 }
 
 // put writes one object: ownership checked, key in the job's tenant, write retried in memory,
@@ -833,6 +845,11 @@ func (r *teamsRun) fail(key string, f repo.TeamsFailure, cause error, verifiedLo
 	prev, exists := r.mem.TeamsFailures[key]
 	if !exists && (len(r.mem.TeamsFailures) >= teamsMaxFailures || r.failuresFull) {
 		r.failuresCapped++
+		if r.status != nil {
+			r.status.FailuresCapped = r.failuresCapped
+			// Durable gap so capped drops are never silent; resource is the attempted failure key.
+			r.addGap("failures_capped", key, r.now(), r.now())
+		}
 		r.warn("Too many failed Teams items; their streams are replayed instead")
 		return false
 	}
@@ -948,6 +965,12 @@ func (r *teamsRun) consented(feature string) bool {
 func (r *teamsRun) loadConsent() {
 	roles := outlook.TokenRoles(r.token)
 	r.notConsented = outlook.TeamsFeaturesNotConsented(roles)
+	for feature, role := range outlook.TeamsApplicationOnlyNotConsented(r.token) {
+		if r.notConsented == nil {
+			r.notConsented = map[string]string{}
+		}
+		r.notConsented[feature] = role
+	}
 	for feature, role := range r.notConsented {
 		r.setFeature(feature, outlook.TeamsStatusNotConsented, "missing role "+role)
 	}
@@ -1079,10 +1102,11 @@ func (r *teamsRun) run(phases []string) error {
 		return err
 	}
 	r.userScope, r.chatsSeen = map[string]bool{}, map[string]bool{}
-	r.seriesSeen, r.midChecked, r.icalMids = map[string]string{}, map[string]string{}, map[string][]string{}
+	r.seriesSeen, r.seriesSubjects, r.midChecked, r.icalMids = map[string]string{}, map[string]string{}, map[string]string{}, map[string][]string{}
 	r.status = &teamsStatusDoc{}
 	r.loadState(outlook.TeamsStatusKey(r.tenantPrefix), r.status)
 	r.status.TenantID, r.status.Warnings = r.tenant, nil
+	r.status.IncomingChannelSkipped, r.status.FailuresCapped, r.status.StoredFallback = 0, 0, 0
 	if r.status.Phases == nil {
 		r.status.Phases = map[string]teamsPhaseStatus{}
 	}
@@ -1142,11 +1166,16 @@ func (r *teamsRun) runPhase(phase string, deadline time.Time) bool {
 	return true
 }
 
-// finish writes _status.json, records the run outcome and sets the job message: success only if
-// every in-scope resource is complete or complete_with_retries.
+// finish writes _status.json, records the run outcome, and sets a job warning only for
+// required-content problems. Time-budget incomplete, optional call blocks, and expected
+// limitations stay in _status.json so the next run can resume without spamming the job.
 func (r *teamsRun) finish() error {
 	now := r.now()
 	r.status.UpdatedAt = outlook.TeamsUTC(now)
+	r.status.FailuresCapped = r.failuresCapped
+	if r.counts != nil {
+		r.status.StoredFallback = r.counts[teamsStoredFallback]
+	}
 	statuses := map[string]int{}
 	for _, res := range r.status.Resources {
 		statuses[res.Status]++
@@ -1170,21 +1199,123 @@ func (r *teamsRun) finish() error {
 	if r.stopErr != nil {
 		return r.stopErr
 	}
-	bad := statuses[teamsIncomplete] + statuses[teamsBlocked]
-	if bad > 0 || statuses[teamsCompleteWithGaps] > 0 || len(r.status.Warnings) > 0 {
-		parts := make([]string, 0, len(statuses))
-		for _, s := range []string{teamsComplete, teamsCompleteWithRetries, teamsCompleteWithGaps, teamsIncomplete, teamsBlocked, teamsSourceDeleted} {
-			if statuses[s] > 0 {
-				parts = append(parts, fmt.Sprintf("%d %s", statuses[s], strings.ReplaceAll(s, "_", " ")))
+	if msg := teamsJobWarning(r.status.Resources, r.status.Warnings); msg != "" {
+		r.input.Job.Message, r.input.Job.MessageStatus = msg, repo.JobMessageStatusWarning
+	} else {
+		r.input.Job.Message, r.input.Job.MessageStatus = "", ""
+	}
+	return nil
+}
+
+func teamsOptionalResource(res teamsResourceStatus) bool {
+	if res.Phase == teamsPhaseCalls {
+		return true
+	}
+	switch res.Type {
+	case "calls", "pstn", "direct_routing", "direct-routing":
+		return true
+	}
+	return false
+}
+
+func teamsResumeIncomplete(res teamsResourceStatus) bool {
+	if res.Status != teamsIncomplete {
+		return false
+	}
+	switch res.Code {
+	case "", outlook.TeamsStatusThrottled:
+		return true
+	}
+	return false
+}
+
+func teamsExpectedBlock(res teamsResourceStatus) bool {
+	if res.Status != teamsBlocked {
+		return false
+	}
+	if teamsOptionalResource(res) {
+		return true
+	}
+	switch res.Code {
+	case outlook.TeamsStatusPaidAPI, outlook.TeamsStatusNotConsented, outlook.TeamsStatusNotAvailable:
+		return true
+	}
+	return false
+}
+
+func teamsExpectedStatusNote(msg string) bool {
+	msg = strings.TrimSpace(msg)
+	switch {
+	case strings.HasPrefix(msg, "Run stopped early ("):
+		return true
+	case strings.HasPrefix(msg, "Messages of shared channels owned by another tenant"):
+		return true
+	case strings.HasPrefix(msg, "Some Teams files are in OneDrive or SharePoint"):
+		return true
+	case strings.HasPrefix(msg, "A team has too many held message windows"):
+		return true
+	case strings.HasPrefix(msg, "Too many held call or phone-log windows"):
+		return true
+	case strings.HasPrefix(msg, "No successful calls backup for over 25 days"):
+		return true
+	case strings.HasPrefix(msg, "Teams progress data is near its size limit"):
+		return true
+	case strings.HasPrefix(msg, "Too many failed Teams items"):
+		return true
+	case strings.HasPrefix(msg, "Too many Teams file references"):
+		return true
+	}
+	return false
+}
+
+// teamsJobWarning is the job banner for required-content problems. Empty means the run succeeded
+// (or only has resume/optional/expected notes) and the next run continues from checkpoints.
+func teamsJobWarning(resources map[string]teamsResourceStatus, notes []string) string {
+	var incomplete, blocked, gaps int
+	for _, res := range resources {
+		if teamsOptionalResource(res) {
+			continue
+		}
+		switch res.Status {
+		case teamsCompleteWithGaps:
+			gaps++
+		case teamsIncomplete:
+			if !teamsResumeIncomplete(res) {
+				incomplete++
+			}
+		case teamsBlocked:
+			if !teamsExpectedBlock(res) {
+				blocked++
 			}
 		}
-		msg := "Teams backup finished with warnings"
-		if len(parts) > 0 {
-			msg += ": " + strings.Join(parts, ", ")
-		}
-		r.input.Job.Message, r.input.Job.MessageStatus = msg, repo.JobMessageStatusWarning
 	}
-		return nil
+	var actionNotes []string
+	for _, n := range notes {
+		if !teamsExpectedStatusNote(n) {
+			actionNotes = append(actionNotes, n)
+		}
+	}
+	if incomplete == 0 && blocked == 0 && len(actionNotes) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if incomplete > 0 {
+		parts = append(parts, fmt.Sprintf("%d incomplete", incomplete))
+	}
+	if blocked > 0 {
+		parts = append(parts, fmt.Sprintf("%d blocked", blocked))
+	}
+	if gaps > 0 && (incomplete > 0 || blocked > 0 || len(actionNotes) > 0) {
+		parts = append(parts, fmt.Sprintf("%d with gaps", gaps))
+	}
+	msg := teamsWarningPrefix
+	if len(parts) > 0 {
+		msg += ": " + strings.Join(parts, ", ")
+	}
+	if len(actionNotes) > 0 && len(parts) == 0 {
+		msg += ": " + actionNotes[0]
+	}
+	return msg
 }
 
 // mergeTeamJobs imports old per-team jobs of the same connection into the tenant job's selection
@@ -1379,8 +1510,8 @@ func (r *teamsRun) markOutOfScope(kind string, inScope map[string]bool) {
 	for _, key := range r.keysWithPrefix(prefix) {
 		id, err := url.PathUnescape(strings.TrimSuffix(strings.TrimPrefix(key, prefix), ".json"))
 		if err != nil {
-				continue
-			}
+			continue
+		}
 		if inScope[id] {
 			continue
 		}
@@ -1520,7 +1651,7 @@ func (r *teamsRun) syncTeam(team teamsTeamInfo, deadline time.Time) (string, str
 		st.Channels = map[string]teamsChannelState{}
 	}
 	shared, sharedErr := r.resolveSharedChannels(team.ID, channels)
-	if err := r.writeTeamMeta(&st, team, teamPrefix, detail, channels, shared); err != nil {
+	if err := r.writeTeamMeta(&st, team, teamPrefix, detail, channels, shared, "", "", ""); err != nil {
 		return streamFail(err)
 	}
 	if st.ConfigAt == nil || now.Sub(*st.ConfigAt) >= teamsConfigEvery {
@@ -1532,6 +1663,7 @@ func (r *teamsRun) syncTeam(team teamsTeamInfo, deadline time.Time) (string, str
 	st.SkipUntil, st.StatusCode = nil, ""
 
 	status := r.syncTeamMessages(&st, team, teamPrefix, deadline)
+	msgStatus, msgCode := status, st.StatusCode
 	if status != teamsIncomplete && st.Layout < repo.TeamsLayoutFiles {
 		if r.convertLegacyTeam(&st, teamPrefix, deadline) {
 			st.Layout = repo.TeamsLayoutFiles
@@ -1555,7 +1687,13 @@ func (r *teamsRun) syncTeam(team teamsTeamInfo, deadline time.Time) (string, str
 			status = teamsWorst(status, s)
 		}
 	}
-	if teamsSharedGaps(teamsSharedChannelCoverage(channels, r.tenant, shared)) > 0 {
+	sharedCoverage := teamsSharedChannelCoverage(channels, r.tenant, shared)
+	if n := teamsSharedGaps(sharedCoverage); n > 0 {
+		for _, e := range sharedCoverage {
+			if e.CoverageReason == "app_only_access_requires_owner_tenant" {
+				r.status.IncomingChannelSkipped++
+			}
+		}
 		r.warn("Messages of shared channels owned by another tenant, or whose host team couldn't be read, are not collected")
 		if status == teamsComplete || status == teamsCompleteWithRetries {
 			status = teamsCompleteWithGaps
@@ -1566,20 +1704,66 @@ func (r *teamsRun) syncTeam(team teamsTeamInfo, deadline time.Time) (string, str
 		r.setFeature("teams_channel_messages", outlook.TeamsStatusOK, "")
 	}
 	st.Status = status
+	if err := r.writeTeamMeta(&st, team, teamPrefix, detail, channels, shared, msgStatus, msgCode, sharedStatus); err != nil {
+		return streamFail(err)
+	}
 	_ = r.saveState(stateKey, &st)
 	return status, ""
 }
 
-// writeTeamMeta writes _team.json and each channel's _channel.json when they changed. Coverage per
-// channel type stays not_verified until the tenant checks (shared channels especially).
-func (r *teamsRun) writeTeamMeta(st *teamsTeamState, team teamsTeamInfo, teamPrefix string, detail []byte, channels []teamsChannelInfo, shared teamsSharedChannels) error {
-	sharedCoverage := teamsSharedChannelCoverage(channels, r.tenant, shared)
-	coverage := map[string]string{"standard": "not_verified", "private": "not_verified", "shared": "not_verified"}
-	if teamsSharedGaps(sharedCoverage) > 0 {
-		coverage["shared"] = "incomplete"
-	} else if len(sharedCoverage) == 0 && outlook.TeamsVerified(outlook.TeamsCheckSharedChannels) {
-		coverage["shared"] = "verified"
+// teamsCoverageFromSync maps a collector result to a channel_coverage status. verified is used
+// only after a complete successful window (no open gaps).
+func teamsCoverageFromSync(status, code string) string {
+	switch status {
+	case "":
+		return "not_verified"
+	case teamsComplete, teamsCompleteWithRetries:
+		return "verified"
+	case teamsCompleteWithGaps, teamsIncomplete:
+		return "incomplete"
+	case teamsBlocked, teamsSourceDeleted:
+		if outlook.IsTeamsPermanentStatus(code) || code == outlook.TeamsStatusNotConsented ||
+			code == outlook.TeamsStatusMissingPermission || code == outlook.TeamsStatusBlockedByPolicy ||
+			code == outlook.TeamsStatusDisabledByTenant || code == outlook.TeamsStatusNotFound ||
+			status == teamsSourceDeleted {
+			return "inaccessible"
+		}
+		return "failed"
+	default:
+		return "not_verified"
 	}
+}
+
+// teamsBuildChannelCoverage sets standard/private from the getAllMessages window result and shared
+// from shared-channel listing + per-channel gap rows. States stay distinguishable.
+func teamsBuildChannelCoverage(channels []teamsChannelInfo, sharedCoverage []teamsSharedChannelCoverageEntry, msgStatus, msgCode, sharedStatus string) map[string]string {
+	stdPriv := teamsCoverageFromSync(msgStatus, msgCode)
+	coverage := map[string]string{"standard": stdPriv, "private": stdPriv, "shared": "not_verified"}
+	switch {
+	case teamsSharedGaps(sharedCoverage) > 0:
+		coverage["shared"] = "incomplete"
+	case sharedStatus != "":
+		coverage["shared"] = teamsCoverageFromSync(sharedStatus, "")
+		if coverage["shared"] == "verified" && teamsSharedGaps(sharedCoverage) > 0 {
+			coverage["shared"] = "incomplete"
+		}
+	case len(sharedCoverage) == 0 && msgStatus != "" &&
+		(msgStatus == teamsComplete || msgStatus == teamsCompleteWithRetries || msgStatus == teamsCompleteWithGaps):
+		// No shared channels on this team: treat shared as verified once the team message window completed.
+		if msgStatus == teamsComplete || msgStatus == teamsCompleteWithRetries {
+			coverage["shared"] = "verified"
+		} else {
+			coverage["shared"] = "incomplete"
+		}
+	}
+	return coverage
+}
+
+// writeTeamMeta writes _team.json and each channel's _channel.json when they changed.
+// msgStatus/sharedStatus empty means coverage stays not_verified (pre-sync write).
+func (r *teamsRun) writeTeamMeta(st *teamsTeamState, team teamsTeamInfo, teamPrefix string, detail []byte, channels []teamsChannelInfo, shared teamsSharedChannels, msgStatus, msgCode, sharedStatus string) error {
+	sharedCoverage := teamsSharedChannelCoverage(channels, r.tenant, shared)
+	coverage := teamsBuildChannelCoverage(channels, sharedCoverage, msgStatus, msgCode, sharedStatus)
 	list := make([]json.RawMessage, 0, len(channels))
 	for _, ch := range channels {
 		list = append(list, ch.raw)
@@ -1617,8 +1801,8 @@ func (r *teamsRun) writeTeamMeta(st *teamsTeamState, team teamsTeamInfo, teamPre
 		}
 		st.Channels[ch.ID] = cs
 	}
-		return nil
-	}
+	return nil
+}
 
 // syncTeamConfig stores settings, members, apps and tags of the team and members and tabs of each
 // channel, each part on its own. A part without its role is skipped, and one Graph refuses for

@@ -98,19 +98,16 @@ func shouldRestoreOutlookMailKey(objectKey string) bool {
 	return ok && k.IsMeta
 }
 
-func shouldRestoreOutlookCalendarKey(objectKey string) bool {
+func shouldRestorePIMItemKey(objectKey string) bool {
 	return !restore.ShouldSkipObjectKey(objectKey) && outlook.IsPIMItemKey(objectKey)
+}
+
+func shouldRestoreOutlookCalendarKey(objectKey string) bool {
+	return shouldRestorePIMItemKey(objectKey)
 }
 
 func shouldRestoreOutlookContactsKey(objectKey string) bool {
-	return !restore.ShouldSkipObjectKey(objectKey) && outlook.IsPIMItemKey(objectKey)
-}
-
-func shouldRestoreOutlookDriveMetaKey(objectKey string) bool {
-	if restore.ShouldSkipObjectKey(objectKey) || isOutlookDataKey(objectKey) {
-		return false
-	}
-	return isOutlookMetaKey(objectKey)
+	return shouldRestorePIMItemKey(objectKey)
 }
 
 // shouldRestoreOutlookTeamsKey selects channel and chat messages (.teams objects) and old channel
@@ -135,7 +132,7 @@ func RestoreOutlookMailKey(ctx context.Context, deps *restore.RestoreDeps, objec
 	if deps == nil {
 		return fmt.Errorf("restore deps are required")
 	}
-	userBase, err := restoreWriteUserBase(ctx, deps, objectKey)
+	userBase, err := restoreWriteUserBase(deps, objectKey)
 	if err != nil {
 		return err
 	}
@@ -159,7 +156,7 @@ func restoreUserBase(application bool, objectKey string) (string, error) {
 // RestoreOutlookCalendarKey restores one backed-up event as a new event in its original calendar
 // of the backed-up user.
 func RestoreOutlookCalendarKey(ctx context.Context, deps *restore.RestoreDeps, objectKey string) error {
-	userBase, err := restoreWriteUserBase(ctx, deps, objectKey)
+	userBase, err := restoreWriteUserBase(deps, objectKey)
 	if err != nil {
 		return err
 	}
@@ -177,7 +174,7 @@ func RestoreOutlookCalendarKey(ctx context.Context, deps *restore.RestoreDeps, o
 // RestoreOutlookContactKey restores one backed-up contact as a new contact in its original folder
 // of the backed-up user.
 func RestoreOutlookContactKey(ctx context.Context, deps *restore.RestoreDeps, objectKey string) error {
-	userBase, err := restoreWriteUserBase(ctx, deps, objectKey)
+	userBase, err := restoreWriteUserBase(deps, objectKey)
 	if err != nil {
 		return err
 	}
@@ -185,7 +182,7 @@ func RestoreOutlookContactKey(ctx context.Context, deps *restore.RestoreDeps, ob
 	if err != nil {
 		return err
 	}
-	folderID := ContactFolderIDForKey(ctx, deps.AccessGrant, objectKey, &deps.ContainerIDs)
+	folderID := RestoreContactFolderID(ctx, deps.AccessGrant, deps.MicrosoftToken, userBase, objectKey, &deps.ContainerIDs)
 	if migrationWrite(deps) {
 		folderID = migratedContactFolderID(ctx, deps.AccessGrant, deps.MicrosoftToken, userBase, objectKey, &deps.ContainerIDs)
 	}
@@ -193,7 +190,8 @@ func RestoreOutlookContactKey(ctx context.Context, deps *restore.RestoreDeps, ob
 }
 
 var (
-	ensureCalendarFn      = outlook.EnsureCalendar
+	ensureCalendarFn = outlook.EnsureCalendar
+	// ensureContactFolderFn matches EnsureContactFolder(ctx, token, userBase, name, parentFolderID).
 	ensureContactFolderFn = outlook.EnsureContactFolder
 	// calendarCreateMu keeps concurrent restores of one deleted calendar from creating it twice.
 	calendarCreateMu      sync.Mutex
@@ -206,36 +204,31 @@ func migrationWrite(deps *restore.RestoreDeps) bool {
 
 // restoreWriteUserBase is the Graph user the restore writes into. In place, that is the backed-up
 // user. A migration with a delegated token uses /me (the destination sign-in). A migration with an
-// app-only token uses the destination user found in the connected organization.
-func restoreWriteUserBase(ctx context.Context, deps *restore.RestoreDeps, objectKey string) (string, error) {
-	if deps == nil || !migrationWrite(deps) || !deps.MicrosoftApplication {
-		application := false
-		if deps != nil {
-			application = deps.MicrosoftApplication
+// app-only token uses the destination resolved once when the token was minted.
+func restoreWriteUserBase(deps *restore.RestoreDeps, objectKey string) (string, error) {
+	if deps != nil && migrationWrite(deps) && deps.MicrosoftApplication {
+		base := strings.TrimSpace(deps.MicrosoftWriteUserBase)
+		if base == "" {
+			return "", fmt.Errorf("migration restore has no destination user")
 		}
-		return restoreUserBase(application, objectKey)
+		return base, nil
 	}
-	if deps.Store == nil || deps.Job == nil {
-		return "", fmt.Errorf("migration restore has no destination lookup")
+	application := false
+	if deps != nil {
+		application = deps.MicrosoftApplication
 	}
-	_, user, err := findOrganizationTargetFn(ctx, deps.Store, deps.Job.UserID, deps.Job.TargetEmail)
-	if err != nil {
-		return "", err
-	}
-	if user == nil || strings.TrimSpace(user.ObjectID) == "" {
-		return "", fmt.Errorf("restore destination %s was not found in a connected organization", deps.Job.TargetEmail)
-	}
-	return outlook.UserBaseURL(user.ObjectID, "", "", true)
+	return restoreUserBase(application, objectKey)
 }
 
 // RestoreCalendarID is the Graph id of the calendar an event restores into, read from the
-// calendar's _calendar.json: the calendar it was backed up from or, when that calendar was deleted
-// from Microsoft, a calendar of the same name, created when missing. "" (the default calendar)
-// when unknown. cache may be nil.
+// calendar's _calendar.json. A named (non-default) calendar is matched or created by name and
+// color so a calendar deleted in Outlook — even before the next backup marks removed_at — comes
+// back as its own folder. "" is the default calendar when unknown. cache may be nil.
 func RestoreCalendarID(ctx context.Context, accessGrant, accessToken, userBase, objectKey string, cache *sync.Map) string {
 	metaKey := path.Dir(objectKey) + "/" + outlook.PIMCalendarMetaName
 	meta := readContainerMeta(ctx, accessGrant, satellite.ReserveBucket_OutlookCalendar, metaKey, cache)
-	if meta.RemovedAt == "" || strings.TrimSpace(meta.Name) == "" {
+	name := strings.TrimSpace(meta.Name)
+	if meta.IsDefault || name == "" {
 		return meta.ID
 	}
 	calendarCreateMu.Lock()
@@ -243,7 +236,7 @@ func RestoreCalendarID(ctx context.Context, accessGrant, accessToken, userBase, 
 	return rememberCreatedID(ctx, cache, "restored-calendar:"+metaKey, metaKey,
 		"deleted calendar not recreated; restoring into the default calendar",
 		func() (string, error) {
-			return ensureCalendarFn(ctx, accessToken, userBase, strings.TrimSpace(meta.Name))
+			return ensureCalendarFn(ctx, accessToken, userBase, name, meta.Color)
 		})
 }
 
@@ -261,26 +254,83 @@ func migratedCalendarID(ctx context.Context, accessGrant, accessToken, userBase,
 	defer calendarCreateMu.Unlock()
 	return rememberCreatedID(ctx, cache, "migrated-calendar:"+metaKey, metaKey,
 		"destination calendar not created; restoring into the default calendar",
-		func() (string, error) { return ensureCalendarFn(ctx, accessToken, userBase, name) })
+		func() (string, error) { return ensureCalendarFn(ctx, accessToken, userBase, name, meta.Color) })
+}
+
+// RestoreContactFolderID is the Graph id of the contact folder a contact restores into, read from
+// _folder.json: the folder it was backed up from, or when that folder was deleted from Microsoft,
+// a folder of the same name (parents recreated first), created when missing. "" is the default
+// Contacts folder.
+func RestoreContactFolderID(ctx context.Context, accessGrant, accessToken, userBase, objectKey string, cache *sync.Map) string {
+	dir, inFolder := outlook.ParsePIMContactKey(objectKey)
+	if !inFolder {
+		return ""
+	}
+	metaKey := dir + outlook.PIMFolderMetaName
+	meta := readContainerMeta(ctx, accessGrant, satellite.ReserveBucket_OutlookContacts, metaKey, cache)
+	if meta.RemovedAt == "" || meta.label() == "" {
+		return meta.ID
+	}
+	contactFolderCreateMu.Lock()
+	defer contactFolderCreateMu.Unlock()
+	return ensureContactFolderTree(ctx, accessGrant, accessToken, userBase, metaKey, cache, "restored-folder:")
 }
 
 // migratedContactFolderID is the destination contact folder for a restore into another mailbox.
-// The source folder id is never reused. "" is the destination's default Contacts folder.
+// The source folder id is never reused; the folder tree is recreated by name (parents first).
+// "" is the destination's default Contacts folder.
 func migratedContactFolderID(ctx context.Context, accessGrant, accessToken, userBase, objectKey string, cache *sync.Map) string {
 	dir, inFolder := outlook.ParsePIMContactKey(objectKey)
 	if !inFolder {
 		return ""
 	}
 	metaKey := dir + outlook.PIMFolderMetaName
-	name := readContainerMeta(ctx, accessGrant, satellite.ReserveBucket_OutlookContacts, metaKey, cache).label()
-	if name == "" {
+	if readContainerMeta(ctx, accessGrant, satellite.ReserveBucket_OutlookContacts, metaKey, cache).label() == "" {
 		return ""
 	}
 	contactFolderCreateMu.Lock()
 	defer contactFolderCreateMu.Unlock()
-	return rememberCreatedID(ctx, cache, "migrated-folder:"+metaKey, metaKey,
-		"destination contact folder not created; restoring into the default folder",
-		func() (string, error) { return ensureContactFolderFn(ctx, accessToken, userBase, name) })
+	return ensureContactFolderTree(ctx, accessGrant, accessToken, userBase, metaKey, cache, "migrated-folder:")
+}
+
+// ensureContactFolderTree recreates a backed-up contact folder and its parent chain by name under
+// userBase. cacheKeyPrefix distinguishes in-place vs migration cache entries.
+func ensureContactFolderTree(ctx context.Context, accessGrant, accessToken, userBase, metaKey string, cache *sync.Map, cacheKeyPrefix string) string {
+	return rememberCreatedID(ctx, cache, cacheKeyPrefix+metaKey, metaKey,
+		"contact folder not created; restoring into the default folder",
+		func() (string, error) {
+			meta := readContainerMeta(ctx, accessGrant, satellite.ReserveBucket_OutlookContacts, metaKey, cache)
+			name := meta.label()
+			if name == "" {
+				return "", fmt.Errorf("contact folder has no name")
+			}
+			destParent := ""
+			if parentID := strings.TrimSpace(meta.ParentFolderID); parentID != "" {
+				prefix := contactFoldersPrefix(metaKey)
+				if prefix != "" {
+					parentMetaKey := prefix + parentID + "/" + outlook.PIMFolderMetaName
+					parentMeta := readContainerMeta(ctx, accessGrant, satellite.ReserveBucket_OutlookContacts, parentMetaKey, cache)
+					if parentMeta.label() != "" {
+						destParent = ensureContactFolderTree(ctx, accessGrant, accessToken, userBase, parentMetaKey, cache, cacheKeyPrefix)
+					}
+				}
+			}
+			return ensureContactFolderFn(ctx, accessToken, userBase, name, destParent)
+		})
+}
+
+// contactFoldersPrefix returns "{tenant}/user/{id}/folders/" from a _folder.json key.
+func contactFoldersPrefix(metaKey string) string {
+	// …/folders/{folderId}/_folder.json
+	if path.Base(metaKey) != outlook.PIMFolderMetaName {
+		return ""
+	}
+	folderDir := path.Dir(metaKey)    // …/folders/{folderId}
+	foldersSeg := path.Dir(folderDir) // …/folders
+	if path.Base(foldersSeg) != "folders" {
+		return ""
+	}
+	return foldersSeg + "/"
 }
 
 // rememberCreatedID returns a cached Graph id, or creates it once and remembers it. "" on failure.
@@ -302,7 +352,8 @@ func rememberCreatedID(ctx context.Context, cache *sync.Map, cacheKey, metaKey, 
 }
 
 // ContactFolderIDForKey is the Graph id of the contact folder a contact was backed up from; ""
-// for the default Contacts folder or when unknown. cache may be nil.
+// for the default Contacts folder or when unknown. Prefer RestoreContactFolderID for restores so
+// deleted folders are recreated. cache may be nil.
 func ContactFolderIDForKey(ctx context.Context, accessGrant, objectKey string, cache *sync.Map) string {
 	dir, inFolder := outlook.ParsePIMContactKey(objectKey)
 	if !inFolder {
@@ -313,11 +364,13 @@ func ContactFolderIDForKey(ctx context.Context, accessGrant, objectKey string, c
 
 // containerMeta is the stored description of a backed-up calendar or contact folder.
 type containerMeta struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	DisplayName string `json:"displayName"`
-	IsDefault   bool   `json:"is_default"`
-	RemovedAt   string `json:"removed_at"`
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	DisplayName    string `json:"displayName"`
+	Color          string `json:"color"`
+	ParentFolderID string `json:"parentFolderId"`
+	IsDefault      bool   `json:"is_default"`
+	RemovedAt      string `json:"removed_at"`
 }
 
 func (m containerMeta) label() string {
@@ -353,7 +406,7 @@ func shouldRestoreOutlookOneDriveKey(objectKey string) bool {
 // RestoreOutlookOneDriveKey restores one OneDrive backup into its original folder in the backed-up
 // user's drive. App-only tokens target the user from the key; delegated tokens use /me.
 func RestoreOutlookOneDriveKey(ctx context.Context, deps *restore.RestoreDeps, objectKey string) error {
-	userBase, err := restoreWriteUserBase(ctx, deps, objectKey)
+	userBase, err := restoreWriteUserBase(deps, objectKey)
 	if err != nil {
 		return err
 	}
@@ -405,7 +458,7 @@ func sharePointDestinationSite(deps *restore.RestoreDeps) string {
 	if deps == nil || deps.Job == nil || deps.Job.Method != "outlook_sharepoint" || !repo.IsRestoreJobMigration(deps.Job) {
 		return ""
 	}
-	return strings.TrimSpace(deps.Job.TargetEmail)
+	return outlook.GraphSharePointSiteID(deps.Job.TargetEmail)
 }
 
 // sharePointSourceLibrary reports whether the backed-up drive is the site's default library and,
@@ -499,21 +552,21 @@ func driveFolderNamesFromSynced(deps *restore.RestoreDeps, bucket, objectType, o
 	if !ok || deps.Store == nil || deps.Store.SyncedObjectRepo == nil || deps.Job == nil {
 		return map[string]string{}
 	}
-	rows, err := deps.Store.SyncedObjectRepo.GetSyncedObjectsByUserAndBucket(deps.Job.UserID, bucket, "outlook", objectType)
+	keys, err := deps.Store.SyncedObjectRepo.ListSyncedObjectKeys(deps.Job.UserID, bucket, "outlook", objectType, prefix+"/")
 	if err != nil {
 		return map[string]string{}
-	}
-	keys := make([]string, 0, len(rows))
-	for _, row := range rows {
-		if strings.HasPrefix(row.ObjectKey, prefix+"/") {
-			keys = append(keys, row.ObjectKey)
-		}
 	}
 	return outlook.OneDriveFolderNames(keys)
 }
 
 func shouldRestoreOutlookSharePointKey(objectKey string) bool {
-	return !restore.ShouldSkipObjectKey(objectKey) && outlook.IsOneDriveRestoreKey(objectKey)
+	if restore.ShouldSkipObjectKey(objectKey) {
+		return false
+	}
+	if outlook.IsOneDriveRestoreKey(objectKey) {
+		return true
+	}
+	return outlook.IsSharePointListItemKey(objectKey) || outlook.IsSharePointPageKey(objectKey)
 }
 
 // RestoreOutlookSharePointKey restores one SharePoint meta key into the recorded drive, or into
@@ -523,17 +576,16 @@ func RestoreOutlookSharePointKey(ctx context.Context, deps *restore.RestoreDeps,
 		return fmt.Errorf("restore deps are required")
 	}
 	metaJSON, dataBytes, _, err := DownloadMetaFollowData(ctx, deps.AccessGrant, satellite.ReserveBucket_OutlookSharePoint, objectKey)
+	if errors.Is(err, errObjectSkipped) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
 	var meta outlook.SharePointCronBackupMeta
 	_ = json.Unmarshal(metaJSON, &meta)
-	if meta.RemovedFromSharePoint {
-		return fmt.Errorf("sharepoint tombstone skipped")
-	}
-	name := strings.TrimSpace(meta.Name)
-	if name == "" {
-		name = path.Base(objectKey)
+	if strings.TrimSpace(meta.Name) == "" {
+		meta.Name = path.Base(objectKey)
 	}
 	driveID := strings.TrimSpace(meta.DriveID)
 	if siteID := sharePointDestinationSite(deps); siteID != "" {
@@ -542,13 +594,11 @@ func RestoreOutlookSharePointKey(ctx context.Context, deps *restore.RestoreDeps,
 			return err
 		}
 	}
-	if driveID == "" {
-		return fmt.Errorf("sharepoint drive_id missing")
+	err = outlook.RestoreSharePointLegacyMetaFile(ctx, deps.MicrosoftToken, driveID, meta, dataBytes)
+	if errors.Is(err, outlook.ErrSharePointLegacyTombstone) {
+		return nil
 	}
-	if len(dataBytes) == 0 {
-		return fmt.Errorf("sharepoint data missing")
-	}
-	return outlook.UploadSharePointDriveFile(ctx, deps.MicrosoftToken, driveID, name, dataBytes)
+	return err
 }
 
 // ErrTeamsRestoreNeedsUser refuses Teams restore with an organization (app-only) token: messages
@@ -698,10 +748,9 @@ func (s *TeamsRestoreSession) Restore(ctx context.Context, objectKey string) err
 }
 
 // RestoreItem reposts one object as the signed-in user: a channel post (a reply goes under the
-// root reposted in this restore, else the original root, else a new post with an "In reply to"
-// line) or a chat message (into its existing chat). Each repost starts with a note naming the
-// original sender, time and ref; original ids, authors, times, reactions and hosted content are
-// not recreated.
+// root reposted in this restore, else the original root, else a new post) or a chat message
+// (into its existing chat). The posted body is the original message text; original ids, authors,
+// times, reactions and hosted content are not recreated.
 func (s *TeamsRestoreSession) RestoreItem(ctx context.Context, objectKey string) TeamsRestoreOutcome {
 	out := TeamsRestoreOutcome{Key: objectKey, Ref: outlook.TeamsRestoreRef(objectKey)}
 	if s.Application || microsoftTokenIsAppOnly(s.Token) {
@@ -887,7 +936,7 @@ func (s *TeamsRestoreSession) restoreChannelMessage(ctx context.Context, k outlo
 	if k.RootID == "" || k.RootID == k.MessageID {
 		id, err := teamsPostChannelFn(ctx, s.Token, teamID, channelID, body)
 		if err != nil {
-			return out.failed(err)
+			return out.failed(WrapWorkspaceWriteError("teams", err))
 		}
 		if id != "" {
 			s.State.Store(teamsRootKey(k, k.MessageID), id)
@@ -900,7 +949,7 @@ func (s *TeamsRestoreSession) restoreChannelMessage(ctx context.Context, k outlo
 			return out.placed(TeamsPlacedRestoredRoot, "")
 		}
 		if !isTeamsGraphStatus(err, 404) {
-			return out.failed(err)
+			return out.failed(WrapWorkspaceWriteError("teams", err))
 		}
 	}
 	if teamID == m.teamID && channelID == k.ChannelID {
@@ -909,13 +958,13 @@ func (s *TeamsRestoreSession) restoreChannelMessage(ctx context.Context, k outlo
 			return out.placed(TeamsPlacedOriginalRoot, "the thread root was not reposted in this restore; the reply was added to the original thread")
 		}
 		if !isTeamsGraphStatus(err, 404) {
-			return out.failed(err)
+			return out.failed(WrapWorkspaceWriteError("teams", err))
 		}
 	}
 	if _, err := teamsPostChannelFn(ctx, s.Token, teamID, channelID, outlook.TeamsRepostBody(raw, out.Key, k.RootID)); err != nil {
-		return out.failed(err)
+		return out.failed(WrapWorkspaceWriteError("teams", err))
 	}
-	return out.placed(TeamsPlacedRootMissing, "the thread root "+k.RootID+" is not in the destination channel; the reply was posted as a new message with an \"In reply to\" line")
+	return out.placed(TeamsPlacedRootMissing, "the thread root "+k.RootID+" is not in the destination channel; the reply was posted as a new message")
 }
 
 func (s *TeamsRestoreSession) restoreChatMessage(ctx context.Context, k outlook.TeamsObjectKey, out TeamsRestoreOutcome) TeamsRestoreOutcome {
@@ -931,10 +980,7 @@ func (s *TeamsRestoreSession) restoreChatMessage(ctx context.Context, k outlook.
 		return out.with(status, detail)
 	}
 	if _, err := teamsPostChatFn(ctx, s.Token, m.chatID, outlook.TeamsRepostBody(raw, out.Key, "")); err != nil {
-		if isTeamsGraphStatus(err, 403) || isTeamsGraphStatus(err, 404) {
-			err = fmt.Errorf("chat restore needs an existing chat the signed-in user is a member of: %w", err)
-		}
-		return out.failed(err)
+		return out.failed(WrapWorkspaceWriteError("teams", err))
 	}
 	return out.placed(TeamsPlacedChat, "")
 }
@@ -984,11 +1030,11 @@ func (s *TeamsRestoreSession) restoreLegacyReplies(ctx context.Context, objectKe
 		return out.failed(err)
 	}
 	snap, err := outlook.ParseTeamsReplySnapshot(raw)
-		if err != nil {
+	if err != nil {
 		return out.failed(err)
-		}
+	}
 	teamID, channelID, err := outlook.ResolveTeamsGraphIDs(outlook.TeamsCronBackupMeta{}, s.legacyTeamSnapshot(ctx, objectKey), objectKey, "", "")
-		if err != nil {
+	if err != nil {
 		return out.failed(err)
 	}
 	for i, reply := range snap.Replies {

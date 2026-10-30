@@ -8,6 +8,7 @@ import (
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/db"
+	"github.com/StorX2-0/Backup-Tools/mstenant"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/restore"
 	storxrefresh "github.com/StorX2-0/Backup-Tools/storx"
@@ -147,10 +148,17 @@ func evaluateCredentialReadiness(
 
 	if tc.Application {
 		if method == "outlook_teams" {
-			out.Ready = false
-			out.Reason = restore.ReadinessReasonMissingPermissions
+			grant, hint := microsoftRestoreGrantScopes(method, nil)
+			markMissingRestorePermissions(out, service, grant, hint)
 			out.Message = ErrTeamsRestoreNeedsUser.Error()
-			out.ReconnectHint = "Run Microsoft restore OAuth with a user account; Teams messages are reposted as that user."
+			return out, nil
+		}
+		// App-only consent is often read-only. Require the write role, the same gate a
+		// migration already uses, before the job is marked ready.
+		missing := outlook.MissingRestoreWriteRoles(tc.Token, method)
+		if len(missing) > 0 {
+			grant, hint := microsoftRestoreGrantScopes(method, missing)
+			markMissingRestorePermissions(out, service, grant, hint)
 			return out, nil
 		}
 		out.Ready = true
@@ -160,18 +168,25 @@ func evaluateCredentialReadiness(
 	// Personal Outlook access tokens are often opaque (not JWT) — use token-endpoint scope.
 	granted := microsoftGrantedScopes(tc.Token, tc.TokenScope)
 	out.GrantedScopes = granted
-	missing := microsoftMissingScopes(granted, required)
-	if len(missing) > 0 {
-		out.Ready = false
-		out.Reason = restore.ReadinessReasonMissingPermissions
-		out.MissingPermissions = restore.OAuthMissingList(service, missing)
-		out.Message = restore.MsgReadinessMissingScopes
-		out.ReconnectHint = "Run Microsoft restore OAuth (write scopes) and reconnect so the stored credential can mint Graph write tokens."
+	if !delegatedRestoreScopesOK(method, granted, required) {
+		missing := microsoftMissingDelegatedScopes(granted, required)
+		if len(missing) == 0 {
+			missing = microsoftRestoreScopesForMethod(method)
+		}
+		markMissingRestorePermissions(out, service, missing, "Grant Access with "+strings.Join(missing, ", ")+", then retry")
 		return out, nil
 	}
 
 	out.Ready = true
 	return out, nil
+}
+
+func markMissingRestorePermissions(out *restore.ReadinessResult, service string, missing []string, hint string) {
+	out.Ready = false
+	out.Reason = restore.ReadinessReasonMissingPermissions
+	out.MissingPermissions = restore.OAuthMissingList(service, missing)
+	out.Message = restore.MsgReadinessMissingScopes
+	out.ReconnectHint = hint
 }
 
 // evaluateMigrationReadiness checks a restore into another mailbox. A connected sign-in for that
@@ -238,20 +253,27 @@ func evaluateMigrationReadiness(
 	out.CredentialID = org.CredentialID
 	out.TenantID = strings.ToLower(strings.TrimSpace(org.TenantID))
 	out.AuthMode = restore.RestoreAuthModeOAuth
-	missing := microsoftMissingScopes(microsoftGrantedScopes(org.Token, ""), microsoftRestoreScopesForMethod(method))
-	if len(missing) > 0 {
-		out.Ready = false
-		out.Reason = restore.ReadinessReasonMissingPermissions
-		out.MissingPermissions = restore.OAuthMissingList(service, missing)
-		out.Message = restore.MsgReadinessMissingScopes
-		out.ReconnectHint = "Grant the organization the Microsoft write permission for this service, then retry"
-		return out, nil
+	writeToken := org.Token
+	if missing := outlook.MissingRestoreWriteRoles(org.Token, method); len(missing) > 0 {
+		var cred *repo.GoogleBackupCredentialDB
+		if org.CredentialID > 0 {
+			cred, _ = store.CredentialRepo.GetByID(org.CredentialID)
+		}
+		del := delegatedRestoreWrite(&mstenant.Context{
+			Token: org.Token, Application: true, TenantID: org.TenantID,
+		}, cred, org.TenantID, method, "")
+		if del == nil {
+			grant, hint := microsoftRestoreGrantScopes(method, missing)
+			markMissingRestorePermissions(out, service, grant, hint)
+			return out, nil
+		}
+		writeToken = del.Token
 	}
 	userBase, err := outlook.UserBaseURL(user.ObjectID, "", "", true)
 	if err != nil {
 		return nil, err
 	}
-	if err := checkRestoreTargetFn(ctx, org.Token, userBase, method); err != nil {
+	if err := checkRestoreTargetFn(ctx, writeToken, userBase, method); err != nil {
 		if errors.Is(err, outlook.ErrRestoreTargetUnavailable) {
 			out.Ready = false
 			out.Reason = restore.ReadinessReasonTargetUnavailable
@@ -279,7 +301,7 @@ func evaluateSharePointSiteReadiness(
 	job *repo.CronJobListingDB,
 	siteID string,
 ) (*restore.ReadinessResult, error) {
-	siteID = strings.TrimSpace(siteID)
+	siteID = outlook.GraphSharePointSiteID(siteID)
 	if siteID == "" || strings.Contains(siteID, "@") {
 		out.Ready = false
 		out.Reason = restore.ReadinessReasonNoCredential
@@ -315,15 +337,26 @@ func evaluateSharePointSiteReadiness(
 	)
 	for i := range candidates {
 		tenant := &candidates[i]
+		writeToken := tenant.Token
 		if missing := outlook.MissingRestoreWriteRoles(tenant.Token, "outlook_sharepoint"); len(missing) > 0 {
-			if missingTenant == nil {
-				firstMissing = i == 0
-				missingTenant = tenant
-				missingRoles = missing
+			var cred *repo.GoogleBackupCredentialDB
+			if tenant.CredentialID > 0 {
+				cred, _ = store.CredentialRepo.GetByID(tenant.CredentialID)
 			}
-			continue
+			del := delegatedRestoreWrite(&mstenant.Context{
+				Token: tenant.Token, Application: true, TenantID: tenant.TenantID,
+			}, cred, tenant.TenantID, "outlook_sharepoint", "")
+			if del == nil {
+				if missingTenant == nil {
+					firstMissing = i == 0
+					missingTenant = tenant
+					missingRoles, _ = microsoftRestoreGrantScopes("outlook_sharepoint", missing)
+				}
+				continue
+			}
+			writeToken = del.Token
 		}
-		if _, err := checkSharePointSiteFn(ctx, tenant.Token, siteID); err != nil {
+		if _, err := checkSharePointSiteFn(ctx, writeToken, siteID); err != nil {
 			if errors.Is(err, outlook.ErrSharePointSiteNoDocumentLibrary) {
 				out.Ready = false
 				out.Reason = restore.ReadinessReasonTargetUnavailable
@@ -354,13 +387,10 @@ func evaluateSharePointSiteReadiness(
 	// The organization that owns the backup is tried first. If that connection cannot write
 	// libraries, say so. A later 404 only means some other organization does not contain the site.
 	if missingTenant != nil && (firstMissing || !sawNotFound) {
-		out.Ready = false
 		out.CredentialID = missingTenant.CredentialID
 		out.TenantID = strings.ToLower(strings.TrimSpace(missingTenant.TenantID))
-		out.Reason = restore.ReadinessReasonMissingPermissions
-		out.MissingPermissions = restore.OAuthMissingList(out.Service, missingRoles)
-		out.Message = restore.MsgReadinessMissingScopes
-		out.ReconnectHint = "Grant the organization Sites.ReadWrite.All, then retry"
+		grant, hint := microsoftRestoreGrantScopes("outlook_sharepoint", missingRoles)
+		markMissingRestorePermissions(out, out.Service, grant, hint)
 		return out, nil
 	}
 	out.Ready = false

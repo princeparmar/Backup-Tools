@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -28,68 +27,52 @@ type OutlookMessageListJSON struct {
 
 // OutlookService provides consolidated Outlook operations
 type OutlookService struct {
-	client      *outlook.OutlookClient
 	accessGrant string
 	accessToken string
-	userEmail   string
 }
 
 // NewOutlookService creates a new OutlookService instance
-func NewOutlookService(client *outlook.OutlookClient, accessGrant, accessToken, userEmail string) *OutlookService {
+func NewOutlookService(accessGrant, accessToken string) *OutlookService {
 	return &OutlookService{
-		client:      client,
 		accessGrant: accessGrant,
 		accessToken: accessToken,
-		userEmail:   userEmail,
 	}
 }
 
-// DownloadMessagesFromSatellite downloads messages from Satellite and inserts them into Outlook
+// DownloadMessagesFromSatellite downloads messages from Satellite and restores them into Outlook
+// via the same folder-aware path used by official restore jobs.
 func (s *OutlookService) DownloadMessagesFromSatellite(ctx context.Context, keys []string) (*DownloadResult, error) {
 	processedIDs, failedIDs := utils.NewLockedArray(), utils.NewLockedArray()
+
+	userBase, err := s.restoreUserBase()
+	if err != nil {
+		return nil, err
+	}
+	download := func(k string) ([]byte, error) {
+		return satellite.DownloadObject(ctx, s.accessGrant, satellite.ReserveBucket_Outlook, k)
+	}
 
 	for _, key := range keys {
 		if key == "" {
 			continue
 		}
 
-		// Autosync mail backups restore into their original folder.
+		var restoreErr error
 		if outlook.IsOutlookMailBackupKey(key) {
-			userBase, _ := outlook.UserBaseURL("", "", "", false)
-			err := outlook.RestoreMailFromBackup(ctx, s.accessToken, userBase, key, func(k string) ([]byte, error) {
-				return satellite.DownloadObject(ctx, s.accessGrant, satellite.ReserveBucket_Outlook, k)
-			})
+			restoreErr = outlook.RestoreMailFromBackup(ctx, s.accessToken, userBase, key, download)
+		} else {
+			// Manual / scheduled flat keys: restore into Inbox with MAPI received appearance.
+			data, err := download(key)
 			if err != nil {
-				logger.Error(ctx, "error restoring outlook message", logger.ErrorField(err), logger.String("key", key))
+				logger.Error(ctx, "error downloading message from satellite",
+					logger.ErrorField(err), logger.String("key", key))
 				failedIDs.Add(key)
-			} else {
-				processedIDs.Add(key)
+				continue
 			}
-			continue
+			restoreErr = outlook.RestoreMailMessage(ctx, s.accessToken, userBase, outlook.MailRestoreFolder{}, data)
 		}
-
-		// Download file from Satellite using the key directly
-		data, err := satellite.DownloadObject(ctx, s.accessGrant, satellite.ReserveBucket_Outlook, key)
-		if err != nil {
-			logger.Error(ctx, "error downloading message from satellite",
-				logger.ErrorField(err), logger.String("key", key))
-			failedIDs.Add(key)
-			continue
-		}
-
-		// Parse the email data and insert into Outlook
-		var outlookMsg outlook.OutlookMessage
-		if err := json.Unmarshal(data, &outlookMsg); err != nil {
-			logger.Error(ctx, "error unmarshalling message data",
-				logger.ErrorField(err), logger.String("key", key))
-			failedIDs.Add(key)
-			continue
-		}
-
-		// Insert message into Outlook
-		if _, err := s.client.InsertMessage(&outlookMsg); err != nil {
-			logger.Error(ctx, "error inserting message into Outlook",
-				logger.ErrorField(err), logger.String("key", key))
+		if restoreErr != nil {
+			logger.Error(ctx, "error restoring outlook message", logger.ErrorField(restoreErr), logger.String("key", key))
 			failedIDs.Add(key)
 		} else {
 			processedIDs.Add(key)
@@ -101,6 +84,12 @@ func (s *OutlookService) DownloadMessagesFromSatellite(ctx context.Context, keys
 		FailedIDs:    failedIDs.Get(),
 		Message:      "all outlook messages processed",
 	}, nil
+}
+
+// restoreUserBase is the signed-in mailbox. Manual restore writes /me, the same mailbox the
+// Graph token belongs to. Folder caches are already scoped by token, so /users/{mail} is unnecessary.
+func (s *OutlookService) restoreUserBase() (string, error) {
+	return outlook.UserBaseURL("", "", "", false)
 }
 
 // getAccessTokens extracts StorX grant + Microsoft Graph token.
@@ -384,6 +373,11 @@ func HandleOutlookDownloadAndInsert(c echo.Context) error {
 			"error": err.Error(),
 		})
 	}
+	if microsoftManualKeysNeedTenantCheck(allIDs) {
+		if _, err := checkMicrosoftManualRestoreKeys(c, accessToken, allIDs); err != nil {
+			return microsoftManualRestoreHTTPError(c, err)
+		}
+	}
 
 	// Get Outlook client
 	outlookClient, err := createOutlookClient(accessToken)
@@ -403,58 +397,26 @@ func HandleOutlookDownloadAndInsert(c echo.Context) error {
 		logger.Error(ctx, "Failed to get userID from Satellite service", logger.ErrorField(err))
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "authentication failed"})
 	}
+	note := &microsoftManualRestoreSession{loginID: userDetails.Mail, userID: userID}
+	notifyMicrosoftRestore(ctx, note, "outlook", "started", len(allIDs), nil, nil)
 
-	// Send start notification
-	priority := "normal"
-	startData := map[string]interface{}{
-		"event":      "outlook_restore_started",
-		"level":      2,
-		"login_id":   userDetails.Mail,
-		"method":     "outlook",
-		"type":       "restore",
-		"timestamp":  "now",
-		"item_count": len(allIDs),
-	}
-	satellite.SendNotificationAsync(ctx, userID, "Outlook Restore Started", fmt.Sprintf("Restore of %d messages for %s has started", len(allIDs), userDetails.Mail), &priority, startData, nil)
-
-	// Create Outlook service and download messages
-	outlookService := NewOutlookService(outlookClient, accessGrant, accessToken, "")
+	// Restore into the signed-in mailbox (/me), same as calendar, contacts, and OneDrive.
+	outlookService := NewOutlookService(accessGrant, accessToken)
 	result, err := outlookService.DownloadMessagesFromSatellite(c.Request().Context(), allIDs)
 	if err != nil {
-		// Send failure notification
-		failPriority := "high"
-		failData := map[string]interface{}{
-			"event":     "outlook_restore_failed",
-			"level":     4,
-			"login_id":  userDetails.Mail,
-			"method":    "outlook",
-			"type":      "restore",
-			"timestamp": "now",
-			"error":     err.Error(),
+		notifyMicrosoftRestore(context.Background(), note, "outlook", "failed", len(allIDs), nil, err)
+		failed, processed := []string{}, []string{}
+		if result != nil {
+			failed, processed = result.FailedIDs, result.ProcessedIDs
 		}
-		satellite.SendNotificationAsync(context.Background(), userID, "Outlook Restore Failed", fmt.Sprintf("Restore for %s failed: %v", userDetails.Mail, err), &failPriority, failData, nil)
-
 		return c.JSON(http.StatusForbidden, map[string]interface{}{
 			"error":         err.Error(),
-			"failed_ids":    result.FailedIDs,
-			"processed_ids": result.ProcessedIDs,
+			"failed_ids":    failed,
+			"processed_ids": processed,
 		})
 	}
 
-	// Send completion notification
-	compPriority := "normal"
-	compData := map[string]interface{}{
-		"event":           "outlook_restore_completed",
-		"level":           2,
-		"login_id":        userDetails.Mail,
-		"method":          "outlook",
-		"type":            "restore",
-		"timestamp":       "now",
-		"processed_count": len(result.ProcessedIDs),
-		"failed_count":    len(result.FailedIDs),
-	}
-	satellite.SendNotificationAsync(ctx, userID, "Outlook Restore Completed", fmt.Sprintf("Restore for %s completed. %d succeeded, %d failed", userDetails.Mail, len(result.ProcessedIDs), len(result.FailedIDs)), &compPriority, compData, nil)
-
+	notifyMicrosoftRestore(ctx, note, "outlook", "completed", len(allIDs), result, nil)
 	return c.JSON(http.StatusOK, result)
 }
 

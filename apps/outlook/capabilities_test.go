@@ -244,3 +244,48 @@ func TestTeamsHistoryNeedsApplicationRoles(t *testing.T) {
 		t.Fatal("history must not add consent requirements")
 	}
 }
+
+func TestCallRecordsDoesNotCoverPstnPermission(t *testing.T) {
+	cases := []struct {
+		name     string
+		granted  []string
+		feature  string
+		wantMiss string
+	}{
+		{"call records with its role", []string{"CallRecords.Read.All"}, TeamsFeatureCallRecords, ""},
+		{"pstn needs its own role", []string{"CallRecords.Read.All"}, TeamsFeaturePSTN, "CallRecord-PstnCalls.Read.All"},
+		{"direct routing needs its own role", []string{"CallRecords.Read.All"}, TeamsFeatureDirectRouting, "CallRecord-PstnCalls.Read.All"},
+		{"pstn granted", []string{"CallRecord-PstnCalls.Read.All"}, TeamsFeaturePSTN, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := TeamsFeaturesNotConsented(tc.granted)[tc.feature]
+			if got != tc.wantMiss {
+				t.Fatalf("got %q want %q", got, tc.wantMiss)
+			}
+		})
+	}
+}
+
+func TestDelegatedTokenCannotConsentCallRecords(t *testing.T) {
+	cases := []struct {
+		name    string
+		token   string
+		wantLen int
+	}{
+		{"opaque", "opaque", 0},
+		{"app with call records", attendanceTestToken(`{"roles":["CallRecords.Read.All"]}`), 0},
+		{"delegated user", attendanceTestToken(`{"scp":"User.Read Calendars.Read CallRecords.Read.All"}`), 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := TeamsApplicationOnlyNotConsented(tc.token)
+			if len(got) != tc.wantLen {
+				t.Fatalf("got %v want %d features", got, tc.wantLen)
+			}
+			if tc.wantLen > 0 && got[TeamsFeatureCallRecords] != "CallRecords.Read.All" {
+				t.Fatalf("call records: %v", got)
+			}
+		})
+	}
+}

@@ -101,7 +101,7 @@ func TestParseOutlookMailLegacyKey(t *testing.T) {
 
 func TestPatchOutlookMailBackup(t *testing.T) {
 	raw := []byte(`{"id":"M","subject":"s","isRead":false,"categories":["Old"],"flag":{"flagStatus":"notFlagged","dueDateTime":{"dateTime":"x"}},"storx_backup":{"backed_up_at":"T0"}}`)
-	msg := &OutlookMailDeltaMessage{IsRead: true, FlagStatus: "flagged", Importance: "high", ParentFolderID: "F2"}
+	msg := &OutlookMailDeltaMessage{IsRead: true, FlagStatus: "flagged", Importance: "high", ParentFolderID: "F2", ChangeKey: "CK9"}
 	out, err := PatchOutlookMailBackup(raw, msg, OutlookMailBackupState{FolderPath: "Inbox/X", WellKnownFolder: ""})
 	if err != nil {
 		t.Fatal(err)
@@ -114,19 +114,23 @@ func TestPatchOutlookMailBackup(t *testing.T) {
 		Flag       map[string]interface{} `json:"flag"`
 		Importance string                 `json:"importance"`
 		Parent     string                 `json:"parentFolderId"`
+		ChangeKey  string                 `json:"changeKey"`
 	}
 	if err := json.Unmarshal(out, &doc); err != nil {
 		t.Fatal(err)
 	}
-	if doc.ID != "M" || doc.Subject != "s" || !doc.IsRead || len(doc.Categories) != 0 || doc.Importance != "high" || doc.Parent != "F2" {
+	if doc.ID != "M" || doc.Subject != "s" || !doc.IsRead || len(doc.Categories) != 0 || doc.Importance != "high" || doc.Parent != "F2" || doc.ChangeKey != "CK9" {
 		t.Fatalf("patched doc %+v", doc)
 	}
 	if doc.Flag["flagStatus"] != "flagged" || doc.Flag["dueDateTime"] == nil {
 		t.Fatalf("flag %+v", doc.Flag)
 	}
 	state := ReadOutlookMailBackupState(out)
-	if state.FolderPath != "Inbox/X" || state.BackedUpAt != "T0" {
+	if state.FolderPath != "Inbox/X" || state.BackedUpAt != "T0" || state.ChangeKey != "CK9" {
 		t.Fatalf("state %+v", state)
+	}
+	if MailBackupChangeKey(out) != "CK9" {
+		t.Fatalf("MailBackupChangeKey=%q", MailBackupChangeKey(out))
 	}
 
 	again, err := PatchOutlookMailBackup(out, msg, OutlookMailBackupState{FolderPath: "Inbox/X"})

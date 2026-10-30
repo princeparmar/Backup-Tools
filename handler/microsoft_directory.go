@@ -9,12 +9,17 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 )
 
-// msListDirectoryUsersFn lists tenant users live from Graph (overridden in tests). Organization
+// msListDirectoryUsersOptsFn lists tenant users live from Graph (overridden in tests). Organization
 // users are never stored, matching Google Workspace domain users.
 var (
-	msListDirectoryUsersFn  = outlook.ListTenantDirectoryUsers
-	msListTenantUserRolesFn = outlook.ListTenantUserRoles
+	msListDirectoryUsersOptsFn = outlook.ListTenantDirectoryUsersWithOptions
+	msListTenantUserRolesFn    = outlook.ListTenantUserRoles
 )
+
+// msListDirectoryUsersFn is the licensed listing used by capability probes and onboarding.
+func msListDirectoryUsersFn(ctx context.Context, token string) ([]outlook.DirectoryUser, error) {
+	return msListDirectoryUsersOptsFn(ctx, token, outlook.ListTenantDirectoryUsersOptions{IncludeLicenses: true})
+}
 
 // microsoftTenantUserRoles returns directory role names per user object ID. On failure (e.g. the
 // app lacks RoleManagement.Read.Directory) roles are empty and the error message is returned so

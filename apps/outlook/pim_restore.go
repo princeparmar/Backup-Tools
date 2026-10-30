@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 )
 
 // Writable event fields copied from a backed-up Graph event. Attendees are left out on purpose:
@@ -19,6 +21,11 @@ var eventCreateFields = []string{
 
 var eventLocationFields = []string{"displayName", "address", "coordinates", "locationEmailAddress", "locationType"}
 
+// contactCreateFields are Graph v1.0 writable contact properties restored from a backup.
+// Outlook UI mapping: Work email→emailAddresses, Work phone→businessPhones, Significant other→
+// spouseName, Notes→personalNotes, Chat→imAddresses, Company→companyName, Home address→
+// homeAddress, Website→businessHomePage, Job title→jobTitle, Birthday→birthday, Categories→
+// categories. Anniversary is restored via singleValueExtendedProperties (see ContactCreatePayload).
 var contactCreateFields = []string{
 	"assistantName", "birthday", "businessAddress", "businessHomePage", "businessPhones", "categories",
 	"children", "companyName", "department", "displayName", "emailAddresses", "fileAs", "generation",
@@ -65,6 +72,10 @@ func ContactCreatePayload(raw []byte) (map[string]any, error) {
 	out := pickNonEmpty(m, contactCreateFields)
 	if len(out) == 0 {
 		return nil, fmt.Errorf("contact has no restorable fields")
+	}
+	// Anniversary is not a first-class v1.0 field; restore the MAPI extended property when present.
+	if props := contactAnniversaryCreateProps(raw); len(props) > 0 {
+		out["singleValueExtendedProperties"] = props
 	}
 	return out, nil
 }
@@ -162,14 +173,22 @@ func RestoreCalendarEvent(ctx context.Context, accessToken, userBase, calendarID
 	if err != nil {
 		return err
 	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(resp, &created)
+	created.ID = strings.TrimSpace(created.ID)
+	if created.ID != "" {
+		if err := RestoreEventFileAttachments(ctx, accessToken, base, created.ID, raw); err != nil {
+			logger.Warn(ctx, "outlook calendar event attachments not restored",
+				logger.String("event_id", created.ID), logger.ErrorField(err))
+		}
+	}
 	s := head.seriesBackup
 	if s.Type != eventTypeSeriesMaster || len(s.CancelledOccurrences)+len(s.ExceptionOccurrences) == 0 {
 		return nil
 	}
-	var created struct {
-		ID string `json:"id"`
-	}
-	if json.Unmarshal(resp, &created) != nil || created.ID == "" {
+	if created.ID == "" {
 		return &SeriesRestoreError{Err: fmt.Errorf("created series has no id")}
 	}
 	if err := restoreSeriesOccurrences(ctx, accessToken, base, created.ID, s, raw); err != nil {
@@ -179,8 +198,9 @@ func RestoreCalendarEvent(ctx context.Context, accessToken, userBase, calendarID
 }
 
 // EnsureCalendar returns the id of the user's writable calendar named name, creating it when
-// missing. Used to restore events of a calendar deleted from Microsoft.
-func EnsureCalendar(ctx context.Context, accessToken, userBase, name string) (string, error) {
+// missing. color is Graph calendarColor (lightBlue, …); empty or "auto" is omitted. Used to
+// restore events of a calendar deleted from Microsoft under the same name.
+func EnsureCalendar(ctx context.Context, accessToken, userBase, name, color string) (string, error) {
 	calendars, err := ListPIMCalendars(ctx, accessToken, userBase)
 	if err != nil {
 		return "", err
@@ -190,7 +210,11 @@ func EnsureCalendar(ctx context.Context, accessToken, userBase, name string) (st
 			return c.ID, nil
 		}
 	}
-	body, err := json.Marshal(map[string]string{"name": name})
+	doc := map[string]string{"name": name}
+	if c := strings.TrimSpace(color); c != "" && !strings.EqualFold(c, "auto") {
+		doc["color"] = c
+	}
+	body, err := json.Marshal(doc)
 	if err != nil {
 		return "", err
 	}
@@ -208,9 +232,11 @@ func EnsureCalendar(ctx context.Context, accessToken, userBase, name string) (st
 }
 
 // RestoreContact creates a backed-up contact in folderID ("" is the default Contacts folder) of the
-// user at userBase. When that folder is gone the contact goes to the default folder.
+// user at userBase. When that folder is gone the contact goes to the default folder. An embedded
+// vault photo is uploaded after create (warn-only on photo failure).
 func RestoreContact(ctx context.Context, accessToken, userBase, folderID string, raw []byte) error {
-	payload, err := ContactCreatePayload(raw)
+	stripped, photo, hasPhoto := StripContactPhotoBackup(raw)
+	payload, err := ContactCreatePayload(stripped)
 	if err != nil {
 		return err
 	}
@@ -219,8 +245,24 @@ func RestoreContact(ctx context.Context, accessToken, userBase, folderID string,
 	if id := strings.TrimSpace(folderID); id != "" {
 		target = base + "/contactFolders/" + url.PathEscape(id) + "/contacts"
 	}
-	_, err = pimCreate(ctx, accessToken, target, base+"/contacts", payload)
-	return err
+	resp, err := pimCreate(ctx, accessToken, target, base+"/contacts", payload)
+	if err != nil {
+		return err
+	}
+	if !hasPhoto {
+		return nil
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(resp, &created) != nil || strings.TrimSpace(created.ID) == "" {
+		return nil
+	}
+	if err := PutContactPhoto(ctx, accessToken, userBase, folderID, created.ID, photo); err != nil {
+		logger.Warn(ctx, "outlook contact photo not restored",
+			logger.String("contact_id", created.ID), logger.ErrorField(err))
+	}
+	return nil
 }
 
 // pimCreate POSTs payload to target, or to fallback when target is gone or read-only, and returns

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -317,19 +319,25 @@ func RestoreMailMessage(ctx context.Context, accessToken, userBaseURL string, fo
 	var created struct {
 		ID string `json:"id"`
 	}
-	_ = json.Unmarshal(resp, &created)
+	if err := json.Unmarshal(resp, &created); err != nil || strings.TrimSpace(created.ID) == "" {
+		return fmt.Errorf("create restored message: no id returned")
+	}
 
-	failed := msg.Skipped
+	var failedNames []string
 	for _, a := range later {
 		if err := addMailRestoreAttachment(ctx, accessToken, userBaseURL, created.ID, a); err != nil {
-			failed++
+			failedNames = append(failedNames, a.Name)
 			logger.Warn(ctx, "outlook mail restore: attachment not restored",
 				logger.String("attachment", a.Name), logger.ErrorField(err))
 		}
 	}
-	if failed > 0 {
-		logger.Warn(ctx, "outlook mail restore: message restored without some attachments",
-			logger.String("message_id", created.ID), logger.Int("attachments_missing", failed))
+	if msg.Skipped > 0 {
+		logger.Warn(ctx, "outlook mail restore: skipped non-file attachments",
+			logger.String("message_id", created.ID), logger.Int("skipped", msg.Skipped))
+	}
+	if len(failedNames) > 0 {
+		return fmt.Errorf("restored message %s but %d attachment(s) failed: %s",
+			created.ID, len(failedNames), strings.Join(failedNames, ", "))
 	}
 	return nil
 }
@@ -406,13 +414,20 @@ func addMailRestoreAttachment(ctx context.Context, accessToken, userBaseURL, mes
 	return nil
 }
 
-// mailRestoreFolderCache maps mailbox + folder path to the folder id found or created.
+// mailRestoreFolderCache maps mailbox scope + folder path to the folder id found or created.
+// Scope includes a token fingerprint so concurrent /me restores for different users never share ids.
 var (
 	mailRestoreFolderCache   = map[string]string{}
 	mailRestoreFolderCacheMu sync.Mutex
 )
 
 const mailRestoreFolderCacheMax = 5000
+
+// mailRestoreCacheScope isolates folder-id cache entries per mailbox token + Graph user base.
+func mailRestoreCacheScope(accessToken, userBaseURL string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(accessToken)))
+	return strings.TrimRight(strings.TrimSpace(userBaseURL), "/") + "\x00" + hex.EncodeToString(sum[:8])
+}
 
 // resolveMailRestoreFolder returns the id of the folder to restore into, creating missing custom
 // folders along the path. Keys without a folder (legacy) restore into the Inbox.
@@ -424,7 +439,7 @@ func resolveMailRestoreFolder(ctx context.Context, accessToken, userBaseURL, wel
 		}
 		return "inbox", nil
 	}
-	cacheKey := userBaseURL + "\x00" + strings.Join(segments, "/")
+	cacheKey := mailRestoreCacheScope(accessToken, userBaseURL) + "\x00" + strings.Join(segments, "/")
 	mailRestoreFolderCacheMu.Lock()
 	cached := mailRestoreFolderCache[cacheKey]
 	mailRestoreFolderCacheMu.Unlock()
@@ -445,10 +460,9 @@ func resolveMailRestoreFolder(ctx context.Context, accessToken, userBaseURL, wel
 	}
 
 	mailRestoreFolderCacheMu.Lock()
-	if len(mailRestoreFolderCache) >= mailRestoreFolderCacheMax {
-		mailRestoreFolderCache = map[string]string{}
+	if len(mailRestoreFolderCache) < mailRestoreFolderCacheMax {
+		mailRestoreFolderCache[cacheKey] = parent
 	}
-	mailRestoreFolderCache[cacheKey] = parent
 	mailRestoreFolderCacheMu.Unlock()
 	return parent, nil
 }

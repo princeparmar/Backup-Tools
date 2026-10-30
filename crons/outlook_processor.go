@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
@@ -17,6 +18,9 @@ import (
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 )
+
+// mailFolderSyncParallelism caps concurrent folder delta walks (shared Graph rate limits).
+var mailFolderSyncParallelism = 3
 
 type outlookProcessor struct{}
 
@@ -182,6 +186,7 @@ type outlookMailRun struct {
 	// not recorded as a deletion.
 	seen    map[string]struct{}
 	removed map[string]struct{}
+	mu      sync.Mutex
 	// precheck blocks the run when the estimated mailbox size does not fit the remaining
 	// storage, like the Gmail backup. nil skips the check.
 	precheck func(ctx context.Context, estimateBytes int64) error
@@ -225,31 +230,73 @@ func (r *outlookMailRun) syncAll(ctx context.Context, tm *repo.TaskMemory) error
 	}
 	r.writeFolderList(ctx, folders, tm.OutlookMailFolderPaths, migrating)
 
+	type folderOutcome struct {
+		folder outlook.MailFolder
+		start  string
+		link   string
+		err    error
+	}
+	outcomes := make([]folderOutcome, len(folders))
+	workers := mailFolderSyncParallelism
+	if workers > len(folders) {
+		workers = len(folders)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	syncCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				if syncCtx.Err() != nil {
+					outcomes[i] = folderOutcome{folder: folders[i], err: syncCtx.Err()}
+					continue
+				}
+				f := folders[i]
+				start := ""
+				if saved := strings.TrimSpace(savedDeltas[f.ID]); saved != "" && tm.OutlookMailFolderPaths[f.ID] == f.Path {
+					start = saved
+				}
+				link, err := r.syncFolder(syncCtx, f, start)
+				outcomes[i] = folderOutcome{folder: f, start: start, link: link, err: err}
+				if err != nil && shouldAbortOnItemError(err) {
+					cancel()
+				}
+			}
+		}()
+	}
+	for i := range folders {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+
 	deltas := make(map[string]string, len(folders))
 	paths := make(map[string]string, len(folders))
 	allFolders := true
-	for _, f := range folders {
-		start := ""
-		if saved := strings.TrimSpace(savedDeltas[f.ID]); saved != "" && tm.OutlookMailFolderPaths[f.ID] == f.Path {
-			start = saved
-		}
-		link, err := r.syncFolder(ctx, f, start)
-		if err != nil {
-			if shouldAbortOnItemError(err) {
-				return wrapStorageAbort("outlook", err)
+	for _, o := range outcomes {
+		f := o.folder
+		if o.err != nil {
+			if shouldAbortOnItemError(o.err) {
+				return wrapStorageAbort("outlook", o.err)
 			}
 			if f.WellKnownName == "inbox" {
-				return fmt.Errorf("outlook mail folder %s: %w", f.Path, err)
+				return fmt.Errorf("outlook mail folder %s: %w", f.Path, o.err)
 			}
 			allFolders = false
 			logger.Warn(ctx, "outlook mail folder sync failed; retrying next run",
-				logger.String("folder", f.Path), logger.ErrorField(err))
-			if start != "" {
-				deltas[f.ID], paths[f.ID] = start, f.Path
+				logger.String("folder", f.Path), logger.ErrorField(o.err))
+			if o.start != "" {
+				deltas[f.ID], paths[f.ID] = o.start, f.Path
 			}
 			continue
 		}
-		deltas[f.ID], paths[f.ID] = link, f.Path
+		deltas[f.ID], paths[f.ID] = o.link, f.Path
 	}
 	// A message moved into a folder that failed would look deleted; wait for a full run.
 	if allFolders {
@@ -318,6 +365,9 @@ func (r *outlookMailRun) writeFolderList(ctx context.Context, folders []outlook.
 }
 
 func (r *outlookMailRun) syncFolder(ctx context.Context, f outlook.MailFolder, start string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	initial := outlook.MessagesDeltaURL(r.userBase, f.ID)
 	if start == "" {
 		start = initial
@@ -334,6 +384,9 @@ func (r *outlookMailRun) syncFolder(ctx context.Context, f outlook.MailFolder, s
 // message in the folder is returned, changed or not.
 func (r *outlookMailRun) deltaSync(ctx context.Context, f outlook.MailFolder, requestURL string, baseline bool) (string, error) {
 	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		if err := r.heartbeat(); err != nil {
 			return "", err
 		}
@@ -342,6 +395,9 @@ func (r *outlookMailRun) deltaSync(ctx context.Context, f outlook.MailFolder, re
 			return "", err
 		}
 		for i := range page.Messages {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
 			if err := r.heartbeat(); err != nil {
 				return "", err
 			}
@@ -366,22 +422,28 @@ func (r *outlookMailRun) deltaSync(ctx context.Context, f outlook.MailFolder, re
 }
 
 // syncMessage keeps one object per message at {folder}/{date}/{from - subject - conv - id}.
-// Like Gmail, a message whose key is unchanged is skipped on a baseline and drafts are always
-// fetched again. Otherwise the stored object is reused: moved or renamed messages are copied to
-// the new key, and changed read/flag/category state is written in place.
+// Like Gmail, a message whose key and changeKey are unchanged is skipped on a baseline and drafts
+// are always fetched again. Otherwise the stored object is reused when changeKey matches: moved or
+// renamed messages are copied to the new key, and changed read/flag/category state is written in place.
 func (r *outlookMailRun) syncMessage(ctx context.Context, f outlook.MailFolder, msg *outlook.OutlookMailDeltaMessage, baseline bool) error {
 	id := strings.TrimSpace(msg.ID)
 	if id == "" {
 		return nil
 	}
 	if msg.IsRemoved {
+		r.mu.Lock()
 		r.removed[id] = struct{}{}
+		r.mu.Unlock()
 		return nil
 	}
+	r.mu.Lock()
 	r.seen[id] = struct{}{}
-
-	state := outlook.OutlookMailBackupState{FolderID: f.ID, FolderPath: f.Path, WellKnownFolder: f.WellKnownName}
 	oldKey := r.index[id]
+	r.mu.Unlock()
+
+	state := outlook.OutlookMailBackupState{
+		FolderID: f.ID, FolderPath: f.Path, WellKnownFolder: f.WellKnownName, ChangeKey: msg.ChangeKey,
+	}
 	legacy := oldKey != "" && isLegacyOutlookMailKey(oldKey)
 	from, subject, conversationID := msg.From, msg.Subject, msg.ConversationID
 	if prev, ok := outlook.ParseOutlookMailObjectKey(oldKey); ok {
@@ -393,15 +455,23 @@ func (r *outlookMailRun) syncMessage(ctx context.Context, f outlook.MailFolder, 
 
 	var stored []byte
 	if oldKey != "" && !msg.IsDraft {
-		if !legacy && oldKey == newKey && baseline {
-			return nil
-		}
 		src := oldKey
 		if legacy {
 			src = outlook.OutlookMailLegacyDataKey(oldKey)
 		}
-		if b, err := r.store.download(ctx, src); err == nil {
-			stored = b
+		b, err := r.store.download(ctx, src)
+		if err == nil {
+			storedCK := outlook.MailBackupChangeKey(b)
+			// Missing stored changeKey with a delta changeKey means an older backup — refresh once.
+			contentMatches := msg.ChangeKey == "" || (storedCK != "" && storedCK == msg.ChangeKey)
+			// Baseline with matching key and changeKey: nothing to do.
+			if !legacy && oldKey == newKey && baseline && contentMatches {
+				return nil
+			}
+			if contentMatches || legacy {
+				stored = b
+			}
+			// changeKey drifted (or was never stored): re-fetch full content below.
 		}
 	}
 
@@ -418,6 +488,12 @@ func (r *outlookMailRun) syncMessage(ctx context.Context, f outlook.MailFolder, 
 			newKey = r.keyFor(f, detail.ReceivedDateTime, detail.LastModifiedDateTime,
 				cmp.Or(detailFrom, from), cmp.Or(detail.Subject, subject),
 				cmp.Or(detail.ConversationID, conversationID), id)
+			if detail.ChangeKey != "" {
+				state.ChangeKey = detail.ChangeKey
+				if msg.ChangeKey == "" {
+					msg.ChangeKey = detail.ChangeKey
+				}
+			}
 		}
 		stored = raw
 		state.BackedUpAt = time.Now().UTC().Format(time.RFC3339)
@@ -438,7 +514,9 @@ func (r *outlookMailRun) syncMessage(ctx context.Context, f outlook.MailFolder, 
 			r.store.remove(ctx, outlook.OutlookMailLegacyDataKey(oldKey))
 		}
 	}
+	r.mu.Lock()
 	r.index[id] = newKey
+	r.mu.Unlock()
 	return nil
 }
 
@@ -450,11 +528,19 @@ func (r *outlookMailRun) keyFor(f outlook.MailFolder, received, modified, from, 
 // run). The backup stays restorable under its last folder.
 func (r *outlookMailRun) flushRemoved(ctx context.Context) {
 	now := time.Now().UTC().Format(time.RFC3339)
+	r.mu.Lock()
+	removed := make([]string, 0, len(r.removed))
 	for id := range r.removed {
 		if _, moved := r.seen[id]; moved {
 			continue
 		}
+		removed = append(removed, id)
+	}
+	r.mu.Unlock()
+	for _, id := range removed {
+		r.mu.Lock()
 		key := r.index[id]
+		r.mu.Unlock()
 		if key == "" || isLegacyOutlookMailKey(key) {
 			continue
 		}

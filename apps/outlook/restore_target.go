@@ -128,23 +128,44 @@ func CheckRestoreTarget(ctx context.Context, accessToken, userBase, method strin
 	}
 }
 
-// EnsureContactFolder returns the id of the user's contact folder named name, creating it as a
-// top-level folder when missing.
-func EnsureContactFolder(ctx context.Context, accessToken, userBase, name string) (string, error) {
+// EnsureContactFolder returns the id of the user's contact folder named name, creating it when
+// missing. parentFolderID scopes the match and create under that parent; empty creates a top-level
+// folder. When parentFolderID is empty, an existing folder of the same name anywhere in the tree
+// is reused (migration-friendly).
+func EnsureContactFolder(ctx context.Context, accessToken, userBase, name, parentFolderID string) (string, error) {
+	name = strings.TrimSpace(name)
+	parentFolderID = strings.TrimSpace(parentFolderID)
+	if name == "" {
+		return "", fmt.Errorf("contact folder name is required")
+	}
 	folders, err := ListPIMContactFolders(ctx, accessToken, userBase)
 	if err != nil {
 		return "", err
 	}
+	var anyMatch string
 	for _, f := range folders {
-		if strings.TrimSpace(f.DisplayName) == name {
+		if strings.TrimSpace(f.DisplayName) != name {
+			continue
+		}
+		if parentFolderID != "" && strings.TrimSpace(f.ParentFolderID) == parentFolderID {
 			return f.ID, nil
 		}
+		if parentFolderID == "" && anyMatch == "" {
+			anyMatch = f.ID
+		}
+	}
+	if parentFolderID == "" && anyMatch != "" {
+		return anyMatch, nil
 	}
 	body, err := json.Marshal(map[string]string{"displayName": name})
 	if err != nil {
 		return "", err
 	}
-	resp, status, err := graphDoJSONWrite(ctx, accessToken, http.MethodPost, strings.TrimRight(userBase, "/")+"/contactFolders", body)
+	createURL := strings.TrimRight(userBase, "/") + "/contactFolders"
+	if parentFolderID != "" {
+		createURL = strings.TrimRight(userBase, "/") + "/contactFolders/" + urlPathEscape(parentFolderID) + "/childFolders"
+	}
+	resp, status, err := graphDoJSONWrite(ctx, accessToken, http.MethodPost, createURL, body)
 	if err != nil {
 		return "", err
 	}
