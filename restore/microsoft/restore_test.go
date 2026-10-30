@@ -365,14 +365,15 @@ func TestEvaluateCredentialReadinessFallsBackToDelegatedWrite(t *testing.T) {
 	prevR, prevD := resolveTenantFn, delegatedRestoreTokenFn
 	t.Cleanup(func() { resolveTenantFn, delegatedRestoreTokenFn = prevR, prevD })
 	cases := []struct {
-		name      string
-		method    string
-		appRoles  []string
-		scp       string
-		mintErr   error
-		refresh   string
-		wantReady bool
-		wantGrant string
+		name         string
+		method       string
+		appRoles     []string
+		scp          string
+		mintErr      error
+		mintBothFail bool
+		refresh      string
+		wantReady    bool
+		wantGrant    string
 	}{
 		{name: "mail Grant Access", method: "outlook", appRoles: []string{"Mail.Read"}, scp: "User.Read Mail.ReadWrite", refresh: "rt", wantReady: true},
 		{name: "mail Shared variant", method: "outlook", appRoles: []string{"Mail.Read"}, scp: "User.Read Mail.ReadWrite.Shared", refresh: "rt", wantReady: true},
@@ -387,7 +388,9 @@ func TestEvaluateCredentialReadinessFallsBackToDelegatedWrite(t *testing.T) {
 		{name: "sharepoint Sites.ReadWrite.All", method: "outlook_sharepoint", appRoles: []string{"Sites.Read.All"}, scp: "Sites.ReadWrite.All", refresh: "rt", wantReady: true},
 		{name: "sharepoint still read-only", method: "outlook_sharepoint", appRoles: []string{"Sites.Read.All"}, scp: "Sites.Read.All Files.Read.All", refresh: "rt", wantGrant: "Files.ReadWrite.All"},
 		{name: "teams Grant Access both send scopes", method: "outlook_teams", appRoles: []string{"ChannelMessage.Read.All"}, scp: "ChannelMessage.Send ChatMessage.Send", refresh: "rt", wantReady: true},
-		{name: "teams channel only still asks chat", method: "outlook_teams", appRoles: []string{"ChannelMessage.Read.All"}, scp: "ChannelMessage.Send", refresh: "rt", wantGrant: "ChatMessage.Send"},
+		{name: "teams channel send is enough to start restore", method: "outlook_teams", appRoles: []string{"ChannelMessage.Read.All"}, scp: "ChannelMessage.Send", refresh: "rt", wantReady: true},
+		{name: "teams chat send is enough to start restore", method: "outlook_teams", appRoles: []string{"ChannelMessage.Read.All"}, scp: "ChatMessage.Send", refresh: "rt", wantReady: true},
+		{name: "teams both-scope mint fails then channel-only fallback", method: "outlook_teams", appRoles: []string{"ChannelMessage.Read.All"}, scp: "ChannelMessage.Send", refresh: "rt", mintBothFail: true, wantReady: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -395,9 +398,12 @@ func TestEvaluateCredentialReadinessFallsBackToDelegatedWrite(t *testing.T) {
 			resolveTenantFn = func(context.Context, *db.PostgresDb, mstenant.Request) (*mstenant.Context, error) {
 				return &mstenant.Context{Token: appTok, Application: true, TenantID: "tenant"}, nil
 			}
-			delegatedRestoreTokenFn = func(string, string, string) (*outlook.TokenResponse, error) {
+			delegatedRestoreTokenFn = func(_, _, scope string) (*outlook.TokenResponse, error) {
 				if tc.mintErr != nil {
 					return nil, tc.mintErr
+				}
+				if tc.mintBothFail && strings.Contains(scope, "ChannelMessage.Send") && strings.Contains(scope, "ChatMessage.Send") {
+					return nil, errors.New("invalid_scope")
 				}
 				return &outlook.TokenResponse{
 					AccessToken: fakeJWT(map[string]interface{}{"scp": tc.scp}),
@@ -444,7 +450,8 @@ func TestDelegatedRestoreScopesOK(t *testing.T) {
 		{name: "onedrive personal", method: "outlook_onedrive", granted: []string{"Files.ReadWrite"}, required: []string{"Files.ReadWrite.All"}, ok: true},
 		{name: "sharepoint sites write", method: "outlook_sharepoint", granted: []string{"Sites.ReadWrite.All"}, required: []string{"Files.ReadWrite.All"}, ok: true},
 		{name: "teams both", method: "outlook_teams", granted: []string{"ChannelMessage.Send", "ChatMessage.Send"}, required: []string{"ChannelMessage.Send", "ChatMessage.Send"}, ok: true},
-		{name: "teams channel only", method: "outlook_teams", granted: []string{"ChannelMessage.Send"}, required: []string{"ChannelMessage.Send", "ChatMessage.Send"}},
+		{name: "teams channel only", method: "outlook_teams", granted: []string{"ChannelMessage.Send"}, required: []string{"ChannelMessage.Send", "ChatMessage.Send"}, ok: true},
+		{name: "teams chat only", method: "outlook_teams", granted: []string{"ChatMessage.Send"}, required: []string{"ChannelMessage.Send", "ChatMessage.Send"}, ok: true},
 		{name: "read is not write", method: "outlook", granted: []string{"Mail.Read"}, required: []string{"Mail.ReadWrite"}},
 	}
 	for _, tc := range cases {

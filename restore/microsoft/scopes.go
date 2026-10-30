@@ -203,6 +203,10 @@ func grantedScopeSet(granted []string) map[string]struct{} {
 // delegatedRestoreScopesOK reports whether Grant Access put a write token on the signed-in
 // account for this service (Mail, Calendar, Contacts, OneDrive, SharePoint, Teams).
 func delegatedRestoreScopesOK(method string, granted, required []string) bool {
+	if strings.TrimSpace(method) == "outlook_teams" {
+		have := grantedScopeSet(granted)
+		return delegatedScopeGranted(have, "ChannelMessage.Send") || delegatedScopeGranted(have, "ChatMessage.Send")
+	}
 	if len(required) == 0 {
 		required = microsoftRestoreScopesForMethod(method)
 	}
