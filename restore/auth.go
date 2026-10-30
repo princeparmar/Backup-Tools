@@ -25,7 +25,7 @@ type StorxGrantSession struct {
 // NewStorxGrantSession loads storx from the linked backup job/credential only.
 func NewStorxGrantSession(ctx context.Context, store *db.PostgresDb, userID, method, loginID string) (*StorxGrantSession, error) {
 	_ = ctx
-	cronJob, ok, err := store.CronJobRepo.FindJobForRestore(userID, method, loginID)
+	cronJob, ok, err := store.CronJobRepo.FindJobForRestoreGrant(userID, method, loginID)
 	if err != nil {
 		return nil, err
 	}

@@ -115,7 +115,7 @@ func HandleGoogleContactsRestore(c echo.Context) error {
 		})
 	}
 
-	storxSess, err := resolveManualRestoreStorx(c, "google_contacts", userDetails.Email)
+	storxSess, err := resolveManualRestoreStorxForKeys(c, "google_contacts", userDetails.Email, allKeys)
 	if err != nil {
 		return err
 	}

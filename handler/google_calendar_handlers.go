@@ -152,7 +152,7 @@ func HandleGoogleCalendarRestore(c echo.Context) error {
 		})
 	}
 
-	storxSess, err := resolveManualRestoreStorx(c, "google_calendar", userDetails.Email)
+	storxSess, err := resolveManualRestoreStorxForKeys(c, "google_calendar", userDetails.Email, allKeys)
 	if err != nil {
 		return err
 	}

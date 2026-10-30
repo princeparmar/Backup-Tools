@@ -439,7 +439,7 @@ func HandleGmailDownloadAndInsert(c echo.Context) error {
 		logger.Warn(ctx, "Failed to get user email for notification", logger.ErrorField(err))
 	}
 
-	storxSess, err := resolveManualRestoreStorx(c, "gmail", userDetails.Email)
+	storxSess, err := resolveManualRestoreStorxForKeys(c, "gmail", userDetails.Email, allIDs)
 	if err != nil {
 		return err
 	}

@@ -183,8 +183,8 @@ type TaskMemory struct {
 	OneDriveLayout int `json:"onedrive_layout,omitempty"`
 
 	// SharePoint incremental sync state (Graph delta on /drives/{drive_id}).
-	 // Legacy single-site jobs keep cursors on these fields; the combined tenant job nests
-	 // per-site state under SharePointSites[siteID] (see SharePointSiteState).
+	// Legacy single-site jobs keep cursors on these fields; the combined tenant job nests
+	// per-site state under SharePointSites[siteID] (see SharePointSiteState).
 	SharePointDeltaLink    *string `json:"sharepoint_delta_link,omitempty"`
 	SharePointBaselineDone bool    `json:"sharepoint_baseline_done,omitempty"`
 	// SharePointLayout is the SharePoint layout version (same values as OneDriveLayout); below
@@ -398,13 +398,13 @@ type SharePointListCursor struct {
 
 // SharePointSiteState is per-site sync memory on the combined SharePoint tenant job.
 type SharePointSiteState struct {
-	DeltaLink    *string                         `json:"delta_link,omitempty"`
-	BaselineDone bool                            `json:"baseline_done,omitempty"`
-	Layout       int                             `json:"layout,omitempty"`
+	DeltaLink    *string                           `json:"delta_link,omitempty"`
+	BaselineDone bool                              `json:"baseline_done,omitempty"`
+	Layout       int                               `json:"layout,omitempty"`
 	Libraries    map[string]SharePointLibraryState `json:"libraries,omitempty"`
-	ListCursors  map[string]SharePointListCursor `json:"list_cursors,omitempty"`
-	LastSyncAt   string                          `json:"last_sync_at,omitempty"`
-	LastError    string                          `json:"last_error,omitempty"`
+	ListCursors  map[string]SharePointListCursor   `json:"list_cursors,omitempty"`
+	LastSyncAt   string                            `json:"last_sync_at,omitempty"`
+	LastError    string                            `json:"last_error,omitempty"`
 }
 
 // DriveSharedDriveState holds baseline + change token for one Shared Drive.
@@ -1146,26 +1146,134 @@ func StripGmailRefreshTokenFromCronJobInputData(job *CronJobListingDB) {
 	}
 }
 
+// JobMailbox is the mailbox a Google autosync job belongs to (input email, else resource_id, else name).
+func JobMailbox(job *CronJobListingDB) string {
+	if job == nil {
+		return ""
+	}
+	if job.InputData != nil && job.InputData.Json() != nil {
+		if s, ok := (*job.InputData.Json())["email"].(string); ok && strings.TrimSpace(s) != "" {
+			return strings.TrimSpace(s)
+		}
+	}
+	if s := strings.TrimSpace(job.ResourceID); s != "" {
+		return s
+	}
+	return strings.TrimSpace(job.Name)
+}
+
+func googleRestoreMethod(method string) bool {
+	for _, m := range restoreJobMethods(method) {
+		if IsGoogleAutosyncMethod(m) {
+			return true
+		}
+	}
+	return false
+}
+
+func restoreJobMethods(method string) []string {
+	switch strings.ToLower(strings.TrimSpace(method)) {
+	case "calendar", "google_calendar":
+		return []string{"google_calendar", "calendar"}
+	case "contacts", "google_contacts":
+		return []string{"google_contacts", "contacts"}
+	case "drive", "google_drive":
+		return []string{"google_drive", "drive"}
+	case "photos", "google_photos":
+		return []string{"google_photos", "photos"}
+	default:
+		method = strings.TrimSpace(method)
+		if method == "" {
+			return nil
+		}
+		return []string{method}
+	}
+}
+
+func restoreMailboxMatches(job *CronJobListingDB, loginID string) bool {
+	want := strings.ToLower(strings.TrimSpace(loginID))
+	if want == "" || job == nil {
+		return false
+	}
+	for _, got := range []string{JobMailbox(job), job.Name, job.ResourceID} {
+		if strings.ToLower(strings.TrimSpace(got)) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func preferRestoreMethod(jobs []CronJobListingDB, method string) *CronJobListingDB {
+	if len(jobs) == 0 {
+		return nil
+	}
+	want := strings.ToLower(strings.TrimSpace(method))
+	switch want {
+	case "calendar":
+		want = "google_calendar"
+	case "contacts":
+		want = "google_contacts"
+	case "drive":
+		want = "google_drive"
+	case "photos":
+		want = "google_photos"
+	}
+	for i := range jobs {
+		if strings.ToLower(strings.TrimSpace(jobs[i].Method)) == want {
+			return &jobs[i]
+		}
+	}
+	return &jobs[0]
+}
+
+func (r *CronJobRepository) findMailboxJobs(userID string, methods []string, loginID string) ([]CronJobListingDB, error) {
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(loginID) == "" || len(methods) == 0 {
+		return nil, nil
+	}
+	var rows []CronJobListingDB
+	q := r.db.Where("user_id = ?", strings.TrimSpace(userID))
+	if len(methods) == 1 {
+		q = q.Where("method = ?", methods[0])
+	} else {
+		q = q.Where("method IN ?", methods)
+	}
+	if err := q.Order("active DESC, id DESC").Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("find job for restore: %w", err)
+	}
+	out := make([]CronJobListingDB, 0, len(rows))
+	for i := range rows {
+		if restoreMailboxMatches(&rows[i], loginID) {
+			out = append(out, rows[i])
+		}
+	}
+	return out, nil
+}
+
 // FindJobForRestore returns the autosync cron job for a user, method, and mailbox login_id.
+// Matches name, resource_id, and input_data.email case-insensitively (same idea as Microsoft restore).
 func (r *CronJobRepository) FindJobForRestore(userID, method, loginID string) (*CronJobListingDB, bool, error) {
-	userID = strings.TrimSpace(userID)
-	method = strings.TrimSpace(method)
-	loginID = strings.TrimSpace(loginID)
-	if userID == "" || method == "" || loginID == "" {
+	jobs, err := r.findMailboxJobs(userID, restoreJobMethods(method), loginID)
+	if err != nil || len(jobs) == 0 {
+		return nil, false, err
+	}
+	return preferRestoreMethod(jobs, method), true, nil
+}
+
+// FindJobForRestoreGrant is the StorX grant for a mailbox restore. Google services share one
+// credential, so a Gmail/Drive job is enough when the Calendar row is missing.
+func (r *CronJobRepository) FindJobForRestoreGrant(userID, method, loginID string) (*CronJobListingDB, bool, error) {
+	job, ok, err := r.FindJobForRestore(userID, method, loginID)
+	if err != nil || ok {
+		return job, ok, err
+	}
+	if !googleRestoreMethod(method) {
 		return nil, false, nil
 	}
-	var job CronJobListingDB
-	err := r.db.Where("user_id = ? AND method = ? AND deleted_at IS NULL", userID, method).
-		Where("(name = ? OR (input_data->>'email') = ?)", loginID, loginID).
-		Order("active DESC, id DESC").
-		First(&job).Error
-	if err != nil {
-		if errors.Is(err, gormio.ErrRecordNotFound) {
-			return nil, false, nil
-		}
-		return nil, false, fmt.Errorf("find job for restore: %w", err)
+	jobs, err := r.findMailboxJobs(userID, GoogleAutosyncMethods, loginID)
+	if err != nil || len(jobs) == 0 {
+		return nil, false, err
 	}
-	return &job, true, nil
+	return preferRestoreMethod(jobs, method), true, nil
 }
 
 // GetCronJobByID retrieves a cron job by ID
@@ -1228,7 +1336,7 @@ func (r *CronJobRepository) ListJobsByCredentialID(userID string, credentialID u
 }
 
 // HasLinkedJobsForCredential reports whether a credential has any real backup jobs for a user.
- // System jobs (access-check, etc.) do not count — otherwise isFirstConnection flips false too early.
+// System jobs (access-check, etc.) do not count — otherwise isFirstConnection flips false too early.
 func (r *CronJobRepository) HasLinkedJobsForCredential(userID string, credentialID uint) (bool, error) {
 	if credentialID == 0 {
 		return false, nil

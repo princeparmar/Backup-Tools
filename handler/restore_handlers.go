@@ -19,6 +19,17 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
+// mailboxFromVaultKeys is the source mailbox encoded as the first path segment of a vault object key.
+func mailboxFromVaultKeys(keys []string) string {
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if i := strings.Index(key, "/"); i > 0 {
+			return strings.TrimSpace(key[:i])
+		}
+	}
+	return ""
+}
+
 // resolveManualRestoreStorx loads storx grant from DB for manual item restore (one Satellite refresh on first uplink error).
 // An invited member's request carries X-Restore-As-User, so the backup job is the project owner's.
 func resolveManualRestoreStorx(c echo.Context, method, loginID string) (*restore.StorxGrantSession, error) {
@@ -36,6 +47,14 @@ func resolveManualRestoreStorx(c echo.Context, method, loginID string) (*restore
 		return nil, echo.NewHTTPError(http.StatusForbidden, map[string]interface{}{"error": err.Error()})
 	}
 	return sess, nil
+}
+
+func resolveManualRestoreStorxForKeys(c echo.Context, method, fallbackEmail string, keys []string) (*restore.StorxGrantSession, error) {
+	loginID := mailboxFromVaultKeys(keys)
+	if loginID == "" {
+		loginID = strings.TrimSpace(fallbackEmail)
+	}
+	return resolveManualRestoreStorx(c, method, loginID)
 }
 
 func googleRestoreService(service string) bool {

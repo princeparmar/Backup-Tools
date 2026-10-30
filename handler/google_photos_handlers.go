@@ -1112,7 +1112,7 @@ func HandleGooglePhotosRestore(c echo.Context) error {
 		userDetails = &google.GoogleAuthResponse{} // Continue with empty email if needed
 	}
 
-	storxSess, err := resolveManualRestoreStorx(c, "google_photos", userDetails.Email)
+	storxSess, err := resolveManualRestoreStorxForKeys(c, "google_photos", userDetails.Email, allKeys)
 	if err != nil {
 		return err
 	}

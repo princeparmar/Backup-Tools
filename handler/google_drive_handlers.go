@@ -814,7 +814,7 @@ func HandleGoogleDriveDownloadAndRestore(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, map[string]string{"error": "failed to get user email"})
 	}
 
-	storxSess, err := resolveManualRestoreStorx(c, "google_drive", userDetails.Email)
+	storxSess, err := resolveManualRestoreStorxForKeys(c, "google_drive", userDetails.Email, allKeys)
 	if err != nil {
 		return err
 	}
