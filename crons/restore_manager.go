@@ -6,6 +6,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/restore"
+	_ "github.com/StorX2-0/Backup-Tools/restore/register"
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
 )

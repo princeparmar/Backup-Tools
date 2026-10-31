@@ -41,6 +41,9 @@ type ReadinessResult struct {
 	Message            string              `json:"message,omitempty"`
 	TargetEmail        string              `json:"target_email,omitempty"`
 	Migration          bool                `json:"migration,omitempty"`
+	// TenantID is the Microsoft tenant the restore writes into: the backup's tenant for an in-place
+	// restore, the destination's tenant for a restore into another account.
+	TenantID string `json:"tenant_id,omitempty"`
 }
 
 const (
@@ -55,8 +58,18 @@ const (
 	ReadinessReasonTokenRefreshFailed = "token_refresh_failed"
 	ReadinessReasonMissingPermissions = "missing_permissions"
 	ReadinessReasonDWDNotConfigured   = "dwd_not_configured"
-	ReadinessReasonAPIProbeFailed     = "api_probe_failed"
-	ReadinessReasonStorxMissing       = "storx_missing"
+	// ReadinessReasonInviteOAuthRequired: an invited member must sign in as the mailbox.
+	ReadinessReasonInviteOAuthRequired = "invite_oauth_required"
+	ReadinessReasonAPIProbeFailed      = "api_probe_failed"
+	ReadinessReasonStorxMissing        = "storx_missing"
+	// ReadinessReasonTenantRequired: the account has Microsoft backups in several tenants.
+	ReadinessReasonTenantRequired = "tenant_required"
+	// ReadinessReasonTenantMismatch: the restore would cross Microsoft tenants.
+	ReadinessReasonTenantMismatch = "tenant_mismatch"
+	// ReadinessReasonMigrationUnsupported: the service only restores to where it was backed up from.
+	ReadinessReasonMigrationUnsupported = "migration_unsupported"
+	// ReadinessReasonTargetUnavailable: the destination has no mailbox or drive for the service.
+	ReadinessReasonTargetUnavailable = "target_unavailable"
 )
 
 // ReadinessRequest is the input for prepare and restore-all readiness checks.
@@ -66,6 +79,13 @@ type ReadinessRequest struct {
 	LoginID     string
 	Service     string
 	TargetEmail string // migration write mailbox (unique per user+project in creds table)
+	// TenantID is the selected Microsoft tenant (MICROSOFT_TENANT_ID); ignored for Google.
+	TenantID string
+	// InviteRestore is set when an invited member starts restore-all on the owner's backup.
+	// That path uses the member's Google sign-in. It does not use domain-wide delegation.
+	InviteRestore bool
+	// InviteAccessToken is the Google access token from that sign-in. Empty on prepare.
+	InviteAccessToken string
 }
 
 // EvaluateReadiness runs prepare checks for in-place restore-all.
@@ -95,6 +115,10 @@ func EvaluateReadinessWithOptions(ctx context.Context, store *db.PostgresDb, req
 	method, ok := APIServiceToMethod[APIService(service)]
 	if !ok {
 		return nil, fmt.Errorf("unsupported service")
+	}
+
+	if IsMicrosoftRestoreMethod(method) {
+		return evaluateMicrosoftReadiness(ctx, store, out, userID, projectID, loginID, service, method, targetEmail, strings.ToLower(strings.TrimSpace(req.TenantID)))
 	}
 
 	cronJob, jobOK, err := store.CronJobRepo.FindJobForRestore(userID, method, loginID)
@@ -218,12 +242,69 @@ func EvaluateReadinessWithOptions(ctx context.Context, store *db.PostgresDb, req
 	}
 
 	out.CredentialID = sourceCred.ID
+	if req.InviteRestore {
+		// Personal Gmail has no domain-wide delegation. An invited member cannot
+		// sign in as the owner's mailbox, so restore uses the owner's stored OAuth.
+		// Workspace child mailboxes still need the member to sign in as that mailbox.
+		if InviteRestoreNeedsMailboxSignIn(authMode) {
+			out.AuthMode = RestoreAuthModeOAuth
+			probeEmail := loginID
+			if isMigrationRestore(loginID, targetEmail) {
+				probeEmail = targetEmail
+			}
+			return evaluateInviteOAuthReadiness(ctx, out, service, probeEmail, req.InviteAccessToken)
+		}
+		return evaluateOAuthReadiness(ctx, store, out, service, cronJob, sourceCred)
+	}
 	switch authMode {
 	case RestoreAuthModeDWD:
 		return evaluateDWDReadiness(ctx, out, service, loginID)
 	default:
 		return evaluateOAuthReadiness(ctx, store, out, service, cronJob, sourceCred)
 	}
+}
+
+// evaluateInviteOAuthReadiness checks the Google account the invited member just signed into.
+// It never asks for domain-wide delegation.
+func evaluateInviteOAuthReadiness(ctx context.Context, out *ReadinessResult, service, probeEmail, accessToken string) (*ReadinessResult, error) {
+	accessToken = strings.TrimSpace(accessToken)
+	if accessToken == "" {
+		out.Ready = false
+		out.Reason = ReadinessReasonInviteOAuthRequired
+		out.Message = restoreReadinessInviteOAuthRequired
+		out.ReconnectHint = "Sign in with Google as the mailbox being restored."
+		return out, nil
+	}
+
+	details, err := google.GetGoogleAccountDetailsFromAccessToken(accessToken)
+	if err != nil {
+		out.Ready = false
+		out.Reason = ReadinessReasonTokenRefreshFailed
+		out.Message = "Google sign-in could not be verified. Sign in with Google again, then retry restore."
+		return out, nil
+	}
+
+	required := google.RestoreOAuthScopesForService(service)
+	missing := google.TokenInfoMissingScopes(details.Scope, required)
+	if len(missing) > 0 {
+		out.Ready = false
+		out.Reason = ReadinessReasonMissingPermissions
+		out.GrantedScopes = strings.Fields(details.Scope)
+		out.MissingPermissions = oauthMissingList(service, missing)
+		out.Message = "Google sign-in is missing permission to restore this service. Sign in again and allow the requested access."
+		out.ReconnectHint = "Sign in with Google as the mailbox being restored."
+		return out, nil
+	}
+	out.GrantedScopes = strings.Fields(details.Scope)
+
+	if err := probeOAuthRestore(ctx, service, accessToken, probeEmail); err != nil {
+		out.Ready = false
+		out.Reason = ReadinessReasonAPIProbeFailed
+		out.Message = err.Error()
+		return out, nil
+	}
+	out.Ready = true
+	return out, nil
 }
 
 func isMigrationRestore(loginID, targetEmail string) bool {
@@ -272,7 +353,7 @@ func evaluateCredentialOAuthReadiness(ctx context.Context, out *ReadinessResult,
 		out.Reason = ReadinessReasonMissingPermissions
 		out.GrantedScopes = []string{}
 		out.MissingPermissions = oauthMissingList(service, required)
-		out.ReconnectHint = "Use dashboard Google reconnect (auto-sync) to grant missing OAuth scopes"
+		out.ReconnectHint = "Use Restore Grant Access (writes refresh token to Backup-Tools). Auto-sync reconnect alone only grants readonly scopes."
 		out.Message = restoreReadinessMissingScopes
 		return out, nil
 	}
@@ -282,7 +363,7 @@ func evaluateCredentialOAuthReadiness(ctx context.Context, out *ReadinessResult,
 		out.Ready = false
 		out.Reason = ReadinessReasonTokenRefreshFailed
 		out.Message = restoreReadinessRefreshInvalid
-		out.ReconnectHint = "Use dashboard Google reconnect (auto-sync) to grant missing OAuth scopes"
+		out.ReconnectHint = "Use Restore Grant Access (writes refresh token to Backup-Tools). Auto-sync reconnect alone only grants readonly scopes."
 		return out, nil
 	}
 
@@ -291,7 +372,7 @@ func evaluateCredentialOAuthReadiness(ctx context.Context, out *ReadinessResult,
 		out.Ready = false
 		out.Reason = ReadinessReasonTokenRefreshFailed
 		out.Message = restoreReadinessTokenValidation
-		out.ReconnectHint = "Use dashboard Google reconnect (auto-sync) to grant missing OAuth scopes"
+		out.ReconnectHint = "Use Restore Grant Access (writes refresh token to Backup-Tools). Auto-sync reconnect alone only grants readonly scopes."
 		return out, nil
 	}
 
@@ -302,7 +383,7 @@ func evaluateCredentialOAuthReadiness(ctx context.Context, out *ReadinessResult,
 		out.Reason = ReadinessReasonMissingPermissions
 		out.GrantedScopes = strings.Fields(details.Scope)
 		out.MissingPermissions = oauthMissingList(service, missing)
-		out.ReconnectHint = "Use dashboard Google reconnect (auto-sync) to grant missing OAuth scopes"
+		out.ReconnectHint = "Use Restore Grant Access (writes refresh token to Backup-Tools). Auto-sync reconnect alone only grants readonly scopes."
 		out.Message = restoreReadinessMissingScopes
 		return out, nil
 	}
@@ -350,6 +431,13 @@ func ResolveRestoreAuthMode(service, accountType, loginID, holderEmail string, c
 	return RestoreAuthModeOAuth
 }
 
+// InviteRestoreNeedsMailboxSignIn is true only when in-place restore would use
+// domain-wide delegation (admin restoring another Workspace mailbox). Invited
+// members cannot use DWD. Personal accounts restore with the owner's OAuth.
+func InviteRestoreNeedsMailboxSignIn(authMode string) bool {
+	return strings.EqualFold(strings.TrimSpace(authMode), RestoreAuthModeDWD)
+}
+
 func evaluateDWDReadiness(ctx context.Context, out *ReadinessResult, service, subjectEmail string) (*ReadinessResult, error) {
 	subjectEmail = strings.TrimSpace(subjectEmail)
 	if subjectEmail == "" {
@@ -362,15 +450,23 @@ func evaluateDWDReadiness(ctx context.Context, out *ReadinessResult, service, su
 		out.Message = err.Error()
 		return out, nil
 	}
+	// Only expose scopes for the service being prepared (e.g. gmail-only restore → gmail.insert).
+	scope := google.RestoreDWDScopeForService(service)
+	if scope != "" {
+		setup.Scopes = map[string]string{service: scope}
+		out.RequiredDWDScopes = []string{scope}
+	}
 	out.DelegationSetup = setup
-	out.RequiredDWDScopes = google.AllRestoreDWDScopeURLs()
 
 	if err := google.ProbeDWDRestore(ctx, service, subjectEmail); err != nil {
 		out.Ready = false
 		out.Reason = ReadinessReasonDWDNotConfigured
-		out.Message = restoreReadinessDWDNotConfigured
+		out.Message = fmt.Sprintf(restoreTplReadinessDWDNotConfigured, service)
 		out.MissingPermissions = dwdMissingList(service, err)
-		out.ReconnectHint = "Workspace admin must add all restore scopes for gmail, drive, calendar, contacts, and photos (OAuth reconnect does not apply to delegated mailboxes)"
+		out.ReconnectHint = fmt.Sprintf(
+			"Workspace admin must add the %s restore scope for client_id in delegation_setup (OAuth reconnect does not apply to delegated mailboxes)",
+			service,
+		)
 		return out, nil
 	}
 	out.Ready = true
@@ -379,26 +475,17 @@ func evaluateDWDReadiness(ctx context.Context, out *ReadinessResult, service, su
 
 func dwdMissingList(service string, probeErr error) []MissingPermission {
 	scope := google.RestoreDWDScopeForService(service)
-	desc := "Domain-wide delegation — authorize all restore scopes in Admin Console (see required_dwd_scopes)"
+	desc := fmt.Sprintf(
+		"Domain-wide delegation — authorize the %s restore scope in Admin Console (see required_dwd_scopes)",
+		service,
+	)
 	if probeErr != nil {
 		desc = desc + ": " + probeErr.Error()
 	}
-	perService := []MissingPermission{{
+	return []MissingPermission{{
 		Type: "dwd", Service: service, Scope: scope,
 		Description: desc,
 	}}
-	all := make([]MissingPermission, 0, len(google.RestoreDWDScopesMap())+1)
-	all = append(all, perService...)
-	for svc, sc := range google.RestoreDWDScopesMap() {
-		if svc == service {
-			continue
-		}
-		all = append(all, MissingPermission{
-			Type: "dwd", Service: svc, Scope: sc,
-			Description: "Also required in Admin Console for restore-all on other services",
-		})
-	}
-	return all
 }
 
 func evaluateOAuthReadiness(ctx context.Context, store *db.PostgresDb, out *ReadinessResult, service string, cronJob *repo.CronJobListingDB, cred *repo.GoogleBackupCredentialDB) (*ReadinessResult, error) {
@@ -410,7 +497,7 @@ func evaluateOAuthReadiness(ctx context.Context, store *db.PostgresDb, out *Read
 		out.Ready = false
 		out.Reason = ReadinessReasonTokenRefreshFailed
 		out.Message = restoreReadinessRefreshMissing
-		out.ReconnectHint = "Use dashboard Google reconnect (PUT /auto-sync/job) to grant tokens"
+		out.ReconnectHint = "Use Restore Grant Access (writes refresh token to Backup-Tools). Auto-sync reconnect alone only grants readonly scopes."
 		return out, nil
 	}
 
@@ -419,7 +506,7 @@ func evaluateOAuthReadiness(ctx context.Context, store *db.PostgresDb, out *Read
 		out.Ready = false
 		out.Reason = ReadinessReasonTokenRefreshFailed
 		out.Message = restoreReadinessRefreshInvalid
-		out.ReconnectHint = "Use dashboard Google reconnect (PUT /auto-sync/job) with full scopes"
+		out.ReconnectHint = "Use Restore Grant Access (writes refresh token to Backup-Tools). Auto-sync reconnect alone only grants readonly scopes."
 		return out, nil
 	}
 
@@ -428,6 +515,7 @@ func evaluateOAuthReadiness(ctx context.Context, store *db.PostgresDb, out *Read
 		out.Ready = false
 		out.Reason = ReadinessReasonTokenRefreshFailed
 		out.Message = restoreReadinessTokenValidation
+		out.ReconnectHint = "Use Restore Grant Access (writes refresh token to Backup-Tools). Auto-sync reconnect alone only grants readonly scopes."
 		return out, nil
 	}
 
@@ -438,7 +526,7 @@ func evaluateOAuthReadiness(ctx context.Context, store *db.PostgresDb, out *Read
 		out.Reason = ReadinessReasonMissingPermissions
 		out.GrantedScopes = strings.Fields(details.Scope)
 		out.MissingPermissions = oauthMissingList(service, missing)
-		out.ReconnectHint = "Use dashboard Google reconnect (auto-sync) to grant missing OAuth scopes"
+		out.ReconnectHint = "Use Restore Grant Access (writes refresh token to Backup-Tools). Auto-sync reconnect alone only grants readonly scopes."
 		out.Message = restoreReadinessMissingScopes
 		return out, nil
 	}
@@ -538,6 +626,7 @@ func CreateRestoreJobFromReadiness(ctx context.Context, store *db.PostgresDb, us
 		AccountType:    prep.AccountType,
 		CredentialID:   prep.CredentialID,
 		CronJobID:      prep.CronJobID,
+		TenantID:       prep.TenantID,
 		Status:         repo.RestoreJobStatusQueued,
 		Message:        "restore queued",
 		MessageStatus:  repo.JobMessageStatusInfo,

@@ -704,7 +704,7 @@ SELECT
   COALESCE(p.retention_type, 'never') AS retention_type
 FROM cron_job_listing_dbs c
 LEFT JOIN autosync_backup_policy_dbs p ON p.id = c.policy_id AND p.deleted_at IS NULL
-LEFT JOIN google_backup_credentials g ON g.id = (c.input_data->>'credential_id')::bigint AND g.deleted_at IS NULL
+LEFT JOIN google_backup_credential_dbs g ON g.id = (c.input_data->>'credential_id')::bigint AND g.deleted_at IS NULL
 WHERE c.deleted_at IS NULL
   AND (c.policy_id IS NULL OR c.policy_id = 0)
   AND c.interval NOT IN ('', 'one_time')

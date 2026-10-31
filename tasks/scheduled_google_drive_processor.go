@@ -338,7 +338,10 @@ func (g *GoogleDriveProcessor) uploadFile(ctx context.Context, input ScheduledTa
 			return fmt.Errorf("failed to export file: %v", err)
 		}
 	} else {
-		resp, err = service.Files.Get(file.Id).Download()
+		resp, err = service.Files.Get(file.Id).SupportsAllDrives(true).Download()
+		if err != nil && strings.Contains(err.Error(), "cannotDownloadAbusiveFile") {
+			resp, err = service.Files.Get(file.Id).SupportsAllDrives(true).AcknowledgeAbuse(true).Download()
+		}
 		if err != nil {
 			return fmt.Errorf("failed to download file: %v", err)
 		}

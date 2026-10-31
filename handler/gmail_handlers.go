@@ -19,6 +19,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
 	"github.com/StorX2-0/Backup-Tools/restore"
+	googlestore "github.com/StorX2-0/Backup-Tools/restore/google"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	"golang.org/x/sync/errgroup"
 
@@ -97,11 +98,11 @@ func (s *GmailService) UploadMessagesToSatellite(ctx context.Context, database *
 					return nil
 				}
 
-				messagePath := s.userEmail + "/" + utils.GenerateTitleFromGmailMessage(msg)
+				messagePath := google.GmailObjectKey(s.userEmail, msg)
 
 				// Use helper function to upload and sync
-				// Source and Type are automatically derived from bucket name ("gmail" -> source: "google", type: "gmail")
-				err = UploadObjectAndSync(ctx, database, s.accessGrant, "gmail", messagePath, b, s.userEmail)
+				// Source and Type are automatically derived from bucket name ("cyberls-gmail" -> source: "google", type: "gmail")
+				err = UploadObjectAndSync(ctx, database, s.accessGrant, satellite.ReserveBucket_Gmail, messagePath, b, s.userEmail)
 				if err != nil {
 					logger.Info(ctx, "error uploading to satellite", logger.ErrorField(err))
 					failedIDs.Add(id)
@@ -139,7 +140,7 @@ func (s *GmailService) DownloadMessagesFromSatellite(ctx context.Context, sess *
 			continue
 		}
 		g.Go(func() error {
-			if err := restore.RestoreGmailKeyWithSession(ctx, sess, s.client, key); err != nil {
+			if err := googlestore.RestoreGmailKeyWithSession(ctx, sess, s.client, key); err != nil {
 				logger.Info(ctx, "error restoring message into Gmail", logger.ErrorField(err))
 				failedIDs.Add(key)
 			} else {
@@ -403,8 +404,7 @@ func HandleGmailGetThreadsIDsControlled(c echo.Context) error {
 	}
 
 	for _, message := range res.Messages {
-		messagePath := userDetails.Email + "/" + utils.GenerateTitleFromGmailMessage(message)
-		synced := syncedMap[messagePath]
+		synced := google.IsGmailMessageSynced(syncedMap, userDetails.Email, message)
 		threads = append(threads, MessageListJSON{Message: *message, Synced: synced})
 	}
 	nextPageToken = res.NextPageToken
@@ -439,7 +439,7 @@ func HandleGmailDownloadAndInsert(c echo.Context) error {
 		logger.Warn(ctx, "Failed to get user email for notification", logger.ErrorField(err))
 	}
 
-	storxSess, err := resolveManualRestoreStorx(c, "gmail", userDetails.Email)
+	storxSess, err := resolveManualRestoreStorxForKeys(c, "gmail", userDetails.Email, allIDs)
 	if err != nil {
 		return err
 	}

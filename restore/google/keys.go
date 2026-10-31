@@ -1,4 +1,4 @@
-package restore
+package googlestore
 
 import (
 	"context"
@@ -7,10 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+
+	"github.com/StorX2-0/Backup-Tools/restore"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/satellite"
-	"github.com/gphotosuploader/google-photos-api-client-go/v2/albums"
 	"google.golang.org/api/calendar/v3"
 	"google.golang.org/api/drive/v3"
 	gmailapi "google.golang.org/api/gmail/v1"
@@ -18,7 +21,7 @@ import (
 )
 
 // RestoreGmailKeyWithSession downloads using DB storx grant (manual restore, single attempt).
-func RestoreGmailKeyWithSession(ctx context.Context, sess *StorxGrantSession, client *google.GmailClient, objectKey string) error {
+func RestoreGmailKeyWithSession(ctx context.Context, sess *restore.StorxGrantSession, client *google.GmailClient, objectKey string) error {
 	data, err := sess.DownloadObject(ctx, satellite.ReserveBucket_Gmail, objectKey)
 	if err != nil {
 		return err
@@ -27,15 +30,21 @@ func RestoreGmailKeyWithSession(ctx context.Context, sess *StorxGrantSession, cl
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return err
 	}
-	return RetryGoogle(ctx, func() error {
+	return restore.RetryGoogle(ctx, func() error {
 		return client.InsertMessage(&msg)
 	})
 }
 
 // RestoreGmailKey downloads one message from Satellite and inserts into Gmail (restore-all).
 func RestoreGmailKey(ctx context.Context, accessGrant string, client *google.GmailClient, objectKey string) error {
-	data, err := downloadBytesRestoreAll(ctx, accessGrant, satellite.ReserveBucket_Gmail, objectKey, restoreDownloadHints{
-		mimeType: "application/json",
+	return RestoreGmailKeyDeduped(ctx, accessGrant, client, objectKey, nil)
+}
+
+// RestoreGmailKeyDeduped is like RestoreGmailKey but skips insert when JSON message.Id
+// was already restored in this job run (legacy + labeled overlap).
+func RestoreGmailKeyDeduped(ctx context.Context, accessGrant string, client *google.GmailClient, objectKey string, seen *sync.Map) error {
+	data, err := restore.DownloadBytes(ctx, accessGrant, satellite.ReserveBucket_Gmail, objectKey, restore.DownloadHints{
+		MimeType: "application/json",
 	})
 	if err != nil {
 		return err
@@ -44,21 +53,80 @@ func RestoreGmailKey(ctx context.Context, accessGrant string, client *google.Gma
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return err
 	}
-	return RetryGoogle(ctx, func() error {
+	if seen != nil && strings.TrimSpace(msg.Id) != "" {
+		if _, loaded := seen.LoadOrStore(msg.Id, struct{}{}); loaded {
+			return nil
+		}
+	}
+	err = restore.RetryGoogle(ctx, func() error {
 		return client.InsertMessage(&msg)
 	})
+	if err != nil && seen != nil && strings.TrimSpace(msg.Id) != "" {
+		seen.Delete(msg.Id)
+	}
+	return err
 }
 
 // RestoreDriveKeyWithSession restores one Drive object using DB storx grant (manual restore).
-func RestoreDriveKeyWithSession(ctx context.Context, sess *StorxGrantSession, srv *drive.Service, userEmail, objectKey string) error {
+func RestoreDriveKeyWithSession(ctx context.Context, sess *restore.StorxGrantSession, srv *drive.Service, userEmail, objectKey string) error {
 	return restoreDriveObjectKey(ctx, func(bucket, key string) ([]byte, error) {
 		return sess.DownloadObject(ctx, bucket, key)
-	}, srv, userEmail, objectKey)
+	}, srv, userEmail, objectKey, nil)
 }
 
 // RestoreDriveKey restores one Drive backup object (restore-all with streaming for large files).
 func RestoreDriveKey(ctx context.Context, accessGrant string, srv *drive.Service, userEmail, objectKey string) error {
-	return restoreDriveObjectKeyRestoreAll(ctx, accessGrant, srv, userEmail, objectKey)
+	return RestoreDriveKeyWithFolderMap(ctx, accessGrant, srv, userEmail, objectKey, nil)
+}
+
+// RestoreDriveKeyWithFolderMap restores Drive objects; folderNames maps Google folder ID → display name.
+func RestoreDriveKeyWithFolderMap(ctx context.Context, accessGrant string, srv *drive.Service, userEmail, objectKey string, folderNames map[string]string) error {
+	return restoreDriveObjectKeyRestoreAll(ctx, accessGrant, srv, userEmail, objectKey, folderNames)
+}
+
+func loadDriveFolderNameMap(ctx context.Context, deps *restore.RestoreDeps) map[string]string {
+	if deps == nil {
+		return map[string]string{}
+	}
+	return deps.DriveFolderNameMap(func() map[string]string {
+		return buildDriveFolderNameMap(deps)
+	})
+}
+
+func buildDriveFolderNameMap(deps *restore.RestoreDeps) map[string]string {
+	out := map[string]string{}
+	if deps == nil || deps.Store == nil || deps.Store.SyncedObjectRepo == nil {
+		return out
+	}
+	userID := ""
+	if deps.Job != nil {
+		userID = strings.TrimSpace(deps.Job.UserID)
+	}
+	if userID == "" {
+		return out
+	}
+	email := strings.TrimSpace(deps.LoginID)
+	if email == "" {
+		email = strings.TrimSpace(WriteEmail(deps))
+	}
+	prefix := ""
+	if email != "" {
+		prefix = email + "/"
+	}
+	keys, err := deps.Store.SyncedObjectRepo.ListSyncedObjectKeys(userID, satellite.ReserveBucket_Drive, "google", "drive", prefix)
+	if err != nil {
+		return out
+	}
+	for _, key := range keys {
+		p, ok := google.ParseDriveObjectKey(key)
+		if !ok || !p.IsFolder {
+			continue
+		}
+		if p.Name != "" {
+			out[p.FileID] = p.Name
+		}
+	}
+	return out
 }
 
 func restoreDriveObjectKey(
@@ -66,7 +134,11 @@ func restoreDriveObjectKey(
 	download func(bucket, key string) ([]byte, error),
 	srv *drive.Service,
 	userEmail, objectKey string,
+	folderNames map[string]string,
 ) error {
+	if google.IsDriveTreeObjectKey(objectKey) {
+		return restoreDriveTreeObjectKey(ctx, download, "", srv, userEmail, objectKey, folderNames)
+	}
 	if google.IsDriveIDBasedMetaKey(objectKey) {
 		metaBytes, err := download(satellite.ReserveBucket_Drive, objectKey)
 		if err != nil {
@@ -98,7 +170,7 @@ func restoreDriveObjectKey(
 		if err != nil {
 			return err
 		}
-		return RetryGoogle(ctx, func() error {
+		return restore.RetryGoogle(ctx, func() error {
 			return google.RestoreFromBackup(ctx, srv, userEmail, metadataJSON, fileBytes)
 		})
 	}
@@ -112,7 +184,7 @@ func restoreDriveObjectKey(
 		return fmt.Errorf("parse drive backup: %w", err)
 	}
 	metadataJSON, _ := json.Marshal(backupItem.Metadata)
-	return RetryGoogle(ctx, func() error {
+	return restore.RetryGoogle(ctx, func() error {
 		return google.RestoreFromBackup(ctx, srv, userEmail, metadataJSON, backupItem.Content)
 	})
 }
@@ -122,10 +194,18 @@ func restoreDriveObjectKeyRestoreAll(
 	accessGrant string,
 	srv *drive.Service,
 	userEmail, objectKey string,
+	folderNames map[string]string,
 ) error {
+	if google.IsDriveTreeObjectKey(objectKey) {
+		if google.IsDriveFolderPlaceholderKey(objectKey) {
+			return restoreDriveTreeFolderKey(ctx, accessGrant, srv, userEmail, objectKey, folderNames)
+		}
+		return restoreDriveTreeObjectKey(ctx, nil, accessGrant, srv, userEmail, objectKey, folderNames)
+	}
 	if google.IsDriveIDBasedMetaKey(objectKey) {
 		metaBytes, err := satellite.DownloadObject(ctx, accessGrant, satellite.ReserveBucket_Drive, objectKey)
 		if err != nil {
+			logger.Warn(ctx, "restore drive meta download failed", logger.String("object_key", objectKey), logger.ErrorField(err))
 			return err
 		}
 		var meta google.DriveCronBackupMeta
@@ -150,11 +230,11 @@ func restoreDriveObjectKeyRestoreAll(
 		if err != nil {
 			return err
 		}
-		return restoreDriveDataFromStorxStream(ctx, accessGrant, srv, userEmail, dataKey, metadataJSON)
+		return RestoreDriveDataFromStorxStream(ctx, accessGrant, srv, userEmail, dataKey, metadataJSON)
 	}
 
-	data, err := downloadBytesRestoreAll(ctx, accessGrant, satellite.ReserveBucket_Drive, objectKey, restoreDownloadHints{
-		mimeType: "application/json",
+	data, err := restore.DownloadBytes(ctx, accessGrant, satellite.ReserveBucket_Drive, objectKey, restore.DownloadHints{
+		MimeType: "application/json",
 	})
 	if err != nil {
 		return err
@@ -164,13 +244,199 @@ func restoreDriveObjectKeyRestoreAll(
 		return fmt.Errorf("parse drive backup: %w", err)
 	}
 	metadataJSON, _ := json.Marshal(backupItem.Metadata)
-	return RetryGoogle(ctx, func() error {
+	return restore.RetryGoogle(ctx, func() error {
 		return google.RestoreFromBackup(ctx, srv, userEmail, metadataJSON, backupItem.Content)
 	})
 }
 
+// restoreDriveTreeFolderKey untrashes/recreates a Drive folder from a .folder__ placeholder key.
+func restoreDriveTreeFolderKey(
+	ctx context.Context,
+	accessGrant string,
+	srv *drive.Service,
+	userEmail, objectKey string,
+	folderNames map[string]string,
+) error {
+	parsed, ok := google.ParseDriveObjectKey(objectKey)
+	if !ok || !parsed.IsFolder {
+		return fmt.Errorf("not a drive tree folder key: %s", objectKey)
+	}
+
+	rc := google.NewRestoreContext(srv, userEmail)
+	for _, sec := range parsed.Sections {
+		if strings.HasPrefix(sec, google.DriveSectionSharedDrivePrefix) {
+			rc.DriveID = strings.TrimPrefix(sec, google.DriveSectionSharedDrivePrefix)
+			rc.LocationType = "SHARED_DRIVE"
+		}
+		if sec == google.DriveSectionSharedWithMe {
+			rc.LocationType = "SHARED_WITH_ME"
+		}
+	}
+
+	parentID := "root"
+	if rc.DriveID != "" {
+		parentID = rc.DriveID
+	}
+	for _, pid := range parsed.ParentIDs {
+		fname := pid
+		if folderNames != nil {
+			if n := strings.TrimSpace(folderNames[pid]); n != "" {
+				fname = n
+			}
+		}
+		seg := pid + "_" + google.SanitizeDrivePathSegment(fname)
+		next, err := rc.GetOrCreateFolder(ctx, seg, parentID)
+		if err != nil {
+			logger.Warn(ctx, "restore drive folder parent failed",
+				logger.String("object_key", objectKey),
+				logger.String("parent_seg", seg),
+				logger.ErrorField(err))
+			return err
+		}
+		parentID = next
+	}
+
+	leafName := parsed.Name
+	if leafName == "" {
+		leafName = parsed.FileID
+	}
+	leafSeg := parsed.FileID + "_" + google.SanitizeDrivePathSegment(leafName)
+	_, err := rc.GetOrCreateFolder(ctx, leafSeg, parentID)
+	return err
+}
+
+// restoreDriveTreeObjectKey restores object-key-tree Drive backups (custom metadata + optional physical-object-key).
+func restoreDriveTreeObjectKey(
+	ctx context.Context,
+	download func(bucket, key string) ([]byte, error),
+	accessGrant string,
+	srv *drive.Service,
+	userEmail, objectKey string,
+	folderNames map[string]string,
+) error {
+	parsed, ok := google.ParseDriveObjectKey(objectKey)
+	if !ok || parsed.IsFolder {
+		return fmt.Errorf("not a drive tree file key: %s", objectKey)
+	}
+
+	var custom map[string]string
+	if accessGrant != "" {
+		obj, err := satellite.StatObject(ctx, accessGrant, satellite.ReserveBucket_Drive, objectKey)
+		if err != nil {
+			logger.Warn(ctx, "restore drive tree StatObject failed (continuing without custom meta)",
+				logger.String("object_key", objectKey),
+				logger.ErrorField(err))
+		} else if obj != nil && obj.Custom != nil {
+			custom = obj.Custom
+		}
+	}
+
+	physicalKey := objectKey
+	isAlias := false
+	if custom != nil {
+		if pk := strings.TrimSpace(custom[google.DriveMetaPhysicalObjectKey]); pk != "" {
+			physicalKey = pk
+			isAlias = true
+		}
+		if strings.EqualFold(custom[google.DriveMetaIsAlias], "true") && strings.TrimSpace(custom[google.DriveMetaPhysicalObjectKey]) != "" {
+			isAlias = true
+		}
+	}
+
+	// BIN-only aliases with no useful restore target: skip cleanly when no physical bytes.
+	for _, sec := range parsed.Sections {
+		if sec == google.DriveSectionBin && isAlias {
+			// Still restore content from physical key into My Drive (not trash).
+			break
+		}
+	}
+
+	name := parsed.Name
+	mimeType := "application/octet-stream"
+	fileID := parsed.FileID
+	if custom != nil {
+		if v := strings.TrimSpace(custom[google.DriveMetaOriginalName]); v != "" {
+			name = v
+		}
+		if v := strings.TrimSpace(custom[google.DriveMetaGoogleMimeType]); v != "" {
+			mimeType = v
+		}
+		if v := strings.TrimSpace(custom[google.DriveMetaBackupMimeType]); v != "" {
+			// Prefer backup mime for upload content type.
+			mimeType = v
+		}
+		if v := strings.TrimSpace(custom[google.DriveMetaGoogleFileID]); v != "" {
+			fileID = v
+		}
+	}
+
+	locType := "MY_DRIVE"
+	driveID := ""
+	for _, sec := range parsed.Sections {
+		if sec == google.DriveSectionSharedWithMe {
+			locType = "SHARED_WITH_ME"
+		}
+		if strings.HasPrefix(sec, google.DriveSectionSharedDrivePrefix) {
+			locType = "SHARED_DRIVE"
+			driveID = strings.TrimPrefix(sec, google.DriveSectionSharedDrivePrefix)
+		}
+	}
+
+	// Synthetic legacy-compatible key: email / {folderId}_{name} / ... / {fileId}${name}
+	synthParts := []string{strings.TrimSpace(userEmail)}
+	if locType != "SHARED_WITH_ME" {
+		for _, pid := range parsed.ParentIDs {
+			fname := pid
+			if folderNames != nil {
+				if n := strings.TrimSpace(folderNames[pid]); n != "" {
+					fname = n
+				}
+			}
+			synthParts = append(synthParts, pid+"_"+google.SanitizeDrivePathSegment(fname))
+		}
+	}
+	leafName := google.DriveBackupDisplayName(name, mimeType)
+	synthParts = append(synthParts, fileID+"_"+leafName)
+	synthKey := strings.Join(synthParts, "/")
+
+	driveMeta := google.DriveFileMetadata{
+		Key:          synthKey,
+		Type:         "file",
+		Name:         name,
+		MimeType:     mimeType,
+		FileID:       fileID,
+		DriveID:      driveID,
+		LocationType: locType,
+	}
+	if custom != nil {
+		if t := strings.TrimSpace(custom[google.DriveMetaShortcutTargetID]); t != "" {
+			// Restore shortcut as empty placeholder file named after shortcut; target may already exist.
+			driveMeta.MimeType = "application/vnd.google-apps.shortcut"
+		}
+	}
+	metadataJSON, err := json.Marshal(driveMeta)
+	if err != nil {
+		return err
+	}
+
+	if accessGrant != "" {
+		err := RestoreDriveDataFromStorxStream(ctx, accessGrant, srv, userEmail, physicalKey, metadataJSON)
+		return err
+	}
+	if download == nil {
+		return fmt.Errorf("no download path for drive tree key")
+	}
+	fileBytes, err := download(satellite.ReserveBucket_Drive, physicalKey)
+	if err != nil {
+		return err
+	}
+	return restore.RetryGoogle(ctx, func() error {
+		return google.RestoreFromBackup(ctx, srv, userEmail, metadataJSON, fileBytes)
+	})
+}
+
 // RestoreCalendarKeyWithSession restores one calendar event using DB storx grant (manual restore).
-func RestoreCalendarKeyWithSession(ctx context.Context, sess *StorxGrantSession, service *calendar.Service, objectKey string) error {
+func RestoreCalendarKeyWithSession(ctx context.Context, sess *restore.StorxGrantSession, service *calendar.Service, objectKey string) error {
 	if !google.IsCalendarEventRestoreObjectKey(objectKey) {
 		return fmt.Errorf("invalid calendar restore key")
 	}
@@ -182,7 +448,7 @@ func RestoreCalendarKeyWithSession(ctx context.Context, sess *StorxGrantSession,
 	if err != nil {
 		return err
 	}
-	return RetryGoogle(ctx, func() error {
+	return restore.RetryGoogle(ctx, func() error {
 		return google.RestoreCalendarEventFromBackup(ctx, service, calendarID, data)
 	})
 }
@@ -196,19 +462,19 @@ func RestoreCalendarKey(ctx context.Context, accessGrant string, service *calend
 	if !ok {
 		return fmt.Errorf("parse calendar key")
 	}
-	data, err := downloadBytesRestoreAll(ctx, accessGrant, satellite.ReserveBucket_Calendar, objectKey, restoreDownloadHints{
-		mimeType: "application/json",
+	data, err := restore.DownloadBytes(ctx, accessGrant, satellite.ReserveBucket_Calendar, objectKey, restore.DownloadHints{
+		MimeType: "application/json",
 	})
 	if err != nil {
 		return err
 	}
-	return RetryGoogle(ctx, func() error {
+	return restore.RetryGoogle(ctx, func() error {
 		return google.RestoreCalendarEventFromBackup(ctx, service, calendarID, data)
 	})
 }
 
 // RestoreContactKeyWithSession restores one contact using DB storx grant (manual restore).
-func RestoreContactKeyWithSession(ctx context.Context, sess *StorxGrantSession, service *people.Service, objectKey string) error {
+func RestoreContactKeyWithSession(ctx context.Context, sess *restore.StorxGrantSession, service *people.Service, objectKey string, seen *google.ContactIdentityIndex) error {
 	if !google.IsContactsRestoreObjectKey(objectKey) {
 		return fmt.Errorf("invalid contacts restore key")
 	}
@@ -216,29 +482,29 @@ func RestoreContactKeyWithSession(ctx context.Context, sess *StorxGrantSession, 
 	if err != nil {
 		return err
 	}
-	return RetryGoogle(ctx, func() error {
-		return google.RestoreContactFromBackup(ctx, service, data)
+	return restore.RetryGoogle(ctx, func() error {
+		return google.RestoreContactFromBackup(ctx, service, data, seen)
 	})
 }
 
 // RestoreContactKey restores one contact JSON blob (restore-all).
-func RestoreContactKey(ctx context.Context, accessGrant string, service *people.Service, objectKey string) error {
+func RestoreContactKey(ctx context.Context, accessGrant string, service *people.Service, objectKey string, seen *google.ContactIdentityIndex) error {
 	if !google.IsContactsRestoreObjectKey(objectKey) {
 		return fmt.Errorf("invalid contacts restore key")
 	}
-	data, err := downloadBytesRestoreAll(ctx, accessGrant, satellite.ReserveBucket_Contacts, objectKey, restoreDownloadHints{
-		mimeType: "application/json",
+	data, err := restore.DownloadBytes(ctx, accessGrant, satellite.ReserveBucket_Contacts, objectKey, restore.DownloadHints{
+		MimeType: "application/json",
 	})
 	if err != nil {
 		return err
 	}
-	return RetryGoogle(ctx, func() error {
-		return google.RestoreContactFromBackup(ctx, service, data)
+	return restore.RetryGoogle(ctx, func() error {
+		return google.RestoreContactFromBackup(ctx, service, data, seen)
 	})
 }
 
 // RestorePhotosKey restores one photo (legacy or ID-based satellite keys, restore-all).
-func RestorePhotosKey(ctx context.Context, deps *RestoreDeps, objectKey string) error {
+func RestorePhotosKey(ctx context.Context, deps *restore.RestoreDeps, objectKey string) error {
 	if strings.Contains(objectKey, "/.file_placeholder") {
 		return fmt.Errorf("skip placeholder")
 	}
@@ -265,25 +531,25 @@ func RestorePhotosKey(ctx context.Context, deps *RestoreDeps, objectKey string) 
 	} else {
 		albumID, albumTitle, filename = parseGooglePhotosKey(objectKey)
 		dataKey = objectKey
-		mimeType = mimeFromFilename(filename)
+		mimeType = restore.MimeFromFilename(filename)
 	}
 
 	if strings.TrimSpace(filename) == "" {
 		filename = "restored_photo"
 	}
 	if strings.TrimSpace(mimeType) == "" {
-		mimeType = mimeFromFilename(filename)
+		mimeType = restore.MimeFromFilename(filename)
 	}
 
 	tempPath := filepath.Join(tempDir, filepath.Base(filename))
-	if err := streamToFileRestoreAll(ctx, deps.AccessGrant, satellite.ReserveBucket_Photos, dataKey, tempPath); err != nil {
+	if err := restore.StreamToFile(ctx, deps.AccessGrant, satellite.ReserveBucket_Photos, dataKey, tempPath); err != nil {
 		return err
 	}
 	defer os.Remove(tempPath)
 
 	targetAlbumID := ""
 	if albumTitle != "" {
-		alb, err := deps.getOrCreateAlbum(ctx, albumID, albumTitle)
+		alb, err := GetOrCreateAlbum(ctx, deps, albumID, albumTitle)
 		if err != nil {
 			return err
 		}
@@ -292,40 +558,10 @@ func RestorePhotosKey(ctx context.Context, deps *RestoreDeps, objectKey string) 
 		}
 	}
 
-	return RetryGoogle(ctx, func() error {
+	return restore.RetryGoogle(ctx, func() error {
 		_, err := deps.PhotosClient.UploadFileToAlbum(ctx, targetAlbumID, tempPath)
 		return err
 	})
-}
-
-func (d *RestoreDeps) getOrCreateAlbum(ctx context.Context, albumID, albumTitle string) (*albums.Album, error) {
-	cacheKey := albumID
-	if cacheKey == "" {
-		cacheKey = "title:" + albumTitle
-	}
-	d.photosAlbumMu.Lock()
-	if alb, ok := d.PhotosAlbumCache[cacheKey]; ok {
-		d.photosAlbumMu.Unlock()
-		return alb, nil
-	}
-	d.photosAlbumMu.Unlock()
-
-	var alb *albums.Album
-	var err error
-	if albumID != "" {
-		alb, _ = d.PhotosClient.Albums.GetById(ctx, albumID)
-	}
-	if alb == nil {
-		alb, err = d.PhotosClient.Albums.Create(ctx, albumTitle)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	d.photosAlbumMu.Lock()
-	d.PhotosAlbumCache[cacheKey] = alb
-	d.photosAlbumMu.Unlock()
-	return alb, nil
 }
 
 // photos parse helpers (same semantics as handler/google_photos_handlers.go)
@@ -371,7 +607,7 @@ func parseGooglePhotosKey(key string) (albumID, albumTitle, filename string) {
 }
 
 // DownloadPhotosIDBasedPayloadWithSession downloads ID-based photo backup using DB storx grant (manual restore).
-func DownloadPhotosIDBasedPayloadWithSession(ctx context.Context, sess *StorxGrantSession, triggerKey, dataKey, metaKey string) ([]byte, string, error) {
+func DownloadPhotosIDBasedPayloadWithSession(ctx context.Context, sess *restore.StorxGrantSession, triggerKey, dataKey, metaKey string) ([]byte, string, error) {
 	return downloadPhotosIDBasedRestorePayload(ctx, sess, triggerKey, dataKey, metaKey)
 }
 
@@ -423,7 +659,7 @@ func downloadPhotosIDBasedRestorePayloadWithGrant(ctx context.Context, accessGra
 	return body, filename, nil
 }
 
-func downloadPhotosIDBasedRestorePayload(ctx context.Context, sess *StorxGrantSession, triggerKey, dataKey, metaKey string) ([]byte, string, error) {
+func downloadPhotosIDBasedRestorePayload(ctx context.Context, sess *restore.StorxGrantSession, triggerKey, dataKey, metaKey string) ([]byte, string, error) {
 	dataKey = strings.TrimSpace(dataKey)
 	metaKey = strings.TrimSpace(metaKey)
 	filename := ""

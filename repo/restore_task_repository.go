@@ -89,6 +89,28 @@ func (r *RestoreTaskRepository) ClaimNextRetryTask() (*RestoreTaskListingDB, err
 	return &task, nil
 }
 
+// MaxCursorEndForJob is the furthest cursor_end_id written for a job (0 if none).
+func (r *RestoreTaskRepository) MaxCursorEndForJob(jobID uint) (uint, error) {
+	var end uint
+	err := r.db.Model(&RestoreTaskListingDB{}).
+		Where("restore_job_id = ? AND cursor_end_id > 0", jobID).
+		Select("COALESCE(MAX(cursor_end_id), 0)").
+		Scan(&end).Error
+	if err != nil {
+		return 0, fmt.Errorf("max restore task cursor: %w", err)
+	}
+	return end, nil
+}
+
+func (r *RestoreTaskRepository) CloseLeftoverRunningTasks(jobID uint) error {
+	return r.db.Model(&RestoreTaskListingDB{}).
+		Where("restore_job_id = ? AND status = ?", jobID, RestoreTaskStatusRunning).
+		Updates(map[string]interface{}{
+			"status":      RestoreTaskStatusSuccess,
+			"finished_at": time.Now(),
+		}).Error
+}
+
 func (r *RestoreTaskRepository) CancelPendingForJob(jobID uint) error {
 	return r.db.Model(&RestoreTaskListingDB{}).
 		Where("restore_job_id = ? AND status IN ?", jobID, []string{RestoreTaskStatusRunning, RestoreTaskStatusRetrying}).

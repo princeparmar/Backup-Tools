@@ -2,6 +2,7 @@ package repo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,6 +12,10 @@ import (
 	gormdb "gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+// SystemAccessCheckTaskMessage marks tasks that only run Microsoft per-user access verify
+// before (or instead of) a normal backup. These are picked first by GetPushedTask.
+const SystemAccessCheckTaskMessage = "System: Access check"
 
 // TaskListingDB represents a task in the database
 type TaskListingDB struct {
@@ -124,31 +129,46 @@ func (r *TaskRepository) MissedHeartbeatForTask() error {
 	return nil
 }
 
-// GetPushedTask retrieves a pushed task and updates its status to running
+// IsSystemAccessCheckTask reports whether this task is the internal access-verify pass.
+func IsSystemAccessCheckTask(task *TaskListingDB) bool {
+	return task != nil && strings.TrimSpace(task.Message) == SystemAccessCheckTaskMessage
+}
+
+// GetPushedTask retrieves a pushed task and updates its status to running.
+// System jobs (job_type=system) and legacy System: Access check tasks are picked first.
+// They may run while the job is inactive. Normal backup tasks still require an active job.
 func (r *TaskRepository) GetPushedTask() (*TaskListingDB, error) {
 	var res TaskListingDB
 	tx := r.db.Begin()
-	// lock table tasks for update and select and return the first row with status pushed
-	// or status 'failed' and retry count less than 3
 	db := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Joins("JOIN cron_job_listing_dbs ON task_listing_dbs.cron_job_id = cron_job_listing_dbs.id").
-		Where("cron_job_listing_dbs.active = ? AND (task_listing_dbs.status = ? OR (task_listing_dbs.status = ? AND task_listing_dbs.retry_count < ?))",
-			true, TaskStatusPushed, TaskStatusFailed, MaxRetryCount).
+		Where(`(task_listing_dbs.status = ? OR (task_listing_dbs.status = ? AND task_listing_dbs.retry_count < ?))
+			AND (cron_job_listing_dbs.active = ? OR COALESCE(cron_job_listing_dbs.job_type, ?) = ? OR task_listing_dbs.message = ?)`,
+			TaskStatusPushed, TaskStatusFailed, MaxRetryCount, true, JobTypeBackup, JobTypeSystem, SystemAccessCheckTaskMessage).
+		Order(`CASE WHEN COALESCE(cron_job_listing_dbs.job_type, '` + JobTypeBackup + `') = '` + JobTypeSystem + `' THEN 0 WHEN task_listing_dbs.message = '` + SystemAccessCheckTaskMessage + `' THEN 1 ELSE 2 END, task_listing_dbs.id ASC`).
 		First(&res)
 	if db.Error != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf("error getting pushed task: %v", db.Error)
 	}
 
-	// Update status to running and set start time
 	prevStatus := res.Status
+	var job CronJobListingDB
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=?", res.CronJobID).First(&job).Error; err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("error getting job: %v", err)
+	}
+	systemJob := IsSystemJob(&job) || IsSystemAccessCheckTask(&res)
+
 	res.Status = TaskStatusRunning
 	startTime := time.Now()
 	res.StartTime = &startTime
 	res.LastHeartBeat = &startTime
-	// Retries reuse the same row; preserve accumulated failure messages. Only reset for a new pushed task.
-	if prevStatus == TaskStatusPushed {
+	if prevStatus == TaskStatusPushed && !systemJob {
 		res.Message = "Automatic backup started"
+	}
+	if prevStatus == TaskStatusPushed && systemJob && strings.TrimSpace(res.Message) == "" {
+		res.Message = SystemAccessCheckTaskMessage
 	}
 
 	if err := tx.Save(&res).Error; err != nil {
@@ -156,14 +176,13 @@ func (r *TaskRepository) GetPushedTask() (*TaskListingDB, error) {
 		return nil, fmt.Errorf("error updating pushed task status: %v", err)
 	}
 
-	var job CronJobListingDB
-	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=?", res.CronJobID).First(&job).Error; err != nil {
-		tx.Rollback()
-		return nil, fmt.Errorf("error getting job: %v", err)
+	if systemJob {
+		job.Message = SystemAccessCheckTaskMessage
+		job.MessageStatus = JobMessageStatusInfo
+	} else {
+		job.Message = "Automatic backup started"
+		job.MessageStatus = JobMessageStatusInfo
 	}
-
-	job.Message = "Automatic backup started"
-	job.MessageStatus = JobMessageStatusInfo
 	job.Status = JobStatusInProgress
 
 	if err := tx.Save(&job).Error; err != nil {
@@ -177,6 +196,54 @@ func (r *TaskRepository) GetPushedTask() (*TaskListingDB, error) {
 	}
 
 	return &res, nil
+}
+
+// CreateSystemAccessCheckTaskForCronJob queues the internal access-verify pass for a draft job.
+// Picked before normal backups via GetPushedTask. Idempotent while a pushed/running/retryable
+// system access-check task already exists for the job.
+func (r *TaskRepository) CreateSystemAccessCheckTaskForCronJob(cronJobID uint) (*TaskListingDB, error) {
+	tx := r.db.Begin()
+
+	var existing TaskListingDB
+	find := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where(`cron_job_id = ? AND message = ? AND (status = ? OR status = ? OR (status = ? AND retry_count < ?))`,
+			cronJobID, SystemAccessCheckTaskMessage, TaskStatusPushed, TaskStatusRunning, TaskStatusFailed, MaxRetryCount).
+		First(&existing)
+	if find.Error == nil {
+		_ = tx.Rollback()
+		return &existing, nil
+	}
+	if find.Error != nil && !errors.Is(find.Error, gormdb.ErrRecordNotFound) {
+		tx.Rollback()
+		return nil, fmt.Errorf("error checking system access-check task: %v", find.Error)
+	}
+
+	data := TaskListingDB{
+		CronJobID: cronJobID,
+		Status:    TaskStatusPushed,
+		Message:   SystemAccessCheckTaskMessage,
+	}
+
+	res := tx.Create(&data)
+	if res != nil && res.Error != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("error creating system access-check task: %v", res.Error)
+	}
+
+	updates := map[string]interface{}{
+		"status": JobStatusInQueue,
+		"hidden": false,
+	}
+	if err := tx.Model(&CronJobListingDB{}).Where("id = ?", cronJobID).Updates(updates).Error; err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("error updating cron job status: %v", err)
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return nil, fmt.Errorf("error committing transaction: %v", err)
+	}
+
+	return &data, nil
 }
 
 // GetTaskByID retrieves a task by its ID

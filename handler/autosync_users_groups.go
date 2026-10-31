@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
@@ -30,6 +31,8 @@ const (
 	usersGroupsCredentialReAuthRequired = "re_auth_required"
 	usersGroupsAccountCorporate         = "corporate"
 	usersGroupsAccountIndividual        = "individual"
+	usersGroupsStorageS3                = "s3"
+	usersGroupsStorageDefault           = "default"
 )
 
 var (
@@ -44,6 +47,14 @@ var (
 		return set
 	}()
 
+	microsoftWorkspaceServiceMethods = func() map[string]struct{} {
+		set := make(map[string]struct{}, len(microsoftAutosyncServiceMethodsOrder))
+		for _, method := range microsoftAutosyncServiceMethodsOrder {
+			set[method] = struct{}{}
+		}
+		return set
+	}()
+
 	validUsersGroupsAccountTypes = map[string]struct{}{
 		usersGroupsAccountCorporate:  {},
 		usersGroupsAccountIndividual: {},
@@ -52,6 +63,11 @@ var (
 	validUsersGroupsCredentialStatuses = map[string]struct{}{
 		usersGroupsCredentialHealthy:        {},
 		usersGroupsCredentialReAuthRequired: {},
+	}
+
+	validUsersGroupsStorageDestinations = map[string]struct{}{
+		usersGroupsStorageS3:      {},
+		usersGroupsStorageDefault: {},
 	}
 )
 
@@ -72,12 +88,24 @@ type UsersGroupsEntityServiceView struct {
 	Interval      string     `json:"interval,omitempty"`
 	On            string     `json:"on,omitempty"`
 	RetentionType string     `json:"retention_type,omitempty"`
+	// Microsoft jobs only: tenant and object key prefix inside the service bucket.
+	TenantID    string `json:"tenant_id,omitempty"`
+	VaultPrefix string `json:"vault_prefix,omitempty"`
+	// Microsoft access-verify (user services): pending / unavailable / empty when normal.
+	AccessVerifyState   string `json:"access_verify_state,omitempty"`
+	AccessVerifyMessage string `json:"access_verify_message,omitempty"`
+	AccessCheckedAt     string `json:"access_checked_at,omitempty"`
+	AccessUnavailableSince string `json:"access_unavailable_since,omitempty"`
+	AccessReasonCode    string `json:"access_reason_code,omitempty"`
+	Message             string `json:"message,omitempty"`
 }
 
 // UsersGroupsBulkActiveRequest is PUT /users-groups/jobs/active.
+// When active=false and job_ids is empty, deactivates every active job for the user.
 type UsersGroupsBulkActiveRequest struct {
-	JobIDs []uint `json:"job_ids"`
-	Active *bool  `json:"active"`
+	JobIDs  []uint `json:"job_ids"`
+	Active  *bool  `json:"active"`
+	Message string `json:"message,omitempty"`
 }
 
 // UsersGroupsPaginationView is pagination metadata for GET /users-groups.
@@ -91,13 +119,14 @@ type UsersGroupsPaginationView struct {
 
 // UsersGroupsEntityView is one mailbox row on GET /users-groups (list + side panel).
 type UsersGroupsEntityView struct {
-	Name             string                           `json:"name"`
-	Email            string                           `json:"email"`
-	AccountType      string                           `json:"account_type"`
-	OrgUnitPath      string                           `json:"org_unit_path,omitempty"`
-	CredentialStatus string                           `json:"credential_status"`
-	Credential       UsersGroupsMailboxCredentialView `json:"credential"`
-	Services         []UsersGroupsEntityServiceView   `json:"services"`
+	Name               string                           `json:"name"`
+	Email              string                           `json:"email"`
+	AccountType        string                           `json:"account_type"`
+	OrgUnitPath        string                           `json:"org_unit_path,omitempty"`
+	CredentialStatus   string                           `json:"credential_status"`
+	StorageDestination string                           `json:"storage_destination"` // s3 | default
+	Credential         UsersGroupsMailboxCredentialView `json:"credential"`
+	Services           []UsersGroupsEntityServiceView   `json:"services"`
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +254,7 @@ func usersGroupsIsCorporateMailbox(mailboxEmail string, cred *repo.GoogleBackupC
 			return true
 		}
 		switch strings.ToLower(strings.TrimSpace(cred.AccountType)) {
-		case "admin_workspace", "employee_workspace":
+		case "admin_workspace", "employee_workspace", "work_account":
 			return true
 		}
 	}
@@ -347,14 +376,41 @@ func enrichJobsFromPolicies(jobs []repo.CronJobListingDB, policies map[uint]*rep
 }
 
 func filterUsersGroupsWorkspaceJobs(jobs []repo.CronJobListingDB) []repo.CronJobListingDB {
-	out := make([]repo.CronJobListingDB, 0, len(jobs))
+	return repo.FilterJobsByMethods(jobs, repo.IsGoogleAutosyncMethod)
+}
+
+func filterUsersGroupsMicrosoftJobs(jobs []repo.CronJobListingDB) []repo.CronJobListingDB {
+	return repo.FilterJobsByMethods(jobs, repo.IsMicrosoftAutosyncMethod)
+}
+
+func filterUsersGroupsSharedJobs(jobs []repo.CronJobListingDB) []repo.CronJobListingDB {
+	return repo.FilterJobsByMethods(jobs, repo.IsSharedCredentialAutosyncMethod)
+}
+
+// dashboardAlertsServiceMethodOrder picks Google, Microsoft, or both service rows
+// for shared GET /autosync/dashboard-alerts mailbox cards.
+func dashboardAlertsServiceMethodOrder(jobs []repo.CronJobListingDB) []string {
+	hasGoogle := false
+	hasMicrosoft := false
 	for i := range jobs {
-		if _, ok := workspaceServiceMethods[strings.TrimSpace(jobs[i].Method)]; !ok {
-			continue
+		if repo.IsGoogleAutosyncMethod(jobs[i].Method) {
+			hasGoogle = true
 		}
-		out = append(out, jobs[i])
+		if repo.IsMicrosoftAutosyncMethod(jobs[i].Method) {
+			hasMicrosoft = true
+		}
 	}
-	return out
+	switch {
+	case hasGoogle && hasMicrosoft:
+		out := make([]string, 0, len(autosyncServiceMethodsOrder)+len(microsoftAutosyncServiceMethodsOrder))
+		out = append(out, autosyncServiceMethodsOrder...)
+		out = append(out, microsoftAutosyncServiceMethodsOrder...)
+		return out
+	case hasMicrosoft:
+		return microsoftAutosyncServiceMethodsOrder
+	default:
+		return autosyncServiceMethodsOrder
+	}
 }
 
 func indexUsersGroupsJobsByMethod(jobs []repo.CronJobListingDB) map[string]repo.CronJobListingDB {
@@ -379,9 +435,26 @@ func enrichUsersGroupsJobs(database *db.PostgresDb, jobs []repo.CronJobListingDB
 // ---------------------------------------------------------------------------
 
 func buildUsersGroupsEntityServices(jobs []repo.CronJobListingDB, policies map[uint]*repo.AutosyncBackupPolicyDB) []UsersGroupsEntityServiceView {
+	return buildUsersGroupsEntityServicesForOrder(jobs, policies, autosyncServiceMethodsOrder)
+}
+
+// microsoftJobStorageIdentity returns the tenant/resource identity and vault prefix of a Microsoft
+// job; all empty for Google jobs.
+func microsoftJobStorageIdentity(job *repo.CronJobListingDB) (tenantID, resourceType, resourceID, vaultPrefix string) {
+	if job == nil || !repo.IsMicrosoftAutosyncMethod(job.Method) {
+		return "", "", "", ""
+	}
+	tenantID = strings.ToLower(strings.TrimSpace(job.TenantID))
+	resourceType = strings.ToLower(strings.TrimSpace(job.ResourceType))
+	resourceID = strings.TrimSpace(job.ResourceID)
+	vaultPrefix = outlook.ResourceKeyPrefix(tenantID, resourceType, resourceID)
+	return tenantID, resourceType, resourceID, vaultPrefix
+}
+
+func buildUsersGroupsEntityServicesForOrder(jobs []repo.CronJobListingDB, policies map[uint]*repo.AutosyncBackupPolicyDB, order []string) []UsersGroupsEntityServiceView {
 	byMethod := indexUsersGroupsJobsByMethod(jobs)
-	out := make([]UsersGroupsEntityServiceView, 0, len(autosyncServiceMethodsOrder))
-	for _, method := range autosyncServiceMethodsOrder {
+	out := make([]UsersGroupsEntityServiceView, 0, len(order))
+	for _, method := range order {
 		job, ok := byMethod[method]
 		if !ok {
 			out = append(out, UsersGroupsEntityServiceView{Method: method, Connected: false})
@@ -401,7 +474,10 @@ func buildUsersGroupsEntityServices(jobs []repo.CronJobListingDB, policies map[u
 			}
 		}
 		active := job.Active
-		out = append(out, UsersGroupsEntityServiceView{
+		tenantID, _, _, vaultPrefix := microsoftJobStorageIdentity(&job)
+		view := UsersGroupsEntityServiceView{
+			TenantID:      tenantID,
+			VaultPrefix:   vaultPrefix,
 			Method:        method,
 			Connected:     true,
 			JobID:         job.ID,
@@ -413,7 +489,16 @@ func buildUsersGroupsEntityServices(jobs []repo.CronJobListingDB, policies map[u
 			Interval:      strings.TrimSpace(job.Interval),
 			On:            strings.TrimSpace(job.On),
 			RetentionType: retentionType,
-		})
+			Message:       strings.TrimSpace(job.Message),
+		}
+		if m := repo.JobAccessVerify(&job); m != nil {
+			view.AccessVerifyState = m.State
+			view.AccessVerifyMessage = m.Message
+			view.AccessCheckedAt = m.CheckedAt
+			view.AccessUnavailableSince = m.UnavailableSince
+			view.AccessReasonCode = m.ReasonCode
+		}
+		out = append(out, view)
 	}
 	return out
 }
@@ -456,7 +541,7 @@ func mailboxFirstJobCreatedAt(jobs []repo.CronJobListingDB) time.Time {
 
 func indexUsersGroupsJobsByEmail(jobs []repo.CronJobListingDB) map[string][]repo.CronJobListingDB {
 	byEmail := make(map[string][]repo.CronJobListingDB)
-	for _, job := range filterUsersGroupsWorkspaceJobs(jobs) {
+	for _, job := range filterUsersGroupsSharedJobs(jobs) {
 		email := jobMailboxEmail(&job)
 		if email == "" {
 			continue
@@ -506,7 +591,9 @@ func buildAutosyncDashboardMailboxView(
 		CredentialStatus: usersGroupsCredentialStatus(needsGoogle, needsStorx),
 		ConnectedAt:      connectedAt,
 		Credential:       credView,
-		Services:         buildAutosyncDashboardServiceViews(buildUsersGroupsEntityServices(emailJobs, policies)),
+		Services: buildAutosyncDashboardServiceViews(
+			buildUsersGroupsEntityServicesForOrder(emailJobs, policies, dashboardAlertsServiceMethodOrder(emailJobs)),
+		),
 	}
 }
 
@@ -568,8 +655,19 @@ func buildUsersGroupsEntities(
 	credByID map[uint]*repo.GoogleBackupCredentialDB,
 	policies map[uint]*repo.AutosyncBackupPolicyDB,
 ) []UsersGroupsEntityView {
+	return buildUsersGroupsEntitiesForFamily(jobs, cronRepo, credByID, policies, filterUsersGroupsWorkspaceJobs, autosyncServiceMethodsOrder)
+}
+
+func buildUsersGroupsEntitiesForFamily(
+	jobs []repo.CronJobListingDB,
+	cronRepo *repo.CronJobRepository,
+	credByID map[uint]*repo.GoogleBackupCredentialDB,
+	policies map[uint]*repo.AutosyncBackupPolicyDB,
+	filterFn func([]repo.CronJobListingDB) []repo.CronJobListingDB,
+	methodOrder []string,
+) []UsersGroupsEntityView {
 	byEmail := make(map[string][]repo.CronJobListingDB)
-	for _, job := range filterUsersGroupsWorkspaceJobs(jobs) {
+	for _, job := range filterFn(jobs) {
 		email := jobMailboxEmail(&job)
 		if email == "" {
 			continue
@@ -589,14 +687,67 @@ func buildUsersGroupsEntities(
 		cred := credentialForEmailJobs(emailJobs, credByID)
 		needsGoogle, needsStorx := credentialReconnectFlagsFromJobs(cronRepo, cred, emailJobs)
 		out = append(out, UsersGroupsEntityView{
-			Name:             nameFromMailboxEmail(email),
-			Email:            email,
-			AccountType:      usersGroupsAccountType(email, cred),
-			OrgUnitPath:      mailboxOrgUnitPath(emailJobs),
-			CredentialStatus: usersGroupsCredentialStatus(needsGoogle, needsStorx),
-			Credential:       buildMailboxCredentialView(cronRepo, cred, emailJobs),
-			Services:         buildUsersGroupsEntityServices(emailJobs, policies),
+			Name:               nameFromMailboxEmail(email),
+			Email:              email,
+			AccountType:        usersGroupsAccountType(email, cred),
+			OrgUnitPath:        mailboxOrgUnitPath(emailJobs),
+			CredentialStatus:   usersGroupsCredentialStatus(needsGoogle, needsStorx),
+			StorageDestination: usersGroupsStorageDestination(cronRepo, emailJobs),
+			Credential:         buildMailboxCredentialView(cronRepo, cred, emailJobs),
+			Services:           buildUsersGroupsEntityServicesForOrder(emailJobs, policies, methodOrder),
 		})
+	}
+	return out
+}
+
+func usersGroupsStorageDestination(cronRepo *repo.CronJobRepository, jobs []repo.CronJobListingDB) string {
+	for i := range jobs {
+		tok := ""
+		if cronRepo != nil {
+			tok = cronRepo.ResolvedStorxToken(&jobs[i])
+		} else {
+			tok = strings.TrimSpace(jobs[i].StorxToken)
+		}
+		if _, ok := satellite.ParseGatewayS3Token(tok); ok {
+			return usersGroupsStorageS3
+		}
+	}
+	return usersGroupsStorageDefault
+}
+
+func parseUsersGroupsStorageDestination(c echo.Context) (string, error) {
+	raw := strings.TrimSpace(c.QueryParam("storage_destination"))
+	if raw == "" {
+		// Alias used by some clients.
+		raw = strings.TrimSpace(c.QueryParam("storage"))
+	}
+	if raw == "" {
+		return "", nil
+	}
+	dest := strings.ToLower(raw)
+	switch dest {
+	case "all", "all_destinations":
+		return "", nil
+	case "external_s3", "gateway_s3":
+		dest = usersGroupsStorageS3
+	case "storx", "default_storx":
+		dest = usersGroupsStorageDefault
+	}
+	if _, ok := validUsersGroupsStorageDestinations[dest]; !ok {
+		return "", fmt.Errorf("storage_destination must be one of: s3, default")
+	}
+	return dest, nil
+}
+
+func filterUsersGroupsEntitiesByStorageDestination(entities []UsersGroupsEntityView, dest string) []UsersGroupsEntityView {
+	if dest == "" {
+		return entities
+	}
+	out := make([]UsersGroupsEntityView, 0, len(entities))
+	for i := range entities {
+		if entities[i].StorageDestination == dest {
+			out = append(out, entities[i])
+		}
 	}
 	return out
 }
@@ -878,6 +1029,13 @@ func loadUsersGroupsMailboxJobs(database *db.PostgresDb, userID, email string) (
 }
 
 func loadUsersGroupsMailboxContext(c echo.Context) (context.Context, string, string, usersGroupsMailboxData, error) {
+	return loadUsersGroupsMailboxContextForFamily(c, filterUsersGroupsWorkspaceJobs)
+}
+
+func loadUsersGroupsMailboxContextForFamily(
+	c echo.Context,
+	filterFn func([]repo.CronJobListingDB) []repo.CronJobListingDB,
+) (context.Context, string, string, usersGroupsMailboxData, error) {
 	empty := usersGroupsMailboxData{}
 	ctx, userID, database, err := usersGroupsAuth(c)
 	if err != nil {
@@ -891,7 +1049,7 @@ func loadUsersGroupsMailboxContext(c echo.Context) (context.Context, string, str
 	if err != nil {
 		return ctx, userID, email, empty, err
 	}
-	workspaceJobs := filterUsersGroupsWorkspaceJobs(jobs)
+	workspaceJobs := filterFn(jobs)
 	if len(workspaceJobs) == 0 {
 		return ctx, userID, email, empty, errUsersGroupsMailboxNotFound
 	}
@@ -1046,7 +1204,8 @@ func handleUsersGroupsMailboxTab(c echo.Context, logMsg string, build func(email
 // Handlers
 // ---------------------------------------------------------------------------
 
-// HandleAutosyncDashboardAlerts returns counts for Satellite dashboard alert cards.
+// HandleAutosyncDashboardAlerts returns counts for Satellite dashboard alert cards
+// (Google + Microsoft mailboxes on the shared product path).
 func HandleAutosyncDashboardAlerts(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
@@ -1158,6 +1317,13 @@ func bulkUpdateUsersGroupsJobsActive(
 		email := jobMailboxEmail(job)
 		method := strings.TrimSpace(job.Method)
 
+		// Access-verify drafts / unavailable rows are activated only via Re-check access.
+		if active && repo.IsAccessVerifyOwned(job) {
+			failed = append(failed, usersGroupsBulkActiveFailure(jobID, email, method,
+				fmt.Errorf("access not verified; use Re-check access")))
+			continue
+		}
+
 		if err := cronRepo.UpdateCronJobByID(jobID, patch); err != nil {
 			failed = append(failed, usersGroupsBulkActiveFailure(jobID, email, method, err))
 			continue
@@ -1174,6 +1340,8 @@ func bulkUpdateUsersGroupsJobsActive(
 }
 
 // HandleUsersGroupsJobsActive sets active true/false on multiple jobs (bulk pause/resume).
+// When active=false and job_ids is omitted/empty, deactivates all active jobs for the user
+// (used by Satellite own_nodes under-min gate — no new route).
 func HandleUsersGroupsJobsActive(c echo.Context) error {
 	ctx := c.Request().Context()
 	var err error
@@ -1191,9 +1359,25 @@ func HandleUsersGroupsJobsActive(c echo.Context) error {
 	if req.Active == nil {
 		return usersGroupsBadRequest(c, "invalid request", fmt.Errorf("active is required"))
 	}
+
 	jobIDs := uniqueUints(req.JobIDs)
 	if len(jobIDs) == 0 {
-		return usersGroupsBadRequest(c, "invalid request", fmt.Errorf("job_ids is required"))
+		if *req.Active {
+			return usersGroupsBadRequest(c, "invalid request", fmt.Errorf("job_ids is required when active=true"))
+		}
+		msg := strings.TrimSpace(req.Message)
+		if msg == "" {
+			msg = "Automatic backup deactivated: connect at least 10 storage nodes to your node group before starting backups."
+		}
+		if err := database.CronJobRepo.DeactivateAllActiveJobsForUser(userID, msg); err != nil {
+			return usersGroupsInternalError(c, ctx, "deactivate all jobs failed", err)
+		}
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"message": "all active jobs deactivated",
+			"active":  false,
+			"success": []interface{}{},
+			"failed":  []interface{}{},
+		})
 	}
 
 	success, failed := bulkUpdateUsersGroupsJobsActive(database.CronJobRepo, userID, jobIDs, *req.Active)
@@ -1229,6 +1413,10 @@ func HandleAutosyncUsersGroupsList(c echo.Context) error {
 	if err != nil {
 		return usersGroupsBadRequest(c, "invalid credential_status filter", err)
 	}
+	storageDestination, err := parseUsersGroupsStorageDestination(c)
+	if err != nil {
+		return usersGroupsBadRequest(c, "invalid storage_destination filter", err)
+	}
 	activeFilter, err := parseUsersGroupsActive(c)
 	if err != nil {
 		return usersGroupsBadRequest(c, "invalid active filter", err)
@@ -1254,6 +1442,7 @@ func HandleAutosyncUsersGroupsList(c echo.Context) error {
 	allEntities = filterUsersGroupsEntitiesByActive(allEntities, jobs, activeFilter)
 	allEntities = filterUsersGroupsEntitiesByAccountType(allEntities, accountType)
 	allEntities = filterUsersGroupsEntitiesByCredentialStatus(allEntities, credentialStatus)
+	allEntities = filterUsersGroupsEntitiesByStorageDestination(allEntities, storageDestination)
 	allEntities = filterUsersGroupsEntitiesByOrgUnitPath(allEntities, parseUsersGroupsOrgUnitPath(c))
 	orgUnits := uniqueUsersGroupsOrgUnitPaths(allEntities)
 	entities, pagination := paginateUsersGroupsEntities(allEntities, limit, offset)

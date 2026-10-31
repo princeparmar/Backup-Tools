@@ -47,31 +47,36 @@ func (o *OutlookProcessor) Run(input ScheduledTaskProcessorInput) error {
 		return o.handleError(input.Task, "Access token not found for Outlook method", nil)
 	}
 
+	keyPrefix, _ := input.InputData["key_prefix"].(string)
+	if keyPrefix == "" {
+		return o.handleError(input.Task, "Outlook task has no tenant storage prefix; create the task again", nil)
+	}
+
 	outlookClient, err := outlook.NewOutlookClientUsingToken(accessToken)
 	if err != nil {
 		return o.handleError(input.Task, fmt.Sprintf("Failed to create Outlook client: %s", err), nil)
 	}
 
 	// Create placeholder and get existing emails
-	if err := o.setupStorage(input.Task, satellite.ReserveBucket_Outlook); err != nil {
+	if err := o.setupStorage(input.Task, keyPrefix, satellite.ReserveBucket_Outlook); err != nil {
 		return o.handleError(input.Task, fmt.Sprintf("Failed to create placeholder: %s", err), nil)
 	}
 
 	// Get synced objects from database instead of listing from Satellite
 	// Uses common handler.GetSyncedObjectsWithPrefix which ensures bucket exists and queries database
-	emailListFromBucket, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Deps.Store, input.Task.StorxToken, satellite.ReserveBucket_Outlook, input.Task.LoginId+"/", input.Task.UserID, "outlook", "outlook")
+	emailListFromBucket, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Deps.Store, input.Task.StorxToken, satellite.ReserveBucket_Outlook, keyPrefix+"/", input.Task.UserID, "outlook", "outlook")
 	if err != nil {
 		return o.handleError(input.Task, fmt.Sprintf("Failed to list existing emails: %s", err), nil)
 	}
 
-	return o.processEmails(input, outlookClient, emailListFromBucket)
+	return o.processEmails(input, outlookClient, keyPrefix, emailListFromBucket)
 }
 
-func (o *OutlookProcessor) setupStorage(task *repo.ScheduledTasks, bucket string) error {
-	return handler.UploadObjectAndSync(context.Background(), o.Deps.Store, task.StorxToken, bucket, task.LoginId+"/.file_placeholder", nil, task.UserID)
+func (o *OutlookProcessor) setupStorage(task *repo.ScheduledTasks, keyPrefix, bucket string) error {
+	return handler.UploadObjectAndSync(context.Background(), o.Deps.Store, task.StorxToken, bucket, keyPrefix+"/.file_placeholder", nil, task.UserID)
 }
 
-func (o *OutlookProcessor) processEmails(input ScheduledTaskProcessorInput, client *outlook.OutlookClient, existingEmails map[string]bool) error {
+func (o *OutlookProcessor) processEmails(input ScheduledTaskProcessorInput, client *outlook.OutlookClient, keyPrefix string, existingEmails map[string]bool) error {
 	successCount, failedCount := 0, 0
 	var failedEmails []string
 
@@ -97,7 +102,7 @@ func (o *OutlookProcessor) processEmails(input ScheduledTaskProcessorInput, clie
 			continue
 		}
 
-		messagePath := input.Task.LoginId + "/" + utils.GenerateTitleFromOutlookMessage(&utils.OutlookMinimalMessage{
+		messagePath := keyPrefix + "/" + utils.GenerateTitleFromOutlookMessage(&utils.OutlookMinimalMessage{
 			ID:               message.ID,
 			Subject:          message.Subject,
 			From:             message.From,

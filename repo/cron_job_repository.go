@@ -3,10 +3,12 @@ package repo
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 	gormio "gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Job message status constants
@@ -55,13 +58,20 @@ const (
 type CronJobListingDB struct {
 	gorm.GormModel
 
-	UserID string `json:"user_id" gorm:"column:user_id;uniqueIndex:idx_name_sync_type_user"`
+	// Job identity: (user_id, provider, tenant_id, resource_type, resource_id, method, sync_type).
+	// Google jobs: provider=google, tenant_id='', resource_type=user, resource_id=name.
+	UserID string `json:"user_id" gorm:"column:user_id;uniqueIndex:idx_cron_job_identity,priority:1"`
 	// StorjProjectID is API-only; persisted on google_backup_credentials (see EnrichCronJobFromCredential).
 	StorjProjectID string `json:"storj_project_id,omitempty" gorm:"-"`
 
-	// Name + Method + SyncType + UserID must be unique (one cron job per service per mailbox).
-	Name     string `json:"name" gorm:"uniqueIndex:idx_name_sync_type_user"`
-	Method   string `json:"method" gorm:"uniqueIndex:idx_name_sync_type_user"`
+	Provider     string `json:"provider" gorm:"column:provider;not null;default:google;uniqueIndex:idx_cron_job_identity,priority:2"`
+	TenantID     string `json:"tenant_id,omitempty" gorm:"column:tenant_id;not null;default:'';uniqueIndex:idx_cron_job_identity,priority:3;index:idx_cron_job_tenant"`
+	ResourceType string `json:"resource_type" gorm:"column:resource_type;not null;default:user;uniqueIndex:idx_cron_job_identity,priority:4"`
+	ResourceID   string `json:"resource_id" gorm:"column:resource_id;not null;default:'';uniqueIndex:idx_cron_job_identity,priority:5"`
+
+	// Name is the display label (mailbox email, site/team/group name).
+	Name     string `json:"name"`
+	Method   string `json:"method" gorm:"uniqueIndex:idx_cron_job_identity,priority:6"`
 	Interval string `json:"interval"`
 	On       string `json:"on" gorm:"-"` // API-only; canonical value from autosync_backup_policy_dbs
 	// PolicyID links to autosync_backup_policy_dbs.id.
@@ -85,7 +95,7 @@ type CronJobListingDB struct {
 	// Tasks associated with the cron job
 	Tasks []TaskListingDB `gorm:"foreignKey:CronJobID"`
 
-	SyncType string `json:"sync_type" gorm:"uniqueIndex:idx_name_sync_type_user"`
+	SyncType string `json:"sync_type" gorm:"uniqueIndex:idx_cron_job_identity,priority:7"`
 
 	Status string `json:"status" gorm:"default:created"`
 
@@ -100,7 +110,54 @@ type CronJobListingDB struct {
 	FailurePeriods uint `json:"failure_periods" gorm:"column:failure_periods;default:0"`
 	// StorxRefreshFailures counts consecutive Satellite storx refresh failures; reset on successful refresh.
 	StorxRefreshFailures uint `json:"storx_refresh_failures" gorm:"column:storx_refresh_failures;default:0"`
+
+	// FailureCode is STORAGE_QUOTA / BANDWIDTH_QUOTA (or empty) for UI CTAs.
+	FailureCode string `json:"failure_code,omitempty" gorm:"column:failure_code;type:varchar(64);default:''"`
+	// EstimateBytes is the last pre-check estimate (bytes) when a quota failure was recorded.
+	EstimateBytes int64 `json:"estimate_bytes,omitempty" gorm:"column:estimate_bytes;default:0"`
+	// RemainingBytes is remaining quota at the last quota failure.
+	RemainingBytes int64 `json:"remaining_bytes,omitempty" gorm:"column:remaining_bytes;default:0"`
+	// QuotaKind is "storage" or "bandwidth" when FailureCode is set.
+	QuotaKind string `json:"quota_kind,omitempty" gorm:"column:quota_kind;type:varchar(32);default:''"`
+
+	// JobType distinguishes normal backup jobs from internal system jobs (e.g. MS access check).
+	// backup (default) | system. System jobs are never scheduled for recurring backups.
+	JobType string `json:"job_type" gorm:"column:job_type;not null;default:backup;index"`
 }
+
+// Job type values for CronJobListingDB.JobType.
+const (
+	JobTypeBackup = "backup"
+	JobTypeSystem = "system"
+)
+
+// IsSystemJob reports whether this cron job is an internal system job (not a backup).
+func IsSystemJob(job *CronJobListingDB) bool {
+	if job == nil {
+		return false
+	}
+	t := strings.TrimSpace(job.JobType)
+	return t == JobTypeSystem
+}
+
+// EffectiveJobType returns job_type or backup when empty (legacy rows).
+func EffectiveJobType(job *CronJobListingDB) string {
+	if job == nil {
+		return JobTypeBackup
+	}
+	if t := strings.TrimSpace(job.JobType); t != "" {
+		return t
+	}
+	return JobTypeBackup
+}
+
+// OutlookMailLayoutFiles is the mail layout with one Gmail-style object per message under its
+// folder path, keyed by immutable message id.
+const OutlookMailLayoutFiles = 2
+
+// OneDriveLayoutTree is the OneDrive layout with one object per file in a Google Drive-style
+// folder tree (MY_DRIVE / BIN).
+const OneDriveLayoutTree = 2
 
 // TaskMemory represents the memory state of a task
 type TaskMemory struct {
@@ -116,23 +173,253 @@ type TaskMemory struct {
 	DatabaseSyncComplete bool `json:"database_sync_complete"`
 
 	// Drive incremental sync state (ID-based autosync architecture)
-	DrivePageToken    *string `json:"drive_page_token,omitempty"`
+	DrivePageToken    *string `json:"drive_page_token,omitempty"` // legacy single token; migrated into DriveUserPageToken
 	DriveBaselineDone bool    `json:"drive_baseline_done,omitempty"`
+
+	// OneDriveDeltaLink is the Graph drive delta cursor (do not reuse DrivePageToken).
+	OneDriveDeltaLink *string `json:"onedrive_delta_link,omitempty"`
+	// OneDriveLayout is the OneDrive layout version; below OneDriveLayoutTree the next run
+	// re-baselines and rewrites every meta/data pair as one object in its folder tree.
+	OneDriveLayout int `json:"onedrive_layout,omitempty"`
+
+	// SharePoint incremental sync state (Graph delta on /drives/{drive_id}).
+	// Legacy single-site jobs keep cursors on these fields; the combined tenant job nests
+	// per-site state under SharePointSites[siteID] (see SharePointSiteState).
+	SharePointDeltaLink    *string `json:"sharepoint_delta_link,omitempty"`
+	SharePointBaselineDone bool    `json:"sharepoint_baseline_done,omitempty"`
+	// SharePointLayout is the SharePoint layout version (same values as OneDriveLayout); below
+	// OneDriveLayoutTree the next run rewrites every meta/data pair in the folder tree.
+	SharePointLayout int `json:"sharepoint_layout,omitempty"`
+	// SharePointLibraries is every document library of the site seen by a backup, by drive id.
+	// The default library's cursor stays in SharePointDeltaLink / SharePointLayout.
+	SharePointLibraries map[string]SharePointLibraryState `json:"sharepoint_libraries,omitempty"`
+	// SharePointListCursors tracks non-library list backup progress (preserve-only; no purge).
+	SharePointListCursors map[string]SharePointListCursor `json:"sharepoint_list_cursors,omitempty"`
+	// SharePointSites holds per-site sync state for the combined tenant SharePoint job.
+	SharePointSites map[string]SharePointSiteState `json:"sharepoint_sites,omitempty"`
+
+	// Outlook mail incremental sync state (Graph mail delta per mail folder).
+	// OutlookMailFolderDeltas maps mailFolderId -> deltaLink for every backed-up folder.
+	OutlookMailFolderDeltas map[string]string `json:"outlook_mail_folder_deltas,omitempty"`
+	// OutlookMailFolderPaths maps mailFolderId -> key folder path at the last sync; a changed path
+	// (rename or move) re-baselines the folder so its messages are re-keyed.
+	OutlookMailFolderPaths map[string]string `json:"outlook_mail_folder_paths,omitempty"`
+	// OutlookMailLayout is the mail layout version; below OutlookMailLayoutFiles the next run
+	// converts ids to immutable ids and rewrites every meta/data pair as one object in its folder.
+	OutlookMailLayout int `json:"outlook_mail_layout,omitempty"`
+
+	// Outlook contacts incremental sync (Graph contacts/delta per folder).
+	// OutlookContactFolderDeltas maps contactFolderId -> deltaLink; "" is the default Contacts folder.
+	OutlookContactFolderDeltas map[string]string `json:"outlook_contact_folder_deltas,omitempty"`
+	// OutlookContactFolderParents maps contactFolderId -> parentFolderId at the last sync; a changed
+	// parent (move) re-baselines that folder.
+	OutlookContactFolderParents map[string]string `json:"outlook_contact_folder_parents,omitempty"`
+	// OutlookContactsLayout below OutlookContactsLayoutPhotos means the next run re-fetches photos.
+	OutlookContactsLayout int `json:"outlook_contacts_layout,omitempty"`
+
+	// DriveUserPageToken is the USER change-log token (My Drive / shared-with-me).
+	DriveUserPageToken *string `json:"drive_user_page_token,omitempty"`
+	// DriveSharedDrives holds per-Shared-Drive baseline + change tokens.
+	DriveSharedDrives map[string]DriveSharedDriveState `json:"drive_shared_drives,omitempty"`
 
 	// Photos incremental sync state (ID-based autosync architecture)
 	PhotosBaselineDone bool `json:"photos_baseline_done,omitempty"`
 
 	// Contacts incremental sync state (ID-based autosync architecture)
 	ContactsBaselineDone bool `json:"contacts_baseline_done,omitempty"`
+	// ContactsDetailVersion below 2 means the next run rewrites each contact in place
+	// so the photo, the display labels, and the extra Google fields are stored.
+	ContactsDetailVersion int `json:"contacts_detail_version,omitempty"`
 
 	// Calendar incremental sync state (per-calendar syncToken; see CalendarCalendarState)
 	CalendarCalendars map[string]CalendarCalendarState `json:"calendar_calendars,omitempty"`
+	// CalendarIndexVersion below 1 means the next run writes one calendar/_index.json
+	// covering every calendar, then later runs only update that file.
+	CalendarIndexVersion int `json:"calendar_index_version,omitempty"`
+
+	// Teams incremental sync state (per-channel; delta OR re-enumeration+dedup)
+	TeamsChannels map[string]TeamsChannelSyncState `json:"teams_channels,omitempty"`
+
+	// Teams tenant job state (outlook_teams with resource_type tenant). Kept small: per-user and
+	// per-team cursors live in StorX under the job's own _state/ prefix.
+	TeamsLayout   int                     `json:"teams_layout,omitempty"`
+	TeamsCursor   *TeamsCursor            `json:"teams_cursor,omitempty"`
+	TeamsCalls    *TeamsWindowState       `json:"teams_calls,omitempty"`
+	TeamsPstn     *TeamsWindowState       `json:"teams_pstn,omitempty"`
+	TeamsDirect   *TeamsWindowState       `json:"teams_direct_routing,omitempty"`
+	TeamsFailures map[string]TeamsFailure `json:"teams_failures,omitempty"`
+	TeamsMerge    *TeamsMergeState        `json:"teams_merge,omitempty"`
+	// TeamsLastRun is the outcome of the last tenant run (counts per status, warnings).
+	TeamsLastRun *TeamsRunSummary `json:"teams_last_run,omitempty"`
+
+	// Groups incremental sync state (independent sub-syncs)
+	GroupsSync GroupsSyncState `json:"groups_sync,omitempty"`
+}
+
+// TeamsChannelSyncState tracks per-channel Teams backup cursor state.
+type TeamsChannelSyncState struct {
+	NextLink     string     `json:"next_link,omitempty"`
+	DeltaLink    string     `json:"delta_link,omitempty"`
+	LastSyncAt   *time.Time `json:"last_sync_at,omitempty"`
+	BaselineDone bool       `json:"baseline_done,omitempty"`
+}
+
+// TeamsLayoutFiles is the Teams layout with one .teams object per message (no meta/data pairs).
+const TeamsLayoutFiles = 2
+
+// TeamsCursor is where the tenant run resumes: per phase, the last resource it finished.
+type TeamsCursor struct {
+	Phase     string            `json:"phase,omitempty"`
+	Positions map[string]string `json:"positions,omitempty"`
+	// Round counts runs; the start of each phase's resource list rotates with it.
+	Round int `json:"round,omitempty"`
+}
+
+// TeamsWindow is one closed time range of a windowed stream. PageLink is the page being
+// processed; it moves only after every item of that page is written or recorded.
+type TeamsWindow struct {
+	From     time.Time `json:"from"`
+	To       time.Time `json:"to"`
+	PageLink string    `json:"page_link,omitempty"`
+	// Dirty is set when an item of the current pass failed; the window is then replayed.
+	Dirty bool `json:"dirty,omitempty"`
+	// Held counts runs that replayed this window because an item of it could not be stored.
+	Held      int        `json:"held,omitempty"`
+	HeldSince *time.Time `json:"held_since,omitempty"`
+}
+
+// TeamsWindowState is a windowed stream (call records, PSTN or Direct Routing chunks): open
+// windows plus the end of the newest closed one.
+type TeamsWindowState struct {
+	Windows       []TeamsWindow `json:"windows,omitempty"`
+	HighWater     *time.Time    `json:"high_water,omitempty"`
+	LastSuccessAt *time.Time    `json:"last_success_at,omitempty"`
+	Status        string        `json:"status,omitempty"`
+	StatusCode    string        `json:"status_code,omitempty"`
+	SkipUntil     *time.Time    `json:"skip_until,omitempty"`
+}
+
+// TeamsFailure is one failed item, window or stream of the tenant job. Keys end in the item's
+// own id so two failures never overwrite each other. No content is stored here.
+type TeamsFailure struct {
+	Phase        string            `json:"phase"`
+	Kind         string            `json:"kind"`
+	ResourceType string            `json:"resource_type,omitempty"`
+	ResourceID   string            `json:"resource_id,omitempty"`
+	ItemIDs      map[string]string `json:"item_ids,omitempty"`
+	HTTPStatus   int               `json:"http_status,omitempty"`
+	ErrorCode    string            `json:"error_code,omitempty"`
+	ErrorMessage string            `json:"error_message,omitempty"`
+	Since        time.Time         `json:"since"`
+	LastAt       time.Time         `json:"last_at"`
+	Attempts     int               `json:"attempts"`
+	SkipUntil    *time.Time        `json:"skip_until,omitempty"`
+	Status       string            `json:"status,omitempty"`
+}
+
+// TeamsMergeState records the merge of old per-team jobs into the tenant job, step by step.
+type TeamsMergeState struct {
+	Imported map[string]TeamsMergeImport `json:"imported,omitempty"`
+	Paused   map[string]time.Time        `json:"paused,omitempty"`
+}
+
+// TeamsMergeImport is one old per-team job imported into the tenant job's selection.
+type TeamsMergeImport struct {
+	TeamID     string    `json:"team_id"`
+	ImportedAt time.Time `json:"imported_at"`
+}
+
+// TeamsRunSummary is the outcome of the last tenant run.
+type TeamsRunSummary struct {
+	FinishedAt time.Time      `json:"finished_at"`
+	Statuses   map[string]int `json:"statuses,omitempty"`
+	Warnings   []string       `json:"warnings,omitempty"`
+	Stopped    string         `json:"stopped,omitempty"`
+}
+
+// GroupsSyncState holds independent cursors for group conversations, calendar, and drive.
+type GroupsSyncState struct {
+	Conversations GroupsConversationSyncState `json:"conversations,omitempty"`
+	Calendar      GroupsCalendarSyncState     `json:"calendar,omitempty"`
+	Drive         GroupsDriveSyncState        `json:"drive,omitempty"`
+}
+
+// GroupsConversationSyncState tracks paginated group conversation/thread backup.
+type GroupsConversationSyncState struct {
+	NextLink     string     `json:"next_link,omitempty"`
+	BaselineDone bool       `json:"baseline_done,omitempty"`
+	LastSyncAt   *time.Time `json:"last_sync_at,omitempty"`
+}
+
+// GroupsCalendarSyncState tracks group calendar event backup.
+type GroupsCalendarSyncState struct {
+	BaselineDone bool   `json:"baseline_done,omitempty"`
+	NextLink     string `json:"next_link,omitempty"`
+}
+
+// GroupsDriveSyncState tracks group drive delta backup.
+type GroupsDriveSyncState struct {
+	DeltaLink    *string `json:"delta_link,omitempty"`
+	BaselineDone bool    `json:"baseline_done,omitempty"`
+	// Layout is the files layout version (same values as OneDriveLayout).
+	Layout int `json:"layout,omitempty"`
 }
 
 // CalendarCalendarState holds baseline + sync token for one Google calendar.
 type CalendarCalendarState struct {
 	BaselineDone bool   `json:"baseline_done,omitempty"`
 	SyncToken    string `json:"sync_token,omitempty"`
+}
+
+// SharePointLibraryState is the backup state of one document library of a SharePoint site.
+type SharePointLibraryState struct {
+	Name   string `json:"name,omitempty"`
+	WebURL string `json:"web_url,omitempty"`
+	// Default marks the site's default library, backed up at the site prefix.
+	Default bool `json:"default,omitempty"`
+	// DeltaLink and Layout are the library's cursor (unused for the default library).
+	DeltaLink    *string `json:"delta_link,omitempty"`
+	Layout       int     `json:"layout,omitempty"`
+	BaselineDone bool    `json:"baseline_done,omitempty"`
+	LastSyncAt   string  `json:"last_sync_at,omitempty"`
+	LastError    string  `json:"last_error,omitempty"`
+	// RemovedAt is legacy: older runs may have marked libraries removed after vault BIN moves.
+	// New SharePoint workspace backup is preserve-only and does not set this for new removals.
+	RemovedAt string `json:"removed_at,omitempty"`
+}
+
+// SharePointListCursor is durable progress for one non-library list (add/update only).
+type SharePointListCursor struct {
+	Name         string `json:"name,omitempty"`
+	LastSyncAt   string `json:"last_sync_at,omitempty"`
+	BaselineDone bool   `json:"baseline_done,omitempty"`
+	LastError    string `json:"last_error,omitempty"`
+}
+
+// SharePointSiteState is per-site sync memory on the combined SharePoint tenant job.
+type SharePointSiteState struct {
+	DeltaLink    *string                           `json:"delta_link,omitempty"`
+	BaselineDone bool                              `json:"baseline_done,omitempty"`
+	Layout       int                               `json:"layout,omitempty"`
+	Libraries    map[string]SharePointLibraryState `json:"libraries,omitempty"`
+	ListCursors  map[string]SharePointListCursor   `json:"list_cursors,omitempty"`
+	LastSyncAt   string                            `json:"last_sync_at,omitempty"`
+	LastError    string                            `json:"last_error,omitempty"`
+}
+
+// DriveSharedDriveState holds baseline + change token for one Shared Drive.
+type DriveSharedDriveState struct {
+	BaselineDone bool   `json:"baseline_done,omitempty"`
+	PageToken    string `json:"page_token,omitempty"`
+}
+
+// Value implements driver.Valuer (stored as JSON).
+func (t TaskMemory) Value() (driver.Value, error) {
+	b, err := json.Marshal(t)
+	if err != nil {
+		return nil, err
+	}
+	return string(b), nil
 }
 
 // Scan implements the sql.Scanner interface
@@ -195,7 +482,9 @@ type CronJobFilter struct {
 // GetAllCronJobsForUser retrieves all cron jobs for a specific user with optional filtering
 func (r *CronJobRepository) GetAllCronJobsForUser(userID string, filter *CronJobFilter) ([]CronJobListingDB, error) {
 	var res []CronJobListingDB
-	query := r.db.Where("user_id = ?", userID).Where("COALESCE(placeholder, false) = ?", false)
+	query := r.db.Where("user_id = ?", userID).
+		Where("COALESCE(placeholder, false) = ?", false).
+		Where("COALESCE(job_type, ?) = ?", JobTypeBackup, JobTypeBackup)
 
 	// Apply filters if provided
 	if filter != nil {
@@ -252,7 +541,9 @@ func (r *CronJobRepository) ListServiceJobCountsForUser(userID string) ([]Servic
 			COUNT(*) AS total_jobs,
 			COUNT(*) FILTER (WHERE active = true) AS active_jobs,
 			COUNT(*) FILTER (WHERE active = false) AS deactive_jobs`).
-		Where("user_id = ? AND COALESCE(placeholder, false) = ?", userID, false).
+		Where("user_id = ?", userID).
+		Where("COALESCE(placeholder, false) = ?", false).
+		Where("COALESCE(job_type, ?) = ?", JobTypeBackup, JobTypeBackup).
 		Group("method").
 		Order("method ASC").
 		Scan(&rows).Error
@@ -285,7 +576,8 @@ func (r *CronJobRepository) ListJobsForUsersGroups(userID string, f *UsersGroups
 	var res []CronJobListingDB
 	query := r.db.Model(&CronJobListingDB{}).
 		Where("cron_job_listing_dbs.user_id = ?", userID).
-		Where("COALESCE(cron_job_listing_dbs.placeholder, false) = ?", false)
+		Where("COALESCE(cron_job_listing_dbs.placeholder, false) = ?", false).
+		Where("COALESCE(cron_job_listing_dbs.job_type, ?) = ?", JobTypeBackup, JobTypeBackup)
 
 	if f != nil {
 		if domain := strings.ToLower(strings.TrimSpace(f.Domain)); domain != "" {
@@ -341,6 +633,7 @@ func (r *CronJobRepository) GetAllActiveCronJobsForUser(userID string) ([]LiveCr
 		AND cj.deleted_at IS NULL
 		AND (cj.hidden = false OR cj.hidden IS NULL)
 		AND COALESCE(cj.placeholder, false) = false
+		AND COALESCE(cj.job_type, 'backup') = 'backup'
 		ORDER BY cj.id, t.start_time DESC`
 
 	rows, err := r.db.Raw(query, userID).Rows()
@@ -464,6 +757,7 @@ func (r *CronJobRepository) GetJobsToProcess() ([]CronJobListingDB, error) {
 			FROM cron_job_listing_dbs c2
 			LEFT JOIN autosync_backup_policy_dbs p ON p.id = c2.policy_id AND p.deleted_at IS NULL
 			WHERE c2.active = true
+			AND COALESCE(c2.job_type, 'backup') = 'backup'
 			AND (c2.message IS NULL OR c2.message != ?)
 			AND c2.status NOT IN (?, ?)
 			AND c2.policy_id IS NOT NULL
@@ -590,6 +884,20 @@ func (r *CronJobRepository) GetJobByIDForUser(userID string, jobID uint) (*CronJ
 	return &res, nil
 }
 
+// FindJobForUser returns the job with the unique (user, name, method, sync_type) key, or nil.
+func (r *CronJobRepository) FindJobForUser(userID, name, method, syncType string) (*CronJobListingDB, error) {
+	var res CronJobListingDB
+	err := r.db.Where("user_id = ? AND name = ? AND method = ? AND sync_type = ?", userID, name, method, syncType).
+		Where("COALESCE(placeholder, false) = ?", false).First(&res).Error
+	if errors.Is(err, gormio.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find cron job for user: %w", err)
+	}
+	return &res, nil
+}
+
 // =============================================================================
 // ACTIVE: google_backup_credentials + input_data.credential_id
 // =============================================================================
@@ -639,9 +947,28 @@ func credentialIDFromInputData(m map[string]interface{}) uint {
 	return 0
 }
 
-// IsGoogleMediaOrGmailMethod is true for Google autosync methods that use shared credentials.
-func IsGoogleMediaOrGmailMethod(method string) bool {
-	switch method {
+// GoogleAutosyncMethods is the ordered set of Google workspace autosync job methods.
+var GoogleAutosyncMethods = []string{
+	"gmail", "google_drive", "google_photos", "google_contacts", "google_calendar",
+}
+
+// MicrosoftAutosyncMethods is the ordered set of Microsoft autosync job methods.
+var MicrosoftAutosyncMethods = []string{
+	"outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive", "outlook_sharepoint", "outlook_teams",
+}
+
+// AllAutosyncMethods returns Google + Microsoft methods for shared dashboard queries
+// (GET /autosync/stats, GET /autosync/dashboard-alerts).
+func AllAutosyncMethods() []string {
+	out := make([]string, 0, len(GoogleAutosyncMethods)+len(MicrosoftAutosyncMethods))
+	out = append(out, GoogleAutosyncMethods...)
+	out = append(out, MicrosoftAutosyncMethods...)
+	return out
+}
+
+// IsGoogleAutosyncMethod is true for Google autosync methods that use shared credentials.
+func IsGoogleAutosyncMethod(method string) bool {
+	switch strings.TrimSpace(method) {
 	case "gmail", "google_drive", "google_photos", "google_calendar", "google_contacts":
 		return true
 	default:
@@ -649,7 +976,55 @@ func IsGoogleMediaOrGmailMethod(method string) bool {
 	}
 }
 
-// ResolvedOAuthHolderEmail returns the Google account that holds OAuth (credential email or mailbox).
+// IsMicrosoftAutosyncMethod is true for Microsoft autosync methods that use shared credentials.
+func IsMicrosoftAutosyncMethod(method string) bool {
+	switch strings.TrimSpace(method) {
+	case "outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive", "outlook_sharepoint", "outlook_teams":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsSharedCredentialAutosyncMethod is true when the job resolves OAuth/StorX via credential_id.
+func IsSharedCredentialAutosyncMethod(method string) bool {
+	return IsGoogleAutosyncMethod(method) || IsMicrosoftAutosyncMethod(method)
+}
+
+// IsGoogleMediaOrGmailMethod is kept as an alias for existing call sites.
+func IsGoogleMediaOrGmailMethod(method string) bool {
+	return IsGoogleAutosyncMethod(method)
+}
+
+// FilterJobsByMethods returns jobs whose Method is allowed (nil allowed → unchanged).
+func FilterJobsByMethods(jobs []CronJobListingDB, allowed func(string) bool) []CronJobListingDB {
+	if allowed == nil {
+		return jobs
+	}
+	out := make([]CronJobListingDB, 0, len(jobs))
+	for i := range jobs {
+		if allowed(jobs[i].Method) {
+			out = append(out, jobs[i])
+		}
+	}
+	return out
+}
+
+// FilterLiveJobsByMethods filters live job rows by method family.
+func FilterLiveJobsByMethods(jobs []LiveCronJobListingDB, allowed func(string) bool) []LiveCronJobListingDB {
+	if allowed == nil {
+		return jobs
+	}
+	out := make([]LiveCronJobListingDB, 0, len(jobs))
+	for i := range jobs {
+		if allowed(jobs[i].Method) {
+			out = append(out, jobs[i])
+		}
+	}
+	return out
+}
+
+// ResolvedOAuthHolderEmail returns the OAuth holder account (credential email or mailbox).
 func (r *CronJobRepository) ResolvedOAuthHolderEmail(job *CronJobListingDB) string {
 	if job == nil {
 		return ""
@@ -688,12 +1063,12 @@ func (r *CronJobRepository) GmailResolvedRefreshToken(job *CronJobListingDB) str
 	return ""
 }
 
-// ResolvedRefreshToken resolves refresh_token for any Google autosync method.
+// ResolvedRefreshToken resolves refresh_token for credential-linked autosync methods (Google + Microsoft).
 func (r *CronJobRepository) ResolvedRefreshToken(job *CronJobListingDB) string {
 	if job == nil {
 		return ""
 	}
-	if IsGoogleMediaOrGmailMethod(job.Method) {
+	if IsSharedCredentialAutosyncMethod(job.Method) {
 		return r.GmailResolvedRefreshToken(job)
 	}
 	if job.InputData == nil || job.InputData.Json() == nil {
@@ -745,17 +1120,17 @@ func (r *CronJobRepository) EnrichCronJobFromCredential(job *CronJobListingDB) {
 	if pid := r.ResolvedStorjProjectID(job); pid != "" {
 		job.StorjProjectID = pid
 	}
-	if JobCredentialID(job) > 0 && IsGoogleMediaOrGmailMethod(job.Method) {
+	if JobCredentialID(job) > 0 && IsSharedCredentialAutosyncMethod(job.Method) {
 		job.StorxToken = ""
 	}
 }
 
-// ResolvedStorxToken resolves storx_token for any Google autosync method.
+// ResolvedStorxToken resolves storx_token for credential-linked autosync methods (Google + Microsoft).
 func (r *CronJobRepository) ResolvedStorxToken(job *CronJobListingDB) string {
 	if job == nil {
 		return ""
 	}
-	if IsGoogleMediaOrGmailMethod(job.Method) {
+	if IsSharedCredentialAutosyncMethod(job.Method) {
 		return r.GmailResolvedStorxToken(job)
 	}
 	return strings.TrimSpace(job.StorxToken)
@@ -771,26 +1146,134 @@ func StripGmailRefreshTokenFromCronJobInputData(job *CronJobListingDB) {
 	}
 }
 
+// JobMailbox is the mailbox a Google autosync job belongs to (input email, else resource_id, else name).
+func JobMailbox(job *CronJobListingDB) string {
+	if job == nil {
+		return ""
+	}
+	if job.InputData != nil && job.InputData.Json() != nil {
+		if s, ok := (*job.InputData.Json())["email"].(string); ok && strings.TrimSpace(s) != "" {
+			return strings.TrimSpace(s)
+		}
+	}
+	if s := strings.TrimSpace(job.ResourceID); s != "" {
+		return s
+	}
+	return strings.TrimSpace(job.Name)
+}
+
+func googleRestoreMethod(method string) bool {
+	for _, m := range restoreJobMethods(method) {
+		if IsGoogleAutosyncMethod(m) {
+			return true
+		}
+	}
+	return false
+}
+
+func restoreJobMethods(method string) []string {
+	switch strings.ToLower(strings.TrimSpace(method)) {
+	case "calendar", "google_calendar":
+		return []string{"google_calendar", "calendar"}
+	case "contacts", "google_contacts":
+		return []string{"google_contacts", "contacts"}
+	case "drive", "google_drive":
+		return []string{"google_drive", "drive"}
+	case "photos", "google_photos":
+		return []string{"google_photos", "photos"}
+	default:
+		method = strings.TrimSpace(method)
+		if method == "" {
+			return nil
+		}
+		return []string{method}
+	}
+}
+
+func restoreMailboxMatches(job *CronJobListingDB, loginID string) bool {
+	want := strings.ToLower(strings.TrimSpace(loginID))
+	if want == "" || job == nil {
+		return false
+	}
+	for _, got := range []string{JobMailbox(job), job.Name, job.ResourceID} {
+		if strings.ToLower(strings.TrimSpace(got)) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func preferRestoreMethod(jobs []CronJobListingDB, method string) *CronJobListingDB {
+	if len(jobs) == 0 {
+		return nil
+	}
+	want := strings.ToLower(strings.TrimSpace(method))
+	switch want {
+	case "calendar":
+		want = "google_calendar"
+	case "contacts":
+		want = "google_contacts"
+	case "drive":
+		want = "google_drive"
+	case "photos":
+		want = "google_photos"
+	}
+	for i := range jobs {
+		if strings.ToLower(strings.TrimSpace(jobs[i].Method)) == want {
+			return &jobs[i]
+		}
+	}
+	return &jobs[0]
+}
+
+func (r *CronJobRepository) findMailboxJobs(userID string, methods []string, loginID string) ([]CronJobListingDB, error) {
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(loginID) == "" || len(methods) == 0 {
+		return nil, nil
+	}
+	var rows []CronJobListingDB
+	q := r.db.Where("user_id = ?", strings.TrimSpace(userID))
+	if len(methods) == 1 {
+		q = q.Where("method = ?", methods[0])
+	} else {
+		q = q.Where("method IN ?", methods)
+	}
+	if err := q.Order("active DESC, id DESC").Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("find job for restore: %w", err)
+	}
+	out := make([]CronJobListingDB, 0, len(rows))
+	for i := range rows {
+		if restoreMailboxMatches(&rows[i], loginID) {
+			out = append(out, rows[i])
+		}
+	}
+	return out, nil
+}
+
 // FindJobForRestore returns the autosync cron job for a user, method, and mailbox login_id.
+// Matches name, resource_id, and input_data.email case-insensitively (same idea as Microsoft restore).
 func (r *CronJobRepository) FindJobForRestore(userID, method, loginID string) (*CronJobListingDB, bool, error) {
-	userID = strings.TrimSpace(userID)
-	method = strings.TrimSpace(method)
-	loginID = strings.TrimSpace(loginID)
-	if userID == "" || method == "" || loginID == "" {
+	jobs, err := r.findMailboxJobs(userID, restoreJobMethods(method), loginID)
+	if err != nil || len(jobs) == 0 {
+		return nil, false, err
+	}
+	return preferRestoreMethod(jobs, method), true, nil
+}
+
+// FindJobForRestoreGrant is the StorX grant for a mailbox restore. Google services share one
+// credential, so a Gmail/Drive job is enough when the Calendar row is missing.
+func (r *CronJobRepository) FindJobForRestoreGrant(userID, method, loginID string) (*CronJobListingDB, bool, error) {
+	job, ok, err := r.FindJobForRestore(userID, method, loginID)
+	if err != nil || ok {
+		return job, ok, err
+	}
+	if !googleRestoreMethod(method) {
 		return nil, false, nil
 	}
-	var job CronJobListingDB
-	err := r.db.Where("user_id = ? AND method = ? AND deleted_at IS NULL", userID, method).
-		Where("(name = ? OR (input_data->>'email') = ?)", loginID, loginID).
-		Order("active DESC, id DESC").
-		First(&job).Error
-	if err != nil {
-		if errors.Is(err, gormio.ErrRecordNotFound) {
-			return nil, false, nil
-		}
-		return nil, false, fmt.Errorf("find job for restore: %w", err)
+	jobs, err := r.findMailboxJobs(userID, GoogleAutosyncMethods, loginID)
+	if err != nil || len(jobs) == 0 {
+		return nil, false, err
 	}
-	return &job, true, nil
+	return preferRestoreMethod(jobs, method), true, nil
 }
 
 // GetCronJobByID retrieves a cron job by ID
@@ -852,23 +1335,27 @@ func (r *CronJobRepository) ListJobsByCredentialID(userID string, credentialID u
 	return rows, nil
 }
 
-// HasLinkedJobsForCredential reports whether a credential has any linked jobs for a user.
+// HasLinkedJobsForCredential reports whether a credential has any real backup jobs for a user.
+// System jobs (access-check, etc.) do not count — otherwise isFirstConnection flips false too early.
 func (r *CronJobRepository) HasLinkedJobsForCredential(userID string, credentialID uint) (bool, error) {
 	if credentialID == 0 {
 		return false, nil
 	}
-	var exists bool
-	err := r.db.Raw(`
-SELECT EXISTS (
-  SELECT 1 FROM cron_job_listing_dbs
-  WHERE user_id = ?
-    AND (input_data->>'credential_id')::bigint = ?
-    AND deleted_at IS NULL
-)`, userID, credentialID).Scan(&exists).Error
+	var rows []CronJobListingDB
+	err := r.db.Select("id", "input_data").
+		Where("user_id = ?", userID).
+		Where("COALESCE(job_type, ?) = ?", JobTypeBackup, JobTypeBackup).
+		Where("COALESCE(hidden, false) = ?", false).
+		Find(&rows).Error
 	if err != nil {
 		return false, fmt.Errorf("has linked jobs for credential: %w", err)
 	}
-	return exists, nil
+	for i := range rows {
+		if JobCredentialID(&rows[i]) == credentialID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ListBackupMailboxEmailsForUser returns distinct mailbox emails with backup jobs for a user (all projects).
@@ -1217,6 +1704,73 @@ func (r *CronJobRepository) DeleteCronJobByID(ID uint) error {
 	return nil
 }
 
+// DeleteCronJobAndTasksByID deletes a cron job and its task_listing_dbs rows.
+func (r *CronJobRepository) DeleteCronJobAndTasksByID(id uint) error {
+	if id == 0 {
+		return nil
+	}
+	tx := r.db.Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+	if err := tx.Unscoped().Where("cron_job_id = ?", id).Delete(&TaskListingDB{}).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := tx.Delete(&CronJobListingDB{}, id).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit().Error
+}
+
+// ListMicrosoftJobsByIDs loads Microsoft cron jobs by id for a satellite user.
+func (r *CronJobRepository) ListMicrosoftJobsByIDs(userID string, ids []uint) ([]CronJobListingDB, error) {
+	ids = uniqueUintIDs(ids)
+	if strings.TrimSpace(userID) == "" || len(ids) == 0 {
+		return nil, nil
+	}
+	var rows []CronJobListingDB
+	err := r.db.Where("user_id = ? AND provider = ? AND id IN ? AND COALESCE(placeholder, false) = ?",
+		userID, CredentialProviderMicrosoft, ids, false).Find(&rows).Error
+	return rows, err
+}
+
+// ListMicrosoftAccessVerifyUnavailableJobs returns Microsoft user-service jobs marked
+// access_verify.state=unavailable for grace cleanup or UI listing.
+func (r *CronJobRepository) ListMicrosoftAccessVerifyUnavailableJobs(userID, tenantID string) ([]CronJobListingDB, error) {
+	return r.listMicrosoftAccessVerifyJobsByState(userID, tenantID, AccessVerifyStateUnavailable)
+}
+
+// ListMicrosoftAccessVerifyPendingJobs returns Microsoft user-service jobs marked
+// access_verify.state=pending.
+func (r *CronJobRepository) ListMicrosoftAccessVerifyPendingJobs(userID, tenantID string) ([]CronJobListingDB, error) {
+	return r.listMicrosoftAccessVerifyJobsByState(userID, tenantID, AccessVerifyStatePending)
+}
+
+func (r *CronJobRepository) listMicrosoftAccessVerifyJobsByState(userID, tenantID, state string) ([]CronJobListingDB, error) {
+	q := r.db.Where("provider = ? AND COALESCE(placeholder, false) = ? AND active = ?",
+		CredentialProviderMicrosoft, false, false)
+	if strings.TrimSpace(userID) != "" {
+		q = q.Where("user_id = ?", strings.TrimSpace(userID))
+	}
+	if strings.TrimSpace(tenantID) != "" {
+		q = q.Where("tenant_id = ?", strings.ToLower(strings.TrimSpace(tenantID)))
+	}
+	var rows []CronJobListingDB
+	if err := q.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]CronJobListingDB, 0, len(rows))
+	for i := range rows {
+		m := JobAccessVerify(&rows[i])
+		if m != nil && m.State == state {
+			out = append(out, rows[i])
+		}
+	}
+	return out, nil
+}
+
 // stripDeprecatedCronJobColumnUpdates removes fields no longer stored on cron_job_listing_dbs.
 func stripDeprecatedCronJobColumnUpdates(m map[string]interface{}) {
 	delete(m, "parent_id")
@@ -1340,6 +1894,158 @@ func (r *CronJobRepository) UpdateCronJobFieldsForCron(ID uint, fields map[strin
 	return nil
 }
 
+// ErrJobOwnershipLost means the run's task is no longer the running task of its job (another
+// worker took the job over after a missed heartbeat); the run must stop without writing.
+var ErrJobOwnershipLost = errors.New("job run lost ownership: its task is no longer running")
+
+// taskOwnsJobClause is true while taskID is the running task of the job.
+const taskOwnsJobClause = "EXISTS (SELECT 1 FROM task_listing_dbs WHERE task_listing_dbs.id = ? AND task_listing_dbs.cron_job_id = ? AND task_listing_dbs.status = ?)"
+
+// CheckpointTaskMemory saves task_memory only while taskID is still the job's running task.
+// taskID 0 (no task row, e.g. a manual run) saves unconditionally.
+func (r *CronJobRepository) CheckpointTaskMemory(jobID, taskID uint, mem TaskMemory) error {
+	q := r.db.Model(&CronJobListingDB{}).Where("id = ?", jobID)
+	if taskID != 0 {
+		q = q.Where(taskOwnsJobClause, taskID, jobID, TaskStatusRunning)
+	}
+	res := q.Update("task_memory", mem)
+	if res.Error != nil {
+		return fmt.Errorf("checkpoint task memory: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return ErrJobOwnershipLost
+	}
+	return nil
+}
+
+// TaskOwnsJob reports whether taskID is still the job's running task (taskID 0 always owns).
+func (r *CronJobRepository) TaskOwnsJob(jobID, taskID uint) (bool, error) {
+	if taskID == 0 {
+		return true, nil
+	}
+	var n int64
+	err := r.db.Model(&TaskListingDB{}).
+		Where("id = ? AND cron_job_id = ? AND status = ?", taskID, jobID, TaskStatusRunning).
+		Count(&n).Error
+	if err != nil {
+		return false, fmt.Errorf("check job ownership: %w", err)
+	}
+	return n > 0, nil
+}
+
+// UpdateJobInputData changes a job's input_data with the job row locked, so two concurrent
+// selection changes never lose each other's additions.
+func (r *CronJobRepository) UpdateJobInputData(jobID uint, change func(map[string]interface{}) map[string]interface{}) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		var job CronJobListingDB
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", jobID).First(&job).Error; err != nil {
+			return fmt.Errorf("lock job %d: %w", jobID, err)
+		}
+		in := map[string]interface{}{}
+		if job.InputData != nil && job.InputData.Json() != nil {
+			for k, v := range *job.InputData.Json() {
+				in[k] = v
+			}
+		}
+		out := change(in)
+		return tx.Model(&CronJobListingDB{}).Where("id = ?", jobID).
+			Update("input_data", database.NewDbJsonFromValue(out)).Error
+	})
+}
+
+// TeamsMergedJobMessage is the message of an old per-team Teams job paused after the tenant job
+// imported it.
+const TeamsMergedJobMessage = "Merged into the Teams tenant job; backups are kept"
+
+// TeamsSelectionAddTeam adds a team (and optional channels) to a Teams job selection. Union only:
+// an empty team_ids list means all teams and stays all; an absent or empty channel list for a
+// team means all of its channels and wins over any list.
+func TeamsSelectionAddTeam(in map[string]interface{}, teamID string, channelIDs []string) map[string]interface{} {
+	teamID = strings.TrimSpace(teamID)
+	if in == nil {
+		in = map[string]interface{}{}
+	}
+	if teamID == "" {
+		return in
+	}
+	teams := InputStringList(in["team_ids"])
+	listed := len(teams) == 0 || slices.Contains(teams, teamID)
+	perTeam := map[string][]string{}
+	if raw, ok := in["team_channel_ids"].(map[string]interface{}); ok {
+		for k, v := range raw {
+			perTeam[k] = InputStringList(v)
+		}
+	} else if raw, ok := in["team_channel_ids"].(map[string][]string); ok {
+		for k, v := range raw {
+			perTeam[k] = v
+		}
+	}
+	channels := compactStrings(channelIDs)
+	if listed {
+		if cur, ok := perTeam[teamID]; ok && len(cur) > 0 {
+			if len(channels) == 0 {
+				delete(perTeam, teamID)
+			} else {
+				perTeam[teamID] = compactStrings(append(cur, channels...))
+			}
+		}
+	} else {
+		in["team_ids"] = append(teams, teamID)
+		if len(channels) > 0 {
+			perTeam[teamID] = channels
+		}
+	}
+	if len(perTeam) > 0 {
+		in["team_channel_ids"] = perTeam
+	} else {
+		delete(in, "team_channel_ids")
+	}
+	return in
+}
+
+// TeamsSelectionAddUsers adds users to a Teams job selection (empty user_ids = all users).
+func TeamsSelectionAddUsers(in map[string]interface{}, userIDs []string) map[string]interface{} {
+	if in == nil {
+		in = map[string]interface{}{}
+	}
+	cur := InputStringList(in["user_ids"])
+	if len(cur) == 0 {
+		return in
+	}
+	in["user_ids"] = compactStrings(append(cur, userIDs...))
+	return in
+}
+
+// InputStringList reads a string list from decoded input_data JSON.
+func InputStringList(v interface{}) []string {
+	var out []string
+	switch t := v.(type) {
+	case []string:
+		out = append(out, t...)
+	case []interface{}:
+		for _, item := range t {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+	}
+	return compactStrings(out)
+}
+
+func compactStrings(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
 // DeleteAllJobsAndTasksByEmail deletes all jobs and related tasks for a user by email
 // Returns the list of deleted job IDs and task IDs
 func (r *CronJobRepository) DeleteAllJobsAndTasksByEmail(email string) ([]uint, []uint, error) {
@@ -1458,6 +2164,24 @@ func (r *CronJobRepository) scheduleForActivation(job *CronJobListingDB) (interv
 	return interval, ""
 }
 
+// jobUsesMicrosoftApplicationAuth reports whether the job's credential uses the tenant app-only token
+// (no refresh token; authorization is tenant consent + capabilities).
+func (r *CronJobRepository) jobUsesMicrosoftApplicationAuth(job *CronJobListingDB) bool {
+	credID := JobCredentialID(job)
+	if credID == 0 {
+		return false
+	}
+	tenantID := normalizeTenantID(job.TenantID)
+	if tenantID == "" {
+		return false
+	}
+	var link MicrosoftAccountTenantDB
+	if err := r.db.Select("auth_mode").Where("credential_id = ? AND tenant_id = ?", credID, tenantID).First(&link).Error; err != nil {
+		return false
+	}
+	return link.Application()
+}
+
 func (r *CronJobRepository) validateJobForActivation(job *CronJobListingDB) error {
 	if job == nil || job.PolicyID == 0 {
 		return fmt.Errorf("policy_id is required when activating backup")
@@ -1502,10 +2226,24 @@ func (r *CronJobRepository) validateJobForActivation(job *CronJobListingDB) erro
 		if emailVal == "" {
 			return fmt.Errorf("email is required in input_data or job name for gmail method")
 		}
-	case "outlook", "google_drive", "google_photos", "google_calendar", "google_contacts":
-		rt := r.ResolvedRefreshToken(job)
-		if strings.TrimSpace(rt) == "" {
+	case "outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive", "outlook_sharepoint", "outlook_teams",
+		"google_drive", "google_photos", "google_calendar", "google_contacts":
+		if strings.HasPrefix(job.Method, "outlook") && r.jobUsesMicrosoftApplicationAuth(job) {
+			if strings.TrimSpace(job.Name) == "" {
+				return fmt.Errorf("job name (mailbox or resource) is required for application %s jobs", job.Method)
+			}
+		} else if strings.TrimSpace(r.ResolvedRefreshToken(job)) == "" {
 			return fmt.Errorf("refresh_token is required in input_data for %s method", job.Method)
+		}
+		if job.Method == "outlook_teams" && job.ResourceType != ResourceTypeTenant {
+			if JobTeamsTeamID(job) == "" {
+				return fmt.Errorf("team_id is required in input_data for outlook_teams method")
+			}
+		}
+		if job.Method == "outlook_sharepoint" {
+			if len(JobSharePointSites(job)) == 0 {
+				return fmt.Errorf("sites (or legacy site_id+drive_id) required in input_data for outlook_sharepoint")
+			}
 		}
 	case "database", "psql_database", "mysql_database":
 		// Check if database connection details exist in input_data
@@ -1526,15 +2264,25 @@ type AutoSyncJobStats struct {
 	LastSyncAt                  *time.Time
 }
 
-var autosyncStatsWorkspaceMethods = []string{
-	"gmail", "google_drive", "google_photos", "google_contacts", "google_calendar",
+// GetAutoSyncJobStats loads Google + Microsoft mailbox counts in one SQL round trip
+// for the shared Satellite dashboard path GET /autosync/stats.
+func (r *CronJobRepository) GetAutoSyncJobStats(userID string) (*AutoSyncJobStats, error) {
+	return r.GetAutoSyncJobStatsForMethods(userID, AllAutosyncMethods())
 }
 
-// GetAutoSyncJobStats loads mailbox counts in one SQL round trip (no full job rows).
-func (r *CronJobRepository) GetAutoSyncJobStats(userID string) (*AutoSyncJobStats, error) {
+// GetMicrosoftAutoSyncJobStats loads Microsoft mailbox counts.
+func (r *CronJobRepository) GetMicrosoftAutoSyncJobStats(userID string) (*AutoSyncJobStats, error) {
+	return r.GetAutoSyncJobStatsForMethods(userID, MicrosoftAutosyncMethods)
+}
+
+// GetAutoSyncJobStatsForMethods loads mailbox counts for the given job methods.
+func (r *CronJobRepository) GetAutoSyncJobStatsForMethods(userID string, methods []string) (*AutoSyncJobStats, error) {
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
 		return nil, fmt.Errorf("user_id is required")
+	}
+	if len(methods) == 0 {
+		return &AutoSyncJobStats{}, nil
 	}
 
 	const q = `
@@ -1554,14 +2302,14 @@ SELECT
   COALESCE((SELECT COUNT(*)::bigint FROM mailbox_first), 0) AS connected_accounts,
   COALESCE((SELECT COUNT(*)::bigint FROM mailbox_first WHERE first_created > NOW() - INTERVAL '7 days'), 0) AS growth_week,
   (SELECT MAX(last_run) FROM cron_job_listing_dbs
-    WHERE user_id = ? AND deleted_at IS NULL AND COALESCE(placeholder, false) = false) AS last_sync_at`
+    WHERE user_id = ? AND deleted_at IS NULL AND COALESCE(placeholder, false) = false AND method IN ?) AS last_sync_at`
 
 	var row struct {
 		ConnectedAccounts int64
 		GrowthWeek        int64
 		LastSyncAt        sql.NullTime
 	}
-	if err := r.db.Raw(q, userID, autosyncStatsWorkspaceMethods, userID).Scan(&row).Error; err != nil {
+	if err := r.db.Raw(q, userID, methods, userID, methods).Scan(&row).Error; err != nil {
 		return nil, fmt.Errorf("autosync job stats: %w", err)
 	}
 
@@ -1574,6 +2322,39 @@ SELECT
 		out.LastSyncAt = &t
 	}
 	return out, nil
+}
+
+// JobSharePointSiteID returns input_data.site_id for outlook_sharepoint jobs.
+func JobSharePointSiteID(job *CronJobListingDB) string {
+	if job == nil || job.InputData == nil || job.InputData.Json() == nil {
+		return ""
+	}
+	if v, ok := (*job.InputData.Json())["site_id"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+// JobSharePointDriveID returns input_data.drive_id for outlook_sharepoint jobs.
+func JobSharePointDriveID(job *CronJobListingDB) string {
+	if job == nil || job.InputData == nil || job.InputData.Json() == nil {
+		return ""
+	}
+	if v, ok := (*job.InputData.Json())["drive_id"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+// JobTeamsTeamID returns input_data.team_id for outlook_teams jobs.
+func JobTeamsTeamID(job *CronJobListingDB) string {
+	if job == nil || job.InputData == nil || job.InputData.Json() == nil {
+		return ""
+	}
+	if v, ok := (*job.InputData.Json())["team_id"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
 }
 
 // MaskTokenForCronJobListingDB masks sensitive tokens in cron job data
