@@ -176,11 +176,12 @@ type RestoreDeps struct {
 	// WriteCred is the credential used to mint provider tokens (Google or Microsoft).
 	WriteCred *repo.GoogleBackupCredentialDB
 
-	GmailClient     *google.GmailClient
-	DriveService    *drive.Service
-	CalendarService *calendar.Service
-	PeopleService   *people.Service
-	PhotosClient    *google.GPotosClient
+	GmailClient       *google.GmailClient
+	DriveService      *drive.Service
+	CalendarService   *calendar.Service
+	PeopleService     *people.Service
+	ContactIdentities *google.ContactIdentityIndex
+	PhotosClient      *google.GPotosClient
 
 	PhotosAlbumCache map[string]*albums.Album
 	PhotosAlbumMu    sync.Mutex

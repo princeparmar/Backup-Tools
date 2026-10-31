@@ -169,8 +169,11 @@ func processContactsPage(ctx context.Context, input ProcessorInput, task *repo.S
 			continue
 		}
 		_, synced := syncedSet[id]
-		stale := synced && google.ContactBackupStale(google.ExistingContactObjectKey(syncedKeys, task.LoginId, items[i].ID), items[i].SourceUpdatedAt)
-		if synced && !refresh && !stale {
+		existing := google.ExistingContactObjectKey(syncedKeys, task.LoginId, items[i].ID)
+		freshKey := google.ContactsObjectKey(task.LoginId, items[i].ID, items[i].SourceUpdatedAt, google.ContactKeyDisplayName(items[i]))
+		stale := synced && google.ContactBackupStale(existing, items[i].SourceUpdatedAt)
+		relabel := existing != "" && existing != freshKey
+		if synced && !refresh && !stale && !relabel {
 			continue
 		}
 		newFound = true
@@ -187,12 +190,9 @@ func processContactsPage(ctx context.Context, input ProcessorInput, task *repo.S
 }
 
 func syncContactByID(ctx context.Context, input ProcessorInput, task *repo.ScheduledTasks, item google.FlatContact, syncedKeys map[string]bool, photoClient *http.Client) error {
-	freshKey := google.ContactsObjectKey(task.LoginId, item.ID, item.SourceUpdatedAt)
+	freshKey := google.ContactsObjectKey(task.LoginId, item.ID, item.SourceUpdatedAt, google.ContactKeyDisplayName(item))
 	existing := google.ExistingContactObjectKey(syncedKeys, task.LoginId, item.ID)
 	objectKey := freshKey
-	if existing != "" && !google.ContactBackupStale(existing, item.SourceUpdatedAt) {
-		objectKey = existing
-	}
 	payload := google.BackupFromFlat(item)
 	payload.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	if item.PhotoURL != "" {

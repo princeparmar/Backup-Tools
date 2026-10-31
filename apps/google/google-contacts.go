@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -473,14 +474,95 @@ func ContactsIDFromResourceName(resourceName string) string {
 	return strings.ReplaceAll(resourceName, "/", "_")
 }
 
-// ContactsObjectKey returns storage path: {email}/contacts/{yyyy}/{mm}/{dd}/{contactId}.json
-// sourceUpdatedAt is People API sources[].updateTime (RFC3339).
-func ContactsObjectKey(email, resourceName, sourceUpdatedAt string) string {
+const contactsObjectTitleSep = " - "
+
+func looksLikeGoogleContactKeyID(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) < 4 || (value[0] != 'c' && value[0] != 'C') {
+		return false
+	}
+	for _, r := range value[1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// SanitizeContactKeyName makes a display name safe as a vault filename segment.
+func SanitizeContactKeyName(name string) string {
+	name = strings.ReplaceAll(name, "/", "_")
+	name = strings.ReplaceAll(name, "\r", " ")
+	name = strings.ReplaceAll(name, "\n", " ")
+	name = strings.Join(strings.Fields(strings.TrimSpace(name)), " ")
+	if name == "" || looksLikeGoogleContactKeyID(name) {
+		return ""
+	}
+	return name
+}
+
+// ContactKeyDisplayName is the list label encoded into the object key (Gmail-style).
+func ContactKeyDisplayName(item FlatContact) string {
+	if name := SanitizeContactKeyName(item.Name); name != "" {
+		return name
+	}
+	for _, email := range item.Emails {
+		if v := strings.TrimSpace(email); v != "" {
+			return SanitizeContactKeyName(v)
+		}
+	}
+	for _, row := range item.EmailDetails {
+		if v := strings.TrimSpace(row.Value); v != "" {
+			return SanitizeContactKeyName(v)
+		}
+	}
+	return ""
+}
+
+// ContactsObjectTitle is the leaf filename without .json: "{name} - {id}" or "{id}".
+func ContactsObjectTitle(displayName, contactID string) string {
+	id := strings.TrimSpace(contactID)
+	name := SanitizeContactKeyName(displayName)
+	if name == "" || id == "" {
+		return id
+	}
+	return name + contactsObjectTitleSep + id
+}
+
+// ParseContactsObjectFilename reads a named or legacy contact leaf (`Priya Shah - c123.json` / `c123.json`).
+func ParseContactsObjectFilename(filename string) (name, id string) {
+	filename = strings.TrimSpace(filename)
+	filename = strings.TrimSuffix(filename, ".json")
+	if looksLikeGoogleContactKeyID(filename) {
+		return "", filename
+	}
+	if i := strings.LastIndex(filename, contactsObjectTitleSep); i >= 0 {
+		id = strings.TrimSpace(filename[i+len(contactsObjectTitleSep):])
+		name = strings.TrimSpace(filename[:i])
+		if looksLikeGoogleContactKeyID(id) {
+			return name, id
+		}
+	}
+	return "", filename
+}
+
+// ContactsIDFromObjectKey returns the People id from a dated vault key.
+func ContactsIDFromObjectKey(objectKey string) string {
+	_, id := ParseContactsObjectFilename(path.Base(strings.TrimSpace(objectKey)))
+	if looksLikeGoogleContactKeyID(id) {
+		return id
+	}
+	return strings.TrimSpace(id)
+}
+
+// ContactsObjectKey returns storage path: {email}/contacts/{yyyy}/{mm}/{dd}/{name} - {contactId}.json
+// Older backups used {contactId}.json only. sourceUpdatedAt is People API sources[].updateTime.
+func ContactsObjectKey(email, resourceName, sourceUpdatedAt, displayName string) string {
 	id := ContactsIDFromResourceName(resourceName)
 	return fmt.Sprintf("%s/contacts/%s/%s.json",
 		strings.TrimSpace(email),
 		ObjectKeyDatePathFromRFC3339(sourceUpdatedAt),
-		id,
+		ContactsObjectTitle(displayName, id),
 	)
 }
 
@@ -498,12 +580,12 @@ func BuildContactsSyncedIDSet(objectKeys map[string]bool, emailPrefix string) ma
 			continue
 		}
 		segment := strings.TrimSuffix(strings.TrimPrefix(key, contactsPrefix), ".json")
-		// Expect yyyy/mm/dd/{id}
+		// Expect yyyy/mm/dd/{name - id|id}
 		parts := strings.Split(segment, "/")
 		if len(parts) != 4 {
 			continue
 		}
-		if id := strings.TrimSpace(parts[3]); id != "" {
+		if id := ContactsIDFromObjectKey(key); id != "" {
 			set[id] = struct{}{}
 		}
 	}
@@ -554,14 +636,16 @@ func ExistingContactObjectKey(syncedMap map[string]bool, email, resourceName str
 	if id == "" {
 		return ""
 	}
-	suffix := "/" + id + ".json"
 	prefix := strings.TrimSpace(email) + "/contacts/"
 	for key := range syncedMap {
-		if !strings.HasPrefix(key, prefix) || !strings.HasSuffix(key, suffix) {
+		if !strings.HasPrefix(key, prefix) {
 			continue
 		}
 		rest := strings.TrimSuffix(strings.TrimPrefix(key, prefix), ".json")
-		if len(strings.Split(rest, "/")) == 4 {
+		if len(strings.Split(rest, "/")) != 4 {
+			continue
+		}
+		if ContactsIDFromObjectKey(key) == id {
 			return key
 		}
 	}
@@ -580,7 +664,9 @@ func IsContactsRestoreObjectKey(objectKey string) bool {
 }
 
 // RestoreContactFromBackup creates a Google contact from vault JSON.
-func RestoreContactFromBackup(ctx context.Context, service *people.Service, data []byte) error {
+// seen is the target mailbox; a matching email or phone is skipped so restore-all
+// does not keep adding the same extras for the owner or an invited member.
+func RestoreContactFromBackup(ctx context.Context, service *people.Service, data []byte, seen *ContactIdentityIndex) error {
 	if service == nil {
 		return fmt.Errorf("people service is nil")
 	}
@@ -592,10 +678,17 @@ func RestoreContactFromBackup(ctx context.Context, service *people.Service, data
 	if person == nil {
 		return fmt.Errorf("contact backup has no restorable fields")
 	}
+	if seen != nil && seen.HasPerson(person) {
+		return nil
+	}
 	attachContactLabels(ctx, service, person, backup.Labels)
 	created, err := service.People.CreateContact(person).Context(ctx).Do()
 	if err != nil {
 		return fmt.Errorf("create contact: %w", err)
+	}
+	if seen != nil {
+		seen.AddPerson(person)
+		seen.AddPerson(created)
 	}
 	restoreContactPhoto(ctx, service, created, backup.Photo)
 	return nil

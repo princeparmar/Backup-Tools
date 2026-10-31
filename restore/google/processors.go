@@ -8,6 +8,8 @@ import (
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
 	"github.com/StorX2-0/Backup-Tools/restore"
+
+	people "google.golang.org/api/people/v1"
 )
 
 func requireGoogleToken(deps *restore.RestoreDeps) error {
@@ -138,7 +140,14 @@ func (c *calendarProcessor) Config() restore.ServiceConfig {
 	return cfg
 }
 func (c *calendarProcessor) ShouldRestoreKey(key string) bool {
-	return google.IsCalendarEventRestoreObjectKey(key)
+	if !google.IsCalendarEventRestoreObjectKey(key) {
+		return false
+	}
+	calID, _, ok := google.ParseCalendarEventObjectKey(key)
+	if !ok {
+		return false
+	}
+	return !google.IsReadOnlyGoogleCalendar(calID)
 }
 func (c *calendarProcessor) Setup(ctx context.Context, deps *restore.RestoreDeps) error {
 	if deps.AuthMode == restore.RestoreAuthModeDWD {
@@ -180,8 +189,7 @@ func (c *contactsProcessor) Setup(ctx context.Context, deps *restore.RestoreDeps
 		if err != nil {
 			return err
 		}
-		deps.PeopleService = svc
-		return nil
+		return attachContactsRestoreIndex(ctx, deps, svc)
 	}
 	if err := requireGoogleToken(deps); err != nil {
 		return err
@@ -190,11 +198,20 @@ func (c *contactsProcessor) Setup(ctx context.Context, deps *restore.RestoreDeps
 	if err != nil {
 		return err
 	}
+	return attachContactsRestoreIndex(ctx, deps, svc)
+}
+
+func attachContactsRestoreIndex(ctx context.Context, deps *restore.RestoreDeps, svc *people.Service) error {
 	deps.PeopleService = svc
+	idx, err := google.LoadContactIdentityIndex(ctx, svc)
+	if err != nil {
+		return err
+	}
+	deps.ContactIdentities = idx
 	return nil
 }
 func (c *contactsProcessor) RestoreKey(ctx context.Context, deps *restore.RestoreDeps, objectKey string) error {
-	return RestoreContactKey(ctx, deps.AccessGrant, deps.PeopleService, objectKey)
+	return RestoreContactKey(ctx, deps.AccessGrant, deps.PeopleService, objectKey, deps.ContactIdentities)
 }
 func (c *contactsProcessor) Cleanup(ctx context.Context, deps *restore.RestoreDeps) error { return nil }
 

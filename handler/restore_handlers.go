@@ -707,18 +707,23 @@ func HandleGetRestoreJob(c echo.Context) error {
 
 // RestoreJobListResponse is the job metadata shape for GET /restore/jobs (progress via /restore/live).
 type RestoreJobListResponse struct {
-	ID            uint                   `json:"ID"`
-	Method        string                 `json:"method"`
-	LoginID       string                 `json:"login_id"`
-	Status        string                 `json:"status"`
-	Message       string                 `json:"message"`
-	MessageStatus string                 `json:"message_status"`
-	AccountType   string                 `json:"account_type"`
-	AuthMode      string                 `json:"auth_mode"`
-	RestoreTag    string                 `json:"restore_tag,omitempty"`
-	InputData     map[string]interface{} `json:"input_data"`
-	CreatedAt     time.Time              `json:"created_at"`
-	UpdatedAt     time.Time              `json:"updated_at"`
+	ID              uint                   `json:"ID"`
+	Method          string                 `json:"method"`
+	LoginID         string                 `json:"login_id"`
+	Status          string                 `json:"status"`
+	Message         string                 `json:"message"`
+	MessageStatus   string                 `json:"message_status"`
+	AccountType     string                 `json:"account_type"`
+	AuthMode        string                 `json:"auth_mode"`
+	RestoreTag      string                 `json:"restore_tag,omitempty"`
+	InputData       map[string]interface{} `json:"input_data"`
+	Total           uint                   `json:"total"`
+	Processed       uint                   `json:"processed"`
+	Failed          uint                   `json:"failed"`
+	CursorID        uint                   `json:"cursor_id"`
+	ProgressPercent float64                `json:"progress_percent"`
+	CreatedAt       time.Time              `json:"created_at"`
+	UpdatedAt       time.Time              `json:"updated_at"`
 }
 
 // RestoreJobDetailResponse is GET /restore/job/:job_id (autosync detail shape + progress).
@@ -829,18 +834,23 @@ func restoreJobInputData(job *repo.RestoreJobListingDB) map[string]interface{} {
 
 func toRestoreJobListResponse(store *db.PostgresDb, job *repo.RestoreJobListingDB) RestoreJobListResponse {
 	return RestoreJobListResponse{
-		ID:            job.ID,
-		Method:        job.Method,
-		LoginID:       job.LoginID,
-		Status:        job.Status,
-		Message:       job.Message,
-		MessageStatus: repo.EffectiveRestoreMessageStatus(job),
-		AccountType:   job.AccountType,
-		AuthMode:      restore.AuthModeForJob(store, job),
-		RestoreTag:    job.RestoreTag,
-		InputData:     restoreJobInputData(job),
-		CreatedAt:     job.CreatedAt,
-		UpdatedAt:     job.UpdatedAt,
+		ID:              job.ID,
+		Method:          job.Method,
+		LoginID:         job.LoginID,
+		Status:          job.Status,
+		Message:         job.Message,
+		MessageStatus:   repo.EffectiveRestoreMessageStatus(job),
+		AccountType:     job.AccountType,
+		AuthMode:        restore.AuthModeForJob(store, job),
+		RestoreTag:      job.RestoreTag,
+		InputData:       restoreJobInputData(job),
+		Total:           job.TotalCount,
+		Processed:       job.ProcessedCount,
+		Failed:          job.FailedCount,
+		CursorID:        job.CursorID,
+		ProgressPercent: repo.RestoreProgressPercent(job.TotalCount, job.ProcessedCount, job.FailedCount),
+		CreatedAt:       job.CreatedAt,
+		UpdatedAt:       job.UpdatedAt,
 	}
 }
 

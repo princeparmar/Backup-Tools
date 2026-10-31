@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/StorX2-0/Backup-Tools/pkg/gorm"
-	gormdb "gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -299,16 +298,18 @@ func (r *RestoreJobRepository) BumpRestoreProgress(jobID uint, ok, fail uint) er
 	if ok == 0 && fail == 0 {
 		return nil
 	}
-	updates := map[string]interface{}{
-		"last_heart_beat": time.Now(),
-	}
-	if ok > 0 {
-		updates["processed_count"] = gormdb.Expr("processed_count + ?", ok)
-	}
-	if fail > 0 {
-		updates["failed_count"] = gormdb.Expr("failed_count + ?", fail)
-	}
-	return r.db.Model(&RestoreJobListingDB{}).Where("id = ?", jobID).Updates(updates).Error
+	delta := ok + fail
+	return r.db.Exec(`
+		UPDATE restore_job_listing_dbs
+		SET processed_count = processed_count + ?,
+		    failed_count = failed_count + ?,
+		    total_count = CASE
+		      WHEN total_count < processed_count + failed_count + ? THEN processed_count + failed_count + ?
+		      ELSE total_count
+		    END,
+		    last_heart_beat = ?
+		WHERE id = ? AND deleted_at IS NULL
+	`, ok, fail, delta, delta, time.Now(), jobID).Error
 }
 
 func (r *RestoreJobRepository) UpdateJob(id uint, updates map[string]interface{}) error {
@@ -326,9 +327,11 @@ func (r *RestoreJobRepository) UpdateHeartBeat(id uint) error {
 func (r *RestoreJobRepository) CountPendingRetryTasks(jobID uint) (int64, error) {
 	var count int64
 	now := time.Now()
+	// Only future retries block complete. A leftover "running" task after the
+	// inventory is empty left jobs stuck at 100% and blocked the next queued job.
 	err := r.db.Model(&RestoreTaskListingDB{}).
-		Where("restore_job_id = ? AND (status = ? OR (status = ? AND next_attempt_at > ?))",
-			jobID, RestoreTaskStatusRunning, RestoreTaskStatusRetrying, now).
+		Where("restore_job_id = ? AND status = ? AND next_attempt_at > ?",
+			jobID, RestoreTaskStatusRetrying, now).
 		Count(&count).Error
 	return count, err
 }
@@ -502,14 +505,34 @@ func (r *RestoreJobRepository) ListByUser(userID string, filter *RestoreJobListF
 	return jobs, err
 }
 
+func (r *RestoreJobRepository) ListIdleRunningJobs(idleFor time.Duration) ([]RestoreJobListingDB, error) {
+	if idleFor <= 0 {
+		idleFor = 2 * time.Minute
+	}
+	idleBefore := time.Now().Add(-idleFor)
+	var jobs []RestoreJobListingDB
+	err := r.db.
+		Where("status = ? AND (last_heart_beat IS NULL OR last_heart_beat < ?)", RestoreJobStatusRunning, idleBefore).
+		Order("id ASC").
+		Find(&jobs).Error
+	return jobs, err
+}
+
 func (r *RestoreJobRepository) MissedHeartbeatForJobs(staleBefore time.Time) error {
-	return r.db.Model(&RestoreJobListingDB{}).
-		Where("status = ? AND (last_heart_beat IS NULL OR last_heart_beat < ?)", RestoreJobStatusRunning, staleBefore).
-		Updates(map[string]interface{}{
-			"status":         RestoreJobStatusFailed,
-			"message":        "restore job missed heartbeat",
-			"message_status": JobMessageStatusError,
-		}).Error
+	return r.db.Exec(`
+		UPDATE restore_job_listing_dbs AS rj
+		SET status = ?, message = ?, message_status = ?
+		WHERE rj.status = ?
+		AND rj.deleted_at IS NULL
+		AND (rj.last_heart_beat IS NULL OR rj.last_heart_beat < ?)
+		AND NOT EXISTS (
+			SELECT 1 FROM restore_task_listing_dbs AS rt
+			WHERE rt.restore_job_id = rj.id
+			AND rt.deleted_at IS NULL
+			AND rt.status IN (?, ?)
+		)
+	`, RestoreJobStatusFailed, "restore job missed heartbeat", JobMessageStatusError,
+		RestoreJobStatusRunning, staleBefore, RestoreTaskStatusRunning, RestoreTaskStatusRetrying).Error
 }
 
 func (r *RestoreJobRepository) CreateDeadItem(item *RestoreDeadItemDB) error {

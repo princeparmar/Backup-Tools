@@ -28,10 +28,89 @@ func TestContactsIDFromResourceName(t *testing.T) {
 }
 
 func TestContactsObjectKey(t *testing.T) {
-	got := ContactsObjectKey("user@gmail.com", "people/c123", "2026-07-21T10:00:00Z")
-	want := "user@gmail.com/contacts/2026/07/21/c123.json"
-	if got != want {
-		t.Fatalf("ContactsObjectKey() = %q, want %q", got, want)
+	tests := []struct {
+		name        string
+		resource    string
+		updatedAt   string
+		displayName string
+		want        string
+	}{
+		{
+			name:        "legacy id only when name empty",
+			resource:    "people/c123",
+			updatedAt:   "2026-07-21T10:00:00Z",
+			displayName: "",
+			want:        "user@gmail.com/contacts/2026/07/21/c123.json",
+		},
+		{
+			name:        "list name in the leaf like Gmail",
+			resource:    "people/c1510373750082112799",
+			updatedAt:   "2026-07-21T10:00:00Z",
+			displayName: "Priya Shah",
+			want:        "user@gmail.com/contacts/2026/07/21/Priya Shah - c1510373750082112799.json",
+		},
+		{
+			name:        "slash in name is underscored",
+			resource:    "people/c12345678",
+			updatedAt:   "2026-07-21T10:00:00Z",
+			displayName: "Sales / Desk",
+			want:        "user@gmail.com/contacts/2026/07/21/Sales _ Desk - c12345678.json",
+		},
+		{
+			name:        "people id is not used as the label",
+			resource:    "people/c12345678",
+			updatedAt:   "2026-07-21T10:00:00Z",
+			displayName: "c12345678",
+			want:        "user@gmail.com/contacts/2026/07/21/c12345678.json",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ContactsObjectKey("user@gmail.com", tt.resource, tt.updatedAt, tt.displayName)
+			if got != tt.want {
+				t.Fatalf("ContactsObjectKey() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseContactsObjectFilename(t *testing.T) {
+	tests := []struct {
+		name     string
+		filename string
+		wantName string
+		wantID   string
+	}{
+		{name: "legacy id", filename: "c1510373750082112799.json", wantName: "", wantID: "c1510373750082112799"},
+		{name: "named leaf", filename: "Priya Shah - c1510373750082112799.json", wantName: "Priya Shah", wantID: "c1510373750082112799"},
+		{name: "name with dash", filename: "Jean-Luc Picard - c12345678.json", wantName: "Jean-Luc Picard", wantID: "c12345678"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotName, gotID := ParseContactsObjectFilename(tt.filename)
+			if gotName != tt.wantName || gotID != tt.wantID {
+				t.Fatalf("got (%q, %q), want (%q, %q)", gotName, gotID, tt.wantName, tt.wantID)
+			}
+		})
+	}
+}
+
+func TestContactKeyDisplayName(t *testing.T) {
+	tests := []struct {
+		name string
+		item FlatContact
+		want string
+	}{
+		{name: "uses display name", item: FlatContact{Name: "Ada Lovelace"}, want: "Ada Lovelace"},
+		{name: "falls back to email", item: FlatContact{Name: "", Emails: []string{"ada@example.com"}}, want: "ada@example.com"},
+		{name: "skips people id", item: FlatContact{Name: "c12345678", Emails: []string{"ada@example.com"}}, want: "ada@example.com"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ContactKeyDisplayName(tt.item); got != tt.want {
+				t.Fatalf("ContactKeyDisplayName() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -45,8 +124,8 @@ func TestBuildContactsSyncedIDSet(t *testing.T) {
 		{
 			name: "dated contacts json keys",
 			objectKeys: map[string]bool{
-				"user@gmail.com/contacts/2026/07/21/c123.json": true,
-				"user@gmail.com/contacts/2026/07/22/c456.json": true,
+				"user@gmail.com/contacts/2026/07/21/c123.json":                 true,
+				"user@gmail.com/contacts/2026/07/22/Ada Lovelace - c456.json": true,
 			},
 			email:   "user@gmail.com",
 			wantIDs: []string{"c123", "c456"},
@@ -100,8 +179,9 @@ func TestPageHasAnyNewContactsItems(t *testing.T) {
 
 func TestIsContactSynced(t *testing.T) {
 	syncedMap := map[string]bool{
-		"user@gmail.com/contacts/c123.json":            true,
-		"user@gmail.com/contacts/2026/07/21/c999.json": true,
+		"user@gmail.com/contacts/c123.json":                         true,
+		"user@gmail.com/contacts/2026/07/21/c999.json":              true,
+		"user@gmail.com/contacts/2026/07/22/Ada Lovelace - c888.json": true,
 	}
 	tests := []struct {
 		name         string
@@ -110,6 +190,7 @@ func TestIsContactSynced(t *testing.T) {
 	}{
 		{name: "undated ignored", resourceName: "people/c123", want: false},
 		{name: "dated synced", resourceName: "people/c999", want: true},
+		{name: "named dated synced", resourceName: "people/c888", want: true},
 		{name: "not synced", resourceName: "people/c000", want: false},
 	}
 

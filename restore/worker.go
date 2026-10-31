@@ -20,10 +20,19 @@ var (
 	ErrJobCancelled = errors.New("restore job cancelled")
 	ErrJobTerminal  = errors.New("restore job already finished")
 
-	// Single-flight across HTTP kick + cron so two ProcessRestoreJobs cannot
-	// claim/run the same job concurrently (that left live progress stuck at 0%).
-	restoreWorkerMu sync.Mutex
+	// One in-process worker per job. A global lock left later jobs queued;
+	// no lock let cron + HTTP kick stack batches on the same Drive job.
+	restoreJobLocks sync.Map
 )
+
+func tryLockRestoreJob(jobID uint) (unlock func(), ok bool) {
+	v, _ := restoreJobLocks.LoadOrStore(jobID, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	if !mu.TryLock() {
+		return nil, false
+	}
+	return mu.Unlock, true
+}
 
 func logJobFields(jobID int, method, loginID string) []logger.Field {
 	return []logger.Field{
@@ -39,13 +48,9 @@ func isInactiveRestoreJobErr(err error) bool {
 
 // ProcessRestoreJobs runs batches for retry, running, and queued jobs until none are claimable.
 func ProcessRestoreJobs(ctx context.Context, store *db.PostgresDb) error {
-	if !restoreWorkerMu.TryLock() {
-		return nil
-	}
-	defer restoreWorkerMu.Unlock()
-
 	stale := time.Now().Add(-10 * time.Minute)
 	_ = store.RestoreJobRepo.MissedHeartbeatForJobs(stale)
+	finalizeIdleRunningJobs(ctx, store)
 
 	for {
 		if err := processRetryTask(ctx, store); err != nil && !errors.Is(err, gormdb.ErrRecordNotFound) && !isInactiveRestoreJobErr(err) {
@@ -56,11 +61,7 @@ func ProcessRestoreJobs(ctx context.Context, store *db.PostgresDb) error {
 
 		job, err := store.RestoreJobRepo.ClaimNextRunningJob()
 		if err == nil {
-			if err := processJobBatches(ctx, store, job, nil); err != nil && !isInactiveRestoreJobErr(err) {
-				logger.Error(ctx, "Restore job batch failed",
-					append(logJobFields(int(job.ID), job.Method, job.LoginID), logger.ErrorField(err))...)
-				return err
-			}
+			runClaimedRestoreJob(ctx, store, job)
 			continue
 		}
 		if !errors.Is(err, gormdb.ErrRecordNotFound) {
@@ -76,11 +77,41 @@ func ProcessRestoreJobs(ctx context.Context, store *db.PostgresDb) error {
 			logger.Error(ctx, "Failed to claim queued restore job", logger.ErrorField(err))
 			return err
 		}
-		if err := processJobBatches(ctx, store, job, nil); err != nil && !isInactiveRestoreJobErr(err) {
-			logger.Error(ctx, "Restore job batch failed",
-				append(logJobFields(int(job.ID), job.Method, job.LoginID), logger.ErrorField(err))...)
-			return err
+		runClaimedRestoreJob(ctx, store, job)
+	}
+}
+
+func runClaimedRestoreJob(ctx context.Context, store *db.PostgresDb, job *repo.RestoreJobListingDB) {
+	if job == nil {
+		return
+	}
+	unlock, ok := tryLockRestoreJob(job.ID)
+	if !ok {
+		return
+	}
+	defer unlock()
+	if runErr := processJobBatches(ctx, store, job, nil); runErr != nil && !isInactiveRestoreJobErr(runErr) {
+		logger.Error(ctx, "Restore job batch failed",
+			append(logJobFields(int(job.ID), job.Method, job.LoginID), logger.ErrorField(runErr))...)
+	}
+}
+
+func finalizeIdleRunningJobs(ctx context.Context, store *db.PostgresDb) {
+	jobs, err := store.RestoreJobRepo.ListIdleRunningJobs(2 * time.Minute)
+	if err != nil {
+		return
+	}
+	for i := range jobs {
+		job := &jobs[i]
+		unlock, ok := tryLockRestoreJob(job.ID)
+		if !ok {
+			continue
 		}
+		if finErr := tryFinalizeJob(ctx, store, job); finErr != nil {
+			logger.Warn(ctx, "Idle restore finalize failed",
+				append(logJobFields(int(job.ID), job.Method, job.LoginID), logger.ErrorField(finErr))...)
+		}
+		unlock()
 	}
 }
 
@@ -130,6 +161,11 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 			return nil
 		}
 		return err
+	}
+
+	if retryTask == nil {
+		syncRestoreJobCursorFromTasks(store, job)
+		_ = store.RestoreTaskRepo.CloseLeftoverRunningTasks(job.ID)
 	}
 
 	if retryTask == nil && job.CursorID == 0 && job.ProcessedCount == 0 {
@@ -246,9 +282,12 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 		}
 		// Inventory-only keys (.file_placeholder, .shared_drive__, …) are not restored —
 		// shrink total so live progress / partial status reflect real work.
-		if skipped := pageRowCount - restorable; skipped > 0 && job.TotalCount >= uint(skipped) {
-			job.TotalCount -= uint(skipped)
-			_ = store.RestoreJobRepo.UpdateJob(job.ID, map[string]interface{}{"total_count": job.TotalCount})
+		if skipped := pageRowCount - restorable; skipped > 0 {
+			nextTotal := adjustedRestoreTotal(job.TotalCount, uint(skipped), job.ProcessedCount, job.FailedCount)
+			if nextTotal != job.TotalCount {
+				job.TotalCount = nextTotal
+				_ = store.RestoreJobRepo.UpdateJob(job.ID, map[string]interface{}{"total_count": job.TotalCount})
+			}
 		}
 
 		expectedCursor := job.CursorID
@@ -330,6 +369,10 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 		job.CursorID = newCursor
 		job.ProcessedCount += batchResult.Processed
 		job.FailedCount += batchResult.Failed
+		if nextTotal := liftRestoreTotal(job.TotalCount, job.ProcessedCount, job.FailedCount); nextTotal != job.TotalCount {
+			job.TotalCount = nextTotal
+			_ = store.RestoreJobRepo.UpdateJob(job.ID, map[string]interface{}{"total_count": job.TotalCount})
+		}
 
 		// Retry tasks cover a fixed ID range — one pass only.
 		if retryTask != nil {
@@ -416,6 +459,42 @@ func IsActiveRestoreConflict(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "already in progress")
 }
 
+func syncRestoreJobCursorFromTasks(store *db.PostgresDb, job *repo.RestoreJobListingDB) {
+	if store == nil || job == nil || store.RestoreTaskRepo == nil {
+		return
+	}
+	end, err := store.RestoreTaskRepo.MaxCursorEndForJob(job.ID)
+	if err != nil {
+		return
+	}
+	next := recoveredRestoreCursor(job.CursorID, end)
+	if next == job.CursorID {
+		return
+	}
+	job.CursorID = next
+	_ = store.RestoreJobRepo.UpdateJob(job.ID, map[string]interface{}{"cursor_id": next})
+}
+
+func restoreInventoryDrained(store *db.PostgresDb, job *repo.RestoreJobListingDB) bool {
+	if store == nil || job == nil {
+		return false
+	}
+	cfg, ok := ConfigForMethod(job.Method)
+	if !ok {
+		return true
+	}
+	var cronJob *repo.CronJobListingDB
+	if job.CronJobID > 0 {
+		if j, err := store.CronJobRepo.GetCronJobByID(job.CronJobID); err == nil {
+			cronJob = j
+		}
+	}
+	prefix := RestoreKeyPrefix(job, cronJob)
+	rows, err := store.SyncedObjectRepo.GetSyncedObjectKeysPage(
+		job.UserID, cfg.Bucket, cfg.Source, cfg.ObjectType, prefix, job.CursorID, 1)
+	return err == nil && len(rows) == 0
+}
+
 func tryFinalizeJob(ctx context.Context, store *db.PostgresDb, job *repo.RestoreJobListingDB) error {
 	fresh, err := store.RestoreJobRepo.GetByID(job.ID)
 	if err != nil {
@@ -428,6 +507,11 @@ func tryFinalizeJob(ctx context.Context, store *db.PostgresDb, job *repo.Restore
 		return nil
 	}
 	job = fresh
+	syncRestoreJobCursorFromTasks(store, job)
+	if nextTotal := liftRestoreTotal(job.TotalCount, job.ProcessedCount, job.FailedCount); nextTotal != job.TotalCount {
+		job.TotalCount = nextTotal
+		_ = store.RestoreJobRepo.UpdateJob(job.ID, map[string]interface{}{"total_count": job.TotalCount})
+	}
 
 	pending, err := store.RestoreJobRepo.CountPendingRetryTasks(job.ID)
 	if err != nil {
@@ -436,6 +520,10 @@ func tryFinalizeJob(ctx context.Context, store *db.PostgresDb, job *repo.Restore
 	if pending > 0 {
 		return nil
 	}
+	if !restoreInventoryDrained(store, job) {
+		return nil
+	}
+	_ = store.RestoreTaskRepo.CloseLeftoverRunningTasks(job.ID)
 
 	ForgetInviteAccessToken(job.ID)
 	status, msg := resolveJobTerminalStatus(job.FailedCount)

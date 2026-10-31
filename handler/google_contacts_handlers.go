@@ -137,6 +137,8 @@ func HandleGoogleContactsRestore(c echo.Context) error {
 	}
 	satellite.SendNotificationAsync(ctx, userID, "Google Contacts Restore Started", fmt.Sprintf("Restore of %d contacts for %s has started", len(allKeys), userDetails.Email), &priority, startData, nil)
 
+	seen, _ := google.LoadContactIdentityIndex(ctx, service)
+
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(10)
 	processedKeys, failedKeys := utils.NewLockedArray(), utils.NewLockedArray()
@@ -148,7 +150,7 @@ func HandleGoogleContactsRestore(c echo.Context) error {
 			continue
 		}
 		g.Go(func() error {
-			if restoreErr := googlestore.RestoreContactKeyWithSession(ctx, storxSess, service, key); restoreErr != nil {
+			if restoreErr := googlestore.RestoreContactKeyWithSession(ctx, storxSess, service, key, seen); restoreErr != nil {
 				logger.Warn(ctx, "Failed to restore contact", logger.String("key", key), logger.ErrorField(restoreErr))
 				failedKeys.Add(key)
 			} else {

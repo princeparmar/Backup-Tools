@@ -243,12 +243,18 @@ func EvaluateReadinessWithOptions(ctx context.Context, store *db.PostgresDb, req
 
 	out.CredentialID = sourceCred.ID
 	if req.InviteRestore {
-		out.AuthMode = RestoreAuthModeOAuth
-		probeEmail := loginID
-		if isMigrationRestore(loginID, targetEmail) {
-			probeEmail = targetEmail
+		// Personal Gmail has no domain-wide delegation. An invited member cannot
+		// sign in as the owner's mailbox, so restore uses the owner's stored OAuth.
+		// Workspace child mailboxes still need the member to sign in as that mailbox.
+		if InviteRestoreNeedsMailboxSignIn(authMode) {
+			out.AuthMode = RestoreAuthModeOAuth
+			probeEmail := loginID
+			if isMigrationRestore(loginID, targetEmail) {
+				probeEmail = targetEmail
+			}
+			return evaluateInviteOAuthReadiness(ctx, out, service, probeEmail, req.InviteAccessToken)
 		}
-		return evaluateInviteOAuthReadiness(ctx, out, service, probeEmail, req.InviteAccessToken)
+		return evaluateOAuthReadiness(ctx, store, out, service, cronJob, sourceCred)
 	}
 	switch authMode {
 	case RestoreAuthModeDWD:
@@ -423,6 +429,13 @@ func ResolveRestoreAuthMode(service, accountType, loginID, holderEmail string, c
 	}
 	_ = cronJob
 	return RestoreAuthModeOAuth
+}
+
+// InviteRestoreNeedsMailboxSignIn is true only when in-place restore would use
+// domain-wide delegation (admin restoring another Workspace mailbox). Invited
+// members cannot use DWD. Personal accounts restore with the owner's OAuth.
+func InviteRestoreNeedsMailboxSignIn(authMode string) bool {
+	return strings.EqualFold(strings.TrimSpace(authMode), RestoreAuthModeDWD)
 }
 
 func evaluateDWDReadiness(ctx context.Context, out *ReadinessResult, service, subjectEmail string) (*ReadinessResult, error) {

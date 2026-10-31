@@ -70,6 +70,11 @@ func HandleMicrosoftAccessVerifyStart(c echo.Context) error {
 			})
 		}
 	}
+	if len(selection) == 0 {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"error": "access check has no mailbox users to probe. Confirm the tenant directory returned users with object IDs, and that Outlook, OneDrive, Calendar, or Contacts is selected.",
+		})
+	}
 
 	credID := uint(0)
 	if tc.Credential != nil {

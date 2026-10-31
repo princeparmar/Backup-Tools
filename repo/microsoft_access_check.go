@@ -152,7 +152,8 @@ func AccessCheckSummaryFromResults(results []AccessCheckResultItem) map[string]i
 }
 
 // FindOpenAccessCheckJob returns an in-flight system access-check job for the same fingerprint
-// that has not yet materialized backup jobs (refresh-safe start).
+// that has not yet finished or materialized backup jobs (refresh-safe start).
+// Completed jobs are not reused — Re-run must create a new probe.
 func (r *CronJobRepository) FindOpenAccessCheckJob(userID, tenantID string, credentialID uint, fingerprint string) (*CronJobListingDB, error) {
 	userID = strings.TrimSpace(userID)
 	tenantID = strings.ToLower(strings.TrimSpace(tenantID))
@@ -170,7 +171,7 @@ func (r *CronJobRepository) FindOpenAccessCheckJob(userID, tenantID string, cred
 	}
 	for i := range rows {
 		st := JobAccessCheck(&rows[i])
-		if st == nil || st.JobsMaterialized {
+		if st == nil || st.JobsMaterialized || st.Phase == AccessCheckPhaseCompleted {
 			continue
 		}
 		if st.CredentialID != credentialID {

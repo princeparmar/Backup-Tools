@@ -474,7 +474,7 @@ func RestoreCalendarKey(ctx context.Context, accessGrant string, service *calend
 }
 
 // RestoreContactKeyWithSession restores one contact using DB storx grant (manual restore).
-func RestoreContactKeyWithSession(ctx context.Context, sess *restore.StorxGrantSession, service *people.Service, objectKey string) error {
+func RestoreContactKeyWithSession(ctx context.Context, sess *restore.StorxGrantSession, service *people.Service, objectKey string, seen *google.ContactIdentityIndex) error {
 	if !google.IsContactsRestoreObjectKey(objectKey) {
 		return fmt.Errorf("invalid contacts restore key")
 	}
@@ -483,12 +483,12 @@ func RestoreContactKeyWithSession(ctx context.Context, sess *restore.StorxGrantS
 		return err
 	}
 	return restore.RetryGoogle(ctx, func() error {
-		return google.RestoreContactFromBackup(ctx, service, data)
+		return google.RestoreContactFromBackup(ctx, service, data, seen)
 	})
 }
 
 // RestoreContactKey restores one contact JSON blob (restore-all).
-func RestoreContactKey(ctx context.Context, accessGrant string, service *people.Service, objectKey string) error {
+func RestoreContactKey(ctx context.Context, accessGrant string, service *people.Service, objectKey string, seen *google.ContactIdentityIndex) error {
 	if !google.IsContactsRestoreObjectKey(objectKey) {
 		return fmt.Errorf("invalid contacts restore key")
 	}
@@ -499,7 +499,7 @@ func RestoreContactKey(ctx context.Context, accessGrant string, service *people.
 		return err
 	}
 	return restore.RetryGoogle(ctx, func() error {
-		return google.RestoreContactFromBackup(ctx, service, data)
+		return google.RestoreContactFromBackup(ctx, service, data, seen)
 	})
 }
 

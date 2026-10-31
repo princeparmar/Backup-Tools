@@ -65,7 +65,7 @@ func TestPhotosIDBasedDataKeyWithDate(t *testing.T) {
 }
 
 func TestContactsObjectKeyWithDate(t *testing.T) {
-	got := ContactsObjectKey("user@gmail.com", "people/c123", "2026-07-21T10:00:00Z")
+	got := ContactsObjectKey("user@gmail.com", "people/c123", "2026-07-21T10:00:00Z", "")
 	want := "user@gmail.com/contacts/2026/07/21/c123.json"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -81,13 +81,94 @@ func TestCalendarObjectKeyWithDate(t *testing.T) {
 }
 
 func TestParseCalendarEventObjectKeyDated(t *testing.T) {
-	calID, evID, ok := ParseCalendarEventObjectKey("user@gmail.com/calendar/events/cal1_Work/2026/07/21/ev1_Standup.json")
-	if !ok || calID != "cal1" || evID != "ev1" {
-		t.Fatalf("got cal=%q ev=%q ok=%v", calID, evID, ok)
+	tests := []struct {
+		name   string
+		key    string
+		wantID string
+		wantEv string
+		ok     bool
+	}{
+		{
+			name:   "legacy short id",
+			key:    "user@gmail.com/calendar/events/cal1_Work/2026/07/21/ev1_Standup.json",
+			wantID: "cal1",
+			wantEv: "ev1",
+			ok:     true,
+		},
+		{
+			name: "classroom c_ id keeps local-part underscore",
+			key:  "dhavalder.office93@gmail.com/calendar/events/c_classroom32c90b75@group.calendar.google.com_7 IT A & B/2026/07/21/ev1_Standup.json",
+			wantID: "c_classroom32c90b75@group.calendar.google.com",
+			wantEv: "ev1",
+			ok:     true,
+		},
+		{
+			name:   "primary mailbox id",
+			key:    "dhavalder.office93@gmail.com/calendar/events/dhavalder.office93@gmail.com_untitled/2026/07/21/ev1_Standup.json",
+			wantID: "dhavalder.office93@gmail.com",
+			wantEv: "ev1",
+			ok:     true,
+		},
+		{
+			name:   "summary with underscores",
+			key:    "user@gmail.com/calendar/events/c_other@group.calendar.google.com_SEM-1 DIV-E_2022/2026/07/21/ev9_Quiz.json",
+			wantID: "c_other@group.calendar.google.com",
+			wantEv: "ev9",
+			ok:     true,
+		},
+		{
+			name: "undated key rejected",
+			key:  "user@gmail.com/calendar/events/cal1_Work/ev1_Standup.json",
+		},
 	}
-	_, _, ok = ParseCalendarEventObjectKey("user@gmail.com/calendar/events/cal1_Work/ev1_Standup.json")
-	if ok {
-		t.Fatal("expected undated key to be rejected")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calID, evID, ok := ParseCalendarEventObjectKey(tt.key)
+			if ok != tt.ok || calID != tt.wantID || evID != tt.wantEv {
+				t.Fatalf("got cal=%q ev=%q ok=%v, want cal=%q ev=%q ok=%v", calID, evID, ok, tt.wantID, tt.wantEv, tt.ok)
+			}
+		})
+	}
+}
+
+func TestSplitCalendarPathSegment(t *testing.T) {
+	tests := []struct {
+		name        string
+		segment     string
+		wantID      string
+		wantSummary string
+	}{
+		{name: "legacy", segment: "cal1_Work", wantID: "cal1", wantSummary: "Work"},
+		{name: "id only", segment: "cal1", wantID: "cal1"},
+		{
+			name:        "classroom",
+			segment:     "c_classroom32c90b75@group.calendar.google.com_7 IT A & B",
+			wantID:      "c_classroom32c90b75@group.calendar.google.com",
+			wantSummary: "7 IT A & B",
+		},
+		{
+			name:        "holiday",
+			segment:     "en.indian#holiday@group.v.calendar.google.com_Holidays in India",
+			wantID:      "en.indian#holiday@group.v.calendar.google.com",
+			wantSummary: "Holidays in India",
+		},
+		{
+			name:        "primary",
+			segment:     "dhavalder.office93@gmail.com_My Calendar",
+			wantID:      "dhavalder.office93@gmail.com",
+			wantSummary: "My Calendar",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id, summary := SplitCalendarPathSegment(tt.segment)
+			if id != tt.wantID || summary != tt.wantSummary {
+				t.Fatalf("got id=%q summary=%q, want id=%q summary=%q", id, summary, tt.wantID, tt.wantSummary)
+			}
+			if got := ParseCalendarIDFromPathSegment(tt.segment); got != tt.wantID {
+				t.Fatalf("ParseCalendarIDFromPathSegment=%q want %q", got, tt.wantID)
+			}
+		})
 	}
 }
 
@@ -150,6 +231,29 @@ func TestGmailObjectKey(t *testing.T) {
 	want := "user@gmail.com/_/2026/07/21/a@b.com - Hi - mid1abcdefghij - mid1abcdefghij.gmail"
 	if got != want {
 		t.Fatalf("GmailObjectKey() = %q, want %q", got, want)
+	}
+}
+
+func TestIsCalendarEventSyncedClassroomID(t *testing.T) {
+	calID := "c_classroom32c90b75@group.calendar.google.com"
+	key := CalendarObjectKey("user@gmail.com", calID, "7 IT A & B", "ev1", "Standup", "2026-07-21T10:00:00Z")
+	synced := map[string]bool{key: true}
+	tests := []struct {
+		name string
+		id   string
+		ev   string
+		want bool
+	}{
+		{name: "classroom match", id: calID, ev: "ev1", want: true},
+		{name: "truncated c must not match", id: "c", ev: "ev1", want: false},
+		{name: "other event", id: calID, ev: "ev2", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsCalendarEventSynced(synced, "user@gmail.com", tt.id, tt.ev, "", ""); got != tt.want {
+				t.Fatalf("synced=%v want %v key=%s", got, tt.want, key)
+			}
+		})
 	}
 }
 

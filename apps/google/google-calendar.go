@@ -530,11 +530,50 @@ func CalendarObjectKey(email, calendarID, calendarSummary, eventID, eventSummary
 
 // ParseCalendarIDFromPathSegment extracts calendarId from a path segment ({id} or {id}_{summary}).
 func ParseCalendarIDFromPathSegment(segment string) string {
+	id, _ := SplitCalendarPathSegment(segment)
+	return id
+}
+
+// SplitCalendarPathSegment splits {calendarId}_{summary}. Google calendar IDs are email-like and
+// often contain underscores in the local part (c_classroom…@group.calendar.google.com). Split on
+// the first '_' after the domain, not the first '_' in the whole segment.
+func SplitCalendarPathSegment(segment string) (calendarID, summary string) {
 	segment = SanitizeCalendarPathSegment(segment)
-	if idx := strings.Index(segment, "_"); idx > 0 {
-		return segment[:idx]
+	if segment == "" {
+		return "", ""
 	}
-	return segment
+	at := strings.LastIndexByte(segment, '@')
+	if at >= 0 {
+		i := at + 1
+		for i < len(segment) && isCalendarDomainChar(segment[i]) {
+			i++
+		}
+		calendarID = segment[:i]
+		if i < len(segment) && segment[i] == '_' {
+			summary = segment[i+1:]
+		}
+		return calendarID, summary
+	}
+	if idx := strings.IndexByte(segment, '_'); idx > 0 {
+		return segment[:idx], segment[idx+1:]
+	}
+	return segment, ""
+}
+
+func isCalendarDomainChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '.' || b == '-'
+}
+
+// IsReadOnlyGoogleCalendar is true for Google-owned holiday/birthday calendars that cannot be written.
+func IsReadOnlyGoogleCalendar(calendarID string) bool {
+	id := strings.ToLower(strings.TrimSpace(calendarID))
+	if id == "" {
+		return false
+	}
+	if strings.Contains(id, "group.v.calendar.google.com") {
+		return true
+	}
+	return strings.Contains(id, "#holiday@") || strings.Contains(id, "#contacts@")
 }
 
 // ParseEventIDFromPathSegment extracts eventId from a path segment ({id} or {id}_{summary}).
@@ -638,6 +677,9 @@ func ParseCalendarEventObjectKey(objectKey string) (calendarID, eventID string, 
 }
 
 // RestoreCalendarEventFromBackup inserts an event into Google Calendar from vault JSON.
+// Cancelled events and Google-owned holiday/birthday calendars are skipped (not failures).
+// Insert 400/403 from Google are failures so the UI cannot report a no-op as success.
+// A missing destination calendar falls back to the user's primary calendar so the event is not lost.
 func RestoreCalendarEventFromBackup(ctx context.Context, service *calendar.Service, calendarID string, data []byte) error {
 	if service == nil {
 		return fmt.Errorf("calendar service is nil")
@@ -650,15 +692,64 @@ func RestoreCalendarEventFromBackup(ctx context.Context, service *calendar.Servi
 	if err := json.Unmarshal(data, &ev); err != nil {
 		return fmt.Errorf("parse calendar event backup: %w", err)
 	}
-	if strings.EqualFold(strings.TrimSpace(ev.Status), "cancelled") {
-		return fmt.Errorf("cannot restore cancelled event")
+	if calendarEventRestoreSkip(&ev, calendarID) {
+		return nil
 	}
 	toInsert := prepareCalendarEventForInsert(&ev)
-	_, err := service.Events.Insert(calendarID, toInsert).Do()
-	if err != nil {
-		return fmt.Errorf("insert calendar event: %w", err)
+	err := insertCalendarEvent(service, calendarID, toInsert)
+	if err == nil {
+		return nil
 	}
-	return nil
+	if isGoogleAPINotFound(err) && !strings.EqualFold(calendarID, "primary") {
+		if retryErr := insertCalendarEvent(service, "primary", toInsert); retryErr == nil {
+			return nil
+		} else {
+			err = retryErr
+		}
+	}
+	return fmt.Errorf("insert calendar event: %w", err)
+}
+
+func calendarEventRestoreSkip(ev *calendar.Event, calendarID string) bool {
+	if IsReadOnlyGoogleCalendar(calendarID) {
+		return true
+	}
+	return ev != nil && strings.EqualFold(strings.TrimSpace(ev.Status), "cancelled")
+}
+
+func insertCalendarEvent(service *calendar.Service, calendarID string, ev *calendar.Event) error {
+	_, err := service.Events.Insert(calendarID, ev).Do()
+	if err != nil && isReminderConflict(err) {
+		if ev != nil {
+			ev.Reminders = nil
+		}
+		_, err = service.Events.Insert(calendarID, ev).Do()
+	}
+	return err
+}
+
+func isReminderConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "cannotusedefaultremindersandspecifyoverride") ||
+		strings.Contains(msg, "default reminders and overrides")
+}
+
+func isGoogleAPINotFound(err error) bool {
+	return googleAPICode(err) == 404
+}
+
+func googleAPICode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var apiErr *googleapi.Error
+	if errors.As(err, &apiErr) && apiErr != nil {
+		return apiErr.Code
+	}
+	return 0
 }
 
 func prepareCalendarEventForInsert(ev *calendar.Event) *calendar.Event {
@@ -673,8 +764,52 @@ func prepareCalendarEventForInsert(ev *calendar.Event) *calendar.Event {
 	out.Created = ""
 	out.Updated = ""
 	out.HangoutLink = ""
-	out.Recurrence = nil
 	out.RecurringEventId = ""
 	out.OriginalStartTime = nil
+	out.Organizer = nil
+	out.Creator = nil
+	out.Source = nil
+	out.Gadget = nil
+	out.ConferenceData = nil
+	out.Attachments = nil
+	out.Reminders = sanitizeCalendarReminders(ev.Reminders)
+	out.Locked = false
+	out.PrivateCopy = false
+	switch strings.ToLower(strings.TrimSpace(out.EventType)) {
+	case "", "default":
+		out.EventType = ""
+	default:
+		out.EventType = "default"
+	}
 	return &out
+}
+
+// sanitizeCalendarReminders drops the Google insert 400
+// cannotUseDefaultRemindersAndSpecifyOverride: vault JSON often has both useDefault
+// and overrides from events.list even though insert allows only one.
+func sanitizeCalendarReminders(in *calendar.EventReminders) *calendar.EventReminders {
+	if in == nil {
+		return nil
+	}
+	overrides := make([]*calendar.EventReminder, 0, len(in.Overrides))
+	for _, item := range in.Overrides {
+		if item == nil {
+			continue
+		}
+		overrides = append(overrides, &calendar.EventReminder{
+			Method:  strings.TrimSpace(item.Method),
+			Minutes: item.Minutes,
+		})
+		if len(overrides) == 5 {
+			break
+		}
+	}
+	if len(overrides) > 0 && in.UseDefault {
+		// events.list often returns both. Insert allows only one. Keep calendar defaults.
+		return &calendar.EventReminders{UseDefault: true}
+	}
+	if len(overrides) > 0 {
+		return &calendar.EventReminders{Overrides: overrides}
+	}
+	return &calendar.EventReminders{UseDefault: in.UseDefault}
 }

@@ -137,11 +137,12 @@ func HandleGoogleCalendarRestore(c echo.Context) error {
 		})
 	}
 
-	service, err := google.NewCalendarServiceFromContext(c)
+	accessToken, err := google.AccessTokenFromAuthHeader(c)
+	if err != nil || strings.TrimSpace(accessToken) == "" {
+		return c.JSON(http.StatusUnauthorized, map[string]interface{}{"error": "token expired"})
+	}
+	service, err := google.NewCalendarServiceForRestore(ctx, accessToken)
 	if err != nil {
-		if err.Error() == "token error" {
-			return c.JSON(http.StatusUnauthorized, map[string]interface{}{"error": "token expired"})
-		}
 		return c.JSON(http.StatusForbidden, map[string]interface{}{"error": err.Error()})
 	}
 
@@ -217,9 +218,18 @@ func HandleGoogleCalendarRestore(c echo.Context) error {
 		fmt.Sprintf("Restore for %s completed. %d succeeded, %d failed", userDetails.Email, len(processedKeys.Get()), len(failedKeys.Get())),
 		&compPriority, compData, nil)
 
+	processed := processedKeys.Get()
+	failed := failedKeys.Get()
+	message := "Google Calendar restore completed"
+	if len(processed) == 0 && len(failed) > 0 {
+		message = "Google Calendar restore failed"
+	} else if len(failed) > 0 {
+		message = fmt.Sprintf("Google Calendar restore completed with %d failed", len(failed))
+	}
+
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"message":        "Google Calendar restore completed",
-		"processed_keys": processedKeys.Get(),
-		"failed_keys":    failedKeys.Get(),
+		"message":        message,
+		"processed_keys": processed,
+		"failed_keys":    failed,
 	})
 }

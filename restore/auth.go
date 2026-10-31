@@ -110,6 +110,21 @@ func AuthModeForJob(store *db.PostgresDb, job *repo.RestoreJobListingDB) string 
 	return ResolveRestoreAuthMode(service, job.AccountType, job.LoginID, holder, cred, cronJob)
 }
 
+// applyInviteRestoreAuth keeps restore_tag=invite_restored for Recovery history.
+// A member Google token is used when present; otherwise the owner's OAuth stays in place.
+func applyInviteRestoreAuth(deps *RestoreDeps, job *repo.RestoreJobListingDB) {
+	if deps == nil || job == nil || job.RestoreTag != "invite_restored" {
+		return
+	}
+	token := strings.TrimSpace(PeekInviteAccessToken(job.ID))
+	if token == "" {
+		return
+	}
+	deps.AuthMode = RestoreAuthModeOAuth
+	deps.GoogleToken = token
+	deps.RefreshToken = ""
+}
+
 // buildRestoreDeps resolves StorX + Google auth from job snapshot and DB credentials.
 // credential_id on the job is the Google write cred (target for migration, source for in-place).
 // StorX read always comes from cron_job_id (source backup).
@@ -205,16 +220,7 @@ func buildRestoreDeps(ctx context.Context, store *db.PostgresDb, job *repo.Resto
 		deps.AccessGrant = strings.TrimSpace(grant)
 	}
 
-	if job.RestoreTag == "invite_restored" {
-		deps.AuthMode = RestoreAuthModeOAuth
-		token := strings.TrimSpace(PeekInviteAccessToken(job.ID))
-		if token == "" {
-			return nil, fmt.Errorf("invited restore needs a fresh Google sign-in for this mailbox")
-		}
-		deps.GoogleToken = token
-		// Do not fall back to the project admin refresh token. That token cannot write as this mailbox.
-		deps.RefreshToken = ""
-	}
+	applyInviteRestoreAuth(deps, job)
 
 	if deps.AuthMode == "" {
 		deps.AuthMode = AuthModeForJob(store, job)
