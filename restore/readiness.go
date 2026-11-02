@@ -339,10 +339,10 @@ func evaluateMigrationTargetReadiness(
 		out.AccountType = google.AccountTypePersonal
 	}
 	out.AuthMode = RestoreAuthModeOAuth
-	return evaluateCredentialOAuthReadiness(ctx, out, service, targetCred, targetEmail)
+	return evaluateCredentialOAuthReadiness(ctx, store, out, service, targetCred, targetEmail)
 }
 
-func evaluateCredentialOAuthReadiness(ctx context.Context, out *ReadinessResult, service string, cred *repo.GoogleBackupCredentialDB, probeLoginID string) (*ReadinessResult, error) {
+func evaluateCredentialOAuthReadiness(ctx context.Context, store *db.PostgresDb, out *ReadinessResult, service string, cred *repo.GoogleBackupCredentialDB, probeLoginID string) (*ReadinessResult, error) {
 	refresh := ""
 	if cred != nil {
 		refresh = strings.TrimSpace(cred.RefreshToken)
@@ -364,6 +364,9 @@ func evaluateCredentialOAuthReadiness(ctx context.Context, out *ReadinessResult,
 		out.Reason = ReadinessReasonTokenRefreshFailed
 		out.Message = restoreReadinessRefreshInvalid
 		out.ReconnectHint = "Use Restore Grant Access (writes refresh token to Backup-Tools). Auto-sync reconnect alone only grants readonly scopes."
+		if isGoogleRefreshRevoked(err) {
+			return finishGoogleOAuthReadiness(ctx, store, cred, nil, out)
+		}
 		return out, nil
 	}
 
@@ -373,6 +376,9 @@ func evaluateCredentialOAuthReadiness(ctx context.Context, out *ReadinessResult,
 		out.Reason = ReadinessReasonTokenRefreshFailed
 		out.Message = restoreReadinessTokenValidation
 		out.ReconnectHint = "Use Restore Grant Access (writes refresh token to Backup-Tools). Auto-sync reconnect alone only grants readonly scopes."
+		if isGoogleRefreshRevoked(err) {
+			return finishGoogleOAuthReadiness(ctx, store, cred, nil, out)
+		}
 		return out, nil
 	}
 
@@ -401,6 +407,18 @@ func evaluateCredentialOAuthReadiness(ctx context.Context, out *ReadinessResult,
 	}
 
 	out.Ready = true
+	return out, nil
+}
+
+func finishGoogleOAuthReadiness(ctx context.Context, store *db.PostgresDb, cred *repo.GoogleBackupCredentialDB, cronJob *repo.CronJobListingDB, out *ReadinessResult) (*ReadinessResult, error) {
+	userID := ""
+	if cred != nil {
+		userID = strings.TrimSpace(cred.UserID)
+	}
+	if userID == "" && cronJob != nil {
+		userID = strings.TrimSpace(cronJob.UserID)
+	}
+	applyGoogleRestoreRevoked(ctx, store, userID, out)
 	return out, nil
 }
 
@@ -507,6 +525,9 @@ func evaluateOAuthReadiness(ctx context.Context, store *db.PostgresDb, out *Read
 		out.Reason = ReadinessReasonTokenRefreshFailed
 		out.Message = restoreReadinessRefreshInvalid
 		out.ReconnectHint = "Use Restore Grant Access (writes refresh token to Backup-Tools). Auto-sync reconnect alone only grants readonly scopes."
+		if isGoogleRefreshRevoked(err) {
+			return finishGoogleOAuthReadiness(ctx, store, cred, cronJob, out)
+		}
 		return out, nil
 	}
 
@@ -516,6 +537,9 @@ func evaluateOAuthReadiness(ctx context.Context, store *db.PostgresDb, out *Read
 		out.Reason = ReadinessReasonTokenRefreshFailed
 		out.Message = restoreReadinessTokenValidation
 		out.ReconnectHint = "Use Restore Grant Access (writes refresh token to Backup-Tools). Auto-sync reconnect alone only grants readonly scopes."
+		if isGoogleRefreshRevoked(err) {
+			return finishGoogleOAuthReadiness(ctx, store, cred, cronJob, out)
+		}
 		return out, nil
 	}
 
@@ -600,7 +624,7 @@ func probeOAuthRestore(ctx context.Context, service, accessToken, loginID string
 }
 
 // CreateRestoreJobFromReadiness queues a job using credential/cron links (no tokens on the row).
-func CreateRestoreJobFromReadiness(ctx context.Context, store *db.PostgresDb, userID string, prep *ReadinessResult) (*repo.RestoreJobListingDB, error) {
+func CreateRestoreJobFromReadiness(ctx context.Context, store *db.PostgresDb, userID string, prep *ReadinessResult, selectedKeys []string) (*repo.RestoreJobListingDB, error) {
 	if prep == nil || !prep.Ready {
 		return nil, fmt.Errorf("restore not ready")
 	}
@@ -609,7 +633,7 @@ func CreateRestoreJobFromReadiness(ctx context.Context, store *db.PostgresDb, us
 		return nil, fmt.Errorf("unsupported service")
 	}
 
-	active, err := store.RestoreJobRepo.HasActiveJob(userID, method, prep.LoginID)
+	active, err := store.RestoreJobRepo.HasActiveJob(userID, method, prep.LoginID, strings.TrimSpace(prep.ProjectID), strings.TrimSpace(prep.TargetEmail))
 	if err != nil {
 		return nil, err
 	}
@@ -630,6 +654,10 @@ func CreateRestoreJobFromReadiness(ctx context.Context, store *db.PostgresDb, us
 		Status:         repo.RestoreJobStatusQueued,
 		Message:        "restore queued",
 		MessageStatus:  repo.JobMessageStatusInfo,
+		SelectedKeys:   selectedKeysValue(selectedKeys),
+	}
+	if n := len(selectedKeys); n > 0 {
+		job.TotalCount = uint(n)
 	}
 
 	if err := store.RestoreJobRepo.Create(job); err != nil {

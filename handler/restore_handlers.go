@@ -69,6 +69,8 @@ type restoreAllRequest struct {
 	TargetEmail string `json:"target_email,omitempty"`
 	// TenantID selects the Microsoft tenant when MICROSOFT_TENANT_ID is not sent.
 	TenantID string `json:"tenant_id,omitempty"`
+	// Keys limits this restore-all job to selected vault items. Empty restores every item.
+	Keys []string `json:"keys,omitempty"`
 }
 
 // restoreTenantID is the Microsoft tenant a restore runs in: MICROSOFT_TENANT_ID, else tenant_id.
@@ -628,7 +630,12 @@ func HandleRestoreAll(c echo.Context) error {
 		})
 	}
 
-	job, err := restore.CreateRestoreJobFromReadiness(ctx, database, userID, prep)
+	selectedKeys, err := restore.NormalizeSelectedRestoreKeys(req.LoginID, req.Keys)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+	}
+
+	job, err := restore.CreateRestoreJobFromReadiness(ctx, database, userID, prep, selectedKeys)
 	if err != nil {
 		if restore.IsActiveRestoreConflict(err) {
 			logger.Warn(ctx, "Restore all rejected — job already active",
@@ -828,6 +835,10 @@ func restoreJobInputData(job *repo.RestoreJobListingDB) map[string]interface{} {
 	}
 	if job.StorjProjectID != "" {
 		inputData["project_id"] = job.StorjProjectID
+	}
+	if keys := restore.JobSelectedKeys(job); len(keys) > 0 {
+		inputData["selected_count"] = len(keys)
+		inputData["keys"] = keys
 	}
 	return inputData
 }

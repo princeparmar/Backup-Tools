@@ -16,7 +16,9 @@ const (
 
 	restoreJobStorxRefreshLimit = "StorX access could not be restored after 3 attempts. Automatic backup has been paused. Please contact support."
 
-	restoreJobGoogleAuth = "Restore failed: Google credentials are invalid or expired. Reconnect your Google account via auto-sync and try again."
+	restoreJobGoogleAuth = "Restore failed: Google permission revoked or expired. Re-authenticate to grant access again."
+
+	restoreLogGoogleRevoked = "Google permission revoked. Re-authenticate to grant access again."
 
 	restoreJobGoogleInsufficientScope = "Restore failed: Google account is missing permissions required for this service. Reconnect Google with full app permissions and try again."
 
@@ -58,7 +60,7 @@ const (
 	restoreReadinessNoBackupData        = "No backed-up items found for this account and service"
 	restoreReadinessStorxMissing        = "StorX access grant is missing — reconnect via auto-sync"
 	restoreReadinessRefreshMissing      = "Google refresh token is missing"
-	restoreReadinessRefreshInvalid      = "Google refresh token is invalid or expired"
+	restoreReadinessRefreshInvalid      = "Google permission revoked. Re-authenticate to grant access again."
 	restoreReadinessTokenValidation     = "Google token validation failed"
 	restoreReadinessMissingScopes       = "Missing OAuth scopes required for restore"
 	restoreReadinessDWDNotConfigured    = "Ask your Google Workspace admin to authorize all restore scopes in Admin Console → Domain-wide delegation"

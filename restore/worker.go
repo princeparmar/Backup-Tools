@@ -200,10 +200,13 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 	cfg := deps.Config
 	prefix := RestoreKeyPrefix(job, deps.CronJob)
 
+	selectedKeys := JobSelectedKeys(job)
 	if job.TotalCount == 0 && job.CursorID == 0 {
-		total, err := store.SyncedObjectRepo.CountSyncedObjectsForRestore(
-			job.UserID, cfg.Bucket, cfg.Source, cfg.ObjectType, prefix)
-		if err == nil {
+		if n := len(selectedKeys); n > 0 {
+			job.TotalCount = uint(n)
+			_ = store.RestoreJobRepo.UpdateJob(job.ID, map[string]interface{}{"total_count": job.TotalCount})
+		} else if total, err := store.SyncedObjectRepo.CountSyncedObjectsForRestore(
+			job.UserID, cfg.Bucket, cfg.Source, cfg.ObjectType, prefix); err == nil {
 			_ = store.RestoreJobRepo.UpdateJob(job.ID, map[string]interface{}{"total_count": total})
 			job.TotalCount = uint(total)
 		}
@@ -220,7 +223,13 @@ func processJobBatches(ctx context.Context, store *db.PostgresDb, job *repo.Rest
 		deps.touchJobHeartbeat()
 
 		var rows []repo.SyncedObject
-		if retryTask != nil && retryTask.CursorEndID > retryTask.CursorStartID {
+		if len(selectedKeys) > 0 {
+			if retryTask != nil && retryTask.CursorEndID > retryTask.CursorStartID {
+				rows = SelectedKeyRange(selectedKeys, retryTask.CursorStartID, retryTask.CursorEndID)
+			} else {
+				rows = SelectedKeyPage(selectedKeys, job.CursorID, cfg.BatchSize)
+			}
+		} else if retryTask != nil && retryTask.CursorEndID > retryTask.CursorStartID {
 			rows, err = store.SyncedObjectRepo.GetSyncedObjectsInIDRange(
 				job.UserID, cfg.Bucket, cfg.Source, cfg.ObjectType, retryTask.CursorStartID, retryTask.CursorEndID)
 		} else {
@@ -477,6 +486,12 @@ func syncRestoreJobCursorFromTasks(store *db.PostgresDb, job *repo.RestoreJobLis
 
 func restoreInventoryDrained(store *db.PostgresDb, job *repo.RestoreJobListingDB) bool {
 	if store == nil || job == nil {
+		return false
+	}
+	if selectedKeysDrained(job) {
+		return true
+	}
+	if len(JobSelectedKeys(job)) > 0 {
 		return false
 	}
 	cfg, ok := ConfigForMethod(job.Method)

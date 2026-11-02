@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/StorX2-0/Backup-Tools/pkg/database"
 	"github.com/StorX2-0/Backup-Tools/pkg/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -63,6 +64,8 @@ type RestoreJobListingDB struct {
 	QuotaKind      string `json:"quota_kind,omitempty" gorm:"column:quota_kind;type:varchar(32);default:''"`
 	// RestoreTag is "invite_restored" when an invited member started the job on the owner's account.
 	RestoreTag string `json:"restore_tag,omitempty" gorm:"column:restore_tag;type:varchar(32);default:''"`
+	// SelectedKeys limits this restore-all job to those vault keys. Empty means every item.
+	SelectedKeys *database.DbJson[[]string] `json:"selected_keys,omitempty" gorm:"column:selected_keys;type:jsonb"`
 
 	CancelledAt   *time.Time `json:"cancelled_at,omitempty"`
 	LastHeartBeat *time.Time `json:"last_heart_beat,omitempty"`
@@ -201,13 +204,20 @@ func activeRestoreJobStatuses() []string {
 	return []string{RestoreJobStatusQueued, RestoreJobStatusRunning}
 }
 
-func (r *RestoreJobRepository) HasActiveJob(userID, method, loginID string) (bool, error) {
-	var count int64
-	err := r.db.Model(&RestoreJobListingDB{}).
+func (r *RestoreJobRepository) HasActiveJob(userID, method, loginID, projectID, targetEmail string) (bool, error) {
+	q := r.db.Model(&RestoreJobListingDB{}).
 		Where("user_id = ? AND method = ? AND login_id = ? AND status IN ?",
-			userID, method, loginID, activeRestoreJobStatuses()).
-		Count(&count).Error
-	if err != nil {
+			userID, method, loginID, activeRestoreJobStatuses())
+	if projectID = strings.TrimSpace(projectID); projectID != "" {
+		q = q.Where("storj_project_id = ?", projectID)
+	}
+	if targetEmail = strings.TrimSpace(targetEmail); targetEmail != "" {
+		q = q.Where("LOWER(TRIM(target_email)) = ?", strings.ToLower(targetEmail))
+	} else {
+		q = q.Where("COALESCE(TRIM(target_email), '') = ''")
+	}
+	var count int64
+	if err := q.Count(&count).Error; err != nil {
 		return false, fmt.Errorf("check active restore job: %w", err)
 	}
 	return count > 0, nil

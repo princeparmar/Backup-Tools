@@ -74,7 +74,7 @@ func classifyRestoreError(method, loginID string, processErr error) restoreError
 				Kind:        restoreKindGoogleAuth,
 				JobMessage:  restoreJobGoogleAuth,
 				TaskMessage: restoreTaskGoogleAuth,
-				ClearGoogle: true,
+				ClearGoogle: isGoogleRefreshRevokedText(errMsg),
 			}
 		}
 		return restoreErrorOutcome{
@@ -157,10 +157,7 @@ func googleAuthImmediateFailure(method, errMsg string) bool {
 	if !repo.IsGoogleMediaOrGmailMethod(method) {
 		return false
 	}
-	e := strings.ToLower(errMsg)
-	return strings.Contains(e, "invalid_grant") ||
-		strings.Contains(errMsg, "error while generating auth token") ||
-		strings.Contains(e, "error parsing response json")
+	return isGoogleRefreshRevokedText(errMsg)
 }
 
 func isConsumerGmailLogin(loginID string) bool {
@@ -196,26 +193,31 @@ func applyRestoreGoogleTokenCleanup(ctx context.Context, store *db.PostgresDb, r
 	if !outcome.ClearGoogle {
 		return
 	}
-	cronJob := linkedCronJob(store, restoreJob)
-	if cronJob == nil {
-		logger.Warn(ctx, "Restore Google token cleanup skipped — no linked cron job",
-			logger.Int("restore_job_id", int(restoreJob.ID)),
-			logger.String("error_kind", string(outcome.Kind)))
+	target := strings.TrimSpace(restoreJob.TargetEmail)
+	if target != "" && !strings.EqualFold(target, strings.TrimSpace(restoreJob.LoginID)) {
+		if restoreJob.CredentialID == 0 {
+			return
+		}
+		if err := store.CronJobRepo.DeactivateAllJobsForCredential(restoreJob.CredentialID, backupJobGoogleAuthDeactivate, true); err != nil {
+			logger.Warn(ctx, "Restore failed to clear destination Google credential",
+				logger.Int("restore_job_id", int(restoreJob.ID)),
+				logger.Int("credential_id", int(restoreJob.CredentialID)),
+				logger.ErrorField(err))
+		}
 		return
 	}
-	if err := store.CronJobRepo.DeactivateJobsForCredentialOrLegacyGoogleAuth(cronJob, outcome.JobMessage); err != nil {
+	cronJob := linkedCronJob(store, restoreJob)
+	if cronJob == nil {
+		return
+	}
+	if err := store.CronJobRepo.DeactivateJobsForCredentialOrLegacyGoogleAuth(cronJob, backupJobGoogleAuthDeactivate); err != nil {
 		logger.Warn(ctx, "Restore failed to clear Google tokens on linked backup jobs",
 			logger.Int("restore_job_id", int(restoreJob.ID)),
 			logger.Int("cron_job_id", int(cronJob.ID)),
-			logger.String("error_kind", string(outcome.Kind)),
 			logger.ErrorField(err))
 		return
 	}
 	repo.StripGmailRefreshTokenFromCronJobInputData(cronJob)
-	logger.Warn(ctx, "Restore cleared Google refresh tokens on linked backup jobs",
-		logger.Int("restore_job_id", int(restoreJob.ID)),
-		logger.Int("cron_job_id", int(cronJob.ID)),
-		logger.String("error_kind", string(outcome.Kind)))
 }
 
 func handleRestoreFailure(ctx context.Context, store *db.PostgresDb, restoreJob *repo.RestoreJobListingDB, processErr error) restoreErrorOutcome {

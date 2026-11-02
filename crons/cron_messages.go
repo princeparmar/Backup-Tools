@@ -56,6 +56,8 @@ const (
 
 	cronJobGoogleAuthDeactivate = "Invalid google credentials. Please update the credentials and reactivate the automatic backup"
 
+	cronJobGooglePermissionRevoked = "Google permission revoked. Re-authenticate to grant access again."
+
 	cronJobPersonalGoogleAuthDeactivate = "Google sign-in failed for this personal Gmail account. Reconnect your Google account in the dashboard and reactivate the backup."
 
 	cronJobGoogleInsufficientScope = "Gmail access for this backup is incomplete (missing Google permissions). Reconnect your Google account and grant all requested Gmail scopes, then reactivate the automatic backup."

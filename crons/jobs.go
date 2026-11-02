@@ -697,10 +697,26 @@ func gmailRefreshOrTokenExchangeFailure(job *repo.CronJobListingDB, errMsg strin
 	if job == nil || job.Method != "gmail" {
 		return false
 	}
-	e := strings.ToLower(errMsg)
+	return googleOAuthTokenExchangeFailure(errMsg)
+}
+
+func googleOAuthTokenExchangeFailure(errMsg string) bool {
+	e := strings.ToLower(strings.TrimSpace(errMsg))
+	if e == "" {
+		return false
+	}
+	if strings.Contains(e, "error making http request") ||
+		strings.Contains(e, "timeout") ||
+		strings.Contains(e, "connection refused") ||
+		strings.Contains(e, "connection reset") ||
+		strings.Contains(e, "temporary failure") ||
+		strings.Contains(e, "network is unreachable") {
+		return false
+	}
 	return strings.Contains(e, "invalid_grant") ||
-		strings.Contains(errMsg, "error while generating auth token") ||
-		strings.Contains(e, "error parsing response json")
+		strings.Contains(e, "expired or revoked") ||
+		strings.Contains(e, "token has been expired") ||
+		strings.Contains(e, "token has been revoked")
 }
 
 func isPersonalGmailCronJob(job *repo.CronJobListingDB) bool {
@@ -727,15 +743,25 @@ func isGmailOAuthOrDelegationFailure(errMsg string) bool {
 }
 
 func (a *AutosyncManager) deactivatePersonalGmailAuth(job *repo.CronJobListingDB, task *repo.TaskListingDB) {
-	if err := a.store.CronJobRepo.DeactivateJobsForCredentialOrLegacyGoogleAuth(job, cronJobPersonalGoogleAuthDeactivate); err != nil {
-		logger.Warn(context.Background(), "Failed to deactivate jobs after personal Gmail auth failure",
+	a.deactivateGoogleOAuthAuthWithMessage(job, task, cronJobPersonalGoogleAuthDeactivate, cronTaskPersonalGoogleAuthDeactivated)
+}
+
+func (a *AutosyncManager) deactivateGoogleOAuthAuth(job *repo.CronJobListingDB, task *repo.TaskListingDB) {
+	a.deactivateGoogleOAuthAuthWithMessage(job, task, cronJobGooglePermissionRevoked, cronTaskGoogleAuthDeactivated)
+}
+
+func (a *AutosyncManager) deactivateGoogleOAuthAuthWithMessage(job *repo.CronJobListingDB, task *repo.TaskListingDB, jobMessage, taskMessage string) {
+	if err := a.store.CronJobRepo.DeactivateJobsForCredentialOrLegacyGoogleAuth(job, jobMessage); err != nil {
+		logger.Warn(context.Background(), "Failed to deactivate jobs after Google auth failure",
 			logger.Int("job_id", int(job.ID)), logger.ErrorField(err))
 	}
 	repo.StripGmailRefreshTokenFromCronJobInputData(job)
 	job.Active = false
 	job.AutoDeactivated = true
-	job.Message = cronJobPersonalGoogleAuthDeactivate
-	task.Message = cronTaskPersonalGoogleAuthDeactivated
+	job.Message = jobMessage
+	if task != nil {
+		task.Message = taskMessage
+	}
 }
 
 func isStorageQuotaPrecheck(err error) bool {
@@ -795,6 +821,9 @@ func (a *AutosyncManager) determineErrorMessage(processErr error, job *repo.Cron
 
 	case job != nil && job.Method == "gmail" && isPersonalGmailCronJob(job) &&
 		(isGmailOAuthOrDelegationFailure(errMsg) || gmailRefreshOrTokenExchangeFailure(job, errMsg)):
+		return cronEmailGoogleAuthFinal
+
+	case job != nil && repo.IsGoogleAutosyncMethod(job.Method) && googleOAuthTokenExchangeFailure(errMsg):
 		return cronEmailGoogleAuthFinal
 
 	case job != nil && job.Method == "gmail" && isGmailOAuthOrDelegationFailure(errMsg):
@@ -859,6 +888,9 @@ func (a *AutosyncManager) handleErrorScenarios(processErr error, job *repo.CronJ
 	case job != nil && job.Method == "gmail" && isPersonalGmailCronJob(job) &&
 		(isGmailOAuthOrDelegationFailure(errMsg) || gmailRefreshOrTokenExchangeFailure(job, errMsg)):
 		a.deactivatePersonalGmailAuth(job, task)
+
+	case job != nil && repo.IsGoogleAutosyncMethod(job.Method) && googleOAuthTokenExchangeFailure(errMsg):
+		a.deactivateGoogleOAuthAuth(job, task)
 
 	case job != nil && job.Method == "gmail" && isGmailOAuthOrDelegationFailure(errMsg):
 		job.Active = false
