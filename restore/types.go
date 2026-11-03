@@ -104,18 +104,19 @@ var serviceConfigs = map[string]ServiceConfig{
 		Source: "outlook", ObjectType: "outlook_onedrive", Provider: RestoreProviderMicrosoft,
 		BatchSize: 25, MaxConcurrency: 10, VaultConcurrency: 5, RateLimitPerSec: 20,
 	},
-	"outlook_sharepoint": {
-		Method: "outlook_sharepoint", Bucket: satellite.ReserveBucket_OutlookSharePoint,
-		Source: "outlook", ObjectType: "outlook_sharepoint", Provider: RestoreProviderMicrosoft,
-		BatchSize: 25, MaxConcurrency: 10, VaultConcurrency: 5, RateLimitPerSec: 20,
-	},
-	// Teams posts run one at a time so a thread root is reposted before the replies stored after
-	// it, which then go under the reposted root.
-	"outlook_teams": {
-		Method: "outlook_teams", Bucket: satellite.ReserveBucket_OutlookTeams,
-		Source: "outlook", ObjectType: "outlook_teams", Provider: RestoreProviderMicrosoft,
-		BatchSize: 50, MaxConcurrency: 1, VaultConcurrency: 1, RateLimitPerSec: 20,
-	},
+	// Temporarily disabled — Teams / SharePoint / tenant restore (keep for later).
+	// "outlook_sharepoint": {
+	// 	Method: "outlook_sharepoint", Bucket: satellite.ReserveBucket_OutlookSharePoint,
+	// 	Source: "outlook", ObjectType: "outlook_sharepoint", Provider: RestoreProviderMicrosoft,
+	// 	BatchSize: 25, MaxConcurrency: 10, VaultConcurrency: 5, RateLimitPerSec: 20,
+	// },
+	// // Teams posts run one at a time so a thread root is reposted before the replies stored after
+	// // it, which then go under the reposted root.
+	// "outlook_teams": {
+	// 	Method: "outlook_teams", Bucket: satellite.ReserveBucket_OutlookTeams,
+	// 	Source: "outlook", ObjectType: "outlook_teams", Provider: RestoreProviderMicrosoft,
+	// 	BatchSize: 50, MaxConcurrency: 1, VaultConcurrency: 1, RateLimitPerSec: 20,
+	// },
 }
 
 // APIServiceToMethod maps API body service to internal method key.
@@ -129,12 +130,13 @@ var APIServiceToMethod = map[APIService]string{
 	APIServiceMail:              "outlook",
 	APIServiceOutlookCalendar:   "outlook_calendar",
 	APIServiceOutlookContacts:   "outlook_contacts",
-	APIServiceOutlookOneDrive:   "outlook_onedrive",
-	APIServiceOneDrive:          "outlook_onedrive",
-	APIServiceOutlookSharePoint: "outlook_sharepoint",
-	APIServiceSharePoint:        "outlook_sharepoint",
-	APIServiceOutlookTeams:      "outlook_teams",
-	APIServiceTeams:             "outlook_teams",
+	APIServiceOutlookOneDrive: "outlook_onedrive",
+	APIServiceOneDrive:        "outlook_onedrive",
+	// Temporarily disabled — Teams / SharePoint / tenant restore (keep for later).
+	// APIServiceOutlookSharePoint: "outlook_sharepoint",
+	// APIServiceSharePoint:        "outlook_sharepoint",
+	// APIServiceOutlookTeams:      "outlook_teams",
+	// APIServiceTeams:             "outlook_teams",
 }
 
 // IsMicrosoftRestoreMethod reports whether method is a Microsoft restore-all method.

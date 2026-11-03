@@ -126,8 +126,8 @@ func shouldRestoreOutlookTeamsKey(objectKey string) bool {
 }
 
 // RestoreOutlookMailKey restores one mail meta key into its original folder of the backed-up
-// mailbox. App-only tokens target the mailbox owner from the key; delegated tokens use /me.
-// A migration writes into the destination account instead of the backed-up user.
+// mailbox. Tenant-scoped keys always write /users/{owner from key}. A migration writes into the
+// destination account instead of the backed-up user.
 func RestoreOutlookMailKey(ctx context.Context, deps *restore.RestoreDeps, objectKey string) error {
 	if deps == nil {
 		return fmt.Errorf("restore deps are required")
@@ -142,15 +142,18 @@ func RestoreOutlookMailKey(ctx context.Context, deps *restore.RestoreDeps, objec
 }
 
 // restoreUserBase is the Graph user a mailbox or OneDrive backup restores into.
+// Tenant-scoped keys ({tenant}/user/{oid}/…) always write to that user — never /me.
+// Writing corporate backups with a delegated admin token to /me was the silent failure mode:
+// the job "succeeded" in the admin mailbox while the corporate user saw nothing.
 func restoreUserBase(application bool, objectKey string) (string, error) {
-	if !application {
-		return outlook.UserBaseURL("", "", "", false)
-	}
 	_, _, resourceType, resourceID, _, ok := outlook.SplitResourceKey(objectKey)
-	if !ok || resourceType != "user" {
+	if ok && resourceType == "user" && strings.TrimSpace(resourceID) != "" {
+		return outlook.UserBaseURL(resourceID, "", "", true)
+	}
+	if application {
 		return "", fmt.Errorf("key %q has no user owner", objectKey)
 	}
-	return outlook.UserBaseURL(resourceID, "", "", true)
+	return outlook.UserBaseURL("", "", "", false)
 }
 
 // RestoreOutlookCalendarKey restores one backed-up event as a new event in its original calendar
@@ -203,15 +206,18 @@ func migrationWrite(deps *restore.RestoreDeps) bool {
 }
 
 // restoreWriteUserBase is the Graph user the restore writes into. In place, that is the backed-up
-// user. A migration with a delegated token uses /me (the destination sign-in). A migration with an
-// app-only token uses the destination resolved once when the token was minted.
+// user from the object key. A migration with a delegated token uses /me (the destination sign-in).
+// A migration with an app-only token uses the destination resolved once when the token was minted.
 func restoreWriteUserBase(deps *restore.RestoreDeps, objectKey string) (string, error) {
-	if deps != nil && migrationWrite(deps) && deps.MicrosoftApplication {
-		base := strings.TrimSpace(deps.MicrosoftWriteUserBase)
-		if base == "" {
-			return "", fmt.Errorf("migration restore has no destination user")
+	if deps != nil && migrationWrite(deps) {
+		if deps.MicrosoftApplication {
+			base := strings.TrimSpace(deps.MicrosoftWriteUserBase)
+			if base == "" {
+				return "", fmt.Errorf("migration restore has no destination user")
+			}
+			return base, nil
 		}
-		return base, nil
+		return outlook.UserBaseURL("", "", "", false)
 	}
 	application := false
 	if deps != nil {
@@ -404,7 +410,7 @@ func shouldRestoreOutlookOneDriveKey(objectKey string) bool {
 }
 
 // RestoreOutlookOneDriveKey restores one OneDrive backup into its original folder in the backed-up
-// user's drive. App-only tokens target the user from the key; delegated tokens use /me.
+// user's drive. Tenant-scoped keys always write /users/{owner from key}.
 func RestoreOutlookOneDriveKey(ctx context.Context, deps *restore.RestoreDeps, objectKey string) error {
 	userBase, err := restoreWriteUserBase(deps, objectKey)
 	if err != nil {

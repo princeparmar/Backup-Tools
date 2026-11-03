@@ -18,8 +18,11 @@ func TestAPIServiceToMethod_microsoftAliases(t *testing.T) {
 		{name: "outlook_calendar", service: APIServiceOutlookCalendar, method: "outlook_calendar", wantOK: true},
 		{name: "outlook_contacts", service: APIServiceOutlookContacts, method: "outlook_contacts", wantOK: true},
 		{name: "onedrive alias", service: APIServiceOneDrive, method: "outlook_onedrive", wantOK: true},
-		{name: "sharepoint alias", service: APIServiceSharePoint, method: "outlook_sharepoint", wantOK: true},
-		{name: "teams alias", service: APIServiceTeams, method: "outlook_teams", wantOK: true},
+		// Temporarily disabled — Teams / SharePoint / tenant restore (keep for later).
+		// {name: "sharepoint alias", service: APIServiceSharePoint, method: "outlook_sharepoint", wantOK: true},
+		// {name: "teams alias", service: APIServiceTeams, method: "outlook_teams", wantOK: true},
+		{name: "sharepoint alias", service: APIServiceSharePoint, method: "outlook_sharepoint", wantOK: false},
+		{name: "teams alias", service: APIServiceTeams, method: "outlook_teams", wantOK: false},
 		{name: "google calendar unchanged", service: APIServiceCalendar, method: "google_calendar", wantOK: true},
 		{name: "google contacts unchanged", service: APIServiceContacts, method: "google_contacts", wantOK: true},
 	}
@@ -31,7 +34,7 @@ func TestAPIServiceToMethod_microsoftAliases(t *testing.T) {
 			if ok != tt.wantOK {
 				t.Fatalf("ok=%v want %v", ok, tt.wantOK)
 			}
-			if got != tt.method {
+			if tt.wantOK && got != tt.method {
 				t.Fatalf("method=%q want %q", got, tt.method)
 			}
 		})
@@ -46,7 +49,9 @@ func TestIsMicrosoftRestoreMethod_table(t *testing.T) {
 	}{
 		{method: "outlook", want: true},
 		{method: "outlook_calendar", want: true},
-		{method: "outlook_sharepoint", want: true},
+		// Temporarily disabled — Teams / SharePoint / tenant restore (keep for later).
+		// {method: "outlook_sharepoint", want: true},
+		{method: "outlook_sharepoint", want: false},
 		{method: "gmail", want: false},
 		{method: "google_drive", want: false},
 		{method: "", want: false},

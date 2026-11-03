@@ -56,7 +56,9 @@ func TestRefreshAccessTokenForJobGoogleUsesGoogleRefresh(t *testing.T) {
 }
 
 func TestRefreshAccessTokenForJobMicrosoftUsesMicrosoftRefresh(t *testing.T) {
-	for _, method := range []string{"outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive", "outlook_sharepoint", "outlook_teams"} {
+	// Temporarily disabled in list — Teams / SharePoint / tenant restore (keep for later):
+	// "outlook_sharepoint", "outlook_teams"
+	for _, method := range []string{"outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive"} {
 		calls := countingHooks(t, nil, nil)
 		if err := depsForMethod(method).refreshAccessTokenForJob(context.Background()); err != nil {
 			t.Fatalf("%s: %v", method, err)

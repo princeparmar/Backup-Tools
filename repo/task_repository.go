@@ -299,6 +299,7 @@ func (r *TaskRepository) CreateOnDemandTaskForCronJob(cronJobID uint) (*TaskList
 		CronJobID: cronJobID,
 		Status:    TaskStatusPushed,
 		Trigger:   TaskTriggerOnDemand,
+		Message:   JobMessageOnDemandStarted,
 	}
 
 	res := tx.Create(&data)
@@ -308,8 +309,10 @@ func (r *TaskRepository) CreateOnDemandTaskForCronJob(cronJobID uint) (*TaskList
 	}
 
 	updates := map[string]interface{}{
-		"status": JobStatusInQueue,
-		"hidden": false,
+		"status":         JobStatusInQueue,
+		"hidden":         false,
+		"message":        JobMessageOnDemandStarted,
+		"message_status": JobMessageStatusInfo,
 	}
 	if err := tx.Model(&CronJobListingDB{}).Where("id = ?", cronJobID).Updates(updates).Error; err != nil {
 		tx.Rollback()

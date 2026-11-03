@@ -198,6 +198,8 @@ func teamsJob(t *testing.T, store *db.PostgresDb, cred *repo.GoogleBackupCredent
 }
 
 func TestTeamsRestoreUsesTenantJobPrefixAndGuard(t *testing.T) {
+	// Temporarily disabled — Teams / SharePoint / tenant restore (keep for later).
+	t.Skip("Teams / tenant restore temporarily disabled")
 	store := newRestoreTestDB(t)
 	cred := restoreCred(t, store, "oid-ann")
 	connectLink(t, store, cred, tenantA)
@@ -232,6 +234,8 @@ func TestTeamsRestoreUsesTenantJobPrefixAndGuard(t *testing.T) {
 }
 
 func TestSharePointRestoreUsesTenantJob(t *testing.T) {
+	// Temporarily disabled — Teams / SharePoint / tenant restore (keep for later).
+	t.Skip("SharePoint / tenant restore temporarily disabled")
 	store := newRestoreTestDB(t)
 	cred := restoreCred(t, store, "oid-ann")
 	connectLink(t, store, cred, tenantA)

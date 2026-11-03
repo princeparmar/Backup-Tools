@@ -111,6 +111,101 @@ type mailRestoreMessage struct {
 
 var mailRestoreCopiedFields = []string{"subject", "body", "from", "sender", "toRecipients", "ccRecipients", "bccRecipients", "replyTo", "importance"}
 
+// ValidateMailBackupForRestore checks that a vault object is restorable Outlook mail JSON
+// before Graph create. Call this first so bad/empty backups fail with a clear error instead of
+// a vague create-message failure on the corporate mailbox.
+func ValidateMailBackupForRestore(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 {
+		return fmt.Errorf("mail backup object is empty")
+	}
+	msg, err := parseMailRestoreMessage(data)
+	if err != nil {
+		return err
+	}
+	if err := ensureMailRestoreBody(msg); err != nil {
+		return err
+	}
+	hasSubject := fieldNonEmptyJSON(msg.Fields["subject"])
+	hasFrom := fieldNonEmptyJSON(msg.Fields["from"]) || fieldNonEmptyJSON(msg.Fields["sender"])
+	hasBody := mailRestoreBodyHasContent(msg)
+	hasAtt := len(msg.Attachments) > 0
+	if !hasSubject && !hasFrom && !hasBody && !hasAtt {
+		return fmt.Errorf("mail backup has no subject, body, sender, or attachments to restore")
+	}
+	return nil
+}
+
+func fieldNonEmptyJSON(raw json.RawMessage) bool {
+	s := strings.TrimSpace(string(raw))
+	return s != "" && s != "null" && s != `""`
+}
+
+func mailRestoreBodyHasContent(msg *mailRestoreMessage) bool {
+	if msg == nil {
+		return false
+	}
+	raw, ok := msg.Fields["body"]
+	if !ok || !fieldNonEmptyJSON(raw) {
+		return false
+	}
+	var body struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return false
+	}
+	return strings.TrimSpace(body.Content) != ""
+}
+
+// ensureMailRestoreBody makes sure Graph receives a well-formed body object (contentType + content).
+// Corporate creates reject malformed body shapes even when subject/from are present.
+func ensureMailRestoreBody(msg *mailRestoreMessage) error {
+	if msg == nil {
+		return fmt.Errorf("mail backup message is nil")
+	}
+	raw, ok := msg.Fields["body"]
+	if !ok || !fieldNonEmptyJSON(raw) {
+		b, err := json.Marshal(map[string]string{"contentType": "text", "content": ""})
+		if err != nil {
+			return err
+		}
+		msg.Fields["body"] = b
+		return nil
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(raw, &body); err != nil || body == nil {
+		// Body was a bare string in some legacy objects.
+		var asString string
+		if err2 := json.Unmarshal(raw, &asString); err2 == nil {
+			b, mErr := json.Marshal(map[string]string{"contentType": "text", "content": asString})
+			if mErr != nil {
+				return mErr
+			}
+			msg.Fields["body"] = b
+			return nil
+		}
+		return fmt.Errorf("mail backup body is not valid Graph itemBody JSON")
+	}
+	if _, ok := body["content"]; !ok {
+		body["content"] = ""
+	}
+	ct, _ := body["contentType"].(string)
+	if strings.TrimSpace(ct) == "" {
+		body["contentType"] = "text"
+	} else {
+		body["contentType"] = strings.ToLower(strings.TrimSpace(ct))
+	}
+	// Drop OData annotations Graph rejects on create.
+	delete(body, "@odata.type")
+	b, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	msg.Fields["body"] = b
+	return nil
+}
+
 func parseMailRestoreMessage(data []byte) (*mailRestoreMessage, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -250,43 +345,20 @@ func RestoreMailMessage(ctx context.Context, accessToken, userBaseURL string, fo
 	if userBaseURL == "" {
 		return fmt.Errorf("restore mailbox is required")
 	}
+	if err := ValidateMailBackupForRestore(data); err != nil {
+		return fmt.Errorf("backed-up mail is not restorable: %w", err)
+	}
 	msg, err := parseMailRestoreMessage(data)
 	if err != nil {
+		return err
+	}
+	if err := ensureMailRestoreBody(msg); err != nil {
 		return err
 	}
 
 	folderID, err := resolveMailRestoreFolder(ctx, accessToken, userBaseURL, folder.WellKnown, folder.Path)
 	if err != nil {
 		return fmt.Errorf("restore folder %q: %w", folder.Path, err)
-	}
-
-	payload := make(map[string]interface{}, len(msg.Fields)+6)
-	for k, v := range msg.Fields {
-		payload[k] = v
-	}
-	payload["isRead"] = msg.IsRead
-	if len(msg.Categories) > 0 {
-		payload["categories"] = msg.Categories
-	}
-	if fs := strings.TrimSpace(msg.FlagStatus); fs != "" && fs != "notFlagged" {
-		payload["flag"] = map[string]string{"flagStatus": fs}
-	}
-	var props []map[string]string
-	if !msg.IsDraft {
-		flags := mapiMessageFlagUnread
-		if msg.IsRead {
-			flags = mapiMessageFlagRead
-		}
-		props = append(props, map[string]string{"id": mapiMessageFlags, "value": flags})
-	}
-	if msg.Received != "" {
-		props = append(props, map[string]string{"id": mapiDeliveryTime, "value": msg.Received})
-	}
-	if sent := cmp.Or(msg.Sent, msg.Received); sent != "" {
-		props = append(props, map[string]string{"id": mapiClientSubmitTime, "value": sent})
-	}
-	if len(props) > 0 {
-		payload["singleValueExtendedProperties"] = props
 	}
 
 	var inline []map[string]interface{}
@@ -300,32 +372,16 @@ func RestoreMailMessage(ctx context.Context, accessToken, userBaseURL string, fo
 		}
 		later = append(later, a)
 	}
-	if len(inline) > 0 {
-		payload["attachments"] = inline
-	}
 
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
 	createURL := fmt.Sprintf("%s/mailFolders/%s/messages", userBaseURL, urlPathEscape(folderID))
-	resp, status, err := graphMailDo(ctx, accessToken, http.MethodPost, createURL, body, 0)
+	createdID, err := createRestoredMailMessage(ctx, accessToken, createURL, msg, inline)
 	if err != nil {
 		return err
-	}
-	if status < 200 || status >= 300 {
-		return fmt.Errorf("create restored message http %d: %s", status, truncateForErr(resp))
-	}
-	var created struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(resp, &created); err != nil || strings.TrimSpace(created.ID) == "" {
-		return fmt.Errorf("create restored message: no id returned")
 	}
 
 	var failedNames []string
 	for _, a := range later {
-		if err := addMailRestoreAttachment(ctx, accessToken, userBaseURL, created.ID, a); err != nil {
+		if err := addMailRestoreAttachment(ctx, accessToken, userBaseURL, createdID, a); err != nil {
 			failedNames = append(failedNames, a.Name)
 			logger.Warn(ctx, "outlook mail restore: attachment not restored",
 				logger.String("attachment", a.Name), logger.ErrorField(err))
@@ -333,13 +389,133 @@ func RestoreMailMessage(ctx context.Context, accessToken, userBaseURL string, fo
 	}
 	if msg.Skipped > 0 {
 		logger.Warn(ctx, "outlook mail restore: skipped non-file attachments",
-			logger.String("message_id", created.ID), logger.Int("skipped", msg.Skipped))
+			logger.String("message_id", createdID), logger.Int("skipped", msg.Skipped))
 	}
 	if len(failedNames) > 0 {
 		return fmt.Errorf("restored message %s but %d attachment(s) failed: %s",
-			created.ID, len(failedNames), strings.Join(failedNames, ", "))
+			createdID, len(failedNames), strings.Join(failedNames, ", "))
 	}
 	return nil
+}
+
+func buildMailRestoreCreatePayload(msg *mailRestoreMessage, inline []map[string]interface{}, withFrom, withExtended bool) map[string]interface{} {
+	payload := make(map[string]interface{}, len(msg.Fields)+6)
+	for k, v := range msg.Fields {
+		if !withFrom && (k == "from" || k == "sender") {
+			continue
+		}
+		payload[k] = v
+	}
+	payload["isRead"] = msg.IsRead
+	if len(msg.Categories) > 0 {
+		payload["categories"] = msg.Categories
+	}
+	if fs := strings.TrimSpace(msg.FlagStatus); fs != "" && fs != "notFlagged" {
+		payload["flag"] = map[string]string{"flagStatus": fs}
+	}
+	if withExtended {
+		var props []map[string]string
+		if !msg.IsDraft {
+			flags := mapiMessageFlagUnread
+			if msg.IsRead {
+				flags = mapiMessageFlagRead
+			}
+			props = append(props, map[string]string{"id": mapiMessageFlags, "value": flags})
+		}
+		if msg.Received != "" {
+			props = append(props, map[string]string{"id": mapiDeliveryTime, "value": msg.Received})
+		}
+		if sent := cmp.Or(msg.Sent, msg.Received); sent != "" {
+			props = append(props, map[string]string{"id": mapiClientSubmitTime, "value": sent})
+		}
+		if len(props) > 0 {
+			payload["singleValueExtendedProperties"] = props
+		}
+	}
+	if len(inline) > 0 {
+		payload["attachments"] = inline
+	}
+	return payload
+}
+
+func mailCreateShouldRetryWithoutFrom(status int, resp []byte) bool {
+	if status < 400 {
+		return false
+	}
+	msg := strings.ToLower(string(resp))
+	return strings.Contains(msg, "erroraccessdenied") ||
+		strings.Contains(msg, "access is denied") ||
+		strings.Contains(msg, "errorinvalidrequest") ||
+		strings.Contains(msg, "sendas") ||
+		strings.Contains(msg, "send as") ||
+		strings.Contains(msg, `"from"`) ||
+		strings.Contains(msg, "sender")
+}
+
+func mailCreateShouldRetryWithoutExtended(status int, resp []byte) bool {
+	if status < 400 {
+		return false
+	}
+	msg := strings.ToLower(string(resp))
+	return strings.Contains(msg, "singlevalueextendedproperties") ||
+		strings.Contains(msg, "errorinvalidproperty") ||
+		strings.Contains(msg, "extended property") ||
+		strings.Contains(msg, "0x0e07") ||
+		strings.Contains(msg, "0x0e06") ||
+		strings.Contains(msg, "0x0039")
+}
+
+// createRestoredMailMessage posts the create payload. Corporate mailboxes often reject
+// from/sender (needs Send As) or MAPI extended properties — retry without those fields.
+func createRestoredMailMessage(ctx context.Context, accessToken, createURL string, msg *mailRestoreMessage, inline []map[string]interface{}) (string, error) {
+	attempts := []struct {
+		name         string
+		withFrom     bool
+		withExtended bool
+	}{
+		{name: "full", withFrom: true, withExtended: true},
+		{name: "no-from", withFrom: false, withExtended: true},
+		{name: "no-extended", withFrom: false, withExtended: false},
+	}
+	var lastStatus int
+	var lastResp []byte
+	for i, attempt := range attempts {
+		payload := buildMailRestoreCreatePayload(msg, inline, attempt.withFrom, attempt.withExtended)
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return "", err
+		}
+		resp, status, err := graphMailDo(ctx, accessToken, http.MethodPost, createURL, body, 0)
+		if err != nil {
+			return "", err
+		}
+		if status >= 200 && status < 300 {
+			var created struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(resp, &created); err != nil || strings.TrimSpace(created.ID) == "" {
+				return "", fmt.Errorf("create restored message: no id returned")
+			}
+			if i > 0 {
+				logger.Info(ctx, "outlook mail restore: create succeeded after payload retry",
+					logger.String("attempt", attempt.name),
+					logger.String("message_id", created.ID))
+			}
+			return created.ID, nil
+		}
+		lastStatus, lastResp = status, resp
+		retryFrom := mailCreateShouldRetryWithoutFrom(status, resp)
+		retryExt := mailCreateShouldRetryWithoutExtended(status, resp)
+		if i+1 < len(attempts) && (retryFrom || retryExt) {
+			logger.Warn(ctx, "outlook mail restore: create rejected, retrying with reduced payload",
+				logger.String("attempt", attempt.name),
+				logger.Int("status", status),
+				logger.String("graph", truncateForErr(resp)))
+			continue
+		}
+		break
+	}
+	return "", fmt.Errorf("create restored message http %d: %s", lastStatus, truncateForErr(lastResp))
 }
 
 func addMailRestoreAttachment(ctx context.Context, accessToken, userBaseURL, messageID string, a mailRestoreAttachment) error {

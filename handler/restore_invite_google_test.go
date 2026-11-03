@@ -34,3 +34,16 @@ func TestGoogleRestoreService(t *testing.T) {
 		}
 	}
 }
+
+func TestMicrosoftRestoreService(t *testing.T) {
+	for _, service := range []string{"outlook", "onedrive", "outlook_onedrive", "outlook_contacts", "outlook_calendar"} {
+		if !microsoftRestoreService(service) {
+			t.Fatalf("%s should resolve the invited member's Microsoft access token", service)
+		}
+	}
+	for _, service := range []string{"gmail", "google_drive", "google_photos", "google_calendar", "google_contacts"} {
+		if microsoftRestoreService(service) {
+			t.Fatalf("%s must not look up a Microsoft access token", service)
+		}
+	}
+}

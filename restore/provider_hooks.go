@@ -21,6 +21,8 @@ var (
 		store *db.PostgresDb,
 		out *ReadinessResult,
 		userID, projectID, loginID, service, method, targetEmail, tenantID string,
+		inviteRestore bool,
+		inviteAccessToken string,
 	) (*ReadinessResult, error)
 )
 
@@ -62,6 +64,8 @@ func RegisterMicrosoftReadiness(fn func(
 	store *db.PostgresDb,
 	out *ReadinessResult,
 	userID, projectID, loginID, service, method, targetEmail, tenantID string,
+	inviteRestore bool,
+	inviteAccessToken string,
 ) (*ReadinessResult, error)) {
 	registryMu.Lock()
 	defer registryMu.Unlock()
@@ -88,11 +92,13 @@ func evaluateMicrosoftReadiness(
 	store *db.PostgresDb,
 	out *ReadinessResult,
 	userID, projectID, loginID, service, method, targetEmail, tenantID string,
+	inviteRestore bool,
+	inviteAccessToken string,
 ) (*ReadinessResult, error) {
 	if evaluateMicrosoftReadyFn == nil {
 		return nil, fmt.Errorf("microsoft restore readiness not registered")
 	}
-	return evaluateMicrosoftReadyFn(ctx, store, out, userID, projectID, loginID, service, method, targetEmail, tenantID)
+	return evaluateMicrosoftReadyFn(ctx, store, out, userID, projectID, loginID, service, method, targetEmail, tenantID, inviteRestore, inviteAccessToken)
 }
 
 func (d *RestoreDeps) mintGoogleAccessToken(ctx context.Context) error {

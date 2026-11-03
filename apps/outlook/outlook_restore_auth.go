@@ -117,6 +117,11 @@ func validateGraphAccessToken(ctx context.Context, accessToken string) error {
 	return nil
 }
 
+// ValidateGraphAccessTokenForRestore verifies a Graph access token via GET /me (invite restore).
+func ValidateGraphAccessTokenForRestore(ctx context.Context, accessToken string) error {
+	return validateGraphAccessToken(ctx, accessToken)
+}
+
 // Authenticate exchanges a Microsoft Graph access token for a Backup-Tools microsoft-auth JWT.
 // Used for all Microsoft restore (mail/calendar/contacts/OneDrive/SharePoint/Teams/Groups), not Outlook-only.
 // Mirrors Google Autentificate (POST /google-auth). Form or JSON: microsoft-key / microsoft_key.

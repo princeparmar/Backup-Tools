@@ -252,16 +252,71 @@ func TestContactFolderIDForDefaultFolderSkipsLookup(t *testing.T) {
 
 func TestRestoreUserBase(t *testing.T) {
 	t.Parallel()
-	key := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/user/oid-1/MY_DRIVE/ITEM1$a.txt"
-	got, err := restoreUserBase(true, key)
-	if err != nil || !strings.HasSuffix(got, "/users/oid-1") {
-		t.Fatalf("app-only base = %q, %v", got, err)
+	tests := []struct {
+		name        string
+		application bool
+		key         string
+		wantSuffix  string
+		wantErr     bool
+	}{
+		{
+			name:        "app-only uses key owner",
+			application: true,
+			key:         "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/user/oid-1/MY_DRIVE/ITEM1$a.txt",
+			wantSuffix:  "/users/oid-1",
+		},
+		{
+			name:       "delegated still uses key owner for tenant user keys",
+			key:        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/user/oid-1/MY_DRIVE/ITEM1$a.txt",
+			wantSuffix: "/users/oid-1",
+		},
+		{
+			name:       "legacy key without resource prefix uses /me when delegated",
+			key:        "inbox/m1.json",
+			wantSuffix: "/me",
+		},
+		{
+			name:        "group key must not resolve to a user",
+			application: true,
+			key:         "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/group/g1/x",
+			wantErr:     true,
+		},
 	}
-	if got, err := restoreUserBase(false, key); err != nil || !strings.HasSuffix(got, "/me") {
-		t.Fatalf("delegated base = %q, %v", got, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := restoreUserBase(tt.application, tt.key)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil || !strings.HasSuffix(got, tt.wantSuffix) {
+				t.Fatalf("base=%q err=%v want suffix %q", got, err, tt.wantSuffix)
+			}
+		})
 	}
-	if _, err := restoreUserBase(true, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/group/g1/x"); err == nil {
-		t.Fatal("group key must not resolve to a user")
+}
+
+func TestIsOtherMailboxRestore(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		loginID string
+		cred    *repo.GoogleBackupCredentialDB
+		want    bool
+	}{
+		{name: "nil cred", loginID: "user@x.com"},
+		{name: "empty login", cred: &repo.GoogleBackupCredentialDB{Email: "admin@x.com"}},
+		{name: "same mailbox", loginID: "Admin@x.com", cred: &repo.GoogleBackupCredentialDB{Email: "admin@x.com"}},
+		{name: "corporate child", loginID: "user@x.com", cred: &repo.GoogleBackupCredentialDB{Email: "admin@x.com"}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isOtherMailboxRestore(tt.loginID, tt.cred); got != tt.want {
+				t.Fatalf("got %v want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -281,7 +336,7 @@ func TestRestoreWriteUserBase(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{name: "delegated in place", deps: &restore.RestoreDeps{}, want: "/me"},
+		{name: "delegated in place uses key owner", deps: &restore.RestoreDeps{}, want: "/users/oid-1"},
 		{name: "app in place uses key owner", deps: &restore.RestoreDeps{MicrosoftApplication: true}, want: "/users/oid-1"},
 		{name: "delegated migration uses signed-in mailbox", deps: &restore.RestoreDeps{Job: migration}, want: "/me"},
 		{
@@ -361,6 +416,65 @@ func TestPrepareMigrationWriteUser(t *testing.T) {
 	}
 }
 
+func TestEvaluateCredentialReadinessCorporateChildNeedsAppWrite(t *testing.T) {
+	prevR, prevD := resolveTenantFn, delegatedRestoreTokenFn
+	t.Cleanup(func() { resolveTenantFn, delegatedRestoreTokenFn = prevR, prevD })
+
+	appTok := fakeJWT(map[string]interface{}{"roles": []string{"Mail.Read"}, "idtyp": "app"})
+	resolveTenantFn = func(context.Context, *db.PostgresDb, mstenant.Request) (*mstenant.Context, error) {
+		return &mstenant.Context{Token: appTok, Application: true, TenantID: "tenant"}, nil
+	}
+
+	tests := []struct {
+		name    string
+		loginID string
+		email   string
+		wantApp bool
+	}{
+		{name: "corporate child needs application write", loginID: "user@contoso.com", email: "admin@contoso.com", wantApp: true},
+		{name: "same mailbox may still use delegated", loginID: "admin@contoso.com", email: "admin@contoso.com"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			delegatedRestoreTokenFn = func(_, _, _ string) (*outlook.TokenResponse, error) {
+				called = true
+				return &outlook.TokenResponse{
+					AccessToken: fakeJWT(map[string]interface{}{"scp": "Mail.ReadWrite"}),
+					Scope:       "Mail.ReadWrite",
+				}, nil
+			}
+			out := &restore.ReadinessResult{Service: "outlook", LoginID: tt.loginID}
+			got, err := evaluateCredentialReadiness(context.Background(), nil, out, "u", "outlook", "outlook",
+				&repo.GoogleBackupCredentialDB{Email: tt.email, RefreshToken: "rt"}, "tenant")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantApp {
+				if called {
+					t.Fatal("must not mint delegated token for corporate child")
+				}
+				if got.Ready {
+					t.Fatal("expected not ready until application Mail.ReadWrite is consented")
+				}
+				found := false
+				for _, p := range got.MissingPermissions {
+					if p.Type == "application" && p.Scope == "Mail.ReadWrite" {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("missing permissions %+v", got.MissingPermissions)
+				}
+				return
+			}
+			if !called || !got.Ready {
+				t.Fatalf("same-mailbox Grant Access fallback ready=%v called=%v", got.Ready, called)
+			}
+		})
+	}
+}
+
 func TestEvaluateCredentialReadinessFallsBackToDelegatedWrite(t *testing.T) {
 	prevR, prevD := resolveTenantFn, delegatedRestoreTokenFn
 	t.Cleanup(func() { resolveTenantFn, delegatedRestoreTokenFn = prevR, prevD })
@@ -384,13 +498,14 @@ func TestEvaluateCredentialReadinessFallsBackToDelegatedWrite(t *testing.T) {
 		{name: "contacts Grant Access", method: "outlook_contacts", appRoles: []string{"Contacts.Read"}, scp: "Contacts.ReadWrite", refresh: "rt", wantReady: true},
 		{name: "onedrive Grant Access", method: "outlook_onedrive", appRoles: []string{"Files.Read.All"}, scp: "Files.ReadWrite.All", refresh: "rt", wantReady: true},
 		{name: "onedrive personal Files.ReadWrite", method: "outlook_onedrive", appRoles: []string{"Files.Read.All"}, scp: "Files.ReadWrite", refresh: "rt", wantReady: true},
-		{name: "sharepoint Files.ReadWrite.All", method: "outlook_sharepoint", appRoles: []string{"Sites.Read.All"}, scp: "Files.ReadWrite.All Sites.Read.All", refresh: "rt", wantReady: true},
-		{name: "sharepoint Sites.ReadWrite.All", method: "outlook_sharepoint", appRoles: []string{"Sites.Read.All"}, scp: "Sites.ReadWrite.All", refresh: "rt", wantReady: true},
-		{name: "sharepoint still read-only", method: "outlook_sharepoint", appRoles: []string{"Sites.Read.All"}, scp: "Sites.Read.All Files.Read.All", refresh: "rt", wantGrant: "Files.ReadWrite.All"},
-		{name: "teams Grant Access both send scopes", method: "outlook_teams", appRoles: []string{"ChannelMessage.Read.All"}, scp: "ChannelMessage.Send ChatMessage.Send", refresh: "rt", wantReady: true},
-		{name: "teams channel send is enough to start restore", method: "outlook_teams", appRoles: []string{"ChannelMessage.Read.All"}, scp: "ChannelMessage.Send", refresh: "rt", wantReady: true},
-		{name: "teams chat send is enough to start restore", method: "outlook_teams", appRoles: []string{"ChannelMessage.Read.All"}, scp: "ChatMessage.Send", refresh: "rt", wantReady: true},
-		{name: "teams both-scope mint fails then channel-only fallback", method: "outlook_teams", appRoles: []string{"ChannelMessage.Read.All"}, scp: "ChannelMessage.Send", refresh: "rt", mintBothFail: true, wantReady: true},
+		// Temporarily disabled — Teams / SharePoint / tenant restore (keep for later).
+		// {name: "sharepoint Files.ReadWrite.All", method: "outlook_sharepoint", appRoles: []string{"Sites.Read.All"}, scp: "Files.ReadWrite.All Sites.Read.All", refresh: "rt", wantReady: true},
+		// {name: "sharepoint Sites.ReadWrite.All", method: "outlook_sharepoint", appRoles: []string{"Sites.Read.All"}, scp: "Sites.ReadWrite.All", refresh: "rt", wantReady: true},
+		// {name: "sharepoint still read-only", method: "outlook_sharepoint", appRoles: []string{"Sites.Read.All"}, scp: "Sites.Read.All Files.Read.All", refresh: "rt", wantGrant: "Files.ReadWrite.All"},
+		// {name: "teams Grant Access both send scopes", method: "outlook_teams", appRoles: []string{"ChannelMessage.Read.All"}, scp: "ChannelMessage.Send ChatMessage.Send", refresh: "rt", wantReady: true},
+		// {name: "teams channel send is enough to start restore", method: "outlook_teams", appRoles: []string{"ChannelMessage.Read.All"}, scp: "ChannelMessage.Send", refresh: "rt", wantReady: true},
+		// {name: "teams chat send is enough to start restore", method: "outlook_teams", appRoles: []string{"ChannelMessage.Read.All"}, scp: "ChatMessage.Send", refresh: "rt", wantReady: true},
+		// {name: "teams both-scope mint fails then channel-only fallback", method: "outlook_teams", appRoles: []string{"ChannelMessage.Read.All"}, scp: "ChannelMessage.Send", refresh: "rt", mintBothFail: true, wantReady: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -476,9 +591,10 @@ func TestEvaluateCredentialReadinessRequiresWriteRole(t *testing.T) {
 	}{
 		{name: "app mail read is not enough", method: "outlook", roles: []string{"Mail.Read"}, application: true},
 		{name: "app mail readwrite", method: "outlook", roles: []string{"Mail.ReadWrite"}, application: true, wantReady: true},
-		{name: "app sharepoint files role is not site write", method: "outlook_sharepoint", roles: []string{"Files.ReadWrite.All"}, application: true},
-		{name: "app sharepoint sites write", method: "outlook_sharepoint", roles: []string{"Sites.ReadWrite.All"}, application: true, wantReady: true},
-		{name: "teams stays delegated", method: "outlook_teams", roles: []string{"ChannelMessage.Send"}, application: true},
+		// Temporarily disabled — Teams / SharePoint / tenant restore (keep for later).
+		// {name: "app sharepoint files role is not site write", method: "outlook_sharepoint", roles: []string{"Files.ReadWrite.All"}, application: true},
+		// {name: "app sharepoint sites write", method: "outlook_sharepoint", roles: []string{"Sites.ReadWrite.All"}, application: true, wantReady: true},
+		// {name: "teams stays delegated", method: "outlook_teams", roles: []string{"ChannelMessage.Send"}, application: true},
 		{name: "personal opaque write scope", method: "outlook", scope: "Mail.ReadWrite", wantReady: true},
 		{name: "personal opaque read scope", method: "outlook", scope: "Mail.Read"},
 	}

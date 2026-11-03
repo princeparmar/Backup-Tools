@@ -91,6 +91,54 @@ func TestApplyInviteRestoreAuth(t *testing.T) {
 	}
 }
 
+func TestApplyInviteRestoreAuth_microsoft(t *testing.T) {
+	cases := []struct {
+		name       string
+		tag        string
+		jobID      uint
+		storeToken string
+		wantToken  string
+		wantApp    bool
+	}{
+		{
+			name:       "invite tag plus member token uses that Microsoft sign-in",
+			tag:        "invite_restored",
+			jobID:      21,
+			storeToken: "ms-member-access",
+			wantToken:  "ms-member-access",
+			wantApp:    false,
+		},
+		{
+			name:      "invite tag without token leaves microsoft empty",
+			tag:       "invite_restored",
+			jobID:     22,
+			wantToken: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ForgetInviteAccessToken(tc.jobID)
+			if tc.storeToken != "" {
+				RememberInviteAccessToken(tc.jobID, tc.storeToken)
+			}
+			deps := &RestoreDeps{RefreshToken: "owner-refresh"}
+			job := &repo.RestoreJobListingDB{RestoreTag: tc.tag, Method: "outlook"}
+			job.ID = tc.jobID
+			applyInviteRestoreAuth(deps, job)
+			if deps.MicrosoftToken != tc.wantToken {
+				t.Fatalf("MicrosoftToken = %q, want %q", deps.MicrosoftToken, tc.wantToken)
+			}
+			if deps.MicrosoftApplication != tc.wantApp {
+				t.Fatalf("MicrosoftApplication = %v, want %v", deps.MicrosoftApplication, tc.wantApp)
+			}
+			if tc.wantToken != "" && deps.RefreshToken != "" {
+				t.Fatalf("RefreshToken should be cleared when invite Microsoft token is set")
+			}
+			ForgetInviteAccessToken(tc.jobID)
+		})
+	}
+}
+
 func TestInviteRestoreNeedsMailboxSignIn(t *testing.T) {
 	cases := []struct {
 		name     string

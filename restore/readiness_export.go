@@ -14,16 +14,18 @@ func OAuthMissingList(service string, scopes []string) []MissingPermission {
 
 // Readiness message constants (shared by Google + Microsoft prepare).
 const (
-	MsgReadinessNoCredential       = restoreReadinessNoCredential
-	MsgReadinessNoTargetCredential = restoreReadinessNoTargetCredential
-	MsgReadinessNoBackupJob        = restoreReadinessNoBackupJob
-	MsgReadinessNoBackupData       = restoreReadinessNoBackupData
-	MsgReadinessStorxMissing       = restoreReadinessStorxMissing
-	MsgReadinessRefreshMissing     = restoreReadinessRefreshMissing
-	MsgReadinessRefreshInvalid     = restoreReadinessRefreshInvalid
-	MsgReadinessTokenValidation    = restoreReadinessTokenValidation
-	MsgReadinessMissingScopes      = restoreReadinessMissingScopes
-	MsgReadinessDWDNotConfigured   = restoreReadinessDWDNotConfigured
+	MsgReadinessNoCredential                 = restoreReadinessNoCredential
+	MsgReadinessNoTargetCredential           = restoreReadinessNoTargetCredential
+	MsgReadinessNoBackupJob                  = restoreReadinessNoBackupJob
+	MsgReadinessNoBackupData                 = restoreReadinessNoBackupData
+	MsgReadinessStorxMissing                 = restoreReadinessStorxMissing
+	MsgReadinessRefreshMissing               = restoreReadinessRefreshMissing
+	MsgReadinessRefreshInvalid               = restoreReadinessRefreshInvalid
+	MsgReadinessMicrosoftRefreshInvalid      = restoreReadinessMicrosoftRefreshInvalid
+	MsgReadinessTokenValidation              = restoreReadinessTokenValidation
+	MsgReadinessMissingScopes                = restoreReadinessMissingScopes
+	MsgReadinessDWDNotConfigured             = restoreReadinessDWDNotConfigured
+	MsgReadinessInviteOAuthRequiredMicrosoft = restoreReadinessInviteOAuthRequiredMicrosoft
 )
 
 // TrimLoginPrefix is a shared vault prefix helper.

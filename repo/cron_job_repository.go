@@ -45,6 +45,9 @@ const (
 
 	TaskTriggerScheduled = "scheduled"
 	TaskTriggerOnDemand  = "on_demand"
+
+	// JobMessageOnDemandStarted is written when Backup Now queues a run, so dashboard logs update immediately.
+	JobMessageOnDemandStarted = "On-demand backup started"
 )
 
 // Other constants

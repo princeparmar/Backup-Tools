@@ -125,7 +125,7 @@ func (r *BackupRestoreLogsRepository) ListBackupRestoreLogs(userID string, filte
 	cj.method AS method,
 	COALESCE(cj.message, '') AS message,
 	COALESCE(NULLIF(TRIM(cj.message_status), ''), 'info') AS message_status,
-	COALESCE(cj.last_run, cj.updated_at) AS sort_ts
+	GREATEST(cj.updated_at, COALESCE(cj.last_run, cj.updated_at)) AS sort_ts
 FROM cron_job_listing_dbs cj
 WHERE %s`, strings.Join(backupWhere, " AND ")))
 	}

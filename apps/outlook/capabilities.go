@@ -59,6 +59,8 @@ var CapabilityRequiredRoles = map[string][]string{
 
 // ConsentRequiredRoles decide granted vs insufficient at consent time. Optional roles (Teams
 // features) are not listed, so tenants consented before they were added keep working.
+// Org backup only needs read application roles here. Cross-mailbox restore separately requires
+// application write roles (e.g. Mail.ReadWrite) — see restore/microsoft markMigrationNeedsAppWrite.
 var ConsentRequiredRoles = []string{"User.Read.All", "Mail.Read"}
 
 // roleSupersets lists granted roles that also satisfy a required role.

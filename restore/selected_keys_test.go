@@ -10,18 +10,19 @@ import (
 
 func TestNormalizeSelectedRestoreKeys(t *testing.T) {
 	login := "user@gmail.com"
+	msPrefix := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/user/oid-ann/"
 	encoded := base64.StdEncoding.EncodeToString([]byte(login + "/contacts/a.json"))
 	cases := []struct {
 		name    string
-		login   string
+		prefix  string
 		keys    []string
 		want    []string
 		wantErr string
 	}{
-		{name: "empty means restore all", login: login, keys: nil, want: nil},
+		{name: "empty means restore all", prefix: login + "/", keys: nil, want: nil},
 		{
-			name:  "keeps mailbox keys and drops dups",
-			login: login,
+			name:   "keeps mailbox keys and drops dups",
+			prefix: login + "/",
 			keys: []string{
 				login + "/contacts/a.json",
 				"  " + login + "/contacts/a.json",
@@ -30,8 +31,8 @@ func TestNormalizeSelectedRestoreKeys(t *testing.T) {
 			want: []string{login + "/contacts/a.json", login + "/contacts/b.json"},
 		},
 		{
-			name:  "drops other mailbox and placeholders",
-			login: login,
+			name:   "drops other mailbox and placeholders",
+			prefix: login + "/",
 			keys: []string{
 				"other@x.com/contacts/a.json",
 				login + "/.file_placeholder",
@@ -40,27 +41,49 @@ func TestNormalizeSelectedRestoreKeys(t *testing.T) {
 			want: []string{login + "/contacts/keep.json"},
 		},
 		{
-			name:  "decodes legacy base64 vault key",
-			login: login,
-			keys:  []string{encoded},
-			want:  []string{login + "/contacts/a.json"},
+			name:   "decodes legacy base64 vault key",
+			prefix: login + "/",
+			keys:   []string{encoded},
+			want:   []string{login + "/contacts/a.json"},
 		},
 		{
 			name:    "all keys wrong mailbox",
-			login:   login,
+			prefix:  login + "/",
 			keys:    []string{"other@x.com/contacts/a.json"},
 			wantErr: "no selected keys belong to this mailbox",
 		},
 		{
 			name:    "too many keys",
-			login:   login,
+			prefix:  login + "/",
 			keys:    tooManySelectedKeys(login),
 			wantErr: "at most 200 selected keys per restore job",
+		},
+		{
+			name:   "microsoft resource prefix keeps matching keys",
+			prefix: msPrefix,
+			keys: []string{
+				msPrefix + "Inbox/msg1.json",
+				"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/user/other/Inbox/x.json",
+				msPrefix + "Inbox/msg2.json",
+			},
+			want: []string{msPrefix + "Inbox/msg1.json", msPrefix + "Inbox/msg2.json"},
+		},
+		{
+			name:    "microsoft email login must not reject resource keys — use resource prefix",
+			prefix:  "admin@space2let.onmicrosoft.com/",
+			keys:    []string{msPrefix + "Inbox/msg1.json"},
+			wantErr: "no selected keys belong to this mailbox",
+		},
+		{
+			name:    "microsoft wrong resource dropped",
+			prefix:  msPrefix,
+			keys:    []string{"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/user/other/Inbox/x.json"},
+			wantErr: "no selected keys belong to this mailbox",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := NormalizeSelectedRestoreKeys(tc.login, tc.keys)
+			got, err := NormalizeSelectedRestoreKeys(tc.prefix, tc.keys)
 			if tc.wantErr != "" {
 				if err == nil || err.Error() != tc.wantErr {
 					t.Fatalf("error=%v want %q", err, tc.wantErr)
@@ -77,6 +100,43 @@ func TestNormalizeSelectedRestoreKeys(t *testing.T) {
 				if got[i] != tc.want[i] {
 					t.Fatalf("got %#v want %#v", got, tc.want)
 				}
+			}
+		})
+	}
+}
+
+func TestSelectedRestoreKeyPrefix(t *testing.T) {
+	cases := []struct {
+		name    string
+		prep    *ReadinessResult
+		cronJob *repo.CronJobListingDB
+		want    string
+	}{
+		{
+			name: "google falls back to email",
+			prep: &ReadinessResult{Service: "gmail", LoginID: "Ann@Gmail.com"},
+			want: "ann@gmail.com/",
+		},
+		{
+			name: "microsoft uses resource prefix from cron job",
+			prep: &ReadinessResult{Service: "outlook", LoginID: "admin@space2let.onmicrosoft.com"},
+			cronJob: &repo.CronJobListingDB{
+				TenantID:     "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+				ResourceType: repo.ResourceTypeUser,
+				ResourceID:   "oid-ann",
+			},
+			want: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/user/oid-ann/",
+		},
+		{
+			name: "nil prep",
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SelectedRestoreKeyPrefix(tc.prep, tc.cronJob)
+			if got != tc.want {
+				t.Fatalf("got %q want %q", got, tc.want)
 			}
 		})
 	}

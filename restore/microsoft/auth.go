@@ -37,9 +37,24 @@ func MintAccessToken(ctx context.Context, d *restore.RestoreDeps) error {
 	if strings.TrimSpace(tenantID) == "" {
 		return fmt.Errorf("%w: the restore job has no tenant", restore.ErrMicrosoftTenantMismatch)
 	}
-	tc, err := resolveRestoreTenant(ctx, d.Store, userID, cred, tenantID, method, d.RefreshToken)
+	migration := d.Job != nil && repo.IsRestoreJobMigration(d.Job)
+	loginID := ""
+	if d.Job != nil {
+		loginID = d.Job.LoginID
+	}
+	// Corporate child mailboxes must not use the admin's delegated Grant Access token (/me).
+	allowDelegated := !migration && !isOtherMailboxRestore(loginID, cred)
+	tc, err := resolveRestoreTenant(ctx, d.Store, userID, cred, tenantID, method, d.RefreshToken, allowDelegated)
 	if err != nil {
 		return err
+	}
+	if migration || isOtherMailboxRestore(loginID, cred) {
+		if !tc.Application {
+			return fmt.Errorf("restoring corporate mailbox %s needs application Mail.ReadWrite via Grant admin consent", strings.TrimSpace(loginID))
+		}
+		if missing := outlook.MissingRestoreWriteRoles(tc.Token, method); len(missing) > 0 {
+			return fmt.Errorf("restoring corporate mailbox needs application %s via Grant admin consent", strings.Join(missing, ", "))
+		}
 	}
 	d.MicrosoftToken = tc.Token
 	d.MicrosoftApplication = tc.Application
@@ -84,7 +99,7 @@ func RefreshAccessToken(ctx context.Context, d *restore.RestoreDeps) error {
 	return MintAccessToken(ctx, d)
 }
 
-func resolveRestoreTenant(ctx context.Context, store *db.PostgresDb, userID string, cred *repo.GoogleBackupCredentialDB, tenantID, method, refreshFallback string) (*mstenant.Context, error) {
+func resolveRestoreTenant(ctx context.Context, store *db.PostgresDb, userID string, cred *repo.GoogleBackupCredentialDB, tenantID, method, refreshFallback string, allowDelegatedWrite bool) (*mstenant.Context, error) {
 	if cred == nil {
 		return nil, fmt.Errorf("microsoft write credential missing")
 	}
@@ -98,15 +113,34 @@ func resolveRestoreTenant(ctx context.Context, store *db.PostgresDb, userID stri
 	if err != nil {
 		return nil, fmt.Errorf("microsoft token: %w", err)
 	}
-	if del := delegatedRestoreWrite(tc, cred, tenantID, method, refreshFallback); del != nil {
-		return del, nil
+	// In-place restore may use delegated Grant Access when app roles are read-only.
+	// Migration must stay app-only so Graph can write /users/{destination}.
+	if allowDelegatedWrite {
+		if del := delegatedRestoreWrite(tc, cred, tenantID, method, refreshFallback); del != nil {
+			return del, nil
+		}
 	}
 	return tc, nil
+}
+
+// isOtherMailboxRestore is true when the restore login is not the OAuth holder (corporate child
+// mailbox backed up under an admin credential). Those restores need app-only /users/{id} writes.
+func isOtherMailboxRestore(loginID string, cred *repo.GoogleBackupCredentialDB) bool {
+	loginID = strings.TrimSpace(loginID)
+	if loginID == "" || cred == nil {
+		return false
+	}
+	holder := strings.TrimSpace(cred.Email)
+	if holder == "" {
+		return false
+	}
+	return !strings.EqualFold(loginID, holder)
 }
 
 // delegatedRestoreWrite uses the signed-in mailbox token when the organization app token cannot
 // write (backup is often Mail.Read only; restore needs Mail.ReadWrite). Grant Access stores that
 // write grant on the refresh token; admin consent of read-only app roles does not.
+// Only for the same mailbox as the OAuth holder — never for another corporate user.
 func delegatedRestoreWrite(app *mstenant.Context, cred *repo.GoogleBackupCredentialDB, tenantID, method, refreshFallback string) *mstenant.Context {
 	if app == nil || !app.Application {
 		return nil

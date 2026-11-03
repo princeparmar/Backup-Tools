@@ -126,31 +126,16 @@ func TestMigrationReadinessOrganizationTarget(t *testing.T) {
 		return res
 	}
 
-	prevDel := delegatedRestoreTokenFn
-	t.Cleanup(func() { delegatedRestoreTokenFn = prevDel })
-	delegatedRestoreTokenFn = func(string, string, string) (*outlook.TokenResponse, error) {
-		return nil, errors.New("no delegated write")
-	}
 	stubTargets(t, &OrganizationTenant{TenantID: orgTenant, CredentialID: admin.ID, Name: "Fabrikam", Token: readOnly}, user, nil)
 	res := run()
+	// Other-mailbox restore needs application Mail.ReadWrite — Grant Access (delegated) is not enough.
 	if res.Ready || res.Reason != restore.ReadinessReasonMissingPermissions ||
-		len(res.MissingPermissions) != 1 || res.MissingPermissions[0].Scope != "Mail.ReadWrite" {
-		t.Fatalf("read-only consent must report the missing write role: %+v", res)
+		len(res.MissingPermissions) != 1 || res.MissingPermissions[0].Scope != "Mail.ReadWrite" ||
+		res.MissingPermissions[0].Type != "application" {
+		t.Fatalf("read-only app consent must ask for application write: %+v", res)
 	}
-
-	delegatedRestoreTokenFn = func(string, string, string) (*outlook.TokenResponse, error) {
-		return &outlook.TokenResponse{
-			AccessToken: fakeJWT(map[string]interface{}{"scp": "Mail.ReadWrite"}),
-			Scope:       "Mail.ReadWrite",
-		}, nil
-	}
-	probedGrant := stubTargets(t, &OrganizationTenant{TenantID: orgTenant, CredentialID: admin.ID, Name: "Fabrikam", Token: readOnly}, user, nil)
-	res = run()
-	if !res.Ready || len(*probedGrant) != 1 {
-		t.Fatalf("Grant Access mail write should restore into the org mailbox: %+v probed=%v", res, *probedGrant)
-	}
-	delegatedRestoreTokenFn = func(string, string, string) (*outlook.TokenResponse, error) {
-		return nil, errors.New("no delegated write")
+	if !strings.Contains(res.Message, "application permission") || !strings.Contains(res.Message, "Mail.Read") {
+		t.Fatalf("message must explain application write is required: %+v", res)
 	}
 
 	probed := stubTargets(t, &OrganizationTenant{TenantID: orgTenant, CredentialID: admin.ID, Token: readWrite}, user, nil)
@@ -163,9 +148,28 @@ func TestMigrationReadinessOrganizationTarget(t *testing.T) {
 	}
 
 	stubTargets(t, &OrganizationTenant{TenantID: orgTenant, CredentialID: admin.ID, Token: readWrite}, user,
-		fmt.Errorf("%w (MailboxNotEnabledForRESTAPI)", outlook.ErrRestoreTargetUnavailable))
+		fmt.Errorf("%w (MailboxNotEnabledForRESTAPI: The mailbox is either inactive, soft-deleted, or is hosted on-premise.)", outlook.ErrRestoreTargetUnavailable))
 	if res = run(); res.Ready || res.Reason != restore.ReadinessReasonTargetUnavailable {
 		t.Fatalf("user without a mailbox: %+v", res)
+	}
+	if !strings.Contains(res.Message, "bob@fabrikam.com") || strings.Contains(res.Message, "MailboxNotEnabledForRESTAPI") {
+		t.Fatalf("want clear mailbox message without Graph code: %+v", res)
+	}
+	if res.ReconnectHint == "" || strings.Contains(strings.ToLower(res.ReconnectHint), "mailboxnotenabled") {
+		t.Fatalf("want actionable hint: %+v", res)
+	}
+
+	// AccessDenied with app write → ask admin consent again (not Grant Access oauth loop).
+	stubTargets(t, &OrganizationTenant{TenantID: orgTenant, CredentialID: admin.ID, Token: readWrite}, user,
+		fmt.Errorf("check destination user: ErrorAccessDenied: Access is denied. Check credentials and try again."))
+	res, err := evaluateMigrationReadiness(t.Context(), store, &restore.ReadinessResult{Service: "outlook", TargetEmail: "bob@fabrikam.com"},
+		"u1", "p1", "outlook", "outlook", job, "bob@fabrikam.com")
+	if err != nil {
+		t.Fatalf("AccessDenied must not hard-fail prepare: %v", err)
+	}
+	if res.Ready || res.Reason != restore.ReadinessReasonMissingPermissions ||
+		len(res.MissingPermissions) == 0 || res.MissingPermissions[0].Type != "application" {
+		t.Fatalf("AccessDenied must ask for application admin consent: %+v", res)
 	}
 }
 
@@ -261,6 +265,8 @@ func TestListOrganizationTenants(t *testing.T) {
 }
 
 func TestSharePointSiteReadiness(t *testing.T) {
+	// Temporarily disabled — Teams / SharePoint / tenant restore (keep test for later).
+	t.Skip("SharePoint / tenant restore temporarily disabled")
 	store := newTargetsTestDB(t)
 	admin := targetsCred(t, store, "admin@contoso.com", srcTenant, repo.MicrosoftAuthModeApplication)
 	job := targetsSourceJob(t, store, admin, "outlook_sharepoint")
@@ -364,5 +370,55 @@ func TestSharePointSiteReadiness(t *testing.T) {
 	res = run("someone@contoso.com")
 	if res.Ready || res.Reason != restore.ReadinessReasonNoCredential {
 		t.Fatalf("an email is not a SharePoint site: %+v", res)
+	}
+}
+
+func TestRestoreTargetUnavailableCopy(t *testing.T) {
+	cases := []struct {
+		name    string
+		method  string
+		email   string
+		err     error
+		wantSub string
+		wantHint string
+	}{
+		{
+			name:     "mail no license",
+			method:   "outlook",
+			email:    "Johnwick@space2let.com",
+			err:      fmt.Errorf("%w (MailboxNotEnabledForRESTAPI)", outlook.ErrRestoreTargetUnavailable),
+			wantSub:  "Johnwick@space2let.com has no Exchange Online mailbox",
+			wantHint: "assign Exchange Online",
+		},
+		{
+			name:     "mail soft-deleted",
+			method:   "outlook",
+			email:    "sales@space2let.com",
+			err:      fmt.Errorf("%w (MailboxNotEnabledForRESTAPI: soft-deleted)", outlook.ErrRestoreTargetUnavailable),
+			wantSub:  "sales@space2let.com has no Exchange Online mailbox",
+			wantHint: "inactive or soft-deleted",
+		},
+		{
+			name:     "onedrive",
+			method:   "outlook_onedrive",
+			email:    "user@contoso.com",
+			err:      outlook.ErrRestoreTargetUnavailable,
+			wantSub:  "user@contoso.com has no OneDrive",
+			wantHint: "OneDrive",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msg, hint := restoreTargetUnavailableCopy(tc.method, tc.email, tc.err)
+			if !strings.Contains(msg, tc.wantSub) {
+				t.Fatalf("message=%q want substring %q", msg, tc.wantSub)
+			}
+			if strings.Contains(msg, "MailboxNotEnabledForRESTAPI") {
+				t.Fatalf("message must not include Graph code: %q", msg)
+			}
+			if !strings.Contains(strings.ToLower(hint), strings.ToLower(tc.wantHint)) {
+				t.Fatalf("hint=%q want substring %q", hint, tc.wantHint)
+			}
+		})
 	}
 }

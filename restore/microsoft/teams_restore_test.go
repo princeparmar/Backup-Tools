@@ -386,6 +386,8 @@ func TestTeamsLegacyRepliesRetryPostsOnlyMissingReplies(t *testing.T) {
 }
 
 func TestTeamsScheduledRestoreRunsInOrderAndRetriesSafely(t *testing.T) {
+	// Temporarily disabled — Teams / SharePoint / tenant restore (keep for later).
+	t.Skip("Teams restore processor temporarily unregistered")
 	root, reply, failing := teamsChannelKey("100", "100"), teamsChannelKey("100", "101"), teamsChannelKey("100", "102")
 	foreign := strings.Replace(teamsChannelKey("500", "500"), teamsTestTenant, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", 1)
 	meeting := outlook.TeamsMeetingEventKey(outlook.TeamsMeetingPrefix(teamsTestTenant, "p-abc"))

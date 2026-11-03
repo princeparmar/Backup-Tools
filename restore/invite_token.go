@@ -2,11 +2,11 @@ package restore
 
 import "sync"
 
-// inviteRestoreTokens keeps the invited member's Google access token for the
+// inviteRestoreTokens keeps the invited member's Google/Microsoft access token for the
 // in-process restore worker. The token is not written on the job row.
 var inviteRestoreTokens sync.Map
 
-// RememberInviteAccessToken stores the Google access token for an invited restore job.
+// RememberInviteAccessToken stores the provider access token for an invited restore job.
 func RememberInviteAccessToken(jobID uint, token string) {
 	if jobID == 0 || token == "" {
 		return

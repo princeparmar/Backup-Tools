@@ -9,6 +9,7 @@ import (
 	"time"
 
 	google "github.com/StorX2-0/Backup-Tools/apps/google"
+	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
@@ -60,6 +61,10 @@ func resolveManualRestoreStorxForKeys(c echo.Context, method, fallbackEmail stri
 func googleRestoreService(service string) bool {
 	cfg, ok := restore.ConfigForMethod(service)
 	return ok && cfg.Provider == restore.RestoreProviderGoogle
+}
+
+func microsoftRestoreService(service string) bool {
+	return restore.IsMicrosoftAPIService(service)
 }
 
 type restoreAllRequest struct {
@@ -602,6 +607,13 @@ func HandleRestoreAll(c echo.Context) error {
 		} else {
 			inviteToken = token
 		}
+	} else if invited && microsoftRestoreService(req.Service) {
+		// microsoft-auth JWT (or raw Graph token) → Graph access token for invite restore.
+		if token, tokenErr := outlook.ResolveGraphAccessToken(c, c.Request().Header.Get(echo.HeaderAuthorization)); tokenErr != nil {
+			logger.Warn(ctx, "invited restore microsoft token lookup failed", logger.ErrorField(tokenErr))
+		} else {
+			inviteToken = token
+		}
 	}
 
 	prep, err := restore.EvaluateReadinessWithOptions(ctx, database, restore.ReadinessRequest{
@@ -630,7 +642,15 @@ func HandleRestoreAll(c echo.Context) error {
 		})
 	}
 
-	selectedKeys, err := restore.NormalizeSelectedRestoreKeys(req.LoginID, req.Keys)
+	// Google keys are {email}/…; Microsoft keys are {tenant}/{type}/{id}/… from the backup job.
+	var cronJob *repo.CronJobListingDB
+	if prep.CronJobID > 0 {
+		if j, e := database.CronJobRepo.GetCronJobByID(prep.CronJobID); e == nil {
+			cronJob = j
+		}
+	}
+	selectedKeys, err := restore.NormalizeSelectedRestoreKeys(
+		restore.SelectedRestoreKeyPrefix(prep, cronJob), req.Keys)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
 	}

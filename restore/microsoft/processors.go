@@ -143,8 +143,9 @@ func init() {
 		{method: "outlook_calendar", match: shouldRestoreOutlookCalendarKey, restore: RestoreOutlookCalendarKey},
 		{method: "outlook_contacts", match: shouldRestoreOutlookContactsKey, restore: RestoreOutlookContactKey},
 		{method: "outlook_onedrive", match: shouldRestoreOutlookOneDriveKey, restore: RestoreOutlookOneDriveKey},
-		outlookSharePointProcessor(),
-		outlookTeamsProcessor(),
+		// Temporarily disabled — Teams / SharePoint / tenant restore (keep processors for later).
+		// outlookSharePointProcessor(),
+		// outlookTeamsProcessor(),
 	} {
 		restore.RegisterProcessor(p)
 	}

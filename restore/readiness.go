@@ -118,7 +118,8 @@ func EvaluateReadinessWithOptions(ctx context.Context, store *db.PostgresDb, req
 	}
 
 	if IsMicrosoftRestoreMethod(method) {
-		return evaluateMicrosoftReadiness(ctx, store, out, userID, projectID, loginID, service, method, targetEmail, strings.ToLower(strings.TrimSpace(req.TenantID)))
+		return evaluateMicrosoftReadiness(ctx, store, out, userID, projectID, loginID, service, method, targetEmail,
+			strings.ToLower(strings.TrimSpace(req.TenantID)), req.InviteRestore, req.InviteAccessToken)
 	}
 
 	cronJob, jobOK, err := store.CronJobRepo.FindJobForRestore(userID, method, loginID)

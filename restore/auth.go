@@ -111,7 +111,7 @@ func AuthModeForJob(store *db.PostgresDb, job *repo.RestoreJobListingDB) string 
 }
 
 // applyInviteRestoreAuth keeps restore_tag=invite_restored for Recovery history.
-// A member Google token is used when present; otherwise the owner's OAuth stays in place.
+// A member Google/Microsoft token is used when present; otherwise the owner's OAuth stays in place.
 func applyInviteRestoreAuth(deps *RestoreDeps, job *repo.RestoreJobListingDB) {
 	if deps == nil || job == nil || job.RestoreTag != "invite_restored" {
 		return
@@ -121,8 +121,13 @@ func applyInviteRestoreAuth(deps *RestoreDeps, job *repo.RestoreJobListingDB) {
 		return
 	}
 	deps.AuthMode = RestoreAuthModeOAuth
-	deps.GoogleToken = token
 	deps.RefreshToken = ""
+	if IsMicrosoftRestoreMethod(job.Method) {
+		deps.MicrosoftToken = token
+		deps.MicrosoftApplication = false
+		return
+	}
+	deps.GoogleToken = token
 }
 
 // buildRestoreDeps resolves StorX + Google auth from job snapshot and DB credentials.

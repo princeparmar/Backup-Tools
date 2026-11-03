@@ -20,6 +20,8 @@ func EvaluateReadiness(
 	store *db.PostgresDb,
 	out *restore.ReadinessResult,
 	userID, projectID, loginID, service, method, targetEmail, tenantID string,
+	inviteRestore bool,
+	inviteAccessToken string,
 ) (*restore.ReadinessResult, error) {
 	cronJob, err := restore.FindMicrosoftRestoreJob(store, userID, method, tenantID, loginID)
 	if errors.Is(err, restore.ErrMicrosoftTenantRequired) {
@@ -111,7 +113,16 @@ func EvaluateReadiness(
 	if restore.IsMigrationRestore(loginID, targetEmail) {
 		out.Migration = true
 		out.TargetEmail = targetEmail
+		if inviteRestore {
+			// Invited members cannot use the owner's admin consent; they sign in as the destination.
+			return evaluateInviteMicrosoftReadiness(ctx, out, service, method, targetEmail, inviteAccessToken)
+		}
 		return evaluateMigrationReadiness(ctx, store, out, userID, projectID, service, method, cronJob, targetEmail)
+	}
+
+	if inviteRestore {
+		// Same as Google Workspace invite: member signs in as the mailbox (no admin consent).
+		return evaluateInviteMicrosoftReadiness(ctx, out, service, method, loginID, inviteAccessToken)
 	}
 
 	writeCred := sourceCred
@@ -129,6 +140,49 @@ func EvaluateReadiness(
 	return evaluateCredentialReadiness(ctx, store, out, userID, service, method, writeCred, out.TenantID)
 }
 
+// evaluateInviteMicrosoftReadiness checks the Microsoft account the invited member just signed into.
+// It never asks for admin consent / application roles.
+func evaluateInviteMicrosoftReadiness(
+	ctx context.Context,
+	out *restore.ReadinessResult,
+	service, method, probeEmail, accessToken string,
+) (*restore.ReadinessResult, error) {
+	accessToken = strings.TrimSpace(accessToken)
+	if accessToken == "" {
+		out.Ready = false
+		out.Reason = restore.ReadinessReasonInviteOAuthRequired
+		out.Message = restore.MsgReadinessInviteOAuthRequiredMicrosoft
+		out.ReconnectHint = "Sign in with Microsoft as the mailbox being restored."
+		return out, nil
+	}
+
+	required := microsoftRestoreScopesForMethod(method)
+	granted := microsoftGrantedScopes(accessToken, "")
+	out.GrantedScopes = granted
+	if len(required) > 0 && !delegatedRestoreScopesOK(method, granted, required) {
+		missing := microsoftMissingDelegatedScopes(granted, required)
+		if len(missing) == 0 {
+			missing = required
+		}
+		out.Ready = false
+		out.Reason = restore.ReadinessReasonMissingPermissions
+		out.MissingPermissions = restore.OAuthMissingList(service, missing)
+		out.Message = "Microsoft sign-in is missing permission to restore this service. Sign in again and allow the requested access."
+		out.ReconnectHint = "Sign in with Microsoft as the mailbox being restored."
+		return out, nil
+	}
+
+	if err := outlook.ValidateGraphAccessTokenForRestore(ctx, accessToken); err != nil {
+		out.Ready = false
+		out.Reason = restore.ReadinessReasonTokenRefreshFailed
+		out.Message = "Microsoft sign-in could not be verified. Sign in with Microsoft again, then retry restore."
+		return out, nil
+	}
+	_ = probeEmail // mailbox match is enforced at Graph write time for opaque MSA tokens
+	out.Ready = true
+	return out, nil
+}
+
 func evaluateCredentialReadiness(
 	ctx context.Context,
 	store *db.PostgresDb,
@@ -137,29 +191,55 @@ func evaluateCredentialReadiness(
 	cred *repo.GoogleBackupCredentialDB,
 	tenantID string,
 ) (*restore.ReadinessResult, error) {
-	tc, err := resolveRestoreTenant(ctx, store, userID, cred, tenantID, method, "")
+	// Corporate child mailboxes need application Mail.ReadWrite; Grant Access only writes the admin.
+	// Migrations never use delegated Grant Access (destination is another mailbox).
+	allowDelegated := !out.Migration && !isOtherMailboxRestore(out.LoginID, cred)
+	tc, err := resolveRestoreTenant(ctx, store, userID, cred, tenantID, method, "", allowDelegated)
 	if err != nil {
 		out.Ready = false
 		out.Reason = restore.ReadinessReasonTokenRefreshFailed
-		out.Message = restore.MsgReadinessRefreshInvalid
-		out.ReconnectHint = "Reconnect the Microsoft account (auto-sync) or complete restore OAuth so write scopes are granted"
+		out.Message = restore.MsgReadinessMicrosoftRefreshInvalid
+		out.ReconnectHint = "Reconnect the Microsoft account (auto-sync) or complete restore Grant Access so write scopes are granted"
+		if restore.IsMicrosoftRefreshRevoked(err) {
+			restore.ApplyMicrosoftRestoreRevoked(ctx, store, userID, out)
+		}
 		return out, nil
 	}
 
 	if tc.Application {
-		if method == "outlook_teams" {
-			grant, hint := microsoftRestoreGrantScopes(method, nil)
-			markMissingRestorePermissions(out, service, grant, hint)
-			out.Message = ErrTeamsRestoreNeedsUser.Error()
+		// Temporarily disabled — Teams restore needs a user token (keep for later).
+		// if method == "outlook_teams" {
+		// 	grant, hint := microsoftRestoreGrantScopes(method, nil)
+		// 	markMissingRestorePermissions(out, service, grant, hint)
+		// 	out.Message = ErrTeamsRestoreNeedsUser.Error()
+		// 	return out, nil
+		// }
+		if method == "outlook_teams" || method == "outlook_sharepoint" {
+			out.Ready = false
+			out.Reason = restore.ReadinessReasonMigrationUnsupported
+			out.Message = "Teams and SharePoint restore is temporarily disabled"
 			return out, nil
 		}
 		// App-only consent is often read-only. Require the write role, the same gate a
 		// migration already uses, before the job is marked ready.
 		missing := outlook.MissingRestoreWriteRoles(tc.Token, method)
 		if len(missing) > 0 {
-			grant, hint := microsoftRestoreGrantScopes(method, missing)
-			markMissingRestorePermissions(out, service, grant, hint)
+			// In-place corporate restore needs application write roles (not delegated Grant Access).
+			markMigrationNeedsAppWrite(out, service, method, out.LoginID, missing)
 			return out, nil
+		}
+		// Confirm the corporate mailbox/OneDrive exists before queueing restore-all.
+		if err := probeApplicationMailboxTarget(ctx, tc.Token, method, out.LoginID); err != nil {
+			if errors.Is(err, outlook.ErrRestoreTargetUnavailable) {
+				markRestoreTargetUnavailable(out, method, out.LoginID, err)
+				return out, nil
+			}
+			if isRestoreDestinationAccessDenied(err) {
+				roles := outlook.RestoreWriteRoles[method]
+				markMigrationNeedsAppWrite(out, service, method, out.LoginID, roles)
+				return out, nil
+			}
+			return nil, err
 		}
 		out.Ready = true
 		return out, nil
@@ -189,6 +269,25 @@ func markMissingRestorePermissions(out *restore.ReadinessResult, service string,
 	out.ReconnectHint = hint
 }
 
+// probeApplicationMailboxTarget checks Graph can open the corporate mailbox (or calendar /
+// contacts / OneDrive) for loginID before restore-all is marked ready.
+func probeApplicationMailboxTarget(ctx context.Context, accessToken, method, loginID string) error {
+	loginID = strings.TrimSpace(loginID)
+	if loginID == "" {
+		return nil
+	}
+	switch method {
+	case "outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive":
+	default:
+		return nil
+	}
+	userBase, err := outlook.UserBaseURL(loginID, "", "", true)
+	if err != nil {
+		return err
+	}
+	return checkRestoreTargetFn(ctx, accessToken, userBase, method)
+}
+
 // evaluateMigrationReadiness checks a restore into another mailbox. A connected sign-in for that
 // address writes with its own token. Otherwise an organization the user connected in admin mode
 // can receive the restore for any enabled member, written with that tenant's app-only token.
@@ -206,13 +305,20 @@ func evaluateMigrationReadiness(
 	}
 	out.Migration = true
 	out.TargetEmail = strings.TrimSpace(targetEmail)
-	if method == "outlook_sharepoint" {
-		return evaluateSharePointSiteReadiness(ctx, store, out, userID, job, targetEmail)
-	}
-	if method == "outlook_teams" {
+	// Temporarily disabled — Teams / SharePoint / tenant site restore (keep for later).
+	// if method == "outlook_sharepoint" {
+	// 	return evaluateSharePointSiteReadiness(ctx, store, out, userID, job, targetEmail)
+	// }
+	// if method == "outlook_teams" {
+	// 	out.Ready = false
+	// 	out.Reason = restore.ReadinessReasonMigrationUnsupported
+	// 	out.Message = "Teams only restores into the team it was backed up from"
+	// 	return out, nil
+	// }
+	if method == "outlook_sharepoint" || method == "outlook_teams" {
 		out.Ready = false
 		out.Reason = restore.ReadinessReasonMigrationUnsupported
-		out.Message = "Teams only restores into the team it was backed up from"
+		out.Message = "Teams and SharePoint restore is temporarily disabled"
 		return out, nil
 	}
 
@@ -253,38 +359,124 @@ func evaluateMigrationReadiness(
 	out.CredentialID = org.CredentialID
 	out.TenantID = strings.ToLower(strings.TrimSpace(org.TenantID))
 	out.AuthMode = restore.RestoreAuthModeOAuth
-	writeToken := org.Token
+
+	var cred *repo.GoogleBackupCredentialDB
+	if org.CredentialID > 0 {
+		cred, _ = store.CredentialRepo.GetByID(org.CredentialID)
+	}
+	if cred != nil {
+		out.OAuthHolderEmail = strings.TrimSpace(cred.Email)
+	}
+	// Other-mailbox restore must use the org app-only token with application write roles
+	// (e.g. Mail.ReadWrite). Delegated Grant Access on admin only writes admin's own mailbox —
+	// Graph AccessDenied on /users/{B} is expected and must not loop Grant Access.
 	if missing := outlook.MissingRestoreWriteRoles(org.Token, method); len(missing) > 0 {
-		var cred *repo.GoogleBackupCredentialDB
-		if org.CredentialID > 0 {
-			cred, _ = store.CredentialRepo.GetByID(org.CredentialID)
-		}
-		del := delegatedRestoreWrite(&mstenant.Context{
-			Token: org.Token, Application: true, TenantID: org.TenantID,
-		}, cred, org.TenantID, method, "")
-		if del == nil {
-			grant, hint := microsoftRestoreGrantScopes(method, missing)
-			markMissingRestorePermissions(out, service, grant, hint)
-			return out, nil
-		}
-		writeToken = del.Token
+		markMigrationNeedsAppWrite(out, service, method, out.TargetEmail, missing)
+		return out, nil
 	}
 	userBase, err := outlook.UserBaseURL(user.ObjectID, "", "", true)
 	if err != nil {
 		return nil, err
 	}
-	if err := checkRestoreTargetFn(ctx, writeToken, userBase, method); err != nil {
+	if err := checkRestoreTargetFn(ctx, org.Token, userBase, method); err != nil {
 		if errors.Is(err, outlook.ErrRestoreTargetUnavailable) {
-			out.Ready = false
-			out.Reason = restore.ReadinessReasonTargetUnavailable
-			out.Message = err.Error()
-			out.ReconnectHint = "The destination user has no mailbox or OneDrive for this service"
+			markRestoreTargetUnavailable(out, method, out.TargetEmail, err)
+			return out, nil
+		}
+		if isRestoreDestinationAccessDenied(err) {
+			roles := outlook.RestoreWriteRoles[method]
+			markMigrationNeedsAppWrite(out, service, method, out.TargetEmail, roles)
 			return out, nil
 		}
 		return nil, err
 	}
 	out.Ready = true
 	return out, nil
+}
+
+func isRestoreDestinationAccessDenied(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "erroraccessdenied") ||
+		strings.Contains(msg, "access is denied") ||
+		strings.Contains(msg, "accessdenied")
+}
+
+// markRestoreTargetUnavailable sets a clear Microsoft-user message (no raw Graph codes).
+func markRestoreTargetUnavailable(out *restore.ReadinessResult, method, targetEmail string, err error) {
+	out.Ready = false
+	out.Reason = restore.ReadinessReasonTargetUnavailable
+	out.Message, out.ReconnectHint = restoreTargetUnavailableCopy(method, targetEmail, err)
+}
+
+// markMigrationNeedsAppWrite asks for admin consent of application write roles (not Grant Access).
+func markMigrationNeedsAppWrite(out *restore.ReadinessResult, service, method, targetEmail string, roles []string) {
+	if len(roles) == 0 {
+		roles = outlook.RestoreWriteRoles[method]
+	}
+	if len(roles) == 0 {
+		roles = []string{"Mail.ReadWrite"}
+	}
+	out.Ready = false
+	out.Reason = restore.ReadinessReasonMissingPermissions
+	perms := make([]restore.MissingPermission, 0, len(roles))
+	for _, role := range roles {
+		role = strings.TrimSpace(role)
+		if role == "" {
+			continue
+		}
+		perms = append(perms, restore.MissingPermission{
+			Type:        "application",
+			Service:     service,
+			Scope:       role,
+			Description: "Application permission required to restore into another mailbox",
+		})
+	}
+	out.MissingPermissions = perms
+	who := strings.TrimSpace(targetEmail)
+	if who == "" {
+		who = "another user's mailbox"
+	}
+	roleList := strings.Join(roles, ", ")
+	out.Message = "Restoring into " + who + " needs organization application permission " + roleList +
+		". Grant Access on the admin sign-in only writes the admin mailbox. Org backup consent is often Mail.Read only — that is not enough for another user's mailbox."
+	out.ReconnectHint = "In the StorX Azure app add " + roleList +
+		" as Application permissions, then Grant admin consent again for this tenant. Re-consent without those app roles will keep asking."
+}
+
+func restoreTargetUnavailableCopy(method, targetEmail string, err error) (message, hint string) {
+	who := strings.TrimSpace(targetEmail)
+	if who == "" {
+		who = "That Microsoft user"
+	}
+	raw := ""
+	if err != nil {
+		raw = strings.ToLower(err.Error())
+	}
+	switch method {
+	case "outlook_onedrive":
+		message = who + " has no OneDrive for Business yet (missing license or not provisioned)."
+		hint = "Ask your Microsoft admin to assign a Microsoft 365 license that includes OneDrive, wait for OneDrive to finish setting up, then pick this user again — or choose another destination."
+	case "outlook_calendar":
+		message = who + " has no Exchange Online mailbox for Calendar."
+		hint = "Ask your Microsoft admin to assign Exchange Online (or a Microsoft 365 license with Exchange), then pick this user again — or choose a licensed cloud mailbox."
+	case "outlook_contacts":
+		message = who + " has no Exchange Online mailbox for Contacts."
+		hint = "Ask your Microsoft admin to assign Exchange Online (or a Microsoft 365 license with Exchange), then pick this user again — or choose a licensed cloud mailbox."
+	default:
+		message = who + " has no Exchange Online mailbox (no license, inactive, soft-deleted, or on-premises)."
+		hint = "Ask your Microsoft admin to assign Exchange Online (or a Microsoft 365 license with Exchange), wait for the mailbox to finish creating, then pick this user again — or choose a licensed cloud mailbox like admin@ or sales@."
+	}
+	// Soft-deleted / inactive: slightly sharper hint when Graph says so.
+	if strings.Contains(raw, "soft-deleted") || strings.Contains(raw, "inactive") {
+		hint = "This mailbox looks inactive or soft-deleted in Microsoft 365. Restore it in the Microsoft 365 admin center, or choose another licensed cloud mailbox."
+	}
+	if strings.Contains(raw, "on-premise") || strings.Contains(raw, "on-premises") {
+		hint = "This mailbox is hosted on-premises, so Microsoft Graph cannot restore into it. Use an Exchange Online (cloud) mailbox instead."
+	}
+	return message, hint
 }
 
 // checkSharePointSiteFn confirms the destination site has a document library (overridden in tests).

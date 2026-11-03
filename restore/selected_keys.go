@@ -11,17 +11,42 @@ import (
 
 const maxSelectedRestoreKeys = 200
 
-// NormalizeSelectedRestoreKeys trims, de-dupes, and keeps keys for the source mailbox.
+// SelectedRestoreKeyPrefix is the vault prefix selected keys must sit under.
+// Google: {email}/. Microsoft: {tenant}/{type}/{resource_id}/ from the backup job.
+// Always lowercased so NormalizeSelectedRestoreKeys matches case-insensitively.
+func SelectedRestoreKeyPrefix(prep *ReadinessResult, cronJob *repo.CronJobListingDB) string {
+	if prep == nil {
+		return ""
+	}
+	login := strings.TrimSpace(prep.LoginID)
+	method, ok := APIServiceToMethod[APIService(strings.TrimSpace(strings.ToLower(prep.Service)))]
+	prefix := ""
+	if ok {
+		prefix = RestoreKeyPrefix(&repo.RestoreJobListingDB{Method: method, LoginID: login}, cronJob)
+	}
+	if prefix == "" && login != "" {
+		prefix = login + "/"
+	}
+	if prefix == "" {
+		return ""
+	}
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	return strings.ToLower(prefix)
+}
+
+// NormalizeSelectedRestoreKeys trims, de-dupes, and keeps keys under keyPrefix.
 // Empty input means restore-all (every vault item). Base64 vault keys from the old
-// manual body are decoded. Wrong-mailbox keys are dropped.
-func NormalizeSelectedRestoreKeys(loginID string, keys []string) ([]string, error) {
+// manual body are decoded. Keys outside keyPrefix are dropped.
+// keyPrefix is SelectedRestoreKeyPrefix (email/ or tenant/user/oid/).
+func NormalizeSelectedRestoreKeys(keyPrefix string, keys []string) ([]string, error) {
 	if len(keys) == 0 {
 		return nil, nil
 	}
-	loginID = strings.ToLower(strings.TrimSpace(loginID))
-	prefix := ""
-	if loginID != "" {
-		prefix = loginID + "/"
+	prefix := strings.ToLower(strings.TrimSpace(keyPrefix))
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
 	}
 
 	seen := make(map[string]struct{}, len(keys))
