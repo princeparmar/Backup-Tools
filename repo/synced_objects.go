@@ -112,6 +112,19 @@ func (r *SyncedObjectRepository) GetSyncedObjectsByUserAndBucket(userID, bucketN
 	return syncedObjects, nil
 }
 
+// ListSyncedObjectKeys returns object keys for a restore prefix. loginPrefix empty lists the bucket.
+func (r *SyncedObjectRepository) ListSyncedObjectKeys(userID, bucketName, source, objectType, loginPrefix string) ([]string, error) {
+	var keys []string
+	err := r.applyRestoreFilters(
+		r.db.GetGormDB().Model(&SyncedObject{}).Where("user_id = ? AND bucket_name = ? AND deleted_at IS NULL", userID, bucketName),
+		source, objectType, loginPrefix).
+		Pluck("object_key", &keys).Error
+	if err != nil {
+		return nil, fmt.Errorf("list synced object keys: %v", err)
+	}
+	return keys, nil
+}
+
 func (r *SyncedObjectRepository) applyRestoreFilters(query *gormdb.DB, source, objectType, loginPrefix string) *gormdb.DB {
 	if source != "" {
 		query = query.Where("source = ?", source)

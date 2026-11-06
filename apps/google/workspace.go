@@ -266,7 +266,14 @@ func jwtHTTPClientForBackupDelegation(ctx context.Context, subjectEmail, product
 	}
 	cfg.Subject = subjectEmail
 	client := cfg.Client(ctx)
-	client.Timeout = 30 * time.Second
+	// Drive/Photos stream multi‑GB files to StorX; a 30s Client.Timeout cancels mid-body
+	// ("request canceled while reading body"). Rely on job ctx for cancellation instead.
+	switch strings.ToLower(strings.TrimSpace(product)) {
+	case "drive", "photos":
+		client.Timeout = 0
+	default:
+		client.Timeout = 30 * time.Second
+	}
 	return client, nil
 }
 

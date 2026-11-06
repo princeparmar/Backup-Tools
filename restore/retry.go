@@ -12,11 +12,11 @@ import (
 )
 
 const (
-	googleRetryMaxAttempts       = 5
-	googleRetryBackoffCap        = 15 * time.Second
-	googleRateLimitMaxAttempts   = 8
-	googleRateLimitBackoffCap    = 60 * time.Second
-	restoreTaskRetryBackoffCap   = 15 * time.Minute
+	googleRetryMaxAttempts     = 5
+	googleRetryBackoffCap      = 15 * time.Second
+	googleRateLimitMaxAttempts = 8
+	googleRateLimitBackoffCap  = 60 * time.Second
+	restoreTaskRetryBackoffCap = 15 * time.Minute
 )
 
 // RetryGoogle runs fn with exponential backoff on retryable Google / network errors.
@@ -124,9 +124,24 @@ func isQuotaOrRateLimitMessage(msg string) bool {
 		strings.Contains(msg, "ratelimitexceeded")
 }
 
+// ErrorCodeOutcomeUnknown marks a failed write that the provider may still have applied: the
+// item must not be written again automatically.
+const ErrorCodeOutcomeUnknown = "outcome_unknown"
+
+// codedError is an item error that names its own error code.
+type codedError interface {
+	RestoreErrorCode() string
+}
+
 func ErrorCodeFromErr(err error) string {
 	if err == nil {
 		return ""
+	}
+	var coded codedError
+	if errors.As(err, &coded) {
+		if code := coded.RestoreErrorCode(); code != "" {
+			return code
+		}
 	}
 	var apiErr *googleapi.Error
 	if errors.As(err, &apiErr) && apiErr != nil {

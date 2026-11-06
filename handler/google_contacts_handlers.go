@@ -13,7 +13,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 	"github.com/StorX2-0/Backup-Tools/repo"
-	"github.com/StorX2-0/Backup-Tools/restore"
+	googlestore "github.com/StorX2-0/Backup-Tools/restore/google"
 	"github.com/StorX2-0/Backup-Tools/satellite"
 
 	"github.com/labstack/echo/v4"
@@ -115,7 +115,7 @@ func HandleGoogleContactsRestore(c echo.Context) error {
 		})
 	}
 
-	storxSess, err := resolveManualRestoreStorx(c, "google_contacts", userDetails.Email)
+	storxSess, err := resolveManualRestoreStorxForKeys(c, "google_contacts", userDetails.Email, allKeys)
 	if err != nil {
 		return err
 	}
@@ -137,6 +137,8 @@ func HandleGoogleContactsRestore(c echo.Context) error {
 	}
 	satellite.SendNotificationAsync(ctx, userID, "Google Contacts Restore Started", fmt.Sprintf("Restore of %d contacts for %s has started", len(allKeys), userDetails.Email), &priority, startData, nil)
 
+	seen, _ := google.LoadContactIdentityIndex(ctx, service)
+
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(10)
 	processedKeys, failedKeys := utils.NewLockedArray(), utils.NewLockedArray()
@@ -148,7 +150,7 @@ func HandleGoogleContactsRestore(c echo.Context) error {
 			continue
 		}
 		g.Go(func() error {
-			if restoreErr := restore.RestoreContactKeyWithSession(ctx, storxSess, service, key); restoreErr != nil {
+			if restoreErr := googlestore.RestoreContactKeyWithSession(ctx, storxSess, service, key, seen); restoreErr != nil {
 				logger.Warn(ctx, "Failed to restore contact", logger.String("key", key), logger.ErrorField(restoreErr))
 				failedKeys.Add(key)
 			} else {

@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,6 +17,7 @@ import (
 	"github.com/StorX2-0/Backup-Tools/apps/outlook"
 	"github.com/StorX2-0/Backup-Tools/db"
 	"github.com/StorX2-0/Backup-Tools/middleware"
+	"github.com/StorX2-0/Backup-Tools/mstenant"
 	"github.com/StorX2-0/Backup-Tools/pkg/logger"
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/repo"
@@ -26,13 +29,19 @@ var (
 	allowedMethods = map[string]bool{
 		"gmail": true, "outlook": true, "psql_database": true, "mysql_database": true,
 		"google_drive": true, "google_photos": true, "google_calendar": true, "google_contacts": true,
+		"outlook_calendar": true, "outlook_contacts": true, "outlook_onedrive": true, "outlook_sharepoint": true,
+		"outlook_teams": true,
 	}
 	allowedSyncTypes = map[string]bool{
 		"one_time": true, "daily": true,
 	}
-	// autosyncServiceMethodsOrder is the stable listing order for GET /auto-sync/job/services (Google workspace only).
+	// autosyncServiceMethodsOrder is the stable listing order for GET /auto-sync/job/services (Google rows).
 	autosyncServiceMethodsOrder = []string{
 		"gmail", "google_drive", "google_photos", "google_contacts", "google_calendar",
+	}
+	// microsoftAutosyncServiceMethodsOrder is the stable listing order for GET /auto-sync/job/services (Microsoft rows).
+	microsoftAutosyncServiceMethodsOrder = []string{
+		"outlook", "outlook_calendar", "outlook_contacts", "outlook_onedrive", "outlook_sharepoint", "outlook_teams",
 	}
 )
 
@@ -60,11 +69,18 @@ var intervalValues = map[string][]string{
 	"monthly": {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28"},
 }
 
-// UI / Satellite service name → cron job method (DB).
+// UI / Satellite service name → cron job method (DB) — Google onboarding only. Do not add outlook here.
 var onboardingServiceToMethod = map[string]string{
 	"gmail": "gmail", "drive": "google_drive", "photos": "google_photos",
 	"calendar": "google_calendar", "contacts": "google_contacts",
-	// Future: "outlook": "outlook", "psql": "psql_database", "mysql": "mysql_database",
+}
+
+// microsoftOnboardingServiceToMethod maps UI services for Microsoft onboarding only.
+var microsoftOnboardingServiceToMethod = map[string]string{
+	"outlook": "outlook", "mail": "outlook",
+	"calendar": "outlook_calendar", "contacts": "outlook_contacts",
+	"onedrive": "outlook_onedrive", "sharepoint": "outlook_sharepoint",
+	"teams": "outlook_teams",
 }
 
 // OrgUnitScheduleInput is one OU schedule when policy_scope=org_unit (separate interval per group).
@@ -81,22 +97,24 @@ const (
 	OnboardingPolicyScopeOrgUnit = "org_unit" // one policy per Organizational Unit
 )
 
-// GoogleBackupOnboardingRequest is the Satellite → Backup-Tools job create body (POST /google/backup/onboarding/jobs or POST /auto-sync/job).
-// sync_type is query only (?sync_type=daily). Future: outlook/psql via services[] in this JSON (legacy POST /auto-sync/job/:method is commented out).
+// GoogleBackupOnboardingRequest is the Satellite job-create JSON for POST /auto-sync/job (Google).
+// Microsoft onboarding converts to this shape in microsoft_onboarding.go.
 type GoogleBackupOnboardingRequest struct {
-	Services        []string          `json:"services"`
-	Interval        string            `json:"interval"` // required when creating a new policy; optional when policy_id selects an existing policy
-	On              string            `json:"on"`       // required for weekly/monthly new policies; optional with policy_id
-	GoogleEmail     string            `json:"google_email"`
-	AccountType     string            `json:"account_type"`
-	ProjectID       string            `json:"project_id"`
-	SatelliteUserID string            `json:"satellite_user_id"`
-	RefreshToken    string            `json:"refresh_token"`
-	StorxToken      string            `json:"storx_token,omitempty"`
-	Emails          []string          `json:"emails"`
-	EmailOrgUnits   map[string]string `json:"email_org_units,omitempty"`
-	PolicyID        *uint             `json:"policy_id,omitempty"`
-	PolicyName      string            `json:"policy_name,omitempty"`
+	Services        []string `json:"services"`
+	Interval        string   `json:"interval"` // required when creating a new policy; optional when policy_id selects an existing policy
+	On              string   `json:"on"`       // required for weekly/monthly new policies; optional with policy_id
+	GoogleEmail     string   `json:"google_email"`
+	AccountType     string   `json:"account_type"`
+	ProjectID       string   `json:"project_id"`
+	SatelliteUserID string   `json:"satellite_user_id"`
+	RefreshToken    string   `json:"refresh_token"`
+	StorxToken      string   `json:"storx_token,omitempty"`
+	// Active: when false, keep jobs inactive (Satellite own_nodes gate). When omitted/null, keep legacy behavior (activate if storx present).
+	Active        *bool             `json:"active,omitempty"`
+	Emails        []string          `json:"emails"`
+	EmailOrgUnits map[string]string `json:"email_org_units,omitempty"`
+	PolicyID      *uint             `json:"policy_id,omitempty"`
+	PolicyName    string            `json:"policy_name,omitempty"`
 	// PolicyScope: "all" (default) applies one policy to every mailbox; "org_unit" creates one policy per OU.
 	PolicyScope string `json:"policy_scope,omitempty"`
 	// OrgUnitSchedules maps OU path → schedule/name. Used only when PolicyScope is org_unit.
@@ -152,6 +170,11 @@ type onboardingJobResult struct {
 	JobID    uint   `json:"job_id,omitempty"`
 	PolicyID uint   `json:"policy_id,omitempty"`
 	TaskID   uint   `json:"task_id,omitempty"`
+	// Existing marks a job that was already configured (retried onboarding); Active is its state.
+	Existing bool `json:"existing,omitempty"`
+	Active   bool `json:"active,omitempty"`
+	// Skipped is set (with no JobID) when the resource has nothing to back up.
+	Skipped string `json:"skipped,omitempty"`
 }
 
 type onboardingFailedResult struct {
@@ -316,6 +339,17 @@ func isAllowedAutosyncMethod(method string) bool {
 }
 
 func buildAllServiceJobCounts(rows []repo.ServiceJobCountRow) []ServiceJobCountView {
+	order := make([]string, 0, len(autosyncServiceMethodsOrder)+len(microsoftAutosyncServiceMethodsOrder))
+	order = append(order, autosyncServiceMethodsOrder...)
+	order = append(order, microsoftAutosyncServiceMethodsOrder...)
+	return buildServiceJobCountsForOrder(rows, order)
+}
+
+func buildMicrosoftServiceJobCounts(rows []repo.ServiceJobCountRow) []ServiceJobCountView {
+	return buildServiceJobCountsForOrder(rows, microsoftAutosyncServiceMethodsOrder)
+}
+
+func buildServiceJobCountsForOrder(rows []repo.ServiceJobCountRow, order []string) []ServiceJobCountView {
 	byMethod := make(map[string]repo.ServiceJobCountRow, len(rows))
 	for i := range rows {
 		if !isAllowedAutosyncMethod(rows[i].Method) {
@@ -323,8 +357,8 @@ func buildAllServiceJobCounts(rows []repo.ServiceJobCountRow) []ServiceJobCountV
 		}
 		byMethod[rows[i].Method] = rows[i]
 	}
-	out := make([]ServiceJobCountView, 0, len(autosyncServiceMethodsOrder))
-	for _, method := range autosyncServiceMethodsOrder {
+	out := make([]ServiceJobCountView, 0, len(order))
+	for _, method := range order {
 		if row, ok := byMethod[method]; ok {
 			out = append(out, ServiceJobCountView{
 				Method:       row.Method,
@@ -339,12 +373,16 @@ func buildAllServiceJobCounts(rows []repo.ServiceJobCountRow) []ServiceJobCountV
 	return out
 }
 
-// AutomaticBackupUpdateByProjectRequest is PUT /auto-sync/job/project — same fields as AutomaticBackupUpdateRequest plus project scope.
+// BackupOnboardingRequest is the shared onboarding create body (Google POST /auto-sync/job; Microsoft via conversion).
+type BackupOnboardingRequest = GoogleBackupOnboardingRequest
+
+// AutomaticBackupUpdateByProjectRequest is PUT /auto-sync/job/project — Google + Microsoft reconnect.
 type AutomaticBackupUpdateByProjectRequest struct {
 	AutomaticBackupUpdateRequest
-	ProjectID    string `json:"project_id"`
-	GoogleEmail  string `json:"google_email"`
-	CredentialID uint   `json:"credential_id"`
+	ProjectID      string `json:"project_id"`
+	GoogleEmail    string `json:"google_email"`
+	MicrosoftEmail string `json:"microsoft_email"`
+	CredentialID   uint   `json:"credential_id"`
 }
 
 func (r *AutomaticBackupUpdateRequest) hasUpdateFields() bool {
@@ -356,7 +394,10 @@ func (r *AutomaticBackupUpdateRequest) hasUpdateFields() bool {
 }
 
 func (r *AutomaticBackupUpdateByProjectRequest) connectedEmail() string {
-	return strings.TrimSpace(r.GoogleEmail)
+	if e := strings.TrimSpace(r.GoogleEmail); e != "" {
+		return e
+	}
+	return strings.TrimSpace(r.MicrosoftEmail)
 }
 
 // LEGACY(parent_account / is_admin) — removed from API; use credential_id + Satellite connected-account UI instead.
@@ -558,6 +599,7 @@ func HandleAutomaticSyncListForUser(c echo.Context) error {
 		database.CronJobRepo.EnrichCronJobFromCredential(&automaticSyncList[i])
 		database.PolicyRepo.EnrichJobFromPolicy(&automaticSyncList[i])
 	}
+	automaticSyncList = repo.FilterJobsByMethods(automaticSyncList, repo.IsSharedCredentialAutosyncMethod)
 	maskedJobs := repo.MaskTokenForCronJobListingDB(automaticSyncList)
 	response := make([]CronJobResponse, len(maskedJobs))
 	for i := range maskedJobs {
@@ -735,6 +777,8 @@ func HandleAutomaticSyncActiveJobsForUser(c echo.Context) error {
 		})
 	}
 
+	activeJobs = repo.FilterLiveJobsByMethods(activeJobs, repo.IsSharedCredentialAutosyncMethod)
+
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"message": "Active Automatic Backup Accounts List",
 		"data":    activeJobs,
@@ -835,6 +879,12 @@ func HandleAutomaticSyncDetails(c echo.Context) error {
 	}
 
 	jobCopy := *jobDetails
+	if !repo.IsSharedCredentialAutosyncMethod(jobCopy.Method) {
+		return c.JSON(http.StatusNotFound, map[string]interface{}{
+			"message": "Invalid Request",
+			"error":   "job not found",
+		})
+	}
 	database.CronJobRepo.EnrichCronJobFromCredential(&jobCopy)
 	database.PolicyRepo.EnrichJobFromPolicy(&jobCopy)
 	repo.MaskTokenForCronJobDB(&jobCopy)
@@ -878,6 +928,30 @@ func satelliteUserIDFromRequest(c echo.Context) (string, error) {
 		return "", jsonError(http.StatusUnauthorized, "Invalid Request", err)
 	}
 	return userID, nil
+}
+
+// restoreJobUserID is the Backup-Tools account that owns Google credentials for this restore.
+// Satellite sets X-Restore-As-User only for an invited Member. Owner and admin requests omit it.
+func restoreJobUserID(c echo.Context) (string, error) {
+	sessionID, err := satelliteUserIDFromRequest(c)
+	if err != nil {
+		return "", err
+	}
+	asUser := strings.TrimSpace(c.Request().Header.Get("X-Restore-As-User"))
+	if asUser == "" || asUser == sessionID {
+		return sessionID, nil
+	}
+	return asUser, nil
+}
+
+// invitedRestoreRequest is true when Satellite asked Backup-Tools to use the project owner's
+// backup on behalf of a signed-in member. That restore uses the member's Google sign-in.
+func invitedRestoreRequest(c echo.Context, jobUserID string) bool {
+	sessionID, err := satelliteUserIDFromRequest(c)
+	if err != nil || strings.TrimSpace(sessionID) == "" || strings.TrimSpace(jobUserID) == "" {
+		return false
+	}
+	return sessionID != jobUserID
 }
 
 func syncTypeFromQuery(c echo.Context) (string, error) {
@@ -1094,46 +1168,128 @@ func createGoogleJobsForServiceEmails(
 	var jobs []onboardingJobResult
 	var failed []onboardingFailedResult
 	for _, targetEmail := range emails {
-		cronJob, createErr := createSyncJobWithCredential(userID, targetEmail, method, syncType, cred.ID, orgUnitInputData(req, targetEmail), c)
-		if createErr != nil {
-			failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: extractCreateJobError(createErr)})
+		entry, fail := createOrReuseGoogleJob(userID, targetEmail, method, svc, syncType, schedule, req, cred, isFirstConnection, policyBatch, c, database)
+		if fail != nil {
+			failed = append(failed, *fail)
 			continue
 		}
-		if err := applyOnboardingJobSchedule(database, userID, cronJob.ID, targetEmail, schedule, cred, req, isFirstConnection, policyBatch); err != nil {
-			if errors.Is(err, repo.ErrPolicyNameExists) {
-				failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: "policy name already exists for user"})
-				continue
-			}
-			failed = append(failed, onboardingFailedResult{Service: svc, Email: targetEmail, Error: err.Error()})
-			continue
+		if entry != nil {
+			jobs = append(jobs, *entry)
 		}
-		// Recurring jobs stay inactive unless storx was supplied at create (stored on credential).
-		if syncType != "one_time" && hasStorxTokenAtJobCreate(req, cred) {
-			if err := database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(true)); err != nil {
-				failed = append(failed, onboardingFailedResult{
-					Service: svc, Email: targetEmail,
-					Error: fmt.Sprintf("job %d created but activation failed: %v", cronJob.ID, err),
-				})
-				continue
-			}
-		}
-		latestJob, _ := database.CronJobRepo.GetCronJobByID(cronJob.ID)
-		var policy *repo.AutosyncBackupPolicyDB
-		if latestJob != nil && latestJob.PolicyID > 0 {
-			policy, _ = database.PolicyRepo.GetByID(latestJob.PolicyID)
-		}
-		entry := onboardingJobResult{Service: svc, Email: targetEmail, JobID: cronJob.ID}
-		if policy != nil {
-			entry.PolicyID = policy.ID
-		}
-		if syncType == "one_time" {
-			if task, taskErr := database.TaskRepo.CreateTaskForCronJob(cronJob.ID); taskErr == nil {
-				entry.TaskID = task.ID
-			}
-		}
-		jobs = append(jobs, entry)
 	}
 	return jobs, failed
+}
+
+// createOrReuseGoogleJob finds an existing mailbox+method+sync job and reuses it (like Microsoft
+ // onboard), or creates a new one. Credentials are already upserted by the caller.
+func createOrReuseGoogleJob(
+	userID, targetEmail, method, svc, syncType string, schedule onboardingSchedule,
+	req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB, isFirstConnection bool, policyBatch *onboardingPolicyBatch,
+	c echo.Context, database *db.PostgresDb,
+) (*onboardingJobResult, *onboardingFailedResult) {
+	fail := func(msg string) (*onboardingJobResult, *onboardingFailedResult) {
+		return nil, &onboardingFailedResult{Service: svc, Email: targetEmail, Error: msg}
+	}
+
+	existing, err := database.CronJobRepo.FindJobForUser(userID, targetEmail, method, syncType)
+	if err != nil {
+		return fail(err.Error())
+	}
+	if existing != nil {
+		return finalizeExistingGoogleJob(userID, existing, targetEmail, svc, syncType, schedule, req, cred, isFirstConnection, policyBatch, database)
+	}
+
+	cronJob, createErr := createSyncJobWithCredential(userID, targetEmail, method, syncType, cred.ID, orgUnitInputData(req, targetEmail), c)
+	if createErr != nil {
+		// Race: another request created the same job between Find and Create.
+		if existing, _ = database.CronJobRepo.FindJobForUser(userID, targetEmail, method, syncType); existing != nil {
+			return finalizeExistingGoogleJob(userID, existing, targetEmail, svc, syncType, schedule, req, cred, isFirstConnection, policyBatch, database)
+		}
+		return fail(extractCreateJobError(createErr))
+	}
+	if err := applyOnboardingJobSchedule(database, userID, cronJob.ID, targetEmail, schedule, cred, req, isFirstConnection, policyBatch); err != nil {
+		if errors.Is(err, repo.ErrPolicyNameExists) {
+			return fail("policy name already exists for user")
+		}
+		return fail(err.Error())
+	}
+	entry := &onboardingJobResult{Service: svc, Email: targetEmail, JobID: cronJob.ID}
+	if syncType != "one_time" {
+		if shouldActivateOnboardingJob(req, cred) {
+			if err := database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(true)); err != nil {
+				return fail(fmt.Sprintf("job %d created but activation failed: %v", cronJob.ID, err))
+			}
+			entry.Active = true
+		} else if isForcedInactiveOnboarding(req) {
+			_ = database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(false))
+		}
+	}
+	if latestJob, _ := database.CronJobRepo.GetCronJobByID(cronJob.ID); latestJob != nil {
+		entry.PolicyID = latestJob.PolicyID
+	}
+	if syncType == "one_time" {
+		if isForcedInactiveOnboarding(req) {
+			_ = database.CronJobRepo.UpdateCronJobByID(cronJob.ID, activeStateUpdateFields(false))
+		} else if task, taskErr := database.TaskRepo.CreateTaskForCronJob(cronJob.ID); taskErr == nil {
+			entry.TaskID = task.ID
+		}
+	}
+	return entry, nil
+}
+
+func finalizeExistingGoogleJob(
+	userID string, existing *repo.CronJobListingDB, targetEmail, svc, syncType string, schedule onboardingSchedule,
+	req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB, isFirstConnection bool, policyBatch *onboardingPolicyBatch,
+	database *db.PostgresDb,
+) (*onboardingJobResult, *onboardingFailedResult) {
+	fail := func(msg string) (*onboardingJobResult, *onboardingFailedResult) {
+		return nil, &onboardingFailedResult{Service: svc, Email: targetEmail, Error: msg}
+	}
+	policyID := existing.PolicyID
+	needSchedule := policyID == 0
+	if !needSchedule && req != nil && req.hasPolicyID() && req.PolicyID != nil && *req.PolicyID != policyID {
+		needSchedule = true
+	}
+	if needSchedule {
+		if err := applyOnboardingJobSchedule(database, userID, existing.ID, targetEmail, schedule, cred, req, isFirstConnection, policyBatch); err != nil {
+			if errors.Is(err, repo.ErrPolicyNameExists) {
+				return fail("policy name already exists for user")
+			}
+			return fail(err.Error())
+		}
+		if latest, _ := database.CronJobRepo.GetCronJobByID(existing.ID); latest != nil {
+			policyID = latest.PolicyID
+		}
+	}
+	// Keep credential_id on the job aligned with the credential used for this onboarding.
+	if cred != nil && cred.ID > 0 && repo.JobCredentialID(existing) != cred.ID {
+		_ = database.CronJobRepo.UpdateJobInputData(existing.ID, func(in map[string]interface{}) map[string]interface{} {
+			if in == nil {
+				in = map[string]interface{}{}
+			}
+			in["credential_id"] = cred.ID
+			if path := orgUnitPathForEmail(req, targetEmail); path != "" {
+				in["org_unit_path"] = path
+			}
+			return in
+		})
+	}
+	active := existing.Active
+	if syncType != "one_time" {
+		if shouldActivateOnboardingJob(req, cred) {
+			if err := database.CronJobRepo.UpdateCronJobByID(existing.ID, activeStateUpdateFields(true)); err != nil {
+				return fail(fmt.Sprintf("job %d exists but activation failed: %v", existing.ID, err))
+			}
+			active = true
+		} else if isForcedInactiveOnboarding(req) {
+			_ = database.CronJobRepo.UpdateCronJobByID(existing.ID, activeStateUpdateFields(false))
+			active = false
+		}
+	}
+	return &onboardingJobResult{
+		Service: svc, Email: targetEmail, JobID: existing.ID, PolicyID: policyID,
+		Existing: true, Active: active,
+	}, nil
 }
 
 func createSyncJobWithCredential(userID, name, method, syncType string, credentialID uint, extraInput map[string]interface{}, c echo.Context) (*repo.CronJobListingDB, error) {
@@ -1984,9 +2140,14 @@ func ProcessOutlookAccessToken(accessToken string) (string, map[string]interface
 		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid")
 	}
 
+	claims, err := outlook.IdentityClaimsFromTokens("", accessToken)
+	if err != nil || claims.TenantID == "" || claims.ObjectID == "" {
+		return "", nil, jsonErrorMsg(http.StatusBadRequest, "Access token has no Microsoft tenant or object ID")
+	}
 	config := map[string]interface{}{
 		"access_token": accessToken,
 		"email":        userDetails.Mail,
+		"key_prefix":   outlook.ResourceKeyPrefix(claims.TenantID, repo.ResourceTypeUser, claims.ObjectID),
 	}
 
 	return userDetails.Mail, config, nil
@@ -2154,6 +2315,16 @@ func getServiceName(method string) string {
 		return "Google Calendar"
 	case "google_contacts":
 		return "Google Contacts"
+	case "outlook_calendar":
+		return "Outlook Calendar"
+	case "outlook_contacts":
+		return "Outlook Contacts"
+	case "outlook_onedrive":
+		return "OneDrive"
+	case "outlook_sharepoint":
+		return "SharePoint"
+	case "outlook_teams":
+		return "Teams"
 	case "psql_database", "mysql_database":
 		return "database"
 	default:
@@ -2198,10 +2369,8 @@ func mergeJobInputData(job *repo.CronJobListingDB, updates map[string]interface{
 			out[k] = v
 		}
 	}
-	if updates != nil {
-		for k, v := range updates {
-			out[k] = v
-		}
+	for k, v := range updates {
+		out[k] = v
 	}
 	return out
 }
@@ -2252,7 +2421,7 @@ func credentialEmailForJob(database *db.PostgresDb, job *repo.CronJobListingDB) 
 }
 
 func persistOAuthRefreshTokenOnJob(database *db.PostgresDb, job *repo.CronJobListingDB, refreshToken string) (map[string]interface{}, error) {
-	if cid := repo.JobCredentialID(job); cid > 0 && repo.IsGoogleMediaOrGmailMethod(job.Method) {
+	if cid := repo.JobCredentialID(job); cid > 0 && repo.IsSharedCredentialAutosyncMethod(job.Method) {
 		rt := strings.TrimSpace(refreshToken)
 		if err := database.CredentialRepo.UpdateTokens(cid, &rt, nil); err != nil {
 			return nil, err
@@ -2279,14 +2448,13 @@ func oauthInputDataFromBackupRequest(database *db.PostgresDb, job *repo.CronJobL
 	if req.RefreshToken == nil {
 		return nil, nil
 	}
-	switch job.Method {
-	case "outlook":
-		return outlookInputDataAfterRefreshToken(job, *req.RefreshToken)
-	case "gmail", "google_drive", "google_photos", "google_calendar", "google_contacts":
-		return gmailInputDataAfterRefreshToken(database, job, *req.RefreshToken)
-	default:
-		return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "refresh_token update is not supported for this method"})
+	if repo.IsMicrosoftAutosyncMethod(job.Method) {
+		return outlookInputDataAfterRefreshToken(database, job, *req.RefreshToken)
 	}
+	if repo.IsGoogleAutosyncMethod(job.Method) {
+		return gmailInputDataAfterRefreshToken(database, job, *req.RefreshToken)
+	}
+	return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "refresh_token update is not supported for this method"})
 }
 
 func gmailInputDataAfterRefreshToken(database *db.PostgresDb, job *repo.CronJobListingDB, refreshToken string) (map[string]interface{}, error) {
@@ -2314,26 +2482,31 @@ func gmailInputDataAfterRefreshToken(database *db.PostgresDb, job *repo.CronJobL
 	return persistOAuthRefreshTokenOnJob(database, mergeBase, refreshToken)
 }
 
-func outlookInputDataAfterRefreshToken(job *repo.CronJobListingDB, refreshToken string) (map[string]interface{}, error) {
-	authToken, err := outlook.AuthTokenUsingRefreshToken(refreshToken)
+func outlookInputDataAfterRefreshToken(database *db.PostgresDb, job *repo.CronJobListingDB, refreshToken string) (map[string]interface{}, error) {
+	signIn, err := msSignInFn(refreshToken)
 	if err != nil {
 		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. Not able to generate auth token from refresh token", err.Error())
 	}
-	client, err := outlook.NewOutlookClientUsingToken(authToken)
-	if err != nil {
-		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err.Error())
+	var cred *repo.GoogleBackupCredentialDB
+	if id := repo.JobCredentialID(job); id != 0 {
+		cred, _ = database.CredentialRepo.GetByID(id)
 	}
-	userDetails, err := client.GetCurrentUser()
-	if err != nil {
-		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", err.Error())
+	if cred != nil && microsoftSignInMatchesCredential(cred, signIn) {
+		return persistOAuthRefreshTokenOnJob(database, job, refreshToken)
 	}
-	if strings.TrimSpace(userDetails.Mail) == "" {
+	tokenEmail := strings.TrimSpace(signIn.Email)
+	if tokenEmail == "" {
 		return nil, httpErr(http.StatusBadRequest, "Invalid Refresh Token. May be it is expired or invalid", "getting empty email id from outlook token")
 	}
-	if !strings.EqualFold(strings.TrimSpace(userDetails.Mail), strings.TrimSpace(job.Name)) {
+	mailbox := jobMailboxEmail(job)
+	if mailbox == "" {
+		mailbox = strings.TrimSpace(job.Name)
+	}
+	if !strings.EqualFold(tokenEmail, mailbox) {
 		return nil, echo.NewHTTPError(http.StatusBadRequest, map[string]interface{}{"message": "email id mismatch"})
 	}
-	return mergeJobInputData(job, map[string]interface{}{"refresh_token": refreshToken}), nil
+	// Same as Gmail: persist on shared credential (prepare/restore-all mint from cred.refresh_token).
+	return persistOAuthRefreshTokenOnJob(database, job, refreshToken)
 }
 
 func HandleAutomaticSyncCreateTask(c echo.Context) error {
@@ -2467,6 +2640,19 @@ func hasStorxTokenAtJobCreate(req *GoogleBackupOnboardingRequest, cred *repo.Goo
 	return cred != nil && strings.TrimSpace(cred.StorxToken) != ""
 }
 
+func isForcedInactiveOnboarding(req *GoogleBackupOnboardingRequest) bool {
+	return req != nil && req.Active != nil && !*req.Active
+}
+
+// shouldActivateOnboardingJob returns whether a newly created recurring job should become active.
+// Satellite may send active=false (own_nodes under MinOwnNodes); that always wins over storx_token.
+func shouldActivateOnboardingJob(req *GoogleBackupOnboardingRequest, cred *repo.GoogleBackupCredentialDB) bool {
+	if isForcedInactiveOnboarding(req) {
+		return false
+	}
+	return hasStorxTokenAtJobCreate(req, cred)
+}
+
 func activeStateUpdateFields(active bool) map[string]interface{} {
 	update := map[string]interface{}{
 		"active": active,
@@ -2481,6 +2667,19 @@ func activeStateUpdateFields(active bool) map[string]interface{} {
 	update["message"] = "Your automatic backup is deactivated. It will not process any backups."
 	update["message_status"] = repo.JobMessageStatusInfo
 	return update
+}
+
+// microsoftSignInMatchesCredential matches a Microsoft sign-in to a credential by home object ID,
+// falling back to email for credentials stored before the object ID was recorded.
+func microsoftSignInMatchesCredential(cred *repo.GoogleBackupCredentialDB, in mstenant.SignIn) bool {
+	if cred == nil {
+		return false
+	}
+	ext := strings.TrimSpace(cred.ExternalAccountID)
+	if ext != "" && !strings.Contains(ext, "@") {
+		return strings.EqualFold(ext, strings.TrimSpace(in.ObjectID))
+	}
+	return credentialEmailMatches(cred, in.Email)
 }
 
 func credentialEmailMatches(cred *repo.GoogleBackupCredentialDB, email string) bool {
@@ -2498,7 +2697,7 @@ func resolveUserCredentialByProjectAndEmail(database *db.PostgresDb, userID, pro
 		return nil, httpErr(http.StatusBadRequest, "Invalid Request", "project_id is required")
 	}
 	if email == "" {
-		return nil, httpErr(http.StatusBadRequest, "Invalid Request", "google_email is required")
+		return nil, httpErr(http.StatusBadRequest, "Invalid Request", "google_email or microsoft_email is required")
 	}
 	if cred, ok, err := database.CredentialRepo.FindByUserProjectAndEmail(userID, projectID, email); err != nil {
 		return nil, err
@@ -2510,7 +2709,7 @@ func resolveUserCredentialByProjectAndEmail(database *db.PostgresDb, userID, pro
 		return nil, err
 	}
 	if !ok {
-		return nil, httpErr(http.StatusNotFound, "Invalid Request", "no backup credential found for this project_id and google_email; complete onboarding first")
+		return nil, httpErr(http.StatusNotFound, "Invalid Request", "no backup credential found for this project_id and mailbox email; complete onboarding first")
 	}
 	cred, err := database.CredentialRepo.GetByID(credID)
 	if err != nil {
@@ -2520,9 +2719,47 @@ func resolveUserCredentialByProjectAndEmail(database *db.PostgresDb, userID, pro
 		return nil, httpErr(http.StatusNotFound, "Invalid Request", "project_id does not match stored credential")
 	}
 	if !credentialEmailMatches(cred, email) {
-		return nil, httpErr(http.StatusBadRequest, "Invalid Request", "google_email does not match the connected account for this project_id")
+		return nil, httpErr(http.StatusBadRequest, "Invalid Request", "mailbox email does not match the connected account for this project_id")
 	}
 	return cred, nil
+}
+
+func credentialIsMicrosoft(cred *repo.GoogleBackupCredentialDB, jobs []repo.CronJobListingDB) bool {
+	for i := range jobs {
+		if repo.IsMicrosoftAutosyncMethod(jobs[i].Method) {
+			return true
+		}
+	}
+	return cred != nil && strings.TrimSpace(cred.TenantID) != ""
+}
+
+func validateRefreshTokenMatchesCredential(ctx context.Context, cred *repo.GoogleBackupCredentialDB, jobs []repo.CronJobListingDB, refreshToken string) error {
+	refreshToken = strings.TrimSpace(refreshToken)
+	if refreshToken == "" {
+		return fmt.Errorf("refresh token is empty")
+	}
+	if credentialIsMicrosoft(cred, jobs) {
+		signIn, err := msSignInFn(refreshToken)
+		if err != nil {
+			return fmt.Errorf("invalid refresh token: %w", err)
+		}
+		if !microsoftSignInMatchesCredential(cred, signIn) {
+			return fmt.Errorf("email id mismatch")
+		}
+		return nil
+	}
+	accessToken, err := google.AuthTokenUsingRefreshToken(refreshToken)
+	if err != nil {
+		return fmt.Errorf("invalid refresh token: %w", err)
+	}
+	userDetails, err := google.GetGoogleAccountDetailsFromAccessToken(accessToken)
+	if err != nil || userDetails.Email == "" {
+		return fmt.Errorf("invalid refresh token")
+	}
+	if !credentialEmailMatches(cred, userDetails.Email) {
+		return fmt.Errorf("email id mismatch")
+	}
+	return nil
 }
 
 func firstJobForOAuthUpdate(jobs []repo.CronJobListingDB, req AutomaticBackupUpdateRequest) *repo.CronJobListingDB {
@@ -2535,12 +2772,17 @@ func firstJobForOAuthUpdate(jobs []repo.CronJobListingDB, req AutomaticBackupUpd
 		}
 	}
 	for i := range jobs {
-		if repo.IsGoogleMediaOrGmailMethod(jobs[i].Method) {
+		if jobs[i].Method == "outlook" {
 			return &jobs[i]
 		}
 	}
 	for i := range jobs {
-		if jobs[i].Method == "outlook" {
+		if repo.IsGoogleAutosyncMethod(jobs[i].Method) {
+			return &jobs[i]
+		}
+	}
+	for i := range jobs {
+		if repo.IsMicrosoftAutosyncMethod(jobs[i].Method) {
 			return &jobs[i]
 		}
 	}
@@ -2612,7 +2854,7 @@ func HandleAutomaticBackupUpdateByProject(c echo.Context) error {
 		if connectedEmail != "" && !credentialEmailMatches(loaded, connectedEmail) {
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{
 				"message": "Invalid Request",
-				"error":   "google_email does not match credential_id",
+				"error":   "mailbox email does not match credential_id",
 			})
 		}
 		cred = loaded
@@ -2652,22 +2894,10 @@ func HandleAutomaticBackupUpdateByProject(c echo.Context) error {
 	if len(jobs) == 0 && tokenOnlyUpdate {
 		if updateReq.RefreshToken != nil {
 			rt := strings.TrimSpace(*updateReq.RefreshToken)
-			accessToken, tokenErr := google.AuthTokenUsingRefreshToken(rt)
-			if tokenErr != nil {
+			if err := validateRefreshTokenMatchesCredential(ctx, cred, jobs, rt); err != nil {
 				return c.JSON(http.StatusBadRequest, map[string]interface{}{
 					"message": "Invalid Refresh Token. Not able to generate auth token from refresh token",
-					"error":   tokenErr.Error(),
-				})
-			}
-			userDetails, detailsErr := google.GetGoogleAccountDetailsFromAccessToken(accessToken)
-			if detailsErr != nil || userDetails.Email == "" {
-				return c.JSON(http.StatusBadRequest, map[string]interface{}{
-					"message": "Invalid Refresh Token. May be it is expired or invalid",
-				})
-			}
-			if !credentialEmailMatches(cred, userDetails.Email) {
-				return c.JSON(http.StatusBadRequest, map[string]interface{}{
-					"message": "email id mismatch",
+					"error":   err.Error(),
 				})
 			}
 			if err := database.CredentialRepo.UpdateTokens(cred.ID, &rt, nil); err != nil {
@@ -2723,6 +2953,7 @@ func HandleAutomaticBackupUpdateByProject(c echo.Context) error {
 		}
 	}
 
+	var grantedScopes []string
 	if updateReq.RefreshToken != nil {
 		oauthJob := firstJobForOAuthUpdate(jobs, updateReq)
 		if oauthJob == nil {
@@ -2740,6 +2971,20 @@ func HandleAutomaticBackupUpdateByProject(c echo.Context) error {
 			return c.JSON(http.StatusBadRequest, map[string]interface{}{"message": "Invalid Request", "error": oauthErr.Error()})
 		}
 		_ = in
+		// Always persist on the project-resolved credential (prepare mints from this row).
+		// Do not rely only on job.input_data.credential_id side effects.
+		rt := strings.TrimSpace(*updateReq.RefreshToken)
+		if err := database.CredentialRepo.UpdateTokens(cred.ID, &rt, nil); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+				"message": "Failed to update refresh token",
+				"error":   err.Error(),
+			})
+		}
+		if tokRes, mintErr := mstenant.HomeToken(rt); mintErr == nil {
+			grantedScopes = scopesFromAccessTokenAndEndpointScope(tokRes.AccessToken, tokRes.Scope)
+		} else if at, mintErr := google.AuthTokenUsingRefreshToken(rt); mintErr == nil {
+			grantedScopes = scopesFromJWTAccessToken(at)
+		}
 	}
 
 	if updateReq.StorxToken != nil {
@@ -2786,12 +3031,80 @@ func HandleAutomaticBackupUpdateByProject(c echo.Context) error {
 		success = append(success, buildAutosyncJobItemView(*updated))
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"message": "Automatic backup updated successfully",
 		"account": account,
 		"success": success,
 		"failed":  failed,
-	})
+	}
+	if len(grantedScopes) > 0 {
+		resp["granted_scopes"] = grantedScopes
+		resp["credential_id"] = cred.ID
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// scopesFromJWTAccessToken reads delegated `scp` / app `roles` from a Graph/Google access token JWT.
+func scopesFromJWTAccessToken(accessToken string) []string {
+	return scopesFromAccessTokenAndEndpointScope(accessToken, "")
+}
+
+// scopesFromAccessTokenAndEndpointScope merges JWT scp/roles with OAuth token-endpoint scope.
+// Personal Microsoft accounts return opaque access tokens — scopes only appear on the endpoint `scope` field.
+func scopesFromAccessTokenAndEndpointScope(accessToken, tokenEndpointScope string) []string {
+	accessToken = strings.TrimSpace(accessToken)
+	out := make([]string, 0, 8)
+	seen := map[string]struct{}{}
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return
+		}
+		if i := strings.LastIndex(s, "/"); i >= 0 && i+1 < len(s) {
+			s = s[i+1:]
+		}
+		key := strings.ToLower(s)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, s)
+	}
+
+	parts := strings.Split(accessToken, ".")
+	if len(parts) >= 2 {
+		payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+		if err != nil {
+			payload, err = base64.StdEncoding.DecodeString(parts[1])
+		}
+		if err == nil {
+			var claims struct {
+				Scp   string          `json:"scp"`
+				Scope string          `json:"scope"`
+				Roles json.RawMessage `json:"roles"`
+			}
+			if json.Unmarshal(payload, &claims) == nil {
+				for _, s := range strings.Fields(claims.Scp) {
+					add(s)
+				}
+				for _, s := range strings.Fields(claims.Scope) {
+					add(s)
+				}
+				if len(claims.Roles) > 0 {
+					var roles []string
+					if json.Unmarshal(claims.Roles, &roles) == nil {
+						for _, r := range roles {
+							add(r)
+						}
+					}
+				}
+			}
+		}
+	}
+	for _, s := range strings.Fields(tokenEndpointScope) {
+		add(s)
+	}
+	return out
 }
 
 func buildUpdateRequestForJob(ctx context.Context, database *db.PostgresDb, job *repo.CronJobListingDB, reqBody AutomaticBackupUpdateRequest, jobID int) (map[string]interface{}, error) {

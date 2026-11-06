@@ -9,17 +9,52 @@ import (
 	gormio "gorm.io/gorm"
 )
 
-// GoogleBackupCredentialDB stores shared Google OAuth + StorX tokens for autosync jobs.
-// Uniqueness: (user_id, storj_project_id, email) — same email may exist per Satellite user.
+const (
+	CredentialProviderGoogle    = "google"
+	CredentialProviderMicrosoft = "microsoft"
+)
+
+// GoogleBackupCredentialDB stores provider OAuth + StorX tokens for autosync jobs (Google and Microsoft).
+// Identity: (user_id, storj_project_id, provider, external_account_id). external_account_id is the
+// Microsoft home object ID (oid) or the Google account (lowercased email). Email is a display label.
 type GoogleBackupCredentialDB struct {
 	gorm.GormModel
 
-	UserID         string `json:"user_id,omitempty" gorm:"column:user_id;not null;default:'';index;uniqueIndex:idx_google_backup_cred_user_project_email,priority:1"`
-	Email          string `json:"email" gorm:"column:email;uniqueIndex:idx_google_backup_cred_user_project_email,priority:3"`
-	StorjProjectID string `json:"storj_project_id,omitempty" gorm:"column:storj_project_id;uniqueIndex:idx_google_backup_cred_user_project_email,priority:2;index:idx_google_backup_cred_project_id"`
-	AccountType    string `json:"account_type" gorm:"column:account_type;not null;default:personal"`
-	RefreshToken   string `json:"refresh_token,omitempty" gorm:"column:refresh_token"`
-	StorxToken     string `json:"storx_token,omitempty" gorm:"column:storx_token"`
+	UserID            string `json:"user_id,omitempty" gorm:"column:user_id;not null;default:'';index;uniqueIndex:idx_backup_cred_identity,priority:1"`
+	Email             string `json:"email" gorm:"column:email"`
+	StorjProjectID    string `json:"storj_project_id,omitempty" gorm:"column:storj_project_id;uniqueIndex:idx_backup_cred_identity,priority:2;index:idx_google_backup_cred_project_id"`
+	Provider          string `json:"provider" gorm:"column:provider;not null;default:google;uniqueIndex:idx_backup_cred_identity,priority:3"`
+	ExternalAccountID string `json:"external_account_id,omitempty" gorm:"column:external_account_id;not null;default:'';uniqueIndex:idx_backup_cred_identity,priority:4"`
+	AccountType       string `json:"account_type" gorm:"column:account_type;not null;default:personal"`
+	// TenantID is the Microsoft home tenant of the sign-in only; never the selected tenant (see HomeTenantID).
+	TenantID     string `json:"tenant_id,omitempty" gorm:"column:tenant_id"`
+	TenantName   string `json:"tenant_name,omitempty" gorm:"column:tenant_name"`
+	RefreshToken string `json:"refresh_token,omitempty" gorm:"column:refresh_token"`
+	StorxToken   string `json:"storx_token,omitempty" gorm:"column:storx_token"`
+}
+
+// BeforeCreate fills provider and external_account_id for rows created without them (Google).
+func (c *GoogleBackupCredentialDB) BeforeCreate(*gormio.DB) error {
+	if strings.TrimSpace(c.Provider) == "" {
+		c.Provider = CredentialProviderGoogle
+	}
+	if strings.TrimSpace(c.ExternalAccountID) == "" {
+		c.ExternalAccountID = strings.ToLower(strings.TrimSpace(c.Email))
+	}
+	return nil
+}
+
+// HomeTenantID is the Microsoft home tenant of the sign-in. It is never the selected tenant.
+func (c *GoogleBackupCredentialDB) HomeTenantID() string {
+	if c == nil {
+		return ""
+	}
+	return normalizeTenantID(c.TenantID)
+}
+
+// IsMicrosoft reports whether the credential is a Microsoft sign-in.
+func (c *GoogleBackupCredentialDB) IsMicrosoft() bool {
+	return c != nil && c.Provider == CredentialProviderMicrosoft
 }
 
 // GoogleBackupCredentialRepository handles google_backup_credential_dbs.
@@ -187,6 +222,8 @@ func normalizeCredentialAccountType(s string) string {
 		return "employee_workspace"
 	case "admin_workspace":
 		return "admin_workspace"
+	case "work_account":
+		return "work_account"
 	case "personal":
 		return "personal"
 	default:
@@ -201,6 +238,11 @@ func (r *GoogleBackupCredentialRepository) Create(email, projectID, accountType,
 
 // CreateForUser inserts a new user-scoped credential row.
 func (r *GoogleBackupCredentialRepository) CreateForUser(userID, email, projectID, accountType, refreshToken, storxToken string) (*GoogleBackupCredentialDB, error) {
+	return r.CreateForUserWithTenant(userID, email, projectID, accountType, "", "", refreshToken, storxToken)
+}
+
+// CreateForUserWithTenant inserts a new user-scoped credential row including Microsoft tenant metadata.
+func (r *GoogleBackupCredentialRepository) CreateForUserWithTenant(userID, email, projectID, accountType, tenantID, tenantName, refreshToken, storxToken string) (*GoogleBackupCredentialDB, error) {
 	acct := normalizeCredentialAccountType(accountType)
 	if acct == "" {
 		acct = "personal"
@@ -209,9 +251,15 @@ func (r *GoogleBackupCredentialRepository) CreateForUser(userID, email, projectI
 		UserID:         strings.TrimSpace(userID),
 		Email:          strings.TrimSpace(email),
 		StorjProjectID: strings.TrimSpace(projectID),
+		Provider:       CredentialProviderGoogle,
 		AccountType:    acct,
+		TenantID:       strings.TrimSpace(tenantID),
+		TenantName:     strings.TrimSpace(tenantName),
 		RefreshToken:   strings.TrimSpace(refreshToken),
 		StorxToken:     strings.TrimSpace(storxToken),
+	}
+	if row.TenantID != "" {
+		row.Provider = CredentialProviderMicrosoft
 	}
 	if row.StorjProjectID == "" {
 		return nil, fmt.Errorf("storj_project_id is required")
@@ -229,6 +277,11 @@ func (r *GoogleBackupCredentialRepository) CreateForUser(userID, email, projectI
 // Reconnecting the same google_email updates tokens on the existing row; a different email always creates a new row
 // even when project_id matches another connected account.
 func (r *GoogleBackupCredentialRepository) FindOrCreateForUser(userID, email, projectID, accountType, refreshToken, storxToken string) (*GoogleBackupCredentialDB, error) {
+	return r.FindOrCreateForUserWithTenant(userID, email, projectID, accountType, "", "", refreshToken, storxToken)
+}
+
+// FindOrCreateForUserWithTenant is FindOrCreateForUser with optional Microsoft tenant_id / tenant_name.
+func (r *GoogleBackupCredentialRepository) FindOrCreateForUserWithTenant(userID, email, projectID, accountType, tenantID, tenantName, refreshToken, storxToken string) (*GoogleBackupCredentialDB, error) {
 	email = strings.TrimSpace(email)
 	projectID = strings.TrimSpace(projectID)
 	userID = strings.TrimSpace(userID)
@@ -236,22 +289,22 @@ func (r *GoogleBackupCredentialRepository) FindOrCreateForUser(userID, email, pr
 		if row, ok, err := r.FindByUserProjectAndEmail(userID, projectID, email); err != nil {
 			return nil, err
 		} else if ok {
-			return r.mergeAndReload(row.ID, email, projectID, accountType, refreshToken, storxToken, userID)
+			return r.mergeAndReloadWithTenant(row.ID, email, projectID, accountType, tenantID, tenantName, refreshToken, storxToken, userID)
 		}
 	}
 	if id, ok, err := r.FindIDForUserAndEmail(userID, email); err != nil {
 		return nil, err
 	} else if ok {
-		return r.mergeAndReload(id, email, projectID, accountType, refreshToken, storxToken, userID)
+		return r.mergeAndReloadWithTenant(id, email, projectID, accountType, tenantID, tenantName, refreshToken, storxToken, userID)
 	}
 	if projectID != "" {
 		if id, ok, err := r.FindIDForUserProjectAndEmail(userID, projectID, email); err != nil {
 			return nil, err
 		} else if ok {
-			return r.mergeAndReload(id, email, projectID, accountType, refreshToken, storxToken, userID)
+			return r.mergeAndReloadWithTenant(id, email, projectID, accountType, tenantID, tenantName, refreshToken, storxToken, userID)
 		}
 	}
-	return r.CreateForUser(userID, email, projectID, accountType, refreshToken, storxToken)
+	return r.CreateForUserWithTenant(userID, email, projectID, accountType, tenantID, tenantName, refreshToken, storxToken)
 }
 
 // ListByUserID returns all credentials for a user, optionally excluding a mailbox email.
@@ -290,13 +343,21 @@ func (r *GoogleBackupCredentialRepository) ListByUserAndProject(userID, projectI
 }
 
 func (r *GoogleBackupCredentialRepository) mergeAndReload(id uint, email, projectID, accountType, refreshToken, storxToken, userID string) (*GoogleBackupCredentialDB, error) {
-	if err := r.mergeFieldsIfProvided(id, email, projectID, accountType, refreshToken, storxToken, userID); err != nil {
+	return r.mergeAndReloadWithTenant(id, email, projectID, accountType, "", "", refreshToken, storxToken, userID)
+}
+
+func (r *GoogleBackupCredentialRepository) mergeAndReloadWithTenant(id uint, email, projectID, accountType, tenantID, tenantName, refreshToken, storxToken, userID string) (*GoogleBackupCredentialDB, error) {
+	if err := r.mergeFieldsIfProvidedWithTenant(id, email, projectID, accountType, tenantID, tenantName, refreshToken, storxToken, userID); err != nil {
 		return nil, err
 	}
 	return r.GetByID(id)
 }
 
 func (r *GoogleBackupCredentialRepository) mergeFieldsIfProvided(id uint, email, projectID, accountType, refreshToken, storxToken, userID string) error {
+	return r.mergeFieldsIfProvidedWithTenant(id, email, projectID, accountType, "", "", refreshToken, storxToken, userID)
+}
+
+func (r *GoogleBackupCredentialRepository) mergeFieldsIfProvidedWithTenant(id uint, email, projectID, accountType, tenantID, tenantName, refreshToken, storxToken, userID string) error {
 	patch := map[string]interface{}{}
 	if t := strings.TrimSpace(userID); t != "" {
 		patch["user_id"] = t
@@ -309,6 +370,12 @@ func (r *GoogleBackupCredentialRepository) mergeFieldsIfProvided(id uint, email,
 	}
 	if t := normalizeCredentialAccountType(accountType); t != "" {
 		patch["account_type"] = t
+	}
+	if t := strings.TrimSpace(tenantID); t != "" {
+		patch["tenant_id"] = t
+	}
+	if t := strings.TrimSpace(tenantName); t != "" {
+		patch["tenant_name"] = t
 	}
 	if t := strings.TrimSpace(refreshToken); t != "" {
 		patch["refresh_token"] = t
@@ -390,6 +457,113 @@ func (r *GoogleBackupCredentialRepository) ListUniqueDomainsForUser(userID strin
 		return nil, fmt.Errorf("list unique domains for user: %w", err)
 	}
 	return domains, nil
+}
+
+// ListMicrosoftByUser returns the user's Microsoft credentials (newest first).
+func (r *GoogleBackupCredentialRepository) ListMicrosoftByUser(userID string) ([]GoogleBackupCredentialDB, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, nil
+	}
+	var rows []GoogleBackupCredentialDB
+	err := r.db.Where("user_id = ? AND provider = ?", userID, CredentialProviderMicrosoft).
+		Order("updated_at DESC").Find(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("list microsoft credentials: %w", err)
+	}
+	return rows, nil
+}
+
+// FindMicrosoftByAccount loads the user's Microsoft credential for a home object ID (newest when the
+// same sign-in is linked to several projects).
+func (r *GoogleBackupCredentialRepository) FindMicrosoftByAccount(userID, externalAccountID string) (*GoogleBackupCredentialDB, bool, error) {
+	userID = strings.TrimSpace(userID)
+	externalAccountID = normalizeExternalAccountID(externalAccountID)
+	if userID == "" || externalAccountID == "" {
+		return nil, false, nil
+	}
+	var row GoogleBackupCredentialDB
+	err := r.db.Where("user_id = ? AND provider = ? AND external_account_id = ?", userID, CredentialProviderMicrosoft, externalAccountID).
+		Order("updated_at DESC").First(&row).Error
+	if err != nil {
+		if errors.Is(err, gormio.ErrRecordNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("find microsoft credential by account: %w", err)
+	}
+	return &row, true, nil
+}
+
+// MicrosoftAccountUpsert is one Microsoft sign-in keyed by its home object ID.
+type MicrosoftAccountUpsert struct {
+	UserID            string
+	StorjProjectID    string
+	ExternalAccountID string
+	HomeTenantID      string
+	HomeTenantName    string
+	Email             string
+	AccountType       string
+	RefreshToken      string
+	StorxToken        string
+}
+
+// UpsertMicrosoftAccount creates or updates the credential for (user, provider=microsoft, oid).
+// Empty fields never overwrite stored values.
+func (r *GoogleBackupCredentialRepository) UpsertMicrosoftAccount(u MicrosoftAccountUpsert) (*GoogleBackupCredentialDB, error) {
+	u.UserID = strings.TrimSpace(u.UserID)
+	u.ExternalAccountID = normalizeExternalAccountID(u.ExternalAccountID)
+	if u.UserID == "" || u.ExternalAccountID == "" {
+		return nil, fmt.Errorf("user_id and external_account_id are required")
+	}
+	existing, found, err := r.FindMicrosoftByAccount(u.UserID, u.ExternalAccountID)
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		patch := map[string]interface{}{}
+		set := func(col, v string) {
+			if v = strings.TrimSpace(v); v != "" {
+				patch[col] = v
+			}
+		}
+		set("storj_project_id", u.StorjProjectID)
+		set("tenant_id", normalizeTenantID(u.HomeTenantID))
+		set("tenant_name", u.HomeTenantName)
+		set("email", u.Email)
+		set("account_type", normalizeCredentialAccountType(u.AccountType))
+		set("refresh_token", u.RefreshToken)
+		set("storx_token", u.StorxToken)
+		if len(patch) > 0 {
+			if err := r.db.Model(&GoogleBackupCredentialDB{}).Where("id = ?", existing.ID).Updates(patch).Error; err != nil {
+				return nil, fmt.Errorf("update microsoft credential: %w", err)
+			}
+		}
+		return r.GetByID(existing.ID)
+	}
+	acct := normalizeCredentialAccountType(u.AccountType)
+	if acct == "" {
+		acct = "personal"
+	}
+	row := GoogleBackupCredentialDB{
+		UserID:            u.UserID,
+		StorjProjectID:    strings.TrimSpace(u.StorjProjectID),
+		Provider:          CredentialProviderMicrosoft,
+		ExternalAccountID: u.ExternalAccountID,
+		Email:             strings.TrimSpace(u.Email),
+		AccountType:       acct,
+		TenantID:          normalizeTenantID(u.HomeTenantID),
+		TenantName:        strings.TrimSpace(u.HomeTenantName),
+		RefreshToken:      strings.TrimSpace(u.RefreshToken),
+		StorxToken:        strings.TrimSpace(u.StorxToken),
+	}
+	if err := r.db.Create(&row).Error; err != nil {
+		return nil, fmt.Errorf("create microsoft credential: %w", err)
+	}
+	return &row, nil
+}
+
+func normalizeExternalAccountID(id string) string {
+	return strings.ToLower(strings.TrimSpace(id))
 }
 
 // OAuthHolderEmail returns the credential email when it differs from the mailbox (corporate delegation).

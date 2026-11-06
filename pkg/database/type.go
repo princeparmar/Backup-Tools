@@ -47,6 +47,9 @@ func (d *DbJson[V]) Scan(value any) error {
 }
 
 func (d *DbJson[V]) Value() (driver.Value, error) {
+	if d == nil {
+		return nil, nil
+	}
 	v, err := json.Marshal(d.v)
 	return string(v), err
 }

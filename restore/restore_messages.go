@@ -16,9 +16,17 @@ const (
 
 	restoreJobStorxRefreshLimit = "StorX access could not be restored after 3 attempts. Automatic backup has been paused. Please contact support."
 
-	restoreJobGoogleAuth = "Restore failed: Google credentials are invalid or expired. Reconnect your Google account via auto-sync and try again."
+	restoreJobGoogleAuth = "Restore failed: Google permission revoked or expired. Re-authenticate to grant access again."
+
+	restoreLogGoogleRevoked = "Google permission revoked. Re-authenticate to grant access again."
 
 	restoreJobGoogleInsufficientScope = "Restore failed: Google account is missing permissions required for this service. Reconnect Google with full app permissions and try again."
+
+	restoreJobMicrosoftAuth = "Restore failed: Microsoft permission revoked or expired. Re-authenticate to grant access again."
+
+	restoreLogMicrosoftRevoked = "Microsoft permission revoked. Re-authenticate to grant access again."
+
+	restoreJobMicrosoftInsufficientScope = "Restore failed: Microsoft account is missing permissions required for this service. Reconnect Microsoft with full app permissions and try again."
 
 	restoreJobDelegation = "Restore failed: Google Workspace blocked access (domain-wide delegation). Ask your admin to authorize this app in Admin Console, or restore using the admin OAuth account."
 
@@ -34,6 +42,10 @@ const (
 	restoreTaskGoogleAuth = "Restore batch stopped: Google credentials invalid — reconnect via auto-sync"
 
 	restoreTaskGoogleInsufficientScope = "Restore batch stopped: missing Google OAuth scopes — reconnect with full permissions"
+
+	restoreTaskMicrosoftAuth = "Restore batch stopped: Microsoft credentials invalid — reconnect via auto-sync"
+
+	restoreTaskMicrosoftInsufficientScope = "Restore batch stopped: missing Microsoft OAuth scopes — reconnect with full permissions"
 
 	restoreTaskDelegation = "Restore batch stopped: domain-wide delegation not configured for this mailbox"
 
@@ -52,16 +64,20 @@ const (
 
 // Readiness / prepare API messages.
 const (
-	restoreReadinessNoCredential      = "No backup credential found for this project"
-	restoreReadinessNoTargetCredential = "No credential found for target account — connect via PUT /auto-sync/job/project"
-	restoreReadinessNoBackupJob      = "No backup job found for this account and service"
-	restoreReadinessNoBackupData     = "No backed-up items found for this account and service"
-	restoreReadinessStorxMissing     = "StorX access grant is missing — reconnect via auto-sync"
-	restoreReadinessRefreshMissing   = "Google refresh token is missing"
-	restoreReadinessRefreshInvalid   = "Google refresh token is invalid or expired"
-	restoreReadinessTokenValidation  = "Google token validation failed"
-	restoreReadinessMissingScopes    = "Missing OAuth scopes required for restore"
-	restoreReadinessDWDNotConfigured = "Ask your Google Workspace admin to authorize all restore scopes in Admin Console → Domain-wide delegation"
+	restoreReadinessNoCredential        = "No backup credential found for this project"
+	restoreReadinessNoTargetCredential  = "No credential found for target account — connect via PUT /auto-sync/job/project"
+	restoreReadinessNoBackupJob         = "No backup job found for this account and service"
+	restoreReadinessNoBackupData        = "No backed-up items found for this account and service"
+	restoreReadinessStorxMissing        = "StorX access grant is missing — reconnect via auto-sync"
+	restoreReadinessRefreshMissing      = "Google refresh token is missing"
+	restoreReadinessRefreshInvalid      = "Google permission revoked. Re-authenticate to grant access again."
+	restoreReadinessMicrosoftRefreshInvalid = "Microsoft permission revoked. Re-authenticate to grant access again."
+	restoreReadinessTokenValidation     = "Google token validation failed"
+	restoreReadinessMissingScopes       = "Missing OAuth scopes required for restore"
+	restoreReadinessDWDNotConfigured    = "Ask your Google Workspace admin to authorize all restore scopes in Admin Console → Domain-wide delegation"
+	restoreTplReadinessDWDNotConfigured = "Ask your Google Workspace admin to authorize the %s restore scope in Admin Console → Domain-wide delegation"
+	restoreReadinessInviteOAuthRequired = "Sign in with Google as this mailbox to restore. An invited user restores with that Google sign-in. Domain-wide delegation is only for the project admin."
+	restoreReadinessInviteOAuthRequiredMicrosoft = "Sign in with Microsoft as this mailbox to restore. An invited user restores with that Microsoft sign-in. Admin consent is only for the project admin."
 )
 
 // Notification bodies (Satellite push).

@@ -10,7 +10,8 @@ import (
 	"github.com/StorX2-0/Backup-Tools/satellite"
 )
 
-// IsUplinkError reports whether err is a missing/invalid storx grant or uplink permission failure.
+// IsUplinkError reports whether err is a missing/invalid storx grant, uplink
+// permission failure, or gateway S3 auth failure (e.g. auth DB wipe).
 func IsUplinkError(err error) bool {
 	if err == nil {
 		return false
@@ -20,7 +21,12 @@ func IsUplinkError(err error) bool {
 		strings.Contains(msg, "uplink: invalid access") ||
 		strings.Contains(msg, "storx access grant not found") ||
 		strings.Contains(msg, "storx_token is required") ||
-		strings.Contains(msg, "parse access grant")
+		strings.Contains(msg, "parse access grant") ||
+		// Gateway S3 / authservice credential failures — refresh via satellite EnsureExternalS3Gateway.
+		strings.Contains(msg, "invalidaccesskeyid") ||
+		strings.Contains(msg, "invalid access key") ||
+		strings.Contains(msg, "signaturedoesnotmatch") ||
+		strings.Contains(msg, "the aws access key id you provided does not exist")
 }
 
 // IsStorageLimitError reports whether err is a CyberLS/uplink quota exhaustion failure.

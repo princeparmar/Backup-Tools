@@ -4,18 +4,41 @@ on:
   push:
     tags:
       - 'v*' # Trigger on version tags (e.g., v1.0.0, v2.1.3)
-  workflow_dispatch: # Manual trigger
+  workflow_dispatch:
+    inputs:
+      product:
+        description: 'Which CyberLS service to replace'
+        required: true
+        type: choice
+        options:
+          - google
+          - microsoft
+        default: google
 
 env:
   APP_NAME: 'backuptools-windows-amd64.exe'
   BUILD_DIR: 'D:\deployment'
+  # One shared folder and one exe. A version-tag push restarts Google only.
+  # Google reads D:\bin\.env.google when that file exists, otherwise D:\bin\.env.
+  # Microsoft reads D:\bin\.env.microsoft. Point that service at it once, as Administrator:
+  # nssm set Cyberls-Microsoft-BackupTools AppEnvironmentExtra ENV_FILE=D:\bin\.env.microsoft
   DEPLOY_DIR: 'D:\bin'
-  SERVICE_NAME: 'backuptools'
+  SERVICE_NAME: ${{ github.event.inputs.product == 'microsoft' && 'Cyberls-Microsoft-BackupTools' || 'backuptools' }}
+  # Module + compile caches (dependencies / .a objects) — NOT the Go stdlib.
+  # Keep them off runner _temp: that path is wiped and has produced corrupt
+  # golang.org/toolchain downloads ("package context is not in std").
+  GOMODCACHE: 'D:\go-pkg\mod'
+  GOCACHE: 'D:\go-pkg\cache'
+  # Use the Go already installed on the CyberLS host. Do not auto-download
+  # golang.org/toolchain@… into GOMODCACHE (that is what broke the build).
+  GOTOOLCHAIN: 'local'
 
 jobs:
   deploy:
     runs-on: [self-hosted, Windows, X64, cyberls]
-    timeout-minutes: 10
+    # Google stays on the existing CyberLS environment. Microsoft uses its own.
+    environment: ${{ github.event.inputs.product == 'microsoft' && 'cyberls-microsoft' || 'cyberls' }}
+    timeout-minutes: 25
     
     steps:
       - name: Checkout code
@@ -29,17 +52,38 @@ jobs:
         run: |
           $verOutput = go version
           Write-Host $verOutput
+          Write-Host "GOROOT=$(go env GOROOT)"
+          Write-Host "GOMODCACHE=$(go env GOMODCACHE)"
+          Write-Host "GOCACHE=$(go env GOCACHE)"
+          Write-Host "GOTOOLCHAIN=$(go env GOTOOLCHAIN)"
           if ($LASTEXITCODE -ne 0) {
             Write-Error "Go is not available on this runner. Install Go 1.24+ on the CyberLS host."
             exit 1
           }
+          # go.mod requires 1.24; with GOTOOLCHAIN=local the host must already match.
+          if ($verOutput -notmatch 'go1\.2[4-9]|go1\.[3-9]\d') {
+            Write-Error "Host Go is too old for this module (need 1.24+). Installed: $verOutput"
+            exit 1
+          }
 
       - name: Pre-download dependencies
+        shell: powershell
         run: |
+          New-Item -ItemType Directory -Path $env:GOMODCACHE -Force | Out-Null
+          New-Item -ItemType Directory -Path $env:GOCACHE -Force | Out-Null
+          Write-Host "GOMODCACHE=$env:GOMODCACHE"
           Write-Host "Pre-downloading dependencies..."
           go mod download
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "go mod download failed; clearing module cache and retrying..."
+            go clean -modcache
+            New-Item -ItemType Directory -Path $env:GOMODCACHE -Force | Out-Null
+            go mod download
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
           
       - name: Fast build application
+        shell: powershell
         run: |
           # Ensure build directory exists
           if (!(Test-Path "${{ env.BUILD_DIR }}")) {
@@ -48,6 +92,8 @@ jobs:
           
           $buildStart = Get-Date
           Write-Host "Building with optimizations..."
+          Write-Host "GOMODCACHE=$env:GOMODCACHE"
+          Write-Host "GOROOT=$(go env GOROOT)"
           
           # Use Go build optimizations
           $env:GOFLAGS = "-buildvcs=false"
@@ -55,6 +101,26 @@ jobs:
           $buildPath = Join-Path "${{ env.BUILD_DIR }}" "${{ env.APP_NAME }}"
           
           go build -ldflags="-s -w -X main.buildTime=$buildTime" -trimpath -o $buildPath ./cmd
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Build failed; clearing module cache (and any leftover toolchain dirs) then retrying once..."
+            go clean -modcache
+            # Also drop known bad auto-toolchain paths from older runs / other runners
+            $badToolchains = @(
+              (Join-Path $env:GOMODCACHE 'golang.org'),
+              'D:\deployment\storx-runner\_work\_temp\go-mod-cache\golang.org',
+              'D:\deployment\backup-tool-runner\_work\_temp\go-mod-cache\golang.org'
+            )
+            foreach ($p in $badToolchains) {
+              if (Test-Path $p) {
+                Write-Host "Removing $p"
+                Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue
+              }
+            }
+            New-Item -ItemType Directory -Path $env:GOMODCACHE -Force | Out-Null
+            go mod download
+            go build -ldflags="-s -w -X main.buildTime=$buildTime" -trimpath -o $buildPath ./cmd
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
           
           $buildDuration = (Get-Date) - $buildStart
           if (Test-Path $buildPath) {
@@ -65,79 +131,131 @@ jobs:
             exit 1
           }
           
-      - name: Stop NSSM service
+      - name: Check service environment
+        shell: powershell
         run: |
-          # Fast stop using optimized polling
-          $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
-          if ($service) {
-            $status = $service.Status
-            if ($status -eq "Running" -or $status -eq "Paused" -or $status -eq "StartPending") {
-              Stop-Service -Name "${{ env.SERVICE_NAME }}" -Force -WarningAction SilentlyContinue
-              
-              # Quick wait with timeout
-              $timeout = 5
-              $elapsed = 0
-              while ($service.Status -ne 'Stopped' -and $elapsed -lt $timeout) {
-                Start-Sleep -Milliseconds 300
-                $service.Refresh()
-                $elapsed += 0.3
-              }
-              Write-Host "Service stopped"
-            } else {
-              Write-Host "Service already stopped"
-            }
-          }
-          
-      - name: Quick file replacement
-        run: |
-          # Ensure deploy directory exists
-          if (!(Test-Path "${{ env.DEPLOY_DIR }}")) {
-            New-Item -ItemType Directory -Path "${{ env.DEPLOY_DIR }}" -Force | Out-Null
-          }
-          
-          # Use Move-Item for faster replacement (atomic operation)
-          $buildPath = Join-Path "${{ env.BUILD_DIR }}" "${{ env.APP_NAME }}"
-          $deployPath = Join-Path "${{ env.DEPLOY_DIR }}" "${{ env.APP_NAME }}"
-          
-          if (Test-Path $buildPath) {
-            # Remove old file if exists
-            if (Test-Path $deployPath) {
-              Remove-Item $deployPath -Force -ErrorAction SilentlyContinue
-            }
-            # Move new file (faster than copy)
-            Move-Item $buildPath $deployPath -Force
-            Write-Host "✅ File replaced at $deployPath"
+          $serviceName = "${{ env.SERVICE_NAME }}"
+          $deploy = "${{ env.DEPLOY_DIR }}"
+          if ($serviceName -eq "Cyberls-Microsoft-BackupTools") {
+            $envFile = Join-Path $deploy ".env.microsoft"
           } else {
+            $googleFile = Join-Path $deploy ".env.google"
+            $legacyFile = Join-Path $deploy ".env"
+            if (Test-Path -LiteralPath $googleFile) {
+              $envFile = $googleFile
+            } elseif (Test-Path -LiteralPath $legacyFile) {
+              $envFile = $legacyFile
+              Write-Host "Google service is using the existing $legacyFile"
+            } else {
+              $envFile = $googleFile
+            }
+          }
+          Write-Host "Service $serviceName"
+          Write-Host "Environment file $envFile"
+          if (!(Test-Path -LiteralPath $envFile)) {
+            Write-Error "Environment file is missing at $envFile. Create it in $deploy. The workflow does not copy it."
+            exit 1
+          }
+          Write-Host "Using $envFile. The runner does not change service settings."
+
+      - name: Stop NSSM service
+        shell: powershell
+        run: |
+          Write-Host "Deploying ${{ env.SERVICE_NAME }}. Both services share ${{ env.DEPLOY_DIR }}\${{ env.APP_NAME }}"
+          $names = @('backuptools', 'Cyberls-Microsoft-BackupTools')
+          $restart = New-Object System.Collections.Generic.List[string]
+          foreach ($name in $names) {
+            $service = Get-Service -Name $name -ErrorAction SilentlyContinue
+            if (-not $service) {
+              Write-Host "$name is not installed"
+              continue
+            }
+            if ($service.Status -eq 'Stopped') {
+              Write-Host "$name already stopped"
+              continue
+            }
+            Write-Host "Stopping $name"
+            try {
+              Stop-Service -Name $name -Force -WarningAction SilentlyContinue -ErrorAction Stop
+            } catch {
+              Write-Error "The runner is not allowed to stop $name. On the server, as Administrator, give it the same permissions as backuptools: sc.exe sdshow backuptools, then sc.exe sdset $name <that value>."
+              exit 1
+            }
+            $timeout = 30
+            $elapsed = 0
+            while ($service.Status -ne 'Stopped' -and $elapsed -lt $timeout) {
+              Start-Sleep -Milliseconds 500
+              $service.Refresh()
+              $elapsed += 0.5
+            }
+            if ($service.Status -ne 'Stopped') {
+              Write-Error "$name is still $($service.Status). The shared exe stays locked until it stops."
+              exit 1
+            }
+            $restart.Add($name)
+            Write-Host "$name stopped"
+          }
+          $selected = '${{ env.SERVICE_NAME }}'
+          if (-not $restart.Contains($selected)) {
+            $restart.Add($selected)
+          }
+          $listPath = Join-Path '${{ env.BUILD_DIR }}' 'services-restart.txt'
+          New-Item -ItemType Directory -Path '${{ env.BUILD_DIR }}' -Force | Out-Null
+          Set-Content -LiteralPath $listPath -Value ($restart -join "`n") -Encoding ascii
+
+      - name: Quick file replacement
+        shell: powershell
+        run: |
+          $deployDir = '${{ env.DEPLOY_DIR }}'
+          if (!(Test-Path -LiteralPath $deployDir)) {
+            New-Item -ItemType Directory -Path $deployDir -Force | Out-Null
+          }
+          $buildPath = Join-Path '${{ env.BUILD_DIR }}' '${{ env.APP_NAME }}'
+          $deployPath = Join-Path $deployDir '${{ env.APP_NAME }}'
+          if (!(Test-Path -LiteralPath $buildPath)) {
             Write-Error "Build file not found at: $buildPath"
             exit 1
           }
-          
+          # Copy over the existing exe. Do not delete it first.
+          Copy-Item -LiteralPath $buildPath -Destination $deployPath -Force
+          Remove-Item -LiteralPath $buildPath -Force
+          Write-Host "File replaced at $deployPath"
+
       - name: Start NSSM service and verify
+        shell: powershell
         run: |
-          # Fast start with quick verification
-          $service = Get-Service -Name "${{ env.SERVICE_NAME }}" -ErrorAction SilentlyContinue
-          if (!$service) {
-            Write-Error "Service '${{ env.SERVICE_NAME }}' not found"
-            exit 1
+          $listPath = Join-Path '${{ env.BUILD_DIR }}' 'services-restart.txt'
+          $names = @('${{ env.SERVICE_NAME }}')
+          if (Test-Path -LiteralPath $listPath) {
+            $fromFile = @(Get-Content -LiteralPath $listPath | Where-Object { $_.Trim() -ne '' })
+            if ($fromFile.Count -gt 0) {
+              $names = $fromFile
+            }
           }
-          
-          # Suppress warnings and start service
-          $WarningPreference = 'SilentlyContinue'
-          Start-Service -Name "${{ env.SERVICE_NAME }}" -WarningAction SilentlyContinue
-          
-          # Quick wait with timeout
-          $timeout = 8
-          $elapsed = 0
-          while ($service.Status -ne 'Running' -and $elapsed -lt $timeout) {
-            Start-Sleep -Milliseconds 300
-            $service.Refresh()
-            $elapsed += 0.3
-          }
-          
-          # Verify deployment
-          if ($service.Status -eq 'Running') {
-            Write-Host "✅ Production deployment successful - Service is running"
-          } else {
-            Write-Error "Deployment failed - Service status: $($service.Status)"
-            exit 1
+          foreach ($name in $names) {
+            $service = Get-Service -Name $name -ErrorAction SilentlyContinue
+            if (-not $service) {
+              if ($name -eq '${{ env.SERVICE_NAME }}') {
+                Write-Error "Service '$name' not found"
+                exit 1
+              }
+              Write-Host "Skipping $name; it is not installed"
+              continue
+            }
+            if ($service.Status -ne 'Running') {
+              $WarningPreference = 'SilentlyContinue'
+              Start-Service -Name $name -WarningAction SilentlyContinue
+            }
+            $timeout = 30
+            $elapsed = 0
+            while ($service.Status -ne 'Running' -and $elapsed -lt $timeout) {
+              Start-Sleep -Milliseconds 500
+              $service.Refresh()
+              $elapsed += 0.5
+            }
+            if ($service.Status -ne 'Running') {
+              Write-Error "$name status: $($service.Status)"
+              exit 1
+            }
+            Write-Host "$name is running"
           }
