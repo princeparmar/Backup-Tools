@@ -17,6 +17,69 @@ func TestOutlookMailObjectKey(t *testing.T) {
 	}
 }
 
+func TestOutlookMailObjectKeyStableDate(t *testing.T) {
+	prefix := ResourceKeyPrefix(mailTenant, "user", "oid-1")
+	tests := []struct {
+		name, received, wantDate string
+	}{
+		{name: "rfc3339", received: "2026-11-06T10:00:00Z", wantDate: "2026/11/06"},
+		{name: "graph fractional without timezone", received: "2026-11-06T10:00:00.0000000", wantDate: "2026/11/06"},
+		{name: "graph fractional utc", received: "2026-11-06T10:00:00.0000000Z", wantDate: "2026/11/06"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := OutlookMailObjectKey(prefix, "Inbox", tc.received, "ann@contoso.com", "Hello", "C", "AAMk/1")
+			want := prefix + "/Inbox/" + tc.wantDate + "/ann@contoso.com - Hello - C - AAMk_1.outlook"
+			if got != want {
+				t.Fatalf("got %s\nwant %s", got, want)
+			}
+		})
+	}
+}
+
+func TestDedupeMailFolders(t *testing.T) {
+	inbox := MailFolder{ID: "in", Path: "Inbox", WellKnownName: "inbox"}
+	again := MailFolder{ID: "in", Path: "Inbox/Inbox"}
+	proj := MailFolder{ID: "p", Path: "Inbox/Projects"}
+	tests := []struct {
+		name string
+		in   []MailFolder
+		want []string
+	}{
+		{name: "empty", want: []string{}},
+		{name: "first path wins", in: []MailFolder{inbox, again, proj}, want: []string{"Inbox", "Inbox/Projects"}},
+		{name: "blank id dropped", in: []MailFolder{{ID: " ", Path: "X"}, proj}, want: []string{"Inbox/Projects"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := dedupeMailFolders(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %+v", got)
+			}
+			for i := range got {
+				if got[i].Path != tc.want[i] {
+					t.Fatalf("got %+v", got)
+				}
+			}
+		})
+	}
+}
+
+func TestMailKeyID(t *testing.T) {
+	tests := []struct{ name, in, want string }{
+		{name: "slash", in: "AAMk/abc def", want: "AAMk_abcdef"},
+		{name: "already safe", in: "AAMk_abc", want: "AAMk_abc"},
+		{name: "empty", in: "  ", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := MailKeyID(tc.in); got != tc.want {
+				t.Fatalf("got %q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestOutlookMailFileName(t *testing.T) {
 	tests := []struct {
 		name                       string

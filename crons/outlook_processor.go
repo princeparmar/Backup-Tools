@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -96,11 +97,12 @@ func runOutlookMailAutosync(input ProcessorInput) error {
 		return err
 	}
 
-	index, err := loadOutlookMailIndex(ctx, input, storx, keyPrefix)
+	index, extras, err := loadOutlookMailIndex(ctx, input, storx, keyPrefix)
 	if err != nil {
 		return err
 	}
 	run := newOutlookMailRun(input, &satelliteMailStore{input: input, storx: storx}, accessToken, userBase, keyPrefix, index)
+	run.duplicateKeys = extras
 	// The mailbox size pre-check is disabled for now, like the other Microsoft 365 quota checks.
 	// run.precheck = func(ctx context.Context, estimateBytes int64) error {
 	// 	return enforceStoragePrecheck(ctx, input, estimateBytes)
@@ -141,21 +143,40 @@ func (s *satelliteMailStore) remove(ctx context.Context, key string) {
 }
 
 // loadOutlookMailIndex maps message id -> current backup key from synced objects.
-func loadOutlookMailIndex(ctx context.Context, input ProcessorInput, storx, keyPrefix string) (map[string]string, error) {
+// extras are older copies of the same message id; the run deletes them.
+func loadOutlookMailIndex(ctx context.Context, input ProcessorInput, storx, keyPrefix string) (map[string]string, []string, error) {
 	keys, err := handler.GetSyncedObjectsWithPrefix(ctx, input.Database, storx, satellite.ReserveBucket_Outlook, keyPrefix+"/", input.Job.UserID, "outlook", "outlook", input.StorxRecovery)
 	if err != nil {
-		return nil, fmt.Errorf("list backed-up mail: %w", err)
+		return nil, nil, fmt.Errorf("list backed-up mail: %w", err)
 	}
-	return buildOutlookMailIndex(keys), nil
+	index, extras := buildOutlookMailIndex(keys)
+	return index, extras, nil
 }
 
 // buildOutlookMailIndex indexes mail backups by message id. Single-object backups win over
 // legacy meta keys for the same id; legacy data keys are reached through their meta key.
-func buildOutlookMailIndex(keys map[string]bool) map[string]string {
-	index := make(map[string]string, len(keys))
+// A message id that already has more than one object returns the extra keys so they can be removed.
+func buildOutlookMailIndex(keys map[string]bool) (map[string]string, []string) {
+	grouped := make(map[string][]string, len(keys))
 	for key := range keys {
 		if obj, ok := outlook.ParseOutlookMailObjectKey(key); ok {
-			index[obj.MessageID] = key
+			id := outlook.MailKeyID(obj.MessageID)
+			grouped[id] = append(grouped[id], key)
+		}
+	}
+	index := make(map[string]string, len(grouped))
+	var extras []string
+	for id, list := range grouped {
+		sort.Strings(list)
+		keep := list[0]
+		for _, key := range list[1:] {
+			keep = betterMailBackupKey(keep, key)
+		}
+		index[id] = keep
+		for _, key := range list {
+			if key != keep {
+				extras = append(extras, key)
+			}
 		}
 	}
 	for key := range keys {
@@ -165,7 +186,31 @@ func buildOutlookMailIndex(keys map[string]bool) map[string]string {
 			}
 		}
 	}
-	return index
+	sort.Strings(extras)
+	return index, extras
+}
+
+// betterMailBackupKey prefers a real received date over the 1970 fallback, then the later key.
+func betterMailBackupKey(a, b string) string {
+	if a == "" {
+		return b
+	}
+	af, bf := mailKeyFallbackDate(a), mailKeyFallbackDate(b)
+	if af && !bf {
+		return b
+	}
+	if bf && !af {
+		return a
+	}
+	if a < b {
+		return b
+	}
+	return a
+}
+
+func mailKeyFallbackDate(key string) bool {
+	obj, ok := outlook.ParseOutlookMailObjectKey(key)
+	return ok && obj.DatePath == "1970/01/01"
 }
 
 func isLegacyOutlookMailKey(key string) bool {
@@ -182,6 +227,13 @@ type outlookMailRun struct {
 	prefix      string
 	// index maps message id -> backup key; updated as messages are written or re-keyed.
 	index map[string]string
+	// duplicateKeys are extra objects for an id already in index. collapseDuplicateMail deletes them.
+	duplicateKeys []string
+	// mailRef and byInternet remember the RFC Message-ID of a backed-up message so a later
+	// Graph id for the same email in the same folder replaces the old object.
+	mailRef    map[string]mailIDRef
+	byInternet map[string]string
+	locks      map[string]*sync.Mutex
 	// seen and removed collect ids across folders so a move (removed here, added there) is
 	// not recorded as a deletion.
 	seen    map[string]struct{}
@@ -221,6 +273,8 @@ func (r *outlookMailRun) syncAll(ctx context.Context, tm *repo.TaskMemory) error
 			return err
 		}
 	}
+	folders = dedupeOutlookFolders(folders)
+	r.collapseDuplicateMail(ctx)
 
 	migrating := tm.OutlookMailLayout < repo.OutlookMailLayoutFiles
 	savedDeltas := tm.OutlookMailFolderDeltas
@@ -306,7 +360,27 @@ func (r *outlookMailRun) syncAll(ctx context.Context, tm *repo.TaskMemory) error
 	tm.OutlookMailFolderDeltas = deltas
 	tm.OutlookMailFolderPaths = paths
 	tm.OutlookMailLayout = repo.OutlookMailLayoutFiles
+	r.saveMailIDIndex(ctx)
 	return nil
+}
+
+// dedupeOutlookFolders keeps one entry per folder id. ListMailFolders already does this;
+// a saved folder list from an older run can still repeat an id.
+func dedupeOutlookFolders(in []outlook.MailFolder) []outlook.MailFolder {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]outlook.MailFolder, 0, len(in))
+	for _, f := range in {
+		id := strings.TrimSpace(f.ID)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, f)
+	}
+	return out
 }
 
 // translateLegacyIDs re-points legacy index entries to immutable ids so the migration baseline
@@ -426,10 +500,13 @@ func (r *outlookMailRun) deltaSync(ctx context.Context, f outlook.MailFolder, re
 // are always fetched again. Otherwise the stored object is reused when changeKey matches: moved or
 // renamed messages are copied to the new key, and changed read/flag/category state is written in place.
 func (r *outlookMailRun) syncMessage(ctx context.Context, f outlook.MailFolder, msg *outlook.OutlookMailDeltaMessage, baseline bool) error {
-	id := strings.TrimSpace(msg.ID)
-	if id == "" {
+	rawID := strings.TrimSpace(msg.ID)
+	if rawID == "" {
 		return nil
 	}
+	id := outlook.MailKeyID(rawID)
+	unlock := r.lockMessage(messageLockToken(f.Path, id, msg))
+	defer unlock()
 	if msg.IsRemoved {
 		r.mu.Lock()
 		r.removed[id] = struct{}{}
@@ -438,7 +515,7 @@ func (r *outlookMailRun) syncMessage(ctx context.Context, f outlook.MailFolder, 
 	}
 	r.mu.Lock()
 	r.seen[id] = struct{}{}
-	oldKey := r.index[id]
+	oldKey, oldID := r.existingMailKey(id, rawID, f.Path, msg.InternetMessageID)
 	r.mu.Unlock()
 
 	state := outlook.OutlookMailBackupState{
@@ -451,7 +528,7 @@ func (r *outlookMailRun) syncMessage(ctx context.Context, f outlook.MailFolder, 
 		subject = cmp.Or(subject, prev.Subject)
 		conversationID = cmp.Or(conversationID, prev.ConversationID)
 	}
-	newKey := r.keyFor(f, msg.ReceivedDateTime, msg.LastModifiedDateTime, from, subject, conversationID, id)
+	newKey := r.keyFor(f, msg.ReceivedDateTime, msg.LastModifiedDateTime, from, subject, conversationID, rawID)
 
 	var stored []byte
 	if oldKey != "" && !msg.IsDraft {
@@ -466,6 +543,9 @@ func (r *outlookMailRun) syncMessage(ctx context.Context, f outlook.MailFolder, 
 			contentMatches := msg.ChangeKey == "" || (storedCK != "" && storedCK == msg.ChangeKey)
 			// Baseline with matching key and changeKey: nothing to do.
 			if !legacy && oldKey == newKey && baseline && contentMatches {
+				r.mu.Lock()
+				r.noteInternet(id, f.Path, cmp.Or(strings.TrimSpace(msg.InternetMessageID), outlook.InternetMessageIDOf(b)), newKey)
+				r.mu.Unlock()
 				return nil
 			}
 			if contentMatches || legacy {
@@ -476,18 +556,18 @@ func (r *outlookMailRun) syncMessage(ctx context.Context, f outlook.MailFolder, 
 	}
 
 	if stored == nil {
-		raw, detail, err := outlookMailFetchFn(ctx, r.accessToken, r.userBase, id)
-	if err != nil {
-		return err
-	}
-	if detail != nil {
+		raw, detail, err := outlookMailFetchFn(ctx, r.accessToken, r.userBase, rawID)
+		if err != nil {
+			return err
+		}
+		if detail != nil {
 			detailFrom := ""
 			if detail.From != nil && detail.From.EmailAddress != nil {
 				detailFrom = detail.From.EmailAddress.Address
 			}
 			newKey = r.keyFor(f, detail.ReceivedDateTime, detail.LastModifiedDateTime,
 				cmp.Or(detailFrom, from), cmp.Or(detail.Subject, subject),
-				cmp.Or(detail.ConversationID, conversationID), id)
+				cmp.Or(detail.ConversationID, conversationID), rawID)
 			if detail.ChangeKey != "" {
 				state.ChangeKey = detail.ChangeKey
 				if msg.ChangeKey == "" {
@@ -515,13 +595,233 @@ func (r *outlookMailRun) syncMessage(ctx context.Context, f outlook.MailFolder, 
 		}
 	}
 	r.mu.Lock()
+	if oldID != "" && oldID != id {
+		if prev := r.mailRef[oldID]; prev.Internet != "" && r.byInternet[mailInternetKey(prev.Folder, prev.Internet)] == oldID {
+			delete(r.byInternet, mailInternetKey(prev.Folder, prev.Internet))
+		}
+		delete(r.index, oldID)
+		delete(r.mailRef, oldID)
+	}
 	r.index[id] = newKey
+	r.noteInternet(id, f.Path, cmp.Or(strings.TrimSpace(msg.InternetMessageID), outlook.InternetMessageIDOf(b)), newKey)
 	r.mu.Unlock()
 	return nil
 }
 
 func (r *outlookMailRun) keyFor(f outlook.MailFolder, received, modified, from, subject, conversationID, id string) string {
 	return outlook.OutlookMailObjectKey(r.prefix, f.Path, cmp.Or(received, modified), from, subject, conversationID, id)
+}
+
+// mailIDRef is one backed-up message in {prefix}/_mail_index.json.
+type mailIDRef struct {
+	Internet string `json:"i,omitempty"`
+	Folder   string `json:"f,omitempty"`
+	Key      string `json:"k,omitempty"`
+}
+
+type mailIDIndexFile struct {
+	V     int                  `json:"v"`
+	Items map[string]mailIDRef `json:"items"`
+}
+
+func mailInternetKey(folder, internet string) string {
+	return folder + "\x00" + strings.TrimSpace(internet)
+}
+
+func messageLockToken(folder, id string, msg *outlook.OutlookMailDeltaMessage) string {
+	if msg != nil && !msg.IsRemoved {
+		if inet := strings.TrimSpace(msg.InternetMessageID); inet != "" {
+			return "inet\x00" + mailInternetKey(folder, inet)
+		}
+	}
+	return "id\x00" + id
+}
+
+func (r *outlookMailRun) lockMessage(token string) func() {
+	r.mu.Lock()
+	if r.locks == nil {
+		r.locks = map[string]*sync.Mutex{}
+	}
+	lk := r.locks[token]
+	if lk == nil {
+		lk = &sync.Mutex{}
+		r.locks[token] = lk
+	}
+	r.mu.Unlock()
+	lk.Lock()
+	return lk.Unlock
+}
+
+// existingMailKey finds the object for this message: the same Graph id, or the same
+// RFC Message-ID already stored in this folder under an older Graph id.
+func (r *outlookMailRun) existingMailKey(id, rawID, folder, internet string) (key, oldID string) {
+	if key = r.index[id]; key != "" {
+		return key, id
+	}
+	if rawID != id {
+		if key = r.index[rawID]; key != "" {
+			return key, rawID
+		}
+	}
+	internet = strings.TrimSpace(internet)
+	if internet == "" || folder == "" || r.byInternet == nil {
+		return "", ""
+	}
+	other := r.byInternet[mailInternetKey(folder, internet)]
+	if other == "" || other == id {
+		return "", ""
+	}
+	if key = r.index[other]; key == "" {
+		return "", ""
+	}
+	return key, other
+}
+
+// noteInternet records the RFC Message-ID. Caller holds r.mu.
+func (r *outlookMailRun) noteInternet(id, folder, internet, key string) {
+	if r.mailRef == nil {
+		r.mailRef = map[string]mailIDRef{}
+	}
+	prev := r.mailRef[id]
+	if internet == "" {
+		internet = prev.Internet
+	}
+	if prev.Internet != "" && prev.Folder != "" && (prev.Folder != folder || prev.Internet != internet) {
+		if r.byInternet[mailInternetKey(prev.Folder, prev.Internet)] == id {
+			delete(r.byInternet, mailInternetKey(prev.Folder, prev.Internet))
+		}
+	}
+	r.mailRef[id] = mailIDRef{Internet: internet, Folder: folder, Key: key}
+	if internet != "" && folder != "" {
+		if r.byInternet == nil {
+			r.byInternet = map[string]string{}
+		}
+		r.byInternet[mailInternetKey(folder, internet)] = id
+	}
+}
+
+func (r *outlookMailRun) mailIndexKey() string {
+	return strings.TrimSuffix(r.prefix, "/") + "/_mail_index.json"
+}
+
+func (r *outlookMailRun) loadMailIDIndex(ctx context.Context) {
+	raw, err := r.store.download(ctx, r.mailIndexKey())
+	if err != nil || len(raw) == 0 {
+		return
+	}
+	var file mailIDIndexFile
+	if err := json.Unmarshal(raw, &file); err != nil {
+		return
+	}
+	r.mailRef = map[string]mailIDRef{}
+	r.byInternet = map[string]string{}
+	for id, ref := range file.Items {
+		id = outlook.MailKeyID(id)
+		if r.index[id] == "" || ref.Key != r.index[id] {
+			continue
+		}
+		r.mailRef[id] = ref
+		if ref.Internet != "" && ref.Folder != "" {
+			r.byInternet[mailInternetKey(ref.Folder, ref.Internet)] = id
+		}
+	}
+}
+
+func (r *outlookMailRun) saveMailIDIndex(ctx context.Context) {
+	items := make(map[string]mailIDRef, len(r.index))
+	r.mu.Lock()
+	for id, key := range r.index {
+		if isLegacyOutlookMailKey(key) {
+			continue
+		}
+		ref := r.mailRef[id]
+		ref.Key = key
+		if ref.Folder == "" {
+			if obj, ok := outlook.ParseOutlookMailObjectKey(key); ok {
+				ref.Folder = obj.FolderPath
+			}
+		}
+		items[id] = ref
+	}
+	r.mu.Unlock()
+	raw, err := json.Marshal(mailIDIndexFile{V: 1, Items: items})
+	if err != nil {
+		return
+	}
+	if err := r.store.upload(ctx, r.mailIndexKey(), raw); err != nil {
+		logger.Warn(ctx, "outlook mail: id index not saved", logger.ErrorField(err))
+	}
+}
+
+// collapseDuplicateMail deletes extra copies of one message. Same Graph id keeps the best key.
+// Same RFC Message-ID in the same folder (a later Graph id for the same email) keeps one object.
+func (r *outlookMailRun) collapseDuplicateMail(ctx context.Context) {
+	for _, key := range r.duplicateKeys {
+		r.store.remove(ctx, key)
+	}
+	r.duplicateKeys = nil
+	r.loadMailIDIndex(ctx)
+
+	type item struct {
+		id, key, folder string
+	}
+	groups := map[string][]item{}
+	for id, key := range r.index {
+		obj, ok := outlook.ParseOutlookMailObjectKey(key)
+		if !ok {
+			continue
+		}
+		g := obj.FolderPath + "\x00" + obj.DatePath + "\x00" + obj.From + "\x00" + obj.Subject
+		groups[g] = append(groups[g], item{id: id, key: key, folder: obj.FolderPath})
+	}
+	for _, group := range groups {
+		if len(group) < 2 {
+			continue
+		}
+		inetOf := map[string]string{}
+		for _, it := range group {
+			inet := ""
+			if ref, ok := r.mailRef[it.id]; ok && ref.Key == it.key {
+				inet = ref.Internet
+			}
+			if inet == "" {
+				raw, err := r.store.download(ctx, it.key)
+				if err != nil {
+					continue
+				}
+				inet = outlook.InternetMessageIDOf(raw)
+				if inet != "" {
+					r.noteInternet(it.id, it.folder, inet, it.key)
+				}
+			}
+			inetOf[it.id] = inet
+		}
+		kept := map[string]string{}
+		for _, it := range group {
+			inet := inetOf[it.id]
+			if inet == "" {
+				continue
+			}
+			prev, ok := kept[inet]
+			if !ok {
+				kept[inet] = it.id
+				continue
+			}
+			drop, keep := it.id, prev
+			if betterMailBackupKey(r.index[prev], it.key) == it.key {
+				drop, keep = prev, it.id
+			}
+			kept[inet] = keep
+			if key := r.index[drop]; key != "" {
+				r.store.remove(ctx, key)
+			}
+			if ref := r.mailRef[drop]; ref.Internet != "" && r.byInternet[mailInternetKey(ref.Folder, ref.Internet)] == drop {
+				delete(r.byInternet, mailInternetKey(ref.Folder, ref.Internet))
+			}
+			delete(r.index, drop)
+			delete(r.mailRef, drop)
+		}
+	}
 }
 
 // flushRemoved marks messages deleted from the mailbox (and not moved to another folder this

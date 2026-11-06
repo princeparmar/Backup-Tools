@@ -81,7 +81,8 @@ func TestPIMGroupEventRoots(t *testing.T) {
 	if !strings.HasSuffix(root, "/groups/gid/calendar") {
 		t.Fatalf("event root %s", root)
 	}
-	if got := PIMEventsURLFromRoot(root); !strings.HasSuffix(got, "/groups/gid/calendar/events?$top=100") {
+	got := PIMEventsURLFromRoot(root)
+	if !strings.Contains(got, "/groups/gid/calendar/events?") || !strings.Contains(got, "$top=100") || !strings.Contains(got, "subject") {
 		t.Fatalf("events url %s", got)
 	}
 	if got := PIMGroupAttachmentRoot("gid"); !strings.HasSuffix(got, "/groups/gid") {

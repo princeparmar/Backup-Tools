@@ -26,6 +26,7 @@ var (
 	pimContactPhotoFn     = outlook.FetchContactPhoto
 	pimContactsDeltaFn    = outlook.FetchContactsDeltaPage
 	pimContactFetchRawFn  = outlook.FetchOutlookContactRaw
+	pimEventFetchRawFn    = outlook.FetchOutlookEventRaw
 	pimEventAttachmentsFn = outlook.EnsureEventAttachmentBytes
 )
 
@@ -122,6 +123,14 @@ type pimCollection struct {
 	contactsDeltaStart    string // saved deltaLink or empty for baseline
 	contactsDeltaLink     string // written after a successful walk
 	contactsDeltaBaseline bool   // true when starting from the initial delta URL
+}
+
+func (c pimCollection) eventItemURL(eventID string) string {
+	root := strings.TrimSpace(c.eventRoot)
+	if root == "" {
+		root = outlook.PIMCalendarEventRoot(c.userBase, c.calendarID)
+	}
+	return outlook.EventItemURLFromRoot(root, eventID)
 }
 
 func (c pimCollection) seriesMasterURL(eventID string) string {
@@ -426,16 +435,35 @@ func (r *pimRun) syncItem(ctx context.Context, c pimCollection, prev outlook.PIM
 	series := calendar && it.SeriesMaster
 	needFullContact := !calendar && r.fetchPhotos && r.tm != nil && r.tm.OutlookContactsLayout < outlook.OutlookContactsLayoutFull
 	needPhoto := !calendar && r.fetchPhotos && r.contactNeedsPhoto(ctx, key, prev)
-	current := prev.Key == key && prev.ChangeKey == it.ChangeKey && prev.RemovedAt == "" && it.ChangeKey != "" && !needFullContact && !needPhoto
+	// A calendar entry without Detail still holds a list stub (id only). Fetch the event again.
+	current := prev.Key == key && prev.ChangeKey == it.ChangeKey && prev.RemovedAt == "" && it.ChangeKey != "" && !needFullContact && !needPhoto && (!calendar || prev.Detail)
 	upload := !current || (series && !prev.Occurrences)
 	entry := prev
+	listed := it
 	if upload {
-		raw, withOccurrences := []byte(it.Raw), false
+		raw, withOccurrences, detail := []byte(it.Raw), false, false
+		if calendar {
+			full, err := pimEventFetchRawFn(ctx, r.accessToken, c.eventItemURL(it.ID))
+			if err != nil {
+				logger.Warn(ctx, "outlook event full fetch failed; skipping until next run",
+					logger.String("event_id", it.ID), logger.ErrorField(err))
+				r.coverage.FailedItems++
+				r.coverage.sample(key, "event_fetch_failed")
+				return prev, false, nil
+			}
+			detail = true
+			if len(bytes.TrimSpace(full)) > 0 {
+				raw = full
+			}
+			if outlook.EventIsSeriesMaster(raw) {
+				series = true
+			}
+		}
 		if series {
 			if err := r.heartbeat(); err != nil {
 				return prev, false, err
 			}
-			if full, err := pimSeriesFn(ctx, r.accessToken, c.seriesMasterURL(it.ID), it.Raw); err != nil {
+			if full, err := pimSeriesFn(ctx, r.accessToken, c.seriesMasterURL(it.ID), raw); err != nil {
 				logger.Warn(ctx, "outlook series occurrences not read", logger.String("key", key), logger.ErrorField(err))
 			} else {
 				raw, withOccurrences = full, true
@@ -475,14 +503,16 @@ func (r *pimRun) syncItem(ctx context.Context, c pimCollection, prev outlook.PIM
 		}
 		r.synced[key] = true
 		r.uploaded++
-		entry = outlook.PIMIndexEntry{Key: key, ChangeKey: it.ChangeKey, Occurrences: withOccurrences}
+		entry = outlook.PIMIndexEntry{Key: key, ChangeKey: it.ChangeKey, Occurrences: withOccurrences, Detail: detail}
+		listed.Raw = raw
+		listed.SeriesMaster = series
 	} else {
 		r.unchanged++
 	}
 	if !calendar || (!upload && !r.summaryStale(prev.Summary, series)) {
 		return entry, upload, nil
 	}
-	summary, err := r.eventSummary(ctx, c, it, series)
+	summary, err := r.eventSummary(ctx, c, listed, series)
 	if err != nil {
 		return prev, false, err
 	}

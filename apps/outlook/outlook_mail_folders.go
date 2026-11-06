@@ -189,7 +189,26 @@ func ListMailFolders(ctx context.Context, accessToken, userBaseURL string) ([]Ma
 		}
 		return out[i].Path < out[j].Path
 	})
-	return out, nil
+	return dedupeMailFolders(out), nil
+}
+
+// dedupeMailFolders keeps the first occurrence of a folder id. The same folder can show up
+// once at the mailbox root and again under childFolders; syncing both writes every message twice.
+func dedupeMailFolders(in []MailFolder) []MailFolder {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]MailFolder, 0, len(in))
+	for _, f := range in {
+		id := strings.TrimSpace(f.ID)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, f)
+	}
+	return out
 }
 
 // resolveWellKnownMailFolders returns folder id -> well-known name in one $batch call. Folders a

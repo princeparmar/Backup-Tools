@@ -251,7 +251,8 @@ func TestOutlookMailMigratesLegacyPairs(t *testing.T) {
 		return &outlook.OutlookMailDeltaPage{Messages: []outlook.OutlookMailDeltaMessage{*mailDelta("IMM1")}, DeltaLink: "delta-1"}, nil
 	}
 
-	run := newTestMailRun(store, buildOutlookMailIndex(map[string]bool{legacyMeta: true, legacyData: true}))
+	index, _ := buildOutlookMailIndex(map[string]bool{legacyMeta: true, legacyData: true})
+	run := newTestMailRun(store, index)
 	tm := &repo.TaskMemory{}
 	if err := run.syncAll(context.Background(), tm); err != nil {
 		t.Fatal(err)
@@ -356,7 +357,7 @@ func TestOutlookMailStopsWhenStorageFull(t *testing.T) {
 
 func TestBuildOutlookMailIndex(t *testing.T) {
 	current := mailKey("Inbox", "M1")
-	index := buildOutlookMailIndex(map[string]bool{
+	index, extras := buildOutlookMailIndex(map[string]bool{
 		current: true,
 		mailTestPrefix + "/meta/2026/07/21/M1.json": true,
 		mailTestPrefix + "/data/2026/07/21/M1.json": true,
@@ -365,7 +366,153 @@ func TestBuildOutlookMailIndex(t *testing.T) {
 		mailTestPrefix + "/_folders.json":           true,
 		mailTestPrefix + "/.file_placeholder":       true,
 	})
-	if len(index) != 2 || index["M1"] != current || index["M2"] != mailTestPrefix+"/meta/2026/07/21/M2.json" {
-		t.Fatalf("index %v", index)
+	if len(extras) != 0 || len(index) != 2 || index["M1"] != current || index["M2"] != mailTestPrefix+"/meta/2026/07/21/M2.json" {
+		t.Fatalf("index %v extras %v", index, extras)
+	}
+}
+
+func TestOutlookMailKeepsOneCopy(t *testing.T) {
+	realKey := mailKey("Inbox", "M1")
+	fallbackKey := outlook.OutlookMailObjectKey(mailTestPrefix, "Inbox", "not-a-date", "ann@contoso.com", "Hello", "C1", "M1")
+	otherKey := mailKey("Inbox", "M2")
+	sentKey := outlook.OutlookMailObjectKey(mailTestPrefix, "Sent Items", "2026-07-21T10:00:00Z", "ann@contoso.com", "Hello", "C1", "M2")
+	tests := []struct {
+		name     string
+		objects  map[string][]byte
+		wantKeys []string
+	}{
+		{
+			name: "same graph id keeps the real date",
+			objects: map[string][]byte{
+				realKey:     []byte(`{"id":"M1","internetMessageId":"<m@x>"}`),
+				fallbackKey: []byte(`{"id":"M1","internetMessageId":"<m@x>"}`),
+			},
+			wantKeys: []string{realKey},
+		},
+		{
+			name: "same internet message in one folder keeps one",
+			objects: map[string][]byte{
+				realKey:  []byte(`{"id":"M1","internetMessageId":"<m@x>"}`),
+				otherKey: []byte(`{"id":"M2","internetMessageId":"<m@x>"}`),
+			},
+			wantKeys: []string{otherKey},
+		},
+		{
+			name: "different internet messages stay",
+			objects: map[string][]byte{
+				realKey:  []byte(`{"id":"M1","internetMessageId":"<one@x>"}`),
+				otherKey: []byte(`{"id":"M2","internetMessageId":"<two@x>"}`),
+			},
+			wantKeys: []string{realKey, otherKey},
+		},
+		{
+			name: "same internet message in another folder stays",
+			objects: map[string][]byte{
+				realKey: []byte(`{"id":"M1","internetMessageId":"<m@x>"}`),
+				sentKey: []byte(`{"id":"M2","internetMessageId":"<m@x>"}`),
+			},
+			wantKeys: []string{realKey, sentKey},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			present := make(map[string]bool, len(tc.objects))
+			for key := range tc.objects {
+				present[key] = true
+			}
+			index, extras := buildOutlookMailIndex(present)
+			store := newMemMailStore()
+			store.objects = tc.objects
+			run := newTestMailRun(store, index)
+			run.duplicateKeys = extras
+			run.collapseDuplicateMail(context.Background())
+			if len(store.objects) != len(tc.wantKeys) {
+				t.Fatalf("left %v", store.objects)
+			}
+			for _, key := range tc.wantKeys {
+				if store.objects[key] == nil {
+					t.Fatalf("missing %s, have %v", key, store.objects)
+				}
+			}
+		})
+	}
+}
+
+func TestOutlookMailSyncDoesNotWriteAnotherCopy(t *testing.T) {
+	fetches := stubMailFetch(t)
+	tests := []struct {
+		name     string
+		setup    func(store *memMailStore) *outlookMailRun
+		messages []struct {
+			folder outlook.MailFolder
+			msg    *outlook.OutlookMailDeltaMessage
+		}
+		wantKeys  []string
+		wantFetch int
+	}{
+		{
+			name: "slash id reuses the stored object",
+			setup: func(store *memMailStore) *outlookMailRun {
+				key := mailKey("Inbox", "AA/M")
+				store.objects[key] = []byte(`{"id":"AA/M","changeKey":"CK1"}`)
+				index, _ := buildOutlookMailIndex(map[string]bool{key: true})
+				return newTestMailRun(store, index)
+			},
+			messages: []struct {
+				folder outlook.MailFolder
+				msg    *outlook.OutlookMailDeltaMessage
+			}{{folder: mailInbox, msg: func() *outlook.OutlookMailDeltaMessage {
+				msg := mailDelta("AA/M")
+				msg.ChangeKey = "CK1"
+				return msg
+			}()}},
+			wantKeys: []string{mailKey("Inbox", "AA/M")},
+		},
+		{
+			name: "new graph id replaces the same email in that folder",
+			setup: func(store *memMailStore) *outlookMailRun {
+				return newTestMailRun(store, nil)
+			},
+			messages: []struct {
+				folder outlook.MailFolder
+				msg    *outlook.OutlookMailDeltaMessage
+			}{
+				{folder: mailInbox, msg: func() *outlook.OutlookMailDeltaMessage {
+					msg := mailDelta("M1")
+					msg.InternetMessageID = "<m@x>"
+					return msg
+				}()},
+				{folder: mailInbox, msg: func() *outlook.OutlookMailDeltaMessage {
+					msg := mailDelta("M2")
+					msg.InternetMessageID = "<m@x>"
+					return msg
+				}()},
+			},
+			wantKeys:  []string{mailKey("Inbox", "M2")},
+			wantFetch: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			before := *fetches
+			store := newMemMailStore()
+			run := tc.setup(store)
+			for _, m := range tc.messages {
+				if err := run.syncMessage(context.Background(), m.folder, m.msg, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if *fetches-before != tc.wantFetch {
+				t.Fatalf("fetches=%d", *fetches-before)
+			}
+			if len(store.objects) != len(tc.wantKeys) {
+				t.Fatalf("objects %v", store.objects)
+			}
+			for _, key := range tc.wantKeys {
+				if store.objects[key] == nil {
+					t.Fatalf("missing %s, have %v", key, store.objects)
+				}
+			}
+		})
 	}
 }

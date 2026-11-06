@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -40,7 +41,7 @@ func OutlookMailObjectKey(prefix, folderPath, receivedTime, from, subject, conve
 	if fp := strings.Trim(strings.TrimSpace(folderPath), "/"); fp != "" {
 		parts = append(parts, fp)
 	}
-	parts = append(parts, objectKeyDatePath(receivedTime), OutlookMailFileName(from, subject, conversationID, messageID))
+	parts = append(parts, mailReceivedDatePath(receivedTime), OutlookMailFileName(from, subject, conversationID, messageID))
 	return strings.Join(parts, "/")
 }
 
@@ -70,8 +71,49 @@ func mailKeyText(s, empty string, maxRunes int) string {
 	return s
 }
 
-func mailKeyID(id string) string {
+// MailKeyID is the message id stored in the backup key. Graph ids contain "/", which cannot
+// be a key segment, so the index must look messages up with this same form.
+func MailKeyID(id string) string {
 	return strings.NewReplacer("/", "_", "\\", "_", " ", "").Replace(strings.TrimSpace(id))
+}
+
+func mailKeyID(id string) string {
+	return MailKeyID(id)
+}
+
+// mailReceivedDatePath is the yyyy/mm/dd of a Graph event time. Graph often sends
+// "2006-01-02T15:04:05.0000000" with no timezone; that used to fall through to 1970/01/01,
+// so the next sync wrote a second copy of the same message.
+func mailReceivedDatePath(received string) string {
+	received = strings.TrimSpace(received)
+	if received == "" {
+		return objectKeyDatePath(received)
+	}
+	layouts := []string{
+		time.RFC3339Nano,
+		"2006-01-02T15:04:05.0000000Z07:00",
+		"2006-01-02T15:04:05.0000000",
+		"2006-01-02T15:04:05Z07:00",
+		"2006-01-02T15:04:05",
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, received); err == nil {
+			return t.UTC().Format("2006/01/02")
+		}
+	}
+	return objectKeyDatePath(received)
+}
+
+// InternetMessageIDOf reads the RFC 5322 Message-ID from a stored Graph message.
+// Copies of one email share it even when Graph gives each copy a new id.
+func InternetMessageIDOf(raw []byte) string {
+	var doc struct {
+		ID string `json:"internetMessageId"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(doc.ID)
 }
 
 // ParseOutlookMailObjectKey parses a mail backup key written by OutlookMailObjectKey.

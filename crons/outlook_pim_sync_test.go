@@ -73,9 +73,14 @@ func pimItem(id, changeKey string) outlook.PIMItem {
 
 func withPIMGraph(t *testing.T, g *stubPIMGraph) {
 	t.Helper()
-	prev := pimListPageFn
+	prev, prevFetch := pimListPageFn, pimEventFetchRawFn
 	pimListPageFn = g.list
-	t.Cleanup(func() { pimListPageFn = prev })
+	// List rows in these tests already carry the fields the index needs.
+	pimEventFetchRawFn = func(context.Context, string, string) ([]byte, error) { return nil, nil }
+	t.Cleanup(func() {
+		pimListPageFn = prev
+		pimEventFetchRawFn = prevFetch
+	})
 }
 
 func newTestPIMRun(store *memPIMStore) *pimRun {
@@ -407,10 +412,108 @@ func TestPIMSyncCalendarIndexHasEventSummaries(t *testing.T) {
 	}
 }
 
+func TestPIMSyncCalendarEventPayload(t *testing.T) {
+	dir := outlook.PIMCalendarDir(pimTestPrefix, "cal1")
+	full := []byte(`{"id":"e1","changeKey":"k1","subject":"Standup","bodyPreview":"bring notes","attendees":[{"emailAddress":{"address":"a@b.com"}}],"start":{"dateTime":"2026-11-06T09:00:00.0000000","timeZone":"UTC"},"end":{"dateTime":"2026-11-06T09:30:00.0000000","timeZone":"UTC"}}`)
+	series := []byte(`{"id":"e1","changeKey":"k1","type":"seriesMaster","subject":"Weekly","start":{"dateTime":"2026-11-06T09:00:00.0000000","timeZone":"UTC"},"end":{"dateTime":"2026-11-06T09:30:00.0000000","timeZone":"UTC"}}`)
+	stubRaw, _ := json.Marshal(map[string]string{"id": "e1", "changeKey": "k1"})
+	stub := outlook.PIMItem{ID: "e1", ChangeKey: "k1", Raw: stubRaw}
+	itemURL := outlook.EventItemURLFromRoot(outlook.PIMCalendarEventRoot(pimTestUserBase, "cal1"), "e1")
+
+	tests := []struct {
+		name        string
+		prev        *outlook.PIMIndexEntry
+		existing    []byte
+		fetch       []byte
+		fetchErr    error
+		wantSeries  bool
+		wantUpload  int
+		wantInBody  string
+		wantSubject string
+		wantDetail  bool
+		wantOccur   bool
+	}{
+		{
+			name:        "list stub is replaced by the full event",
+			fetch:       full,
+			wantUpload:  1,
+			wantInBody:  "bring notes",
+			wantSubject: "Standup",
+			wantDetail:  true,
+		},
+		{
+			name:        "full event reveals a series the list stub hid",
+			fetch:       series,
+			wantSeries:  true,
+			wantUpload:  1,
+			wantInBody:  "cancelledOccurrences",
+			wantSubject: "Weekly",
+			wantDetail:  true,
+			wantOccur:   true,
+		},
+		{
+			name:       "fetch failure keeps the previous object",
+			prev:       &outlook.PIMIndexEntry{Key: dir + "e1.json", ChangeKey: "old"},
+			existing:   []byte(`{"id":"e1","kept":true}`),
+			fetchErr:   errors.New("graph event http 503"),
+			wantInBody: `"kept":true`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			withPIMGraph(t, &stubPIMGraph{pages: map[string][][]outlook.PIMItem{"list": {{stub}}}})
+			if tc.wantSeries {
+				withSeries(t)
+			}
+			var gotURL string
+			pimEventFetchRawFn = func(_ context.Context, _, eventURL string) ([]byte, error) {
+				gotURL = eventURL
+				return tc.fetch, tc.fetchErr
+			}
+			objects := map[string][]byte{}
+			if tc.existing != nil {
+				objects[dir+"e1.json"] = append([]byte(nil), tc.existing...)
+			}
+			if tc.prev != nil {
+				index, err := json.Marshal(outlook.PIMIndex{Items: map[string]outlook.PIMIndexEntry{"e1": *tc.prev}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				objects[dir+outlook.PIMIndexName] = index
+			}
+			store := &memPIMStore{objects: objects}
+			run := newTestPIMRun(store)
+			if err := run.syncCollection(context.Background(), calendarCollection(dir)); err != nil {
+				t.Fatal(err)
+			}
+			if gotURL != itemURL {
+				t.Fatalf("fetch url %q", gotURL)
+			}
+			if run.uploaded != tc.wantUpload {
+				t.Fatalf("uploaded=%d", run.uploaded)
+			}
+			body := string(store.objects[dir+"e1.json"])
+			if !strings.Contains(body, tc.wantInBody) {
+				t.Fatalf("stored %s", body)
+			}
+			entry := readPIMIndex(t, store, dir+outlook.PIMIndexName).Items["e1"]
+			if entry.Detail != tc.wantDetail || entry.Occurrences != tc.wantOccur {
+				t.Fatalf("entry=%+v", entry)
+			}
+			if tc.wantSubject != "" && (entry.Summary == nil || entry.Summary.Subject != tc.wantSubject || entry.Summary.Start == "") {
+				t.Fatalf("summary=%+v", entry.Summary)
+			}
+			if tc.wantOccur && (entry.Summary == nil || len(entry.Summary.Instances) != 1) {
+				t.Fatalf("summary=%+v", entry.Summary)
+			}
+		})
+	}
+}
+
 func TestPIMSyncAddsSummariesToOldIndexWithoutUploading(t *testing.T) {
 	dir := outlook.PIMCalendarDir(pimTestPrefix, "cal1")
 	withPIMGraph(t, &stubPIMGraph{pages: map[string][][]outlook.PIMItem{"list": {{eventItem("e1", "k1")}}}})
-	index, _ := json.Marshal(outlook.PIMIndex{Items: map[string]outlook.PIMIndexEntry{"e1": {Key: dir + "e1.json", ChangeKey: "k1"}}})
+	index, _ := json.Marshal(outlook.PIMIndex{Items: map[string]outlook.PIMIndexEntry{"e1": {Key: dir + "e1.json", ChangeKey: "k1", Detail: true}}})
 	store := &memPIMStore{objects: map[string][]byte{dir + "e1.json": []byte(`{"id":"e1"}`), dir + outlook.PIMIndexName: index}}
 	run := newTestPIMRun(store)
 	if err := run.syncCollection(context.Background(), calendarCollection(dir)); err != nil {
@@ -428,7 +531,7 @@ func TestPIMSyncRefreshesSeriesOccurrencesBeforeWindowEnds(t *testing.T) {
 	dir := outlook.PIMCalendarDir(pimTestPrefix, "cal1")
 	withPIMGraph(t, &stubPIMGraph{pages: map[string][][]outlook.PIMItem{"list": {{seriesItem("s1", "k1")}}}})
 	g := withSeries(t)
-	entry := outlook.PIMIndexEntry{Key: dir + "s1.json", ChangeKey: "k1", Occurrences: true,
+	entry := outlook.PIMIndexEntry{Key: dir + "s1.json", ChangeKey: "k1", Occurrences: true, Detail: true,
 		Summary: &outlook.EventSummary{Until: "2027-01-15T00:00:00Z"}}
 	index, _ := json.Marshal(outlook.PIMIndex{Items: map[string]outlook.PIMIndexEntry{"s1": entry}})
 	store := &memPIMStore{objects: map[string][]byte{dir + "s1.json": []byte(`{"id":"s1"}`), dir + outlook.PIMIndexName: index}}

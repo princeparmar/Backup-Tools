@@ -222,6 +222,103 @@ func TestListPIMPageKeepsCancelledAndFollowsNextLink(t *testing.T) {
 	}
 }
 
+func TestOutlookCalendarEventURLs(t *testing.T) {
+	root := "https://graph.microsoft.com/v1.0/users/u1/calendars/cal 1"
+	tests := []struct {
+		name string
+		got  string
+		want []string
+	}{
+		{
+			name: "list selects the fields a stub row drops",
+			got:  PIMEventsURLFromRoot(root),
+			want: []string{
+				root + "/events?",
+				"$top=100",
+				"subject",
+				"bodyPreview",
+				"start",
+				"type",
+				"recurrence",
+				"attendees",
+				"changeKey",
+			},
+		},
+		{
+			name: "item url is one event",
+			got:  EventItemURLFromRoot(root, "id/with space"),
+			want: []string{root + "/events/id%2Fwith%20space"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, part := range tc.want {
+				if !strings.Contains(tc.got, part) {
+					t.Fatalf("%q missing %q", tc.got, part)
+				}
+			}
+		})
+	}
+}
+
+func TestEventIsSeriesMaster(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "series master", raw: `{"type":"seriesMaster"}`, want: true},
+		{name: "single event", raw: `{"type":"singleInstance"}`, want: false},
+		{name: "list stub", raw: `{"id":"e1"}`, want: false},
+		{name: "not json", raw: `{`, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EventIsSeriesMaster([]byte(tc.raw)); got != tc.want {
+				t.Fatalf("got %v", got)
+			}
+		})
+	}
+}
+
+func TestFetchOutlookEventRaw(t *testing.T) {
+	srv, _ := newPIMGraph(t, func(p string) int {
+		if strings.Contains(p, "/missing") {
+			return http.StatusNotFound
+		}
+		return http.StatusOK
+	}, func(p string) string {
+		if strings.Contains(p, "/events/e1") {
+			return `{"id":"e1","subject":"Standup","bodyPreview":"bring notes"}`
+		}
+		return `{}`
+	})
+	tests := []struct {
+		name    string
+		url     string
+		want    string
+		wantErr bool
+	}{
+		{name: "empty url", wantErr: true},
+		{name: "full event", url: srv.URL + "/me/events/e1", want: "bring notes"},
+		{name: "graph error", url: srv.URL + "/me/events/missing", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := FetchOutlookEventRaw(context.Background(), "tok", tc.url)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("want error")
+				}
+				return
+			}
+			if err != nil || !strings.Contains(string(body), tc.want) {
+				t.Fatalf("body=%s err=%v", body, err)
+			}
+		})
+	}
+}
+
 func TestListPIMContactFoldersIncludesNested(t *testing.T) {
 	srv, _ := newPIMGraph(t, func(string) int { return http.StatusOK }, func(p string) string {
 		switch {

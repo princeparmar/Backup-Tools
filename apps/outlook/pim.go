@@ -1,6 +1,7 @@
 package outlook
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -42,11 +43,14 @@ type PIMIndex struct {
 // its backup is kept. Occurrences is set when a series master was stored with its changed and
 // cancelled occurrences. Summary is set for calendar events.
 type PIMIndexEntry struct {
-	Key         string        `json:"key"`
-	ChangeKey   string        `json:"change_key"`
-	RemovedAt   string        `json:"removed_at,omitempty"`
-	Occurrences bool          `json:"occurrences,omitempty"`
-	Summary     *EventSummary `json:"s,omitempty"`
+	Key         string `json:"key"`
+	ChangeKey   string `json:"change_key"`
+	RemovedAt   string `json:"removed_at,omitempty"`
+	Occurrences bool   `json:"occurrences,omitempty"`
+	// Detail is set once the stored object is the full event, not a list stub.
+	// Old indexes omit it, so the next calendar run fetches the event again.
+	Detail  bool          `json:"detail,omitempty"`
+	Summary *EventSummary `json:"s,omitempty"`
 }
 
 // EventSummary is what a calendar view needs of an event, so a month is drawn from the index
@@ -208,6 +212,11 @@ func PIMGroupAttachmentRoot(groupID string) string {
 	return graphBaseURL + "/groups/" + url.PathEscape(strings.TrimSpace(groupID))
 }
 
+// eventListSelect is required. Without $select, Graph returns id-only event stubs on some
+// tenants (same as mail delta), so the calendar is backed up and the events are not.
+const eventListSelect = "id,changeKey,subject,bodyPreview,start,end,isAllDay,type,isCancelled," +
+	"location,organizer,attendees,categories,recurrence,seriesMasterId,originalStart,originalStartTimeZone"
+
 // PIMEventsURL lists the events of one user calendar: single events and recurring series masters.
 func PIMEventsURL(userBase, calendarID string) string {
 	return PIMEventsURLFromRoot(PIMCalendarEventRoot(userBase, calendarID))
@@ -215,7 +224,39 @@ func PIMEventsURL(userBase, calendarID string) string {
 
 // PIMEventsURLFromRoot lists events under an event root (.../calendars/{id} or .../groups/{id}/calendar).
 func PIMEventsURLFromRoot(eventRoot string) string {
-	return strings.TrimRight(eventRoot, "/") + "/events?$top=100"
+	return strings.TrimRight(eventRoot, "/") + "/events?$top=100&$select=" + eventListSelect
+}
+
+// EventItemURLFromRoot is GET …/events/{id} for the full event (body, attendees, recurrence).
+func EventItemURLFromRoot(eventRoot, eventID string) string {
+	return strings.TrimRight(eventRoot, "/") + "/events/" + url.PathEscape(strings.TrimSpace(eventID))
+}
+
+// EventIsSeriesMaster reports a Graph event whose type is seriesMaster.
+func EventIsSeriesMaster(raw []byte) bool {
+	var head struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(raw, &head) == nil && head.Type == eventTypeSeriesMaster
+}
+
+// FetchOutlookEventRaw loads one event JSON. List rows omit the fields the backup has to keep.
+func FetchOutlookEventRaw(ctx context.Context, accessToken, eventURL string) ([]byte, error) {
+	eventURL = strings.TrimSpace(eventURL)
+	if eventURL == "" {
+		return nil, fmt.Errorf("event url is required")
+	}
+	body, status, err := graphRequest(ctx, accessToken, http.MethodGet, eventURL, nil, "UTC")
+	if err != nil {
+		return nil, err
+	}
+	if status < 200 || status >= 300 {
+		return nil, fmt.Errorf("graph event http %d: %s", status, truncateForErr(body))
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, fmt.Errorf("graph event response was empty")
+	}
+	return body, nil
 }
 
 // PIMContactsURL lists the contacts of a folder; "" is the default Contacts folder.
