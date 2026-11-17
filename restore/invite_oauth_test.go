@@ -158,3 +158,48 @@ func TestInviteRestoreNeedsMailboxSignIn(t *testing.T) {
 		})
 	}
 }
+
+func TestMicrosoftInviteUsesMemberToken(t *testing.T) {
+	cases := []struct {
+		name  string
+		tag   string
+		token string
+		want  bool
+	}{
+		{name: "invite with member graph token", tag: "invite_restored", token: "ms-token", want: true},
+		{name: "invite without token falls back to owner guard", tag: "invite_restored", token: "", want: false},
+		{name: "owner restore keeps tenant guard", tag: "", token: "ms-token", want: false},
+		{name: "whitespace token is empty", tag: "invite_restored", token: "  ", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			job := &repo.RestoreJobListingDB{RestoreTag: tc.tag, Method: "outlook"}
+			deps := &RestoreDeps{MicrosoftToken: tc.token}
+			if got := microsoftInviteUsesMemberToken(job, deps); got != tc.want {
+				t.Fatalf("microsoftInviteUsesMemberToken = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMicrosoftAPIServicesForInviteRestore(t *testing.T) {
+	cases := []struct {
+		service string
+		want    bool
+	}{
+		{service: "outlook", want: true},
+		{service: "outlook_calendar", want: true},
+		{service: "outlook_contacts", want: true},
+		{service: "outlook_onedrive", want: true},
+		{service: "onedrive", want: true},
+		{service: "gmail", want: false},
+		{service: "google_drive", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.service, func(t *testing.T) {
+			if got := IsMicrosoftAPIService(tc.service); got != tc.want {
+				t.Fatalf("IsMicrosoftAPIService(%q) = %v, want %v", tc.service, got, tc.want)
+			}
+		})
+	}
+}

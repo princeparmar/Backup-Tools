@@ -130,6 +130,12 @@ func applyInviteRestoreAuth(deps *RestoreDeps, job *repo.RestoreJobListingDB) {
 	deps.GoogleToken = token
 }
 
+// microsoftInviteUsesMemberToken is true when an invited restore already has the member's Graph token.
+func microsoftInviteUsesMemberToken(job *repo.RestoreJobListingDB, deps *RestoreDeps) bool {
+	return job != nil && job.RestoreTag == "invite_restored" &&
+		deps != nil && strings.TrimSpace(deps.MicrosoftToken) != ""
+}
+
 // buildRestoreDeps resolves StorX + Google auth from job snapshot and DB credentials.
 // credential_id on the job is the Google write cred (target for migration, source for in-place).
 // StorX read always comes from cron_job_id (source backup).
@@ -199,18 +205,6 @@ func buildRestoreDeps(ctx context.Context, store *db.PostgresDb, job *repo.Resto
 		}
 	}
 
-	if IsMicrosoftRestoreMethod(job.Method) {
-		var guard error
-		if isMigration {
-			guard = CheckMicrosoftMigrationWrite(store, job.TenantID, cronJob, deps.WriteCred)
-		} else {
-			guard = CheckMicrosoftTenantGuard(store, job.TenantID, cronJob, deps.WriteCred)
-		}
-		if guard != nil {
-			return nil, guard
-		}
-	}
-
 	if deps.AccessGrant == "" && deps.StorxRecovery != nil {
 		if err := checkJobContinuable(store, job.ID); err != nil {
 			return nil, err
@@ -226,6 +220,19 @@ func buildRestoreDeps(ctx context.Context, store *db.PostgresDb, job *repo.Resto
 	}
 
 	applyInviteRestoreAuth(deps, job)
+
+	// Invite restore writes with the member's Graph token; do not require the owner's tenant write-link.
+	if IsMicrosoftRestoreMethod(job.Method) && !microsoftInviteUsesMemberToken(job, deps) {
+		var guard error
+		if isMigration {
+			guard = CheckMicrosoftMigrationWrite(store, job.TenantID, cronJob, deps.WriteCred)
+		} else {
+			guard = CheckMicrosoftTenantGuard(store, job.TenantID, cronJob, deps.WriteCred)
+		}
+		if guard != nil {
+			return nil, guard
+		}
+	}
 
 	if deps.AuthMode == "" {
 		deps.AuthMode = AuthModeForJob(store, job)

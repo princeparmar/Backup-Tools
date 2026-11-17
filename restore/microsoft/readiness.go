@@ -110,6 +110,9 @@ func EvaluateReadiness(
 		return out, nil
 	}
 
+	// Same as Google invite: keep the source credential on the job for StorX / job metadata.
+	out.CredentialID = sourceCred.ID
+
 	if restore.IsMigrationRestore(loginID, targetEmail) {
 		out.Migration = true
 		out.TargetEmail = targetEmail
@@ -121,12 +124,46 @@ func EvaluateReadiness(
 	}
 
 	if inviteRestore {
-		// Same as Google Workspace invite: member signs in as the mailbox (no admin consent).
+		// All Microsoft services (mail / calendar / contacts / OneDrive):
+		// 1) Prefer the project owner's connection first (delegated same-mailbox, or
+		//    application token for a corporate child mailbox under an admin credential).
+		// 2) Same mailbox as OAuth holder: if owner is not ready, invitee may sign in as
+		//    that mailbox (Google personal parallel).
+		// 3) Other mailbox (admin@ holds OAuth, restore sales@): do NOT fall back to
+		//    invitee Entra login — locked tenants only show "Need admin approval".
+		//    Owner/admin must grant application write roles (Mail.ReadWrite,
+		//    Calendars.ReadWrite, Contacts.ReadWrite, Files.ReadWrite.All).
+		otherMailbox := isOtherMailboxRestore(loginID, sourceCred)
+		if err := restore.CheckMicrosoftTenantGuard(store, out.TenantID, cronJob, sourceCred); err != nil {
+			if !errors.Is(err, restore.ErrMicrosoftTenantMismatch) {
+				return nil, err
+			}
+			if otherMailbox {
+				out.Ready = false
+				out.Reason = restore.ReadinessReasonTenantMismatch
+				out.Message = "Ask the project owner to reconnect this Microsoft organization, then try restore again."
+				out.ReconnectHint = "Only the project owner can fix the Microsoft backup connection."
+				return out, nil
+			}
+			return evaluateInviteMicrosoftReadiness(ctx, out, service, method, loginID, inviteAccessToken)
+		}
+		ownerReady, err := evaluateCredentialReadiness(ctx, store, out, userID, service, method, sourceCred, out.TenantID)
+		if err != nil {
+			return nil, err
+		}
+		if ownerReady.Ready {
+			return ownerReady, nil
+		}
+		if otherMailbox {
+			ownerReady.ReconnectHint = "Ask an organization admin to Grant admin consent for Cyberls application " +
+				strings.Join(microsoftRestoreScopesForMethod(method), ", ") +
+				" (Users & Groups → this mailbox → restore), then try again."
+			return ownerReady, nil
+		}
 		return evaluateInviteMicrosoftReadiness(ctx, out, service, method, loginID, inviteAccessToken)
 	}
 
 	writeCred := sourceCred
-	out.CredentialID = writeCred.ID
 	if err := restore.CheckMicrosoftTenantGuard(store, out.TenantID, cronJob, writeCred); err != nil {
 		if !errors.Is(err, restore.ErrMicrosoftTenantMismatch) {
 			return nil, err
@@ -148,6 +185,10 @@ func evaluateInviteMicrosoftReadiness(
 	service, method, probeEmail, accessToken string,
 ) (*restore.ReadinessResult, error) {
 	accessToken = strings.TrimSpace(accessToken)
+	// Clear owner-path grant/admin hints so the UI opens mailbox sign-in, not admin consent.
+	out.MissingPermissions = nil
+	out.DelegationSetup = nil
+	out.RequiredDWDScopes = nil
 	if accessToken == "" {
 		out.Ready = false
 		out.Reason = restore.ReadinessReasonInviteOAuthRequired
