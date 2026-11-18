@@ -20,17 +20,13 @@ import (
 	"github.com/StorX2-0/Backup-Tools/pkg/monitor"
 	"github.com/StorX2-0/Backup-Tools/pkg/utils"
 
-	rm "cloud.google.com/go/resourcemanager/apiv3"
 	"github.com/dgrijalva/jwt-go"
-	"github.com/gphotosuploader/googlemirror/api/photoslibrary/v1"
 	"github.com/labstack/echo/v4"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	admin "google.golang.org/api/admin/directory/v1"
-	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/gmail/v1"
 	"google.golang.org/api/option"
-	gs "google.golang.org/api/storage/v1"
 )
 
 type CustomClaims struct {
@@ -177,46 +173,62 @@ func Autentificate(c echo.Context) error {
 	})
 }
 
-// Google authentication module, checks if you have auth token in database, if not - redirects to Google auth page.
+// Autentificateg previously redirected to Google with full drive / mail.google.com /
+// photoslibrary scopes. That path is retired for OAuth verification least-privilege.
+// Use POST /google-auth (token wrap) and GIS Grant Access with restore_scopes instead.
+//
+// Old body kept commented (do not delete) so we can reuse it later. Re-enable by
+// restoring these imports and swapping the Gone response for the block below:
+//   rm "cloud.google.com/go/resourcemanager/apiv3"
+//   "github.com/gphotosuploader/googlemirror/api/photoslibrary/v1"
+//   "google.golang.org/api/drive/v3"
+//   gs "google.golang.org/api/storage/v1"
 func Autentificateg(c echo.Context) error {
 	var err error
 	ctx := c.Request().Context()
 	defer monitor.Mon.Task()(&ctx)(&err)
 
-	database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
-	code := c.FormValue("code")
-	b, err := os.ReadFile("credentials.json")
-	if err != nil {
-		log.Printf("Unable to read client secret file: %v", err)
-	}
-	scopes := []string{drive.DriveScope, photoslibrary.PhotoslibraryScope, gmail.MailGoogleComScope, gs.DevstorageFullControlScope, gs.DevstorageReadWriteScope}
-	scopes = append(scopes, rm.DefaultAuthScopes()...)
-	config, err := google.ConfigFromJSON(b, scopes...)
-	if err != nil {
-		log.Printf("Unable to parse client secret file to config: %v", err)
-	}
+	return c.JSON(http.StatusGone, map[string]string{
+		"error":   "legacy_google_auth_disabled",
+		"message": "GET /google-auth is disabled. Use GIS connect/restore Grant Access and POST /google-auth to wrap a token.",
+	})
 
-	var redirectAddr = utils.GetEnvWithKey("FRONTEND_URL") // Add Frontend URL for redirect to file .env
-	if AuthRequestChecker(c) {
-		return c.String(http.StatusAccepted, "you are already authenticated!") // if code 202 - means already authentificated
-	} else {
-		if code == "" {
-			authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
-			c.Redirect(http.StatusTemporaryRedirect, authURL)
-		} else {
-			tok, err := config.Exchange(context.TODO(), code)
-			if err != nil {
-				log.Printf("Unable to retrieve token from web %v", err)
-			}
-
-			googleExternalToken := utils.RandStringRunes(50)
-			database.AuthRepo.WriteGoogleAuthToken(googleExternalToken, tok.AccessToken)
-			jwtString := CreateJWToken(googleExternalToken)
-			c.Response().Header().Add("Authorization", "Bearer "+jwtString)
-		}
-	}
-
-	return c.Redirect(http.StatusTemporaryRedirect, redirectAddr)
+	// Legacy GET /google-auth — full-scope redirect + code exchange (kept for reuse):
+	//
+	// database := c.Get(middleware.DbContextKey).(*db.PostgresDb)
+	// code := c.FormValue("code")
+	// b, err := os.ReadFile("credentials.json")
+	// if err != nil {
+	// 	log.Printf("Unable to read client secret file: %v", err)
+	// }
+	// scopes := []string{drive.DriveScope, photoslibrary.PhotoslibraryScope, gmail.MailGoogleComScope, gs.DevstorageFullControlScope, gs.DevstorageReadWriteScope}
+	// scopes = append(scopes, rm.DefaultAuthScopes()...)
+	// config, err := google.ConfigFromJSON(b, scopes...)
+	// if err != nil {
+	// 	log.Printf("Unable to parse client secret file to config: %v", err)
+	// }
+	//
+	// var redirectAddr = utils.GetEnvWithKey("FRONTEND_URL") // Add Frontend URL for redirect to file .env
+	// if AuthRequestChecker(c) {
+	// 	return c.String(http.StatusAccepted, "you are already authenticated!") // if code 202 - means already authentificated
+	// } else {
+	// 	if code == "" {
+	// 		authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
+	// 		c.Redirect(http.StatusTemporaryRedirect, authURL)
+	// 	} else {
+	// 		tok, err := config.Exchange(context.TODO(), code)
+	// 		if err != nil {
+	// 			log.Printf("Unable to retrieve token from web %v", err)
+	// 		}
+	//
+	// 		googleExternalToken := utils.RandStringRunes(50)
+	// 		database.AuthRepo.WriteGoogleAuthToken(googleExternalToken, tok.AccessToken)
+	// 		jwtString := CreateJWToken(googleExternalToken)
+	// 		c.Response().Header().Add("Authorization", "Bearer "+jwtString)
+	// 	}
+	// }
+	//
+	// return c.Redirect(http.StatusTemporaryRedirect, redirectAddr)
 }
 
 func AuthRequestChecker(c echo.Context) bool {
